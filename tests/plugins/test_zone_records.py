@@ -1145,63 +1145,6 @@ def test_axfr_notify_static_targets_normalized(tmp_path: pathlib.Path) -> None:
     assert t2["ca_file"] == "/tmp/ca.pem"
 
 
-def test_axfr_notify_all_learns_axfr_client_and_sends_notify(monkeypatch, tmp_path):
-    """Brief: axfr_notify_all learns AXFR clients and schedules NOTIFY.
-
-    Inputs:
-      - monkeypatch: pytest monkeypatch fixture.
-      - tmp_path: pytest temporary directory.
-
-    Outputs:
-      - Asserts that iter_zone_rrs_for_transfer() records the AXFR client as a
-        learned NOTIFY target and triggers a NOTIFY send via the helper.
-    """
-
-    records_file = tmp_path / "records.txt"
-    # Minimal SOA so ZoneRecords is authoritative for the zone.
-    records_file.write_text(
-        "notify.example|SOA|300|ns1.notify.example. hostmaster.notify.example. 1 3600 600 604800 300\n",
-        encoding="utf-8",
-    )
-
-    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
-    ZoneRecords = mod.ZoneRecords
-
-    plugin = ZoneRecords(
-        file_paths=[str(records_file)], axfr_notify_all=True, axfr_notify_scheduled=0
-    )
-    plugin.setup()
-
-    calls = []
-
-    def fake_send_notify(zone_apex, target):  # noqa: D401,ANN001
-        """Record NOTIFY sends instead of performing network I/O."""
-
-        calls.append((zone_apex, dict(target)))
-
-    notify_mod = importlib.import_module("foghorn.plugins.resolve.zone_records.notify")
-    monkeypatch.setattr(
-        notify_mod, "send_notify_to_target", fake_send_notify, raising=True
-    )
-
-    # Pretend an AXFR client pulled the zone.
-    client_ip = "203.0.113.5"
-    rrs = plugin.iter_zone_rrs_for_transfer("notify.example", client_ip=client_ip)
-    assert rrs is not None and rrs, "expected authoritative RRset for notify.example"
-
-    # Learned targets should include the client.
-    learned = getattr(plugin, "_axfr_notify_learned", {})
-    assert "notify.example" in learned or "notify.example" in {
-        k.rstrip(".") for k in learned.keys()
-    }
-
-    # With axfr_notify_scheduled=0 we treat delay as immediate and expect at
-    # least one NOTIFY send for this client.
-    assert calls, "expected at least one NOTIFY send for learned AXFR client"
-    zones = {z for (z, _t) in calls}
-    assert any(z.startswith("notify.example") for z in zones)
-
-
 def test_reload_records_from_watchdog_sends_notify_for_changed_zones(
     monkeypatch, tmp_path: pathlib.Path
 ) -> None:
@@ -1277,18 +1220,18 @@ def test_reload_records_from_watchdog_sends_notify_for_changed_zones(
     assert zones is not None and "example.com" in zones
 
 
-def test_send_notify_for_zones_uses_static_and_learned_targets(
+def test_send_notify_for_zones_uses_static_targets(
     monkeypatch, tmp_path: pathlib.Path
 ) -> None:
-    """Brief: send_notify_for_zones sends NOTIFY to static and learned targets.
+    """Brief: send_notify_for_zones sends NOTIFY to configured static targets.
 
     Inputs:
       - monkeypatch: pytest monkeypatch fixture.
       - tmp_path: pytest temporary directory.
 
     Outputs:
-      - Asserts that both axfr_notify (static) and learned axfr_notify_all
-        targets are used when sending NOTIFY for a changed zone.
+      - Asserts configured axfr_notify targets are used when sending NOTIFY for
+        a changed zone.
     """
 
     mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
@@ -1300,28 +1243,13 @@ def test_send_notify_for_zones_uses_static_and_learned_targets(
         encoding="utf-8",
     )
 
-    # Configure one static axfr_notify target; learned targets will be injected
-    # directly into the plugin's state.
     plugin = ZoneRecords(
         file_paths=[str(records_file)],
         axfr_notify=[{"host": "198.51.100.10", "port": 53, "transport": "tcp"}],
+        axfr_notify_allow_private_targets=True,
+        axfr_notify_min_interval_seconds=0.0,
     )
     plugin.setup()
-
-    # Inject a learned target for the same zone.
-    learned = getattr(plugin, "_axfr_notify_learned", None)
-    assert isinstance(learned, dict)
-    learned["notify.example"] = {
-        "203.0.113.5:53/tcp": {
-            "host": "203.0.113.5",
-            "port": 53,
-            "timeout_ms": 2000,
-            "transport": "tcp",
-            "server_name": None,
-            "verify": True,
-            "ca_file": None,
-        }
-    }
 
     calls: list[tuple[str, dict]] = []
 
@@ -1337,13 +1265,11 @@ def test_send_notify_for_zones_uses_static_and_learned_targets(
 
     notify_mod.send_notify_for_zones(plugin, ["notify.example"])
 
-    # Expect at least one call for the static target and one for the learned one.
     assert calls, "expected at least one NOTIFY send"
     zones = {z for (z, _t) in calls}
     assert any(z.startswith("notify.example") for z in zones)
     hosts = {t["host"] for (_z, t) in calls}
     assert "198.51.100.10" in hosts
-    assert "203.0.113.5" in hosts
 
 
 def test_watchdog_handler_should_reload_and_on_any_event(
@@ -2511,6 +2437,68 @@ def test_normalize_axfr_config_supports_dot_and_tls_fields() -> None:
     assert m["server_name"] == "axfr.tls.example"
     assert m["verify"] is False
     assert m["ca_file"] == "/tmp/ca.pem"
+
+
+def test_axfr_notify_policy_defaults_are_applied(tmp_path: pathlib.Path) -> None:
+    """Brief: new NOTIFY policy fields default to safe values when unset.
+
+    Inputs:
+      - tmp_path: pytest temporary directory fixture.
+
+    Outputs:
+      - Asserts defaults for private-target policy and throttling fields.
+    """
+    records_file = tmp_path / "records.txt"
+    records_file.write_text("example.com|A|300|192.0.2.10\n", encoding="utf-8")
+
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
+    ZoneRecords = mod.ZoneRecords
+
+    plugin = ZoneRecords(
+        file_paths=[str(records_file)],
+        axfr_notify=[{"host": "198.51.100.10", "port": 53, "transport": "tcp"}],
+    )
+    plugin.setup()
+
+    assert plugin._axfr_notify_allow_private_targets is False
+    assert plugin._axfr_notify_min_interval_seconds == 1.0
+    assert plugin._axfr_notify_rate_limit_per_target_per_minute == 60
+
+
+def test_axfr_notify_policy_invalid_values_normalized(tmp_path: pathlib.Path) -> None:
+    """Brief: invalid/unsafe NOTIFY policy inputs normalize to bounded values.
+
+    Inputs:
+      - tmp_path: pytest temporary directory fixture.
+
+    Outputs:
+      - Asserts normalization for non-numeric and negative values.
+    """
+    records_file = tmp_path / "records.txt"
+    records_file.write_text("example.com|A|300|192.0.2.10\n", encoding="utf-8")
+
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
+    ZoneRecords = mod.ZoneRecords
+
+    plugin_bad = ZoneRecords(
+        file_paths=[str(records_file)],
+        axfr_notify=[{"host": "198.51.100.10", "port": 53, "transport": "tcp"}],
+        axfr_notify_min_interval_seconds="not-a-number",
+        axfr_notify_rate_limit_per_target_per_minute="oops",
+    )
+    plugin_bad.setup()
+    assert plugin_bad._axfr_notify_min_interval_seconds == 1.0
+    assert plugin_bad._axfr_notify_rate_limit_per_target_per_minute == 60
+
+    plugin_negative = ZoneRecords(
+        file_paths=[str(records_file)],
+        axfr_notify=[{"host": "198.51.100.10", "port": 53, "transport": "tcp"}],
+        axfr_notify_min_interval_seconds=-7,
+        axfr_notify_rate_limit_per_target_per_minute=-3,
+    )
+    plugin_negative.setup()
+    assert plugin_negative._axfr_notify_min_interval_seconds == 0.0
+    assert plugin_negative._axfr_notify_rate_limit_per_target_per_minute == 1
 
 
 def test_load_records_axfr_overlays_and_only_runs_once(
@@ -3702,3 +3690,184 @@ def test_iter_zone_rrs_for_transfer_exports_zone_rrs(tmp_path: pathlib.Path) -> 
 
     assert _Q.SOA in types
     assert _Q.A in types
+
+
+def test_zone_records_rejects_file_over_max_size(tmp_path: pathlib.Path) -> None:
+    """Brief: loader enforces max_file_size_bytes for file_paths.
+
+    Inputs:
+      - tmp_path: pytest temporary directory.
+
+    Outputs:
+      - Asserts setup raises ValueError when a configured records file exceeds
+        max_file_size_bytes.
+    """
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
+    ZoneRecords = mod.ZoneRecords
+
+    records_file = tmp_path / "too-large.txt"
+    records_file.write_text(
+        "example.com|A|300|192.0.2.10\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="max_file_size_bytes"):
+        plugin = ZoneRecords(
+            file_paths=[str(records_file)],
+            max_file_size_bytes=8,
+        )
+        plugin.setup()
+
+
+def test_zone_records_rejects_parent_traversal_path(
+    tmp_path: pathlib.Path, caplog
+) -> None:
+    """Brief: loader rejects configured paths that contain explicit '..' segments.
+
+    Inputs:
+      - tmp_path: pytest temporary directory.
+      - caplog: pytest log capture fixture.
+
+    Outputs:
+      - Asserts a traversal-style configured path is skipped and warning is
+        logged, resulting in no loaded records from that source.
+    """
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
+    ZoneRecords = mod.ZoneRecords
+
+    records_file = tmp_path / "records.txt"
+    records_file.write_text(
+        "example.com|A|300|192.0.2.10\n",
+        encoding="utf-8",
+    )
+    parent_ref = tmp_path / ".." / tmp_path.name / "records.txt"
+
+    with caplog.at_level(logging.WARNING):
+        plugin = ZoneRecords(file_paths=[str(parent_ref)])
+        plugin.setup()
+
+    assert ("example.com", int(QTYPE.A)) not in plugin.records
+    assert "parent traversal" in caplog.text
+
+
+def test_zone_records_max_records_limit_enforced_for_inline_records() -> None:
+    """Brief: loader enforces max_records across accepted record values.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - Asserts setup raises ValueError once inline record ingestion exceeds
+        max_records.
+    """
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
+    ZoneRecords = mod.ZoneRecords
+
+    with pytest.raises(ValueError, match="max_records exceeded"):
+        plugin = ZoneRecords(
+            records=[
+                "example.com|A|300|192.0.2.10",
+                "example.com|A|300|192.0.2.11",
+            ],
+            max_records=1,
+        )
+        plugin.setup()
+
+
+def test_zone_records_max_record_value_length_enforced() -> None:
+    """Brief: loader rejects record values that exceed max_record_value_length.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - Asserts setup raises ValueError for overlong inline values.
+    """
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
+    ZoneRecords = mod.ZoneRecords
+
+    with pytest.raises(ValueError, match="record value too long"):
+        plugin = ZoneRecords(
+            records=["example.com|TXT|300|abcdefghijklmnopqrstuvwxyz"],
+            max_record_value_length=4,
+        )
+        plugin.setup()
+
+
+def test_zone_records_auto_ptr_can_be_disabled() -> None:
+    """Brief: auto_ptr_enabled=false prevents reverse PTR synthesis.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - Asserts no PTR RRset is created for a loaded A record when auto PTR is
+        disabled.
+    """
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
+    ZoneRecords = mod.ZoneRecords
+
+    plugin = ZoneRecords(
+        records=["host.example.com|A|300|192.0.2.10"],
+        auto_ptr_enabled=False,
+    )
+    plugin.setup()
+
+    ptr_key = (
+        dns_name := ipaddress.ip_address("192.0.2.10").reverse_pointer,
+        int(QTYPE.PTR),
+    )
+    ptr_key = (dns_name.rstrip(".").lower(), int(QTYPE.PTR))
+    assert ptr_key not in plugin.records
+
+
+def test_zone_records_auto_ptr_respects_max_auto_ptr_records() -> None:
+    """Brief: auto PTR synthesis stops when max_auto_ptr_records is reached.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - Asserts only max_auto_ptr_records PTR RRsets are created.
+    """
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
+    ZoneRecords = mod.ZoneRecords
+
+    plugin = ZoneRecords(
+        records=[
+            "a.example.com|A|300|192.0.2.10",
+            "b.example.com|A|300|192.0.2.11",
+            "c.example.com|A|300|192.0.2.12",
+        ],
+        max_auto_ptr_records=2,
+    )
+    plugin.setup()
+
+    ptr_qtype = int(QTYPE.PTR)
+    ptr_rrsets = [key for key in plugin.records.keys() if int(key[1]) == ptr_qtype]
+    assert len(ptr_rrsets) == 2
+
+
+def test_zone_records_soa_synthesis_can_be_disabled() -> None:
+    """Brief: soa_synthesis_enabled=false disables inferred SOA creation.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - Asserts zone_soa stays empty when no explicit SOA exists and synthesis
+        is disabled.
+    """
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
+    ZoneRecords = mod.ZoneRecords
+
+    plugin = ZoneRecords(
+        records=[
+            "a.example.com|A|300|192.0.2.10",
+            "b.example.com|A|300|192.0.2.11",
+        ],
+        soa_synthesis_enabled=False,
+    )
+    plugin.setup()
+
+    assert getattr(plugin, "_zone_soa", {}) == {}

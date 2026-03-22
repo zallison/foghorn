@@ -30,21 +30,19 @@ class _PluginNoLock:
         *,
         name_index: dict,
         zone_soa: dict,
-        axfr_notify_all: bool = False,
     ) -> None:
         self._name_index = name_index
         self._zone_soa = zone_soa
-        self._axfr_notify_all = bool(axfr_notify_all)
 
 
 def test_iter_zone_rrs_for_transfer_empty_apex_returns_none() -> None:
     """Brief: Empty zone apex should return None immediately.
 
     Inputs:
-      - zone_apex: ''
+      - zone_apex: ''.
 
     Outputs:
-      - None
+      - None.
     """
     plugin = _PluginNoLock(name_index={}, zone_soa={})
 
@@ -65,7 +63,6 @@ def test_iter_zone_rrs_for_transfer_no_lock_snapshots_and_filters_zone() -> None
         name_index={
             "example.com": {int(QTYPE.A): (300, ["192.0.2.1"])},
             "www.example.com.": {int(QTYPE.A): (300, ["192.0.2.2"])},
-            # Outside zone; must be skipped.
             "other.com": {int(QTYPE.A): (300, ["198.51.100.1"])},
         },
         zone_soa={apex: (300, ["soa"])},
@@ -78,39 +75,3 @@ def test_iter_zone_rrs_for_transfer_no_lock_snapshots_and_filters_zone() -> None
     assert "example.com" in owners
     assert "www.example.com" in owners
     assert "other.com" not in owners
-
-
-def test_iter_zone_rrs_for_transfer_records_axfr_client(monkeypatch) -> None:
-    """Brief: client_ip is recorded as a learned NOTIFY target when enabled.
-
-    Inputs:
-      - client_ip: non-empty.
-      - plugin._axfr_notify_all: True.
-
-    Outputs:
-      - None; asserts notify.record_axfr_client is called with normalized apex.
-    """
-    calls: list[tuple[str, str]] = []
-
-    def fake_record(plugin_obj: object, zone_apex: str, client_ip: str) -> None:
-        _ = plugin_obj
-        calls.append((zone_apex, client_ip))
-
-    monkeypatch.setattr(
-        transfer.notify,
-        "record_axfr_client",
-        fake_record,
-        raising=True,
-    )
-
-    plugin = _PluginNoLock(
-        name_index={"example.com": {int(QTYPE.A): (300, ["192.0.2.1"])}},
-        zone_soa={"example.com": (300, ["soa"])},
-        axfr_notify_all=True,
-    )
-
-    out = transfer.iter_zone_rrs_for_transfer(
-        plugin, "Example.COM.", client_ip="203.0.113.5"
-    )
-    assert out is not None
-    assert calls == [("example.com", "203.0.113.5")]

@@ -1322,17 +1322,52 @@ def _build_v2_root_schema(
                     "items": {"$ref": "#/$defs/upstream_host"},
                 },
             )
-            # axfr_notify_all: learn NOTIFY targets from AXFR/IXFR clients.
             zone_cfg_props.setdefault(
-                "axfr_notify_all",
+                "axfr_notify_allow_private_targets",
                 {
                     "type": "boolean",
                     "description": (
-                        "When true, any client that performs AXFR/IXFR from this "
-                        "server is remembered as a NOTIFY target for its zone "
-                        "using its source IP and TCP port 53."
+                        "When false (default), outbound NOTIFY targets that "
+                        "resolve to private/loopback/link-local/multicast/"
+                        "reserved addresses are blocked."
                     ),
                     "default": False,
+                },
+            )
+            zone_cfg_props.setdefault(
+                "axfr_notify_target_allowlist",
+                {
+                    "type": "array",
+                    "description": (
+                        "Optional outbound NOTIFY target allowlist. Entries "
+                        "may be hostnames, IP literals, or CIDR ranges. "
+                        "When set, targets must match."
+                    ),
+                    "items": {"type": "string"},
+                },
+            )
+            zone_cfg_props.setdefault(
+                "axfr_notify_min_interval_seconds",
+                {
+                    "type": "number",
+                    "minimum": 0,
+                    "description": (
+                        "Minimum elapsed seconds between consecutive NOTIFY "
+                        "sends to the same configured target."
+                    ),
+                    "default": 1.0,
+                },
+            )
+            zone_cfg_props.setdefault(
+                "axfr_notify_rate_limit_per_target_per_minute",
+                {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": (
+                        "Maximum NOTIFY messages sent to a single configured "
+                        "target in a rolling 60-second window."
+                    ),
+                    "default": 60,
                 },
             )
             # axfr_notify_scheduled: delay before sending follow-up NOTIFY.
@@ -1663,8 +1698,12 @@ def _build_v2_root_schema(
         "required": ["endpoints"],
     }
 
-    # Attach plugin config schemas under $defs.PluginConfigs.
-    defs["PluginConfigs"] = {
+    # Attach plugin config schemas under both modern and legacy keys.
+    #
+    # Some tooling still reads $defs.plugin_configs (lowercase) while newer
+    # code uses $defs.PluginConfigs (camel-case). Keep them in sync so that
+    # consumers on either key see the same, up-to-date plugin model schema.
+    plugin_configs_schema = {
         alias: {
             "module": meta["module"],
             "aliases": meta["aliases"],
@@ -1672,6 +1711,8 @@ def _build_v2_root_schema(
         }
         for alias, meta in plugins.items()
     }
+    defs["PluginConfigs"] = plugin_configs_schema
+    defs["plugin_configs"] = plugin_configs_schema
 
     # Lightweight PluginInstance schema: keep it permissive for now but reflect
     # the v2 shape (id/type/enabled/logging/setup/hooks/config).
