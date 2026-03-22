@@ -106,7 +106,7 @@ class BracketLevelFormatter(logging.Formatter):
         r"(?P<kv>\b[A-Za-z_][\w.-]*=[^\s,;]+)"
         r"|(?P<date>\b\d{4}-\d{2}-\d{2}\b)"
         #        r"|(?P<ip>\b(https?://)?(?:25[0-5]|2[0-4]\d|1?\d?\d)(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){3}(?::\d{1,5})?\b)"
-        r"|(?P<ip>(https?://)?(?:www\.)?[-a-zA-Z0-9@:%._+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}\b(?:[-a-zA-Z0-9()@:%_+.~#?&//=]*))"
+        r"|(?P<ip>((https?|tcp|smb|ftp)?://)?(?:www\.)?[-a-zA-Z0-9@:%._+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}\b(?:[-a-zA-Z0-9()@:%_+.~#?&//=]*))"
         r"|(?P<bracket>\[[^\[\]\n]*\])"
         r"|(?P<paren>\([^()\n]*\))"
         r"|(?P<plugin_context>\b(?:plugin|pkugin)\s+[A-Za-z0-9_.-]+)"

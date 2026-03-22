@@ -29,6 +29,7 @@ import time
 from typing import Any, Dict, Optional
 
 import requests
+from requests.exceptions import RequestException
 
 from .base import BaseStatsStore
 
@@ -226,8 +227,15 @@ class InfluxLogging(BaseStatsStore):
                     resp.status_code,
                     resp.text,
                 )
+        except RequestException as exc:  # pragma: no cover - environment specific
+            logger.warning(
+                "Failed to publish InfluxDB query_log start marker: %s",
+                exc,
+            )
         except Exception:  # pragma: no cover - environment specific
-            logger.exception("Failed to publish InfluxDB query_log start marker")
+            logger.exception(
+                "Unexpected error publishing InfluxDB query_log start marker"
+            )
 
     # ------------------------------------------------------------------
     # Health and lifecycle
