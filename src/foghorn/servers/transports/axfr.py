@@ -3,6 +3,11 @@ from __future__ import annotations
 import socket
 import ssl
 from typing import List, Optional, Tuple
+import dns.exception
+import dns.message
+import dns.rdatatype
+import dns.tsig
+import dns.tsigkeyring
 
 from dnslib import QTYPE, RR, DNSRecord
 
@@ -23,6 +28,62 @@ class AXFRError(Exception):
     """
 
     pass
+
+
+def _normalize_tsig_algorithm(algorithm: str) -> str:
+    """Brief: Normalize TSIG algorithm names to canonical short forms.
+
+    Inputs:
+      - algorithm: TSIG algorithm name (e.g. hmac-sha256., HMAC-SHA512).
+
+    Outputs:
+      - str: Canonical algorithm string accepted by dnspython.
+    """
+    alg = str(algorithm or "").strip().rstrip(".").lower()
+    if "hmac-sha512" in alg:
+        return "hmac-sha512"
+    if "hmac-sha384" in alg:
+        return "hmac-sha384"
+    if "hmac-sha256" in alg:
+        return "hmac-sha256"
+    if "hmac-sha1" in alg:
+        return "hmac-sha1"
+    if "hmac-md5" in alg:
+        return "hmac-md5"
+    return alg or "hmac-sha256"
+
+
+def _build_tsig_query_wire(
+    zone_qname: str, tsig: dict
+) -> tuple[bytes, dns.message.Message]:
+    """Brief: Build an AXFR query wire signed with TSIG.
+
+    Inputs:
+      - zone_qname: Fully-qualified zone name.
+      - tsig: Mapping with TSIG fields name/secret/algorithm.
+
+    Outputs:
+      - (wire, query): Wire-format DNS query bytes and dnspython query object.
+    """
+    key_name = tsig.get("name")
+    key_secret = tsig.get("secret")
+    if not key_name or not key_secret:
+        raise AXFRError("AXFR TSIG requires 'name' and 'secret'")
+    algorithm = _normalize_tsig_algorithm(tsig.get("algorithm", "hmac-sha256"))
+    keyring = dns.tsigkeyring.from_text({str(key_name): str(key_secret)})
+    query = dns.message.make_query(zone_qname, dns.rdatatype.AXFR)
+    query.use_tsig(
+        keyring=keyring,
+        keyname=str(key_name),
+        algorithm=algorithm,
+    )
+    try:
+        wire = query.to_wire()
+    except Exception as exc:  # pragma: no cover - defensive
+        raise AXFRError(
+            f"failed to build TSIG AXFR query for {zone_qname!r}: {exc}"
+        ) from exc
+    return wire, query
 
 
 def _recv_exact(sock: socket.socket, n: int) -> bytes:
@@ -60,6 +121,7 @@ def axfr_transfer(
     read_timeout_ms: int = 5000,
     max_rrs: Optional[int] = None,
     max_total_bytes: Optional[int] = None,
+    tsig: Optional[dict] = None,
 ) -> List[RR]:
     """Brief: Perform a blocking AXFR for *zone* over TCP or DoT and return all RRs.
 
@@ -75,6 +137,7 @@ def axfr_transfer(
       - read_timeout_ms: Per-read timeout in milliseconds.
       - max_rrs: Optional maximum number of RRs allowed before aborting.
       - max_total_bytes: Optional maximum total response bytes allowed.
+      - tsig: Optional TSIG config mapping with name/secret/algorithm.
 
     Outputs:
       - list[RR]: All RRs returned by the AXFR, including the initial and
@@ -83,14 +146,17 @@ def axfr_transfer(
 
     zone_qname = f"{dns_names.normalize_name(zone) or '.'}."
 
-    try:
-        q = DNSRecord.question(zone_qname, "AXFR")
-    except Exception as exc:  # pragma: no cover - defensive
-        raise AXFRError(
-            f"failed to build AXFR query for {zone_qname!r}: {exc}"
-        ) from exc
-
-    payload = q.pack()
+    dpy_query: Optional[dns.message.Message] = None
+    if tsig and isinstance(tsig, dict):
+        payload, dpy_query = _build_tsig_query_wire(zone_qname, tsig)
+    else:
+        try:
+            q = DNSRecord.question(zone_qname, "AXFR")
+        except Exception as exc:  # pragma: no cover - defensive
+            raise AXFRError(
+                f"failed to build AXFR query for {zone_qname!r}: {exc}"
+            ) from exc
+        payload = q.pack()
     length_prefix = len(payload).to_bytes(2, "big")
     frame = length_prefix + payload
 
@@ -130,6 +196,9 @@ def axfr_transfer(
         seen_any_message = False
         total_bytes = 0
         rr_count = 0
+        tsig_ctx = None
+        had_tsig_response = False
+        last_frame_had_tsig = False
 
         # Send initial query frame.
         io_sock.sendall(frame)
@@ -159,7 +228,28 @@ def axfr_transfer(
                         f"({total_bytes} > {int(max_total_bytes)})"
                     )
             try:
+                if dpy_query is not None:
+                    parsed = dns.message.from_wire(
+                        body,
+                        keyring=dpy_query.keyring,
+                        request_mac=dpy_query.mac,
+                        xfr=True,
+                        tsig_ctx=tsig_ctx,
+                        multi=True,
+                    )
+                    tsig_ctx = parsed.tsig_ctx
+                    last_frame_had_tsig = bool(parsed.had_tsig)
+                    had_tsig_response = had_tsig_response or last_frame_had_tsig
                 resp = DNSRecord.parse(body)
+            except (
+                dns.tsig.BadSignature,
+                dns.tsig.PeerBadTime,
+                dns.tsig.PeerBadKey,
+                dns.exception.DNSException,
+            ) as exc:
+                raise AXFRError(
+                    f"failed TSIG validation for AXFR response: {exc}"
+                ) from exc
             except Exception as exc:  # pragma: no cover - defensive
                 raise AXFRError(f"failed to parse AXFR response: {exc}") from exc
 
@@ -178,9 +268,14 @@ def axfr_transfer(
                     if first_soa_key is None:
                         first_soa_key = key
                     elif first_soa_key == key:
+                        if dpy_query is not None and not last_frame_had_tsig:
+                            raise AXFRError("AXFR response missing TSIG")
                         rrs.append(rr)
                         return rrs
                 rrs.append(rr)
+
+        if dpy_query is not None and not had_tsig_response:
+            raise AXFRError("AXFR response missing TSIG")
 
     except (
         OSError,

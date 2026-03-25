@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import ipaddress  # reused by DNSSEC auto-sign helper when building PTRs, kept for future use
 import logging
-import pathlib
 import socket
 import time
 from typing import Callable, Dict, List, Optional, Set, Tuple
@@ -384,6 +383,7 @@ def _axfr_transfer_for_zone(
         server_name = m.get("server_name")
         verify_flag = m.get("verify", True)
         ca_file = m.get("ca_file")
+        tsig = m.get("tsig")
         if not host:
             continue
         host_text = str(host)
@@ -439,6 +439,7 @@ def _axfr_transfer_for_zone(
                 server_name=(str(server_name) if server_name is not None else None),
                 verify=bool(verify_flag),
                 ca_file=str(ca_file) if ca_file is not None else None,
+                tsig=tsig if isinstance(tsig, dict) else None,
                 connect_timeout_ms=timeout_i,
                 read_timeout_ms=timeout_i,
                 max_rrs=max_rrs_i if max_rrs_i > 0 else None,
