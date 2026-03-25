@@ -5,7 +5,6 @@ import ipaddress
 import logging
 import random
 import threading
-from concurrent.futures import Future
 from typing import Dict, List, Optional, Tuple
 from dnslib import (  # noqa: F401  (re-exported for udp_server._ensure_edns)
     EDNS0,
@@ -62,10 +61,6 @@ logger = logging.getLogger("foghorn.server")
 # hit path and always treats the query as a miss.
 _CACHE_LOCAL = threading.local()
 
-# Bounded background executor used for best-effort work triggered by untrusted
-# network events (NOTIFY and cache refresh). This avoids spawning unbounded
-# threads under attack conditions.
-_BG_SEM = threading.Semaphore(128)
 _BG_LOCK = threading.Lock()
 # Coalescing set for background cache refresh tasks (keyed by the original
 # query wire bytes). This prevents redundant upstream work when multiple clients
@@ -182,33 +177,17 @@ def _bg_submit(key: object, fn) -> None:
       - None.
 
     Notes:
-      - Uses a semaphore to bound outstanding tasks. When the semaphore cannot
-        be acquired immediately, the task is dropped.
+      - Uses bg_executor admission control to bound outstanding tasks. When
+        capacity is exhausted, the task is dropped.
     """
 
     try:
-        acquired = _BG_SEM.acquire(blocking=False)
+        from .bg_executor import submit_bg_executor_task
+
+        _ = key
+        submit_bg_executor_task(fn)
     except Exception:
-        acquired = False
-    if not acquired:
-        return
-
-    def _done(_fut: Future) -> None:
-        try:
-            _BG_SEM.release()
-        except Exception:
-            pass
-
-    try:
-        from .bg_executor import get_bg_executor
-
-        fut = get_bg_executor().submit(fn)
-        fut.add_done_callback(_done)
-    except Exception:
-        try:
-            _BG_SEM.release()
-        except Exception:
-            pass
+        pass
 
 
 def _schedule_notify_axfr_refresh(zone_name: str, upstream: Dict) -> None:

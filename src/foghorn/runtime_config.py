@@ -241,6 +241,14 @@ class RuntimeSnapshot:
     # AXFR/IXFR policy for TCP/DoT listeners.
     axfr_enabled: bool
     axfr_allow_clients: List[str]
+    axfr_max_zone_rrs: int | None
+    axfr_max_concurrent_transfers: int
+    axfr_rate_limit_per_client_per_second: float
+    axfr_rate_limit_burst: float
+    axfr_max_transfer_rate_bytes_per_second: int | None
+    axfr_message_max_bytes: int
+    axfr_require_tsig: bool
+    axfr_tsig_keys: List[Dict[str, str]]
     generation: int
     applied_at_epoch: float
 
@@ -760,6 +768,70 @@ def _build_snapshot(
     if not isinstance(axfr_allow_clients, list):
         axfr_allow_clients = []
     axfr_allow_clients = [str(x) for x in axfr_allow_clients if x]
+    try:
+        raw_max_zone_rrs = axfr_cfg.get("max_zone_rrs")
+        axfr_max_zone_rrs = (
+            int(raw_max_zone_rrs)
+            if raw_max_zone_rrs is not None and str(raw_max_zone_rrs).strip() != ""
+            else None
+        )
+    except Exception:
+        axfr_max_zone_rrs = None
+    if axfr_max_zone_rrs is not None and axfr_max_zone_rrs <= 0:
+        axfr_max_zone_rrs = None
+    try:
+        axfr_max_concurrent_transfers = int(axfr_cfg.get("max_concurrent_transfers", 4))
+    except Exception:
+        axfr_max_concurrent_transfers = 4
+    axfr_max_concurrent_transfers = max(1, int(axfr_max_concurrent_transfers))
+    try:
+        axfr_rate_limit_per_client_per_second = float(
+            axfr_cfg.get("rate_limit_per_client_per_second", 0.0)
+        )
+    except Exception:
+        axfr_rate_limit_per_client_per_second = 0.0
+    axfr_rate_limit_per_client_per_second = max(
+        0.0, float(axfr_rate_limit_per_client_per_second)
+    )
+    try:
+        axfr_rate_limit_burst = float(axfr_cfg.get("rate_limit_burst", 2.0))
+    except Exception:
+        axfr_rate_limit_burst = 2.0
+    axfr_rate_limit_burst = max(1.0, float(axfr_rate_limit_burst))
+    try:
+        raw_max_rate = axfr_cfg.get("max_transfer_rate_bytes_per_second")
+        axfr_max_transfer_rate_bytes_per_second = (
+            int(raw_max_rate)
+            if raw_max_rate is not None and str(raw_max_rate).strip() != ""
+            else None
+        )
+    except Exception:
+        axfr_max_transfer_rate_bytes_per_second = None
+    if (
+        axfr_max_transfer_rate_bytes_per_second is not None
+        and axfr_max_transfer_rate_bytes_per_second <= 0
+    ):
+        axfr_max_transfer_rate_bytes_per_second = None
+    try:
+        axfr_message_max_bytes = int(axfr_cfg.get("message_max_bytes", 64000))
+    except Exception:
+        axfr_message_max_bytes = 64000
+    axfr_message_max_bytes = max(512, min(65535, int(axfr_message_max_bytes)))
+    axfr_require_tsig = bool(axfr_cfg.get("require_tsig", False))
+    axfr_tsig_keys_raw = axfr_cfg.get("tsig_keys") or []
+    axfr_tsig_keys: List[Dict[str, str]] = []
+    if isinstance(axfr_tsig_keys_raw, list):
+        for entry in axfr_tsig_keys_raw:
+            if not isinstance(entry, dict):
+                continue
+            name = str(entry.get("name") or "").strip()
+            secret = str(entry.get("secret") or "").strip()
+            algorithm = str(entry.get("algorithm") or "hmac-sha256").strip().lower()
+            if not name or not secret:
+                continue
+            axfr_tsig_keys.append(
+                {"name": name, "secret": secret, "algorithm": algorithm}
+            )
 
     # Cache prefetch knobs are not yet config-plumbed; preserve current values
     # from the active snapshot when available.
@@ -804,6 +876,22 @@ def _build_snapshot(
         ),
         axfr_enabled=bool(axfr_enabled),
         axfr_allow_clients=list(axfr_allow_clients or []),
+        axfr_max_zone_rrs=(
+            int(axfr_max_zone_rrs) if axfr_max_zone_rrs is not None else None
+        ),
+        axfr_max_concurrent_transfers=int(axfr_max_concurrent_transfers),
+        axfr_rate_limit_per_client_per_second=float(
+            axfr_rate_limit_per_client_per_second
+        ),
+        axfr_rate_limit_burst=float(axfr_rate_limit_burst),
+        axfr_max_transfer_rate_bytes_per_second=(
+            int(axfr_max_transfer_rate_bytes_per_second)
+            if axfr_max_transfer_rate_bytes_per_second is not None
+            else None
+        ),
+        axfr_message_max_bytes=int(axfr_message_max_bytes),
+        axfr_require_tsig=bool(axfr_require_tsig),
+        axfr_tsig_keys=list(axfr_tsig_keys or []),
         generation=int(generation),
         applied_at_epoch=time.time(),
     )
@@ -972,6 +1060,14 @@ def _default_snapshot() -> RuntimeSnapshot:
         udp_max_response_bytes=None,
         axfr_enabled=False,
         axfr_allow_clients=[],
+        axfr_max_zone_rrs=None,
+        axfr_max_concurrent_transfers=4,
+        axfr_rate_limit_per_client_per_second=0.0,
+        axfr_rate_limit_burst=2.0,
+        axfr_max_transfer_rate_bytes_per_second=None,
+        axfr_message_max_bytes=64000,
+        axfr_require_tsig=False,
+        axfr_tsig_keys=[],
         generation=0,
         applied_at_epoch=time.time(),
     )
