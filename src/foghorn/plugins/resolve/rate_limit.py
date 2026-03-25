@@ -23,7 +23,7 @@ from foghorn.utils.current_cache import get_current_namespaced_cache, module_nam
 from foghorn.utils import dns_names, ip_networks
 
 logger = logging.getLogger(__name__)
-_GLOBAL_RPS_DB_KEY = "__global__"
+_GLOBAL_RPS_DB_KEY = "global"
 
 
 @lru_cache(maxsize=16384)
@@ -127,29 +127,32 @@ class RateLimitConfig(BaseModel):
         are pruned during periodic maintenance (0 disables TTL pruning).
       - prune_interval_seconds: Minimum seconds between prune passes (>= 0).
 
-      - udp_keying: Keying override applied when ctx.listener == 'udp' and the
-        request is not secure. Options:
-          - 'cidr' (default): bucket client IPs into /bucket_network_prefix_v4 or
-            /bucket_network_prefix_v6 to reduce spoofed-IP cardinality.
-          - 'domain': ignore client identity and key only by base domain.
       - assume_udp_when_listener_missing: When True, treat missing/unknown
         listener values on insecure transports as UDP for spoofing mitigation.
-      - bucket_network_prefix_v4: IPv4 prefix length used for udp_keying='cidr'.
-      - bucket_network_prefix_v6: IPv6 prefix length used for udp_keying='cidr'.
+      - bucket_network_prefix_v4: IPv4 prefix length used for UDP client-IP
+        bucketing on insecure transports.
+      - bucket_network_prefix_v6: IPv6 prefix length used for UDP client-IP
+        bucketing on insecure transports.
+      - limit_recalc_windows: Number of completed windows between per-bucket
+        allowed-RPS recalculations. Default 10 windows.
       - warmup_max_rps: Optional hard RPS cap enforced during warmup
         (0 disables).
       - bootstrap_rps: Optional baseline RPS used to seed profiles when
-        no historical samples exist. When omitted, defaults to max_enforce_rps;
-        set to 0 to disable bootstrap seeding.
+        no historical samples exist. When omitted, defaults to global_max_rps
+        when explicitly set; otherwise defaults to 50. Set to 0 to disable
+        bootstrap seeding.
 
       - deny_response: Policy for limited queries ('nxdomain', 'refused', 'servfail',
-        'noerror_empty'/'nodata', or 'ip'). Defaults to 'refused'.
+        'noerror_empty'/'nodata', 'ip', or 'drop'). Defaults to 'refused'.
       - deny_response_ip4 / deny_response_ip6: Optional IPs used when deny_response=='ip'.
       - ttl: Optional TTL used when synthesizing IP responses.
       - stats_log_interval_seconds: Interval for periodic rate-limit summary logs
         (0 disables).
       - stats_window_seconds: Optional lookback window in seconds applied when
         computing periodic summary avg/max values (0 uses all profiles).
+      - deny_log_interval_seconds: Minimum seconds between per-key deny log
+        messages (0 logs every deny; default 10).  Suppressed denies are
+        counted and the total is included in the next emitted message.
       - psl_strict: When True, fail startup if PSL extraction is unavailable
         in domain-based modes.
 
@@ -174,12 +177,12 @@ class RateLimitConfig(BaseModel):
     profile_ttl_seconds: int = Field(default=7 * 24 * 60 * 60, ge=0)
     prune_interval_seconds: int = Field(default=60, ge=0)
 
-    udp_keying: str = Field(default="cidr")
     assume_udp_when_listener_missing: bool = Field(default=True)
     bucket_network_prefix_v4: int = Field(default=24, ge=0, le=32)
     bucket_network_prefix_v6: int = Field(default=56, ge=0, le=128)
+    limit_recalc_windows: int = Field(default=10, ge=1)
     warmup_max_rps: float = Field(default=0.0, ge=0.0)
-    bootstrap_rps: float = Field(default=5000.0, ge=0.0)
+    bootstrap_rps: float = Field(default=50.0, ge=0.0)
 
     deny_response: str = Field(default="refused")
     deny_response_ip4: Optional[str] = None
@@ -187,29 +190,33 @@ class RateLimitConfig(BaseModel):
     ttl: int = Field(default=60, ge=0)
     stats_log_interval_seconds: int = Field(default=3600, ge=0)
     stats_window_seconds: int = Field(default=0, ge=0)
+    deny_log_interval_seconds: int = Field(default=10, ge=0)
     psl_strict: bool = Field(default=False)
 
     @model_validator(mode="before")
     @classmethod
     def _reject_client_prefix_keys(cls, data: object) -> object:
-        """Brief: Reject deprecated client_prefix_* keys for RateLimit config.
+        """Brief: Reject removed RateLimit config keys.
 
         Inputs:
           - data: Raw configuration payload before field validation.
 
         Outputs:
-          - object: Unmodified data when no deprecated keys are present.
+          - object: Unmodified data when no removed keys are present.
         """
 
         if isinstance(data, Mapping):
             disallowed = [
-                key for key in ("client_prefix_v4", "client_prefix_v6") if key in data
+                key
+                for key in ("client_prefix_v4", "client_prefix_v6", "udp_keying")
+                if key in data
             ]
             if disallowed:
                 keys = ", ".join(f"'{key}'" for key in disallowed)
                 raise ValueError(
                     f"RateLimit: unsupported config key(s) {keys}; "
-                    "use 'bucket_network_prefix_v4' and/or "
+                    "use UDP prefix bucketing via "
+                    "'bucket_network_prefix_v4' and/or "
                     "'bucket_network_prefix_v6'."
                 )
         return data
@@ -239,7 +246,7 @@ class RateLimitConfig(BaseModel):
 
     @model_validator(mode="after")
     def _default_bootstrap_rps_to_global_max(self) -> "RateLimitConfig":
-        """Brief: Default bootstrap_rps to max_enforce_rps when omitted.
+        """Brief: Default bootstrap_rps from explicit global_max_rps or fallback.
 
         Inputs:
           - self: Fully parsed RateLimitConfig model instance.
@@ -249,7 +256,10 @@ class RateLimitConfig(BaseModel):
         """
 
         if "bootstrap_rps" not in self.model_fields_set:
-            self.bootstrap_rps = float(self.max_enforce_rps)
+            if "global_max_rps" in self.model_fields_set:
+                self.bootstrap_rps = float(self.global_max_rps)
+            else:
+                self.bootstrap_rps = 50.0
         return self
 
     model_config = ConfigDict(extra="allow")
@@ -343,14 +353,6 @@ class RateLimit(BasePlugin):
             self.mode = "per_client"
 
         # Spoofing-aware keying for UDP (best-effort).
-        raw_udp_keying = str(self.config.get("udp_keying", "cidr") or "cidr").lower()
-        if raw_udp_keying not in {"cidr", "domain"}:
-            logger.warning(
-                "RateLimit: invalid udp_keying %r; using 'cidr'",
-                raw_udp_keying,
-            )
-            raw_udp_keying = "cidr"
-        self.udp_keying = raw_udp_keying
         self.assume_udp_when_listener_missing = self._parse_bool_config(
             "assume_udp_when_listener_missing",
             True,
@@ -359,13 +361,16 @@ class RateLimit(BasePlugin):
 
         cfg_map = dict(self.config or {})
         disallowed_client_prefix = [
-            key for key in ("client_prefix_v4", "client_prefix_v6") if key in cfg_map
+            key
+            for key in ("client_prefix_v4", "client_prefix_v6", "udp_keying")
+            if key in cfg_map
         ]
         if disallowed_client_prefix:
             keys = ", ".join(f"'{key}'" for key in disallowed_client_prefix)
             raise ValueError(
                 f"RateLimit: unsupported config key(s) {keys}; "
-                "use 'bucket_network_prefix_v4' and/or "
+                "use UDP prefix bucketing via "
+                "'bucket_network_prefix_v4' and/or "
                 "'bucket_network_prefix_v6'."
             )
 
@@ -385,6 +390,11 @@ class RateLimit(BasePlugin):
         )
         self.bucket_network_prefix_v6 = max(
             0, min(128, int(self.bucket_network_prefix_v6))
+        )
+        self.limit_recalc_windows = self._parse_int_config(
+            "limit_recalc_windows",
+            10,
+            minimum=1,
         )
 
         # sqlite bounds / pruning knobs.
@@ -428,9 +438,12 @@ class RateLimit(BasePlugin):
         self.global_max_rps = self._parse_float_config(
             "global_max_rps", 0.0, minimum=0.0
         )
+        bootstrap_default = (
+            float(self.global_max_rps) if "global_max_rps" in self.config else 50.0
+        )
         self.bootstrap_rps = self._parse_float_config(
             "bootstrap_rps",
-            float(self.max_enforce_rps),
+            float(bootstrap_default),
             minimum=0.0,
         )
         self.stats_log_interval_seconds = self._parse_int_config(
@@ -448,6 +461,15 @@ class RateLimit(BasePlugin):
         # cannot emit duplicate periodic summaries in the same interval.
         self._stats_log_lock = threading.Lock()
 
+        # Deny-log throttle: per-key last-logged timestamp and suppressed count
+        # to prevent per-deny logging from becoming a DoS vector itself.
+        self.deny_log_interval_seconds = self._parse_int_config(
+            "deny_log_interval_seconds", 10, minimum=0
+        )
+        self._deny_log_ts: dict[str, float] = {}
+        self._deny_log_suppressed: dict[str, int] = {}
+        self._deny_log_lock = threading.Lock()
+
         # Deny policy configuration
         deny_resp = str(
             self.config.get("deny_response", "refused") or "refused"
@@ -459,6 +481,7 @@ class RateLimit(BasePlugin):
             "noerror_empty",
             "nodata",
             "ip",
+            "drop",
         }
         if deny_resp not in valid_deny:
             logger.warning(
@@ -485,6 +508,16 @@ class RateLimit(BasePlugin):
             cache_plugin=self.config.get("cache"),
         )
         self._window_locks = [threading.Lock() for _ in range(256)]
+        # Best-effort in-memory snapshot of current-window key counters for
+        # admin visibility. This is independent of sqlite profile persistence,
+        # so keys that are active in the current window can be surfaced even
+        # before a completed window writes a rate_profiles row.
+        self._active_window_counts: dict[str, tuple[int, int]] = {}
+        self._active_window_id: Optional[int] = None
+        self._active_window_lock = threading.Lock()
+        self._cached_bucket_limits: dict[str, tuple[int, float, float]] = {}
+        self._bucket_limit_lock = threading.Lock()
+        self._last_limit_recalc_epoch: Optional[int] = None
 
         # SQLite-backed learned profiles
         cfg_db_path = self.config.get("db_path", "./config/var/dbs/rate_limit.db")
@@ -980,15 +1013,15 @@ class RateLimit(BasePlugin):
             return threading.Lock()
         return locks[hash(key) % len(locks)]
 
-    def _should_apply_udp_keying(self, listener: str, secure: bool) -> bool:
-        """Brief: Decide whether to apply UDP spoofing mitigation keying.
+    def _should_apply_udp_bucketing(self, listener: str, secure: bool) -> bool:
+        """Brief: Decide whether to apply UDP spoofing mitigation bucketing.
 
         Inputs:
           - listener: Normalized listener string.
           - secure: Boolean security flag for the transport.
 
         Outputs:
-          - bool: True when UDP keying should be applied.
+          - bool: True when UDP bucketed keying should be applied.
         """
 
         if listener == "udp":
@@ -1013,7 +1046,7 @@ class RateLimit(BasePlugin):
         if bool(getattr(self, "_missing_listener_warned", False)):
             return
         logger.warning(
-            "RateLimit: listener metadata missing; applying UDP keying fallback."
+            "RateLimit: listener metadata missing; applying UDP prefix bucketing fallback."
         )
         self._missing_listener_warned = True
 
@@ -1050,8 +1083,8 @@ class RateLimit(BasePlugin):
           - str: Normalized key string (e.g., '1.2.3.4' or '1.2.3.0/24|example.com').
 
         Notes:
-          - When ctx.listener == 'udp' and ctx.secure is falsey, the keying can be
-            overridden via udp_keying to reduce spoofed-source cardinality.
+          - On insecure UDP transports, client identity uses CIDR bucketing via
+            bucket_network_prefix_v4/bucket_network_prefix_v6.
         """
 
         raw_client_ip = str(getattr(ctx, "client_ip", "") or "unknown")
@@ -1060,14 +1093,9 @@ class RateLimit(BasePlugin):
         secure = bool(getattr(ctx, "secure", False))
 
         # Spoofing-aware UDP overrides.
-        if self._should_apply_udp_keying(listener, secure):
+        if self._should_apply_udp_bucketing(listener, secure):
             if not listener:
                 self._warn_missing_listener()
-            udp_keying = str(getattr(self, "udp_keying", "cidr") or "cidr").lower()
-            if udp_keying == "domain":
-                # Ignore client identity entirely for UDP.
-                return _to_base_domain(qname)
-            # Default: bucket client IP for spoofing mitigation.
             client_ip = self._client_ip_bucket(raw_client_ip)
 
         if self.mode == "per_client_domain":
@@ -1187,8 +1215,196 @@ class RateLimit(BasePlugin):
                     "RateLimit: failed applying zero-RPS windows for %s",
                     key,
                 )
+        # Record a best-effort in-memory snapshot of active current-window
+        # counters so admin views can include keys before profile persistence
+        # catches up at the next window rollover.
+        self._record_active_window_count(str(key), int(window_id), int(count))
 
         return window_id, count
+
+    def _record_active_window_count(self, key: str, window_id: int, count: int) -> None:
+        """Brief: Track per-key request count for the currently active window.
+
+        Inputs:
+          - key: Rate profile key (for example client IP or client|domain).
+          - window_id: Integer window identifier (epoch/window_seconds).
+          - count: Current request count observed for this key in window_id.
+
+        Outputs:
+          - None. Updates in-memory active-window counters used by admin views.
+        """
+
+        key_text = str(key)
+        if not key_text:
+            return
+        count_i = int(count)
+        if count_i <= 0:
+            return
+        window_i = int(window_id)
+        stale_entries: list[tuple[str, int]] = []
+        rollover_happened = False
+        with self._active_window_lock:
+            # Keep only the active window to avoid unbounded growth under
+            # high-cardinality traffic.
+            if (
+                self._active_window_id is None
+                or int(self._active_window_id) != window_i
+            ):
+                previous_window_id = self._active_window_id
+                self._active_window_id = int(window_i)
+                rollover_happened = previous_window_id is not None
+                stale_keys = [
+                    stale_key
+                    for stale_key, (
+                        stale_window,
+                        _,
+                    ) in self._active_window_counts.items()
+                    if int(stale_window) != int(window_i)
+                ]
+                for stale_key in stale_keys:
+                    stale_window_id, stale_count = self._active_window_counts.pop(
+                        stale_key,
+                        (None, 0),
+                    )
+                    if (
+                        stale_window_id is not None
+                        and previous_window_id is not None
+                        and int(stale_window_id) == int(previous_window_id)
+                    ):
+                        stale_entries.append((str(stale_key), int(stale_count)))
+
+            self._active_window_counts[key_text] = (int(window_i), int(count_i))
+
+        if rollover_happened:
+            self._flush_completed_active_window_keys(
+                stale_entries=stale_entries,
+                exclude_keys={str(key_text), str(_GLOBAL_RPS_DB_KEY)},
+            )
+
+    def _flush_completed_active_window_keys(
+        self,
+        *,
+        stale_entries: list[tuple[str, int]],
+        exclude_keys: set[str],
+    ) -> None:
+        """Brief: Persist completed-window active key counts that were not self-flushed.
+
+        Inputs:
+          - stale_entries: list of (profile_key, request_count) for the
+            previous active window.
+          - exclude_keys: Keys to skip because their rollover is handled by the
+            normal per-key _increment_window path (for example current key and
+            the global key).
+
+        Outputs:
+          - None. Best-effort profile updates are written to sqlite.
+        """
+
+        if not stale_entries:
+            return
+        window_seconds = int(getattr(self, "window_seconds", 10) or 10)
+        if window_seconds <= 0:
+            return
+        now_ts = int(time.time())
+        skipped_keys = {str(k) for k in set(exclude_keys or set())}
+
+        for stale_key, stale_count in stale_entries:
+            key_text = str(stale_key)
+            if not key_text or key_text in skipped_keys:
+                continue
+            count_i = int(stale_count)
+            if count_i <= 0:
+                continue
+            rps = float(count_i) / float(window_seconds)
+            try:
+                self._db_update_profile(key_text, rps, now_ts)
+                self._update_burst_counter(key_text, rps)
+            except (
+                Exception
+            ):  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
+                logger.warning(
+                    "RateLimit: failed to flush completed active window for %s",
+                    key_text,
+                )
+
+    def _get_current_window_rps_snapshot(self, limit: int = 500) -> dict[str, float]:
+        """Brief: Return a snapshot of per-key RPS for the active request window.
+
+        Inputs:
+          - limit: Maximum number of keys to include (<=0 disables truncation).
+
+        Outputs:
+          - dict[str, float]: Mapping of key -> current-window RPS for keys with
+            observed traffic in the currently active window.
+        """
+
+        window_seconds = int(getattr(self, "window_seconds", 10) or 10)
+        if window_seconds <= 0:
+            return {}
+
+        current_window_id = int(time.time() // float(window_seconds))
+        with self._active_window_lock:
+            if int(getattr(self, "_active_window_id", -1)) != int(current_window_id):
+                self._active_window_id = int(current_window_id)
+                stale_keys = [
+                    stale_key
+                    for stale_key, (
+                        stale_window,
+                        _,
+                    ) in self._active_window_counts.items()
+                    if int(stale_window) != int(current_window_id)
+                ]
+                for stale_key in stale_keys:
+                    self._active_window_counts.pop(stale_key, None)
+
+            rows = [
+                (key_text, int(count))
+                for key_text, (window_id, count) in self._active_window_counts.items()
+                if int(window_id) == int(current_window_id) and int(count) > 0
+            ]
+
+        if int(limit) > 0 and len(rows) > int(limit):
+            rows.sort(key=lambda row: int(row[1]), reverse=True)
+            rows = rows[: int(limit)]
+
+        return {
+            str(key_text): float(int(count)) / float(window_seconds)
+            for key_text, count in rows
+        }
+
+    def _get_current_window_rps(self, key: str) -> float:
+        """Brief: Return active in-progress window RPS for a profile key.
+
+        Inputs:
+          - key: Normalized profile key string.
+
+        Outputs:
+          - float: Current-window requests-per-second for the key, or 0.0 when
+            no active current-window counter exists.
+        """
+
+        window_seconds = int(getattr(self, "window_seconds", 10) or 10)
+        if window_seconds <= 0:
+            return 0.0
+
+        raw = self._window_cache.get((key, 0))
+        if raw is None:
+            return 0.0
+
+        try:
+            text = raw.decode()
+            stored_window_str, stored_count_str = text.split(":", 1)
+            stored_window_id = int(stored_window_str)
+            stored_count = int(stored_count_str)
+        except Exception:
+            return 0.0
+        if stored_count <= 0:
+            return 0.0
+
+        current_window_id = int(time.time() // float(window_seconds))
+        if stored_window_id != current_window_id:
+            return 0.0
+        return float(stored_count) / float(window_seconds)
 
     def _get_burst_count(self, key: str) -> int:
         """Brief: Return the current burst window count for a key.
@@ -1367,6 +1583,146 @@ class RateLimit(BasePlugin):
             return
         self._advance_burst_reset_counter(key, 1)
 
+    def _compute_allowed_rps_thresholds(self, avg_rps: float) -> tuple[float, float]:
+        """Brief: Compute burst and baseline allowed-RPS thresholds from avg_rps.
+
+        Inputs:
+          - avg_rps: Learned baseline requests-per-second for the bucket.
+
+        Outputs:
+          - tuple[float, float]:
+              * burst_allowed_rps: avg_rps * burst_factor (clamped by max_enforce_rps).
+              * baseline_allowed_rps: avg_rps (clamped by max_enforce_rps).
+        """
+
+        burst_allowed_rps = float(avg_rps) * float(self.burst_factor)
+        baseline_allowed_rps = float(avg_rps)
+        if float(self.max_enforce_rps) > 0.0:
+            burst_allowed_rps = min(burst_allowed_rps, float(self.max_enforce_rps))
+            baseline_allowed_rps = min(
+                baseline_allowed_rps,
+                float(self.max_enforce_rps),
+            )
+        return float(burst_allowed_rps), float(baseline_allowed_rps)
+
+    def _maybe_recalculate_all_bucket_limits(self, now: float) -> int:
+        """Brief: Refresh cached limits for all known buckets on recalc cadence.
+
+        Inputs:
+          - now: Current epoch seconds used to derive window/recalc epochs.
+
+        Outputs:
+          - int: Current request window identifier.
+
+        Notes:
+          - This performs a global recalc every limit_recalc_windows windows for
+            all persisted buckets, including buckets not seen in the current
+            interval.
+        """
+
+        window_seconds = int(getattr(self, "window_seconds", 10) or 10)
+        if window_seconds <= 0:
+            return 0
+        window_id = int(float(now) // float(window_seconds))
+        recalc_windows = max(
+            1,
+            int(getattr(self, "limit_recalc_windows", 10) or 10),
+        )
+        recalc_epoch = int(window_id // int(recalc_windows))
+
+        with self._bucket_limit_lock:
+            if self._last_limit_recalc_epoch == recalc_epoch:
+                return int(window_id)
+            self._last_limit_recalc_epoch = int(recalc_epoch)
+
+        rows: list[tuple[str, float]] = []
+        try:
+            with self._db_lock:
+                cur = self._conn.cursor()
+                cur.execute("SELECT key, avg_rps FROM rate_profiles")
+                raw_rows = cur.fetchall()
+            for key_text, avg_rps in raw_rows:
+                try:
+                    rows.append((str(key_text), float(avg_rps or 0.0)))
+                except Exception:
+                    continue
+        except Exception:
+            return int(window_id)
+
+        if not rows:
+            return int(window_id)
+
+        with self._bucket_limit_lock:
+            for key_text, avg_rps in rows:
+                burst_allowed_rps, baseline_allowed_rps = (
+                    self._compute_allowed_rps_thresholds(float(avg_rps))
+                )
+                self._cached_bucket_limits[str(key_text)] = (
+                    int(window_id),
+                    float(burst_allowed_rps),
+                    float(baseline_allowed_rps),
+                )
+        return int(window_id)
+
+    def _get_recalculated_allowed_rps(
+        self,
+        key: str,
+        avg_rps: float,
+        samples: int,
+        now: Optional[float] = None,
+    ) -> tuple[float, float]:
+        """Brief: Return per-bucket allowed-RPS thresholds with interval refresh.
+
+        Inputs:
+          - key: Normalized profile key string.
+          - avg_rps: Learned baseline requests-per-second for this bucket.
+          - samples: Number of completed windows observed for this bucket.
+          - now: Optional current time override used for window/recalc epochs.
+
+        Outputs:
+          - tuple[float, float]:
+              * burst_allowed_rps: Burst threshold for the bucket.
+              * baseline_allowed_rps: Non-burst threshold for the bucket.
+
+        Notes:
+          - Buckets seen in the current interval are recalculated once per
+            window interval.
+          - Every limit_recalc_windows windows, all persisted buckets are
+            globally refreshed, including buckets not seen in the interval.
+        """
+        try:
+            int(samples)
+        except Exception:
+            pass
+
+        if now is None:
+            now = time.time()
+        current_window_id = self._maybe_recalculate_all_bucket_limits(float(now))
+
+        with self._bucket_limit_lock:
+            cached = self._cached_bucket_limits.get(str(key))
+            if cached is not None:
+                cached_window_id, cached_burst, cached_baseline = cached
+                if int(cached_window_id) == int(current_window_id):
+                    return float(cached_burst), float(cached_baseline)
+
+            burst_allowed_rps, baseline_allowed_rps = (
+                self._compute_allowed_rps_thresholds(float(avg_rps))
+            )
+            self._cached_bucket_limits[str(key)] = (
+                int(current_window_id),
+                float(burst_allowed_rps),
+                float(baseline_allowed_rps),
+            )
+
+            max_cached_keys = (
+                max(int(getattr(self, "max_profiles", 10000) or 10000), 1) * 2
+            )
+            if len(self._cached_bucket_limits) > int(max_cached_keys):
+                self._cached_bucket_limits.clear()
+
+        return float(burst_allowed_rps), float(baseline_allowed_rps)
+
     def _maybe_log_stats(self, now: float) -> None:
         """Brief: Periodically log rate-limit summary statistics.
 
@@ -1474,6 +1830,45 @@ class RateLimit(BasePlugin):
             stats_window_seconds,
         )
 
+    def _throttled_deny_log(self, key: str, msg: str, *args: object) -> None:
+        """Brief: Emit a rate-limited deny log message.
+
+        Inputs:
+          - key: Rate-limit bucket key used for per-key throttling.
+          - msg: Log format string.
+          - *args: Format arguments for msg.
+
+        Outputs:
+          - None; logs at most once per key per deny_log_interval_seconds.
+            Suppressed entries are counted and included in the next message.
+        """
+
+        interval = int(getattr(self, "deny_log_interval_seconds", 10) or 10)
+        if interval <= 0:
+            logger.info(msg, *args)
+            return
+
+        now = time.time()
+        with self._deny_log_lock:
+            last = self._deny_log_ts.get(key, 0.0)
+            if now - last < float(interval):
+                self._deny_log_suppressed[key] = (
+                    self._deny_log_suppressed.get(key, 0) + 1
+                )
+                return
+            suppressed = self._deny_log_suppressed.pop(key, 0)
+            self._deny_log_ts[key] = now
+
+        if suppressed > 0:
+            logger.info(
+                msg + " (suppressed %d similar in last %ds)",
+                *args,
+                suppressed,
+                interval,
+            )
+        else:
+            logger.info(msg, *args)
+
     def _build_deny_decision(
         self,
         qname: str,
@@ -1490,12 +1885,20 @@ class RateLimit(BasePlugin):
           - ctx: PluginContext for the request.
 
         Outputs:
-          - PluginDecision with action 'deny' or 'override' based on configuration.
+          - PluginDecision with action 'deny' or 'override' based on
+            configuration.  All decisions carry suppress_query_log=True so the
+            server skips per-row persistent logging for high-volume denies.
         """
 
         mode = (getattr(self, "deny_response", "refused") or "refused").lower()
+        if mode == "drop":
+            return self._decision(
+                action="drop", stat="rate_limit", suppress_query_log=True
+            )
         if mode == "nxdomain":
-            return self._decision(action="deny", stat="rate_limit")
+            return self._decision(
+                action="deny", stat="rate_limit", suppress_query_log=True
+            )
 
         if mode in {"refused", "servfail", "noerror_empty", "nodata"}:
             try:
@@ -1507,7 +1910,9 @@ class RateLimit(BasePlugin):
                     "RateLimit: failed to parse request while building deny response: %s",
                     exc,
                 )
-                return self._decision(action="deny", stat="rate_limit")
+                return self._decision(
+                    action="deny", stat="rate_limit", suppress_query_log=True
+                )
 
             reply = req.reply()
             if mode == "refused":
@@ -1542,11 +1947,14 @@ class RateLimit(BasePlugin):
                 action="override",
                 response=reply.pack(),
                 stat="rate_limit",
+                suppress_query_log=True,
             )
 
         if mode == "ip":
             if qtype not in {QTYPE.A, QTYPE.AAAA}:
-                return self._decision(action="deny", stat="rate_limit")
+                return self._decision(
+                    action="deny", stat="rate_limit", suppress_query_log=True
+                )
             ipaddr: Optional[str] = None
             if qtype == QTYPE.A and self.deny_response_ip4:
                 ipaddr = str(self.deny_response_ip4)
@@ -1560,10 +1968,11 @@ class RateLimit(BasePlugin):
                         action="override",
                         response=wire,
                         stat="rate_limit",
+                        suppress_query_log=True,
                     )
 
         # Fallback: simple deny (refused by default)
-        return self._decision(action="deny", stat="rate_limit")
+        return self._decision(action="deny", stat="rate_limit", suppress_query_log=True)
 
     def pre_resolve(
         self, qname: str, qtype: int, req: bytes, ctx: PluginContext
@@ -1602,7 +2011,8 @@ class RateLimit(BasePlugin):
         if float(getattr(self, "global_max_rps", 0.0) or 0.0) > 0.0:
             global_allowed_rps = float(self.global_max_rps)
             if global_rps > global_allowed_rps:
-                logger.info(
+                self._throttled_deny_log(
+                    key,
                     "RateLimit: limiting key=%s current_rps=%.2f global_rps=%.2f "
                     "global_allowed_rps=%.2f",
                     key,
@@ -1613,6 +2023,7 @@ class RateLimit(BasePlugin):
                 return self._build_deny_decision(qname, qtype, req, ctx)
 
         profile = None
+        profile_is_bootstrap = False
         try:
             profile = self._db_get_profile(key)
         except (
@@ -1633,6 +2044,7 @@ class RateLimit(BasePlugin):
                 # as warmup-complete so configured bootstrap limits can enforce
                 # immediately (instead of waiting warmup_windows windows).
                 profile = (bootstrap_rps, bootstrap_rps, int(self.warmup_windows))
+                profile_is_bootstrap = True
             if not profile:
                 warmup_cap = float(getattr(self, "warmup_max_rps", 0.0) or 0.0)
                 if warmup_cap > 0.0:
@@ -1659,7 +2071,8 @@ class RateLimit(BasePlugin):
         if float(avg_rps) < float(self.min_enforce_rps):
             hard_cap_rps = float(getattr(self, "max_enforce_rps", 0.0) or 0.0)
             if hard_cap_rps > 0.0 and current_rps > hard_cap_rps:
-                logger.info(
+                self._throttled_deny_log(
+                    key,
                     "RateLimit: limiting key=%s current_rps=%.2f avg_rps=%.2f "
                     "hard_cap_rps=%.2f min_enforce_rps=%.2f",
                     key,
@@ -1671,13 +2084,20 @@ class RateLimit(BasePlugin):
                 return self._build_deny_decision(qname, qtype, req, ctx)
             return None
 
-        # Derive allowed RPS from learned average plus configured caps.
-        burst_allowed_rps = avg_rps * float(self.burst_factor)
-        baseline_allowed_rps = avg_rps
-        if self.max_enforce_rps > 0.0:
-            burst_allowed_rps = min(burst_allowed_rps, float(self.max_enforce_rps))
-            baseline_allowed_rps = min(
-                baseline_allowed_rps, float(self.max_enforce_rps)
+        # Derive allowed RPS from learned average and refresh thresholds at the
+        # configured recalculation cadence.
+        if profile_is_bootstrap:
+            burst_allowed_rps, baseline_allowed_rps = (
+                self._compute_allowed_rps_thresholds(float(avg_rps))
+            )
+        else:
+            burst_allowed_rps, baseline_allowed_rps = (
+                self._get_recalculated_allowed_rps(
+                    key=str(key),
+                    avg_rps=float(avg_rps),
+                    samples=int(samples),
+                    now=float(now),
+                )
             )
 
         if int(getattr(self, "burst_windows", 0) or 0) > 0:
@@ -1692,7 +2112,8 @@ class RateLimit(BasePlugin):
         if current_rps <= allowed_rps:
             return None
 
-        logger.info(
+        self._throttled_deny_log(
+            key,
             "RateLimit: limiting key=%s current_rps=%.2f avg_rps=%.2f allowed_rps=%.2f",
             key,
             current_rps,
@@ -1753,6 +2174,10 @@ class RateLimit(BasePlugin):
                     "rows": [
                         {"key": "mode", "label": "Mode"},
                         {"key": "window_seconds", "label": "Window (s)"},
+                        {
+                            "key": "limit_recalc_windows",
+                            "label": "Limit recalc interval (windows)",
+                        },
                         {"key": "warmup_windows", "label": "Warmup windows"},
                         {"key": "warmup_max_rps", "label": "Warmup max RPS"},
                         {"key": "burst_factor", "label": "Burst factor"},
@@ -1768,6 +2193,7 @@ class RateLimit(BasePlugin):
                             "label": "Per-bucket max RPS",
                         },
                         {"key": "global_max_rps", "label": "Global max RPS"},
+                        {"key": "current_rps", "label": "Current RPS"},
                         {
                             "key": "stats_log_interval_seconds",
                             "label": "Stats log interval (s)",
@@ -1792,7 +2218,6 @@ class RateLimit(BasePlugin):
                             "key": "window_max_rps",
                             "label": "Max RPS (last stats_window_seconds)",
                         },
-                        {"key": "udp_keying", "label": "UDP keying"},
                         {
                             "key": "bucket_network_prefix_v4",
                             "label": "Bucket network prefix v4",
@@ -1856,6 +2281,14 @@ class RateLimit(BasePlugin):
                 getattr(self, "window_seconds", self.config.get("window_seconds", 10))
                 or 10
             ),
+            "limit_recalc_windows": int(
+                getattr(
+                    self,
+                    "limit_recalc_windows",
+                    self.config.get("limit_recalc_windows", 10),
+                )
+                or 10
+            ),
             "warmup_windows": int(
                 getattr(self, "warmup_windows", self.config.get("warmup_windows", 6))
                 or 0
@@ -1910,6 +2343,7 @@ class RateLimit(BasePlugin):
                 getattr(self, "global_max_rps", self.config.get("global_max_rps", 0.0))
                 or 0.0
             ),
+            "current_rps": float(self._get_current_window_rps(_GLOBAL_RPS_DB_KEY)),
             "stats_log_interval_seconds": int(
                 getattr(
                     self,
@@ -1925,9 +2359,6 @@ class RateLimit(BasePlugin):
                     self.config.get("stats_window_seconds", 0),
                 )
                 or 0
-            ),
-            "udp_keying": str(
-                getattr(self, "udp_keying", self.config.get("udp_keying", "cidr"))
             ),
             "assume_udp_when_listener_missing": bool(
                 getattr(
