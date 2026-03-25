@@ -286,6 +286,7 @@ def _register_stats_routes(app: FastAPI, auth_dep: Any, version: str) -> None:
         """Return RateLimit statistics derived from sqlite3 profiles."""
 
         cfg = app.state.config or {}
-        data = web_mod._collect_rate_limit_stats(cfg)
+        plugins_list = getattr(app.state, "plugins", []) or []
+        data = web_mod._collect_rate_limit_stats(cfg, plugins=plugins_list)
         data["server_time"] = _utc_now_iso()
         return data

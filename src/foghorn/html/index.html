@@ -4331,6 +4331,13 @@
 							item.max_rps_interval,
 							item.window_max_rps,
 						]);
+						var currentRps = firstFiniteNumber([
+							item.current_rps,
+						]);
+						var burstThresholdRps = firstFiniteNumber([
+							item.burst_threshold_rps,
+						]);
+						var enforcementActive = item.enforcement_active === true;
 						var samples = Number(item.samples);
 						var lastRaw = item.last_update;
 						var lastUpdateTs = null;
@@ -4353,7 +4360,6 @@
 							rpsLimitText = '-';
 						}
 						rows.push({
-							db_path: dbPath,
 							key: item.key != null ? String(item.key) : '',
 							rps_limit: rpsLimitText,
 							rps_limit_raw: rpsLimitRaw,
@@ -4365,6 +4371,12 @@
 							avg_rps_interval_raw: isFinite(avgInterval) ? avgInterval : 0,
 							max_rps_interval: formatRateLimitRps(maxInterval),
 							max_rps_interval_raw: isFinite(maxInterval) ? maxInterval : 0,
+							current_rps: formatRateLimitRps(currentRps),
+							current_rps_raw: isFinite(currentRps) ? currentRps : 0,
+							burst_threshold_rps: formatRateLimitRps(burstThresholdRps),
+							burst_threshold_rps_raw: isFinite(burstThresholdRps) ? burstThresholdRps : 0,
+							enforcement_active: enforcementActive ? 'yes' : '',
+							enforcement_active_raw: enforcementActive ? 1 : 0,
 							lookback_seconds: lookbackValue,
 							lookback_seconds_raw: isFinite(dbLookback) ? dbLookback : 0,
 							samples: isFinite(samples) ? samples : 0,
@@ -4378,8 +4390,6 @@
 					if (b.avg_rps_overall_raw === a.avg_rps_overall_raw) {
 						if (a.key < b.key) return -1;
 						if (a.key > b.key) return 1;
-						if (a.db_path < b.db_path) return -1;
-						if (a.db_path > b.db_path) return 1;
 						return 0;
 					}
 					return b.avg_rps_overall_raw - a.avg_rps_overall_raw;
@@ -4393,6 +4403,9 @@
 					return;
 				}
 				var snapshot = snapshotData && typeof snapshotData === 'object' ? snapshotData : {};
+				var settingsObj = snapshot && typeof snapshot.settings === 'object'
+					? snapshot.settings
+					: {};
 
 				var layout = desc && desc.layout ? desc.layout : {};
 				var sections = Array.isArray(layout.sections) ? layout.sections : [];
@@ -4420,6 +4433,19 @@
 					configSection.title = 'Configuration variables';
 				}
 				configSection.className = 'fh-rate-limit-config';
+				var runtimeRoot = document.createElement('div');
+				body.appendChild(runtimeRoot);
+				renderKvSection(runtimeRoot, {
+					current_rps: formatRateLimitRps(settingsObj.current_rps),
+				}, {
+					id: 'summary',
+					title: 'Runtime',
+					className: 'fh-rate-limit-runtime',
+					align: 'right',
+					rows: [
+						{ key: 'current_rps', label: 'Current RPS' },
+					],
+				});
 
 				var profilesRoot = document.createElement('div');
 				body.appendChild(profilesRoot);
@@ -4428,7 +4454,6 @@
 					title: 'Profiles',
 					className: 'fh-rate-limit-profiles',
 					columns: [
-						{ key: 'db_path', label: 'Database' },
 						{
 							key: 'key',
 							label: 'Key',
@@ -4439,6 +4464,30 @@
 							key: 'rps_limit',
 							sort_key: 'rps_limit_raw',
 							label: 'RPS Limit',
+							align: 'right',
+							default_sort_dir: 'desc',
+							nowrap: true,
+						},
+						{
+							key: 'current_rps',
+							sort_key: 'current_rps_raw',
+							label: 'Current RPS',
+							align: 'right',
+							default_sort_dir: 'desc',
+							nowrap: true,
+						},
+						{
+							key: 'burst_threshold_rps',
+							sort_key: 'burst_threshold_rps_raw',
+							label: 'Burst threshold',
+							align: 'right',
+							default_sort_dir: 'desc',
+							nowrap: true,
+						},
+						{
+							key: 'enforcement_active',
+							sort_key: 'enforcement_active_raw',
+							label: 'Enforcing',
 							align: 'right',
 							default_sort_dir: 'desc',
 							nowrap: true,
@@ -4487,9 +4536,6 @@
 				}
 				var snapshotProfiles = Array.isArray(snapshot.profiles) ? snapshot.profiles : [];
 				if (snapshotProfiles.length > 0) {
-					var settingsObj = snapshot && typeof snapshot.settings === 'object'
-						? snapshot.settings
-						: {};
 					var snapshotDbPath = settingsObj && settingsObj.db_path != null
 						? String(settingsObj.db_path)
 						: '';
