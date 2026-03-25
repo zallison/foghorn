@@ -563,6 +563,31 @@ def _augment_server_limits_and_listen_schema(base: Dict[str, Any]) -> None:
                         "default": None,
                     },
                 )
+                limits_props.setdefault(
+                    "bg_executor_workers",
+                    {
+                        "type": ["integer", "null"],
+                        "minimum": 1,
+                        "description": (
+                            "Max workers for the shared background ThreadPoolExecutor "
+                            "used by best-effort tasks (cache refresh/NOTIFY). Null "
+                            "uses a default of 4."
+                        ),
+                        "default": 4,
+                    },
+                )
+                limits_props.setdefault(
+                    "bg_executor_max_pending",
+                    {
+                        "type": ["integer", "null"],
+                        "minimum": 1,
+                        "description": (
+                            "Cap on accepted running+queued background tasks. Null "
+                            "derives capacity from bg_executor_workers * 32."
+                        ),
+                        "default": None,
+                    },
+                )
 
         # server.listen.{udp,tcp,dot} hardening knobs.
         listen_obj = server_props.get("listen")
@@ -752,6 +777,133 @@ def _augment_server_limits_and_listen_schema(base: Dict[str, Any]) -> None:
                         "type": "boolean",
                         "default": True,
                         "description": "When false, disable Swagger UI at /docs (requires enable_schema=true).",
+                    },
+                )
+
+        # server.axfr.*
+        axfr_obj = server_props.get("axfr")
+        axfr_schema = _ensure_obj_schema(axfr_obj)
+        if axfr_schema is None:
+            axfr_schema = {"type": "object", "additionalProperties": True}
+            server_props["axfr"] = axfr_schema
+            axfr_schema = _ensure_obj_schema(axfr_schema)
+        if axfr_schema is not None:
+            axfr_props = axfr_schema.get("properties")
+            if isinstance(axfr_props, dict):
+                axfr_props.setdefault(
+                    "enabled",
+                    {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Enable serving AXFR/IXFR over TCP/DoT.",
+                    },
+                )
+                axfr_props.setdefault(
+                    "allow_clients",
+                    {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Client IP/CIDR allowlist for AXFR/IXFR requests. "
+                            "When empty, all transfers are denied."
+                        ),
+                        "default": [],
+                    },
+                )
+                axfr_props.setdefault(
+                    "max_zone_rrs",
+                    {
+                        "type": ["integer", "null"],
+                        "minimum": 1,
+                        "default": None,
+                        "description": (
+                            "Optional maximum RR count per zone transfer. "
+                            "Transfers exceeding this limit are refused."
+                        ),
+                    },
+                )
+                axfr_props.setdefault(
+                    "max_concurrent_transfers",
+                    {
+                        "type": "integer",
+                        "minimum": 1,
+                        "default": 4,
+                        "description": "Maximum concurrent AXFR/IXFR sessions.",
+                    },
+                )
+                axfr_props.setdefault(
+                    "rate_limit_per_client_per_second",
+                    {
+                        "type": "number",
+                        "minimum": 0,
+                        "default": 0.0,
+                        "description": (
+                            "Per-client AXFR request token refill rate. "
+                            "Set to 0 to disable per-client rate limiting."
+                        ),
+                    },
+                )
+                axfr_props.setdefault(
+                    "rate_limit_burst",
+                    {
+                        "type": "number",
+                        "minimum": 1,
+                        "default": 2.0,
+                        "description": "Per-client AXFR request token bucket burst size.",
+                    },
+                )
+                axfr_props.setdefault(
+                    "max_transfer_rate_bytes_per_second",
+                    {
+                        "type": ["integer", "null"],
+                        "minimum": 1,
+                        "default": None,
+                        "description": (
+                            "Optional best-effort per-transfer throughput cap "
+                            "in bytes per second."
+                        ),
+                    },
+                )
+                axfr_props.setdefault(
+                    "message_max_bytes",
+                    {
+                        "type": "integer",
+                        "minimum": 512,
+                        "maximum": 65535,
+                        "default": 64000,
+                        "description": "Maximum packed DNS message size for AXFR chunks.",
+                    },
+                )
+                axfr_props.setdefault(
+                    "require_tsig",
+                    {
+                        "type": "boolean",
+                        "default": False,
+                        "description": (
+                            "Require inbound AXFR/IXFR requests to be TSIG-signed "
+                            "with one of server.axfr.tsig_keys."
+                        ),
+                    },
+                )
+                axfr_props.setdefault(
+                    "tsig_keys",
+                    {
+                        "type": "array",
+                        "description": "AXFR/IXFR TSIG keys (name/algorithm/secret).",
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "properties": {
+                                "name": {"type": "string"},
+                                "algorithm": {
+                                    "type": "string",
+                                    "default": "hmac-sha256",
+                                },
+                                "secret": {"type": "string"},
+                            },
+                            "required": ["name", "secret"],
+                        },
+                        "default": [],
                     },
                 )
     except Exception:  # pragma: no cover - defensive logging only
@@ -1089,6 +1241,11 @@ def _build_v2_root_schema(
         if isinstance(server_props, dict) and "resolver" in server_props
         else base_props.get("resolver", {"type": "object"})
     )
+    axfr_schema = (
+        server_props.get("axfr")  # type: ignore[union-attr]
+        if isinstance(server_props, dict) and "axfr" in server_props
+        else {"type": "object", "additionalProperties": True}
+    )
 
     # server.limits: hardening knobs.
     limits_schema: Dict[str, Any] = {
@@ -1103,7 +1260,25 @@ def _build_v2_root_schema(
                     "Max workers for the shared resolver ThreadPoolExecutor used by asyncio listeners "
                     "(TCP/DoT). Null uses a conservative default."
                 ),
-            }
+            },
+            "bg_executor_workers": {
+                "type": ["integer", "null"],
+                "minimum": 1,
+                "default": 4,
+                "description": (
+                    "Max workers for the shared background ThreadPoolExecutor used by "
+                    "best-effort tasks (cache refresh/NOTIFY). Null uses a default of 4."
+                ),
+            },
+            "bg_executor_max_pending": {
+                "type": ["integer", "null"],
+                "minimum": 1,
+                "default": None,
+                "description": (
+                    "Cap on accepted running+queued background tasks. Null derives "
+                    "capacity from bg_executor_workers * 32."
+                ),
+            },
         },
     }
 
@@ -1777,6 +1952,7 @@ def _build_v2_root_schema(
                     "resolver": resolver_schema,
                     "cache": cache_schema,
                     "limits": limits_schema,
+                    "axfr": axfr_schema,
                     # Preferred v2 placement for admin HTTP/web UI config.
                     "http": webserver_schema,
                     # Feature gate for Extended DNS Errors (RFC 8914). When true,
