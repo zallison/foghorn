@@ -49,6 +49,9 @@ def test_sigusr2_calls_plugin_handlers(monkeypatch, caplog):
         def handle_sigusr2(self):
             self.called = True
 
+        def post_setup(self):
+            return None
+
     captured = {"handler": None}
 
     def fake_signal(sig, handler):

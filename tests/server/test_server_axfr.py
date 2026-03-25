@@ -33,8 +33,9 @@ def test_iter_axfr_messages_non_authoritative_refused(set_runtime_snapshot) -> N
       - None.
 
     Outputs:
-      - Asserts that a single REFUSED response is returned when no plugin
-        advertises iter_zone_rrs_for_transfer for the requested zone.
+      - Asserts that an iterable yielding a single REFUSED response is returned
+        when no plugin advertises iter_zone_rrs_for_transfer for the requested
+        zone.
     """
     set_runtime_snapshot(
         plugins=[],
@@ -43,15 +44,18 @@ def test_iter_axfr_messages_non_authoritative_refused(set_runtime_snapshot) -> N
     )
 
     q = _mk_axfr_query("example.com")
-    messages = srv.iter_axfr_messages(q, client_ip="127.0.0.1")
-    assert isinstance(messages, list)
-    assert len(messages) == 1
+    messages = iter(srv.iter_axfr_messages(q, client_ip="127.0.0.1"))
+    first_wire = next(messages, None)
+    assert first_wire is not None
+    assert next(messages, None) is None
 
-    resp = DNSRecord.parse(messages[0])
+    resp = DNSRecord.parse(first_wire)
     assert resp.header.rcode == RCODE.REFUSED
 
 
-def test_iter_axfr_messages_with_zone_plugin_exports_zone(tmp_path, set_runtime_snapshot) -> None:
+def test_iter_axfr_messages_with_zone_plugin_exports_zone(
+    tmp_path, set_runtime_snapshot
+) -> None:
     """Brief: iter_axfr_messages streams an AXFR from a ZoneRecords-backed zone.
 
     Inputs:

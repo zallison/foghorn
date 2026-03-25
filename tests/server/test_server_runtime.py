@@ -130,7 +130,10 @@ def test_init_configures_handler_state_without_binding_socket() -> None:
 
     assert server.server is None
     assert plugin_base.DNS_CACHE is cache_obj
-    assert DNSUDPHandler.upstream_addrs == upstreams
+    assert DNSUDPHandler.upstream_addrs == [
+        {"host": "1.1.1.1", "port": 53, "transport": "udp"}
+    ]
+    assert upstreams == [{"host": "1.1.1.1", "port": 53}]
     assert DNSUDPHandler.plugins == plugins
     assert DNSUDPHandler.timeout == 1.25
     assert DNSUDPHandler.timeout_ms == 1250
