@@ -698,27 +698,34 @@ def _resolve_core(
                             except Exception:  # pragma: no cover - defensive
                                 pass
                             stats.record_response_rcode("NXDOMAIN", qname)
-                            result_ctx = {
-                                "source": "pre_plugin",
-                                "action": "deny",
-                                "ede_code": int(ede_code),
-                                "ede_text": str(ede_text),
-                            }
-                            if listener is not None:
-                                result_ctx["listener"] = listener
-                            if secure is not None:
-                                result_ctx["secure"] = bool(secure)
-                            stats.record_query_result(
-                                client_ip=client_ip,
-                                qname=qname,
-                                qtype=qtype_name,
-                                rcode="NXDOMAIN",
-                                upstream_id=None,
-                                status="deny_pre",
-                                error=None,
-                                first=None,
-                                result=result_ctx,
+                            # Skip persistent query-log insert when the
+                            # plugin signals suppress_query_log (e.g.
+                            # rate-limit denies under flood).
+                            _suppress_qlog = bool(
+                                getattr(decision, "suppress_query_log", False)
                             )
+                            if not _suppress_qlog:
+                                result_ctx = {
+                                    "source": "pre_plugin",
+                                    "action": "deny",
+                                    "ede_code": int(ede_code),
+                                    "ede_text": str(ede_text),
+                                }
+                                if listener is not None:
+                                    result_ctx["listener"] = listener
+                                if secure is not None:
+                                    result_ctx["secure"] = bool(secure)
+                                stats.record_query_result(
+                                    client_ip=client_ip,
+                                    qname=qname,
+                                    qtype=qtype_name,
+                                    rcode="NXDOMAIN",
+                                    upstream_id=None,
+                                    status="deny_pre",
+                                    error=None,
+                                    first=None,
+                                    result=result_ctx,
+                                )
                         except (
                             Exception
                         ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
@@ -793,38 +800,44 @@ def _resolve_core(
                                 pass
                             stats.record_response_rcode(rcode_name, qname)
 
-                            answers = [
-                                {
-                                    "name": str(rr.rname),
-                                    "type": QTYPE.get(rr.rtype, str(rr.rtype)),
-                                    "ttl": int(getattr(rr, "ttl", 0)),
-                                    "rdata": str(rr.rdata),
-                                }
-                                for rr in (parsed.rr or [])
-                            ]
-                            first = answers[0]["rdata"] if answers else None
-                            result_ctx = {
-                                "source": override_source,
-                                "answers": answers,
-                            }
-                            if override_source != "pre_plugin_override":
-                                result_ctx["plugin"] = override_source
-                            if listener is not None:
-                                result_ctx["listener"] = listener
-                            if secure is not None:
-                                result_ctx["secure"] = bool(secure)
-                            qtype_name = QTYPE.get(qtype, str(qtype))
-                            stats.record_query_result(
-                                client_ip=client_ip,
-                                qname=qname,
-                                qtype=qtype_name,
-                                rcode=rcode_name,
-                                upstream_id=None,
-                                status="override_pre",
-                                error=None,
-                                first=str(first) if first is not None else None,
-                                result=result_ctx,
+                            # Skip persistent query-log insert when the
+                            # plugin signals suppress_query_log.
+                            _suppress_qlog = bool(
+                                getattr(decision, "suppress_query_log", False)
                             )
+                            if not _suppress_qlog:
+                                answers = [
+                                    {
+                                        "name": str(rr.rname),
+                                        "type": QTYPE.get(rr.rtype, str(rr.rtype)),
+                                        "ttl": int(getattr(rr, "ttl", 0)),
+                                        "rdata": str(rr.rdata),
+                                    }
+                                    for rr in (parsed.rr or [])
+                                ]
+                                first = answers[0]["rdata"] if answers else None
+                                result_ctx = {
+                                    "source": override_source,
+                                    "answers": answers,
+                                }
+                                if override_source != "pre_plugin_override":
+                                    result_ctx["plugin"] = override_source
+                                if listener is not None:
+                                    result_ctx["listener"] = listener
+                                if secure is not None:
+                                    result_ctx["secure"] = bool(secure)
+                                qtype_name = QTYPE.get(qtype, str(qtype))
+                                stats.record_query_result(
+                                    client_ip=client_ip,
+                                    qname=qname,
+                                    qtype=qtype_name,
+                                    rcode=rcode_name,
+                                    upstream_id=None,
+                                    status="override_pre",
+                                    error=None,
+                                    first=str(first) if first is not None else None,
+                                    result=result_ctx,
+                                )
                         except (
                             Exception
                         ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably

@@ -128,6 +128,11 @@ class PluginDecision:
         on stat and context is used instead.
       - ede_text: Optional[str] short human-readable text to include in the EDE
         EXTRA-TEXT field when ede_code is provided.
+      - suppress_query_log: Optional[bool] when True, instructs the core
+        resolver to skip the persistent query-log insert for this decision.
+        In-memory aggregate counters (rcodes, latency, cache tallies) are
+        still updated.  Intended for high-volume deny paths (e.g. rate
+        limiting) where per-row logging would itself become a DoS vector.
 
     Outputs:
       - PluginDecision instance with attributes populated.
@@ -140,6 +145,7 @@ class PluginDecision:
     plugin_label: Optional[str] = None
     ede_code: Optional[int] = None
     ede_text: Optional[str] = None
+    suppress_query_log: Optional[bool] = None
 
     def __post_init__(self) -> None:
         """Brief: Infer originating plugin metadata when not explicitly provided.
