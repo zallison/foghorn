@@ -11,7 +11,7 @@ import os
 import pathlib
 import threading
 import time
-from typing import Optional
+from typing import Iterable, Optional
 
 
 def _iter_watched_record_files(plugin: object) -> list[str]:
@@ -74,6 +74,112 @@ except Exception:  # pragma: no cover - defensive fallback when watchdog is unav
     Observer = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
+
+
+def _path_has_parent_reference(path_text: str) -> bool:
+    """Brief: Return True when a path contains explicit parent traversal.
+
+    Inputs:
+      - path_text: Raw path string from configuration.
+
+    Outputs:
+      - bool: True when ``..`` appears as a concrete path segment.
+    """
+    try:
+        parts = pathlib.PurePath(path_text).parts
+    except Exception:
+        return True
+    return ".." in parts
+
+
+def _path_is_within_prefixes(
+    candidate: pathlib.Path, prefixes: Iterable[pathlib.Path]
+) -> bool:
+    """Brief: Return True when a candidate path resolves under allowed prefixes.
+
+    Inputs:
+      - candidate: Resolved path to validate.
+      - prefixes: Iterable of resolved directory prefixes.
+
+    Outputs:
+      - bool: True when candidate is under at least one configured prefix.
+    """
+    for prefix in prefixes:
+        try:
+            candidate.relative_to(prefix)
+            return True
+        except Exception:
+            continue
+    return False
+
+
+def _resolve_watched_record_paths(plugin: object) -> list[pathlib.Path]:
+    """Brief: Resolve and validate record file paths used by watchers/polling.
+
+    Inputs:
+      - plugin: ZoneRecords instance with watcher validation settings.
+
+    Outputs:
+      - list[pathlib.Path]: De-duplicated list of validated absolute file paths.
+
+    Notes:
+      - Paths with explicit ``..`` traversal segments are rejected.
+      - Absolute paths may be rejected based on plugin configuration.
+      - When watcher allowlist prefixes are configured, only files under those
+        prefixes are accepted.
+      - Maximum watched file count is enforced.
+    """
+    raw_paths = _iter_watched_record_files(plugin)
+    allowed_prefixes = list(getattr(plugin, "_watchdog_path_allowlist", []) or [])
+    reject_absolute = bool(getattr(plugin, "_watchdog_reject_absolute_paths", False))
+    max_files = int(getattr(plugin, "_watchdog_max_files", 4096) or 4096)
+    max_files = max(1, max_files)
+
+    validated: list[pathlib.Path] = []
+    seen: set[pathlib.Path] = set()
+    for raw in raw_paths:
+        text = str(raw).strip()
+        if not text:
+            continue
+        if _path_has_parent_reference(text):
+            logger.warning(
+                "Skipping records watch path %s: parent traversal ('..') is not allowed",
+                text,
+            )
+            continue
+        expanded = pathlib.Path(text).expanduser()
+        if reject_absolute and expanded.is_absolute():
+            logger.warning(
+                "Skipping records watch path %s: absolute paths are not allowed",
+                text,
+            )
+            continue
+        try:
+            resolved = expanded.resolve()
+        except Exception:
+            logger.warning(
+                "Skipping records watch path %s: unable to resolve path", text
+            )
+            continue
+        if allowed_prefixes and not _path_is_within_prefixes(
+            resolved, allowed_prefixes
+        ):
+            logger.warning(
+                "Skipping records watch path %s: path is outside configured watcher directories",
+                resolved,
+            )
+            continue
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        validated.append(resolved)
+        if len(validated) >= max_files:
+            logger.warning(
+                "Truncating watched record file list to %d entries (configured max)",
+                max_files,
+            )
+            break
+    return validated
 
 
 class WatchdogHandler(FileSystemEventHandler):
@@ -151,10 +257,17 @@ def start_watchdog(plugin: object) -> None:
         plugin._observer = None
         return
 
-    file_paths = _iter_watched_record_files(plugin)
-    record_paths = [pathlib.Path(p).expanduser() for p in file_paths]
-    watched_files = [p.resolve() for p in record_paths]
-    directories = {p.parent.resolve() for p in record_paths}
+    watched_files = _resolve_watched_record_paths(plugin)
+    max_directories = int(getattr(plugin, "_watchdog_max_directories", 256) or 256)
+    max_directories = max(1, max_directories)
+    directories = list(dict.fromkeys([p.parent.resolve() for p in watched_files]))
+    if len(directories) > max_directories:
+        logger.warning(
+            "Truncating watched directories from %d to %d (configured max)",
+            len(directories),
+            max_directories,
+        )
+        directories = directories[:max_directories]
 
     if not directories:
         plugin._observer = None
@@ -168,7 +281,6 @@ def start_watchdog(plugin: object) -> None:
             logger.debug("Watching %s", directory)
         except Exception as exc:  # pragma: no cover - log and continue
             logger.warning("Failed to watch directory %s: %s", directory, exc)
-
     observer.daemon = True
     observer.start()
     plugin._observer = observer
@@ -249,19 +361,28 @@ def have_files_changed(plugin: object) -> bool:
       First invocation records a baseline snapshot; subsequent calls only return
       True when a file's inode, size, or mtime changes.
     """
-    file_paths = _iter_watched_record_files(plugin)
+    file_paths = _resolve_watched_record_paths(plugin)
+    max_entries = int(getattr(plugin, "_watchdog_snapshot_max_entries", 4096) or 4096)
+    max_entries = max(1, max_entries)
     snapshot = []
     for fp in file_paths:
+        fp_text = str(fp)
         try:
-            st = os.stat(fp)
+            st = os.stat(fp_text)
         except FileNotFoundError:
-            snapshot.append((fp, None))
+            snapshot.append((fp_text, None))
         except OSError:
             # Other OS-level errors are logged but do not crash the poller.
-            logger.warning("Failed to stat records file %s", fp, exc_info=True)
-            snapshot.append((fp, None))
+            logger.warning("Failed to stat records file %s", fp_text, exc_info=True)
+            snapshot.append((fp_text, None))
         else:
-            snapshot.append((fp, (st.st_ino, st.st_size, st.st_mtime)))
+            snapshot.append((fp_text, (st.st_ino, st.st_size, st.st_mtime)))
+        if len(snapshot) >= max_entries:
+            logger.warning(
+                "Truncating records stat snapshot to %d entries (configured max)",
+                max_entries,
+            )
+            break
 
     last = getattr(plugin, "_last_stat_snapshot", None)
     if last is None or snapshot != last:
@@ -299,14 +420,20 @@ def schedule_debounced_reload(plugin: object, delay: float) -> None:
 
     with lock:
         timer = getattr(plugin, "_reload_debounce_timer", None)
-        if timer is not None and getattr(timer, "is_alive", lambda: False)():
-            # A timer is already scheduled; let it perform the reload.
-            return
+        if timer is not None:
+            # Replace any pending timer so rapid events collapse into one
+            # deferred reload at the latest requested deadline.
+            try:
+                timer.cancel()
+            except Exception:  # pragma: no cover - defensive
+                logger.debug("failed to cancel prior debounce timer", exc_info=True)
 
         def _timer_cb() -> None:
             # Re-enter the normal reload path; by the time this fires the
             # minimum interval will have elapsed, so the reload will be
             # performed.
+            with lock:
+                plugin._reload_debounce_timer = None
             try:
                 plugin._reload_records_from_watchdog()
             except Exception:  # pragma: no cover - defensive logging
@@ -318,7 +445,7 @@ def schedule_debounced_reload(plugin: object, delay: float) -> None:
         timer = threading.Timer(delay, _timer_cb)
         timer.daemon = True
         plugin._reload_debounce_timer = timer
-        timer.start()
+    timer.start()
 
 
 def reload_records_from_watchdog(
