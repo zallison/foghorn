@@ -994,7 +994,7 @@
         ],
         "config_schema": {
           "additionalProperties": true,
-          "description": "Brief: Typed configuration model for RateLimit.\n\nInputs:\n  - mode: 'per_client' (default), 'per_client_domain', or 'per_domain'\n    controlling how rate profiles are keyed.\n  - window_seconds: Measurement window size in seconds (>= 1).\n  - warmup_windows: Number of completed windows to observe before enforcing.\n  - alpha: EWMA smoothing factor when the new RPS is >= the learned average\n    (controls how quickly we ramp *up*).\n  - alpha_down: Optional EWMA factor when the new RPS is < the learned\n    average (controls how quickly we ramp *down*). Defaults to alpha when\n    omitted.\n  - burst_factor: Allowed multiplier over learned average RPS when enforcing.\n  - burst_windows: Number of consecutive burst windows allowed before the\n    burst factor is disabled (0 means unlimited).\n  - min_enforce_rps: Minimum RPS threshold for enforcement.\n  - global_max_rps: Hard upper bound on allowed RPS per key (0 disables).\n  - db_path: Path to sqlite3 database storing learned profiles.\n\n  - max_profiles: Maximum number of rows permitted in rate_profiles (>= 1).\n  - profile_ttl_seconds: Best-effort TTL for profiles; rows older than this\n    are pruned during periodic maintenance (0 disables TTL pruning).\n  - prune_interval_seconds: Minimum seconds between prune passes (>= 0).\n\n  - udp_keying: Keying override applied when ctx.listener == 'udp' and the\n    request is not secure. Options:\n      - 'cidr' (default): bucket client IPs into /bucket_network_prefix_v4 or\n        /bucket_network_prefix_v6 to reduce spoofed-IP cardinality.\n      - 'domain': ignore client identity and key only by base domain.\n  - client_prefix_v4: IPv4 prefix length applied to client identity keying\n    for all transports when configured.\n  - client_prefix_v6: IPv6 prefix length applied to client identity keying\n    for all transports when configured.\n  - assume_udp_when_listener_missing: When True, treat missing/unknown\n    listener values on insecure transports as UDP for spoofing mitigation.\n  - bucket_network_prefix_v4: IPv4 prefix length used for udp_keying='cidr'.\n  - bucket_network_prefix_v6: IPv6 prefix length used for udp_keying='cidr'.\n  - warmup_max_rps: Optional hard RPS cap enforced during warmup\n    (0 disables).\n  - bootstrap_rps: Optional baseline RPS used to seed profiles when\n    no historical samples exist (0 disables).\n\n  - deny_response: Policy for limited queries ('nxdomain', 'refused', 'servfail',\n    'noerror_empty'/'nodata', or 'ip'). Defaults to 'refused'.\n  - deny_response_ip4 / deny_response_ip6: Optional IPs used when deny_response=='ip'.\n  - ttl: Optional TTL used when synthesizing IP responses.\n  - stats_log_interval_seconds: Interval for periodic rate-limit summary logs\n    (0 disables).\n  - stats_window_seconds: Optional lookback window in seconds applied when\n    computing periodic summary avg/max values (0 uses all profiles).\n  - psl_strict: When True, fail startup if PSL extraction is unavailable\n    in domain-based modes.\n\nOutputs:\n  - RateLimitConfig instance with normalized field types.",
+          "description": "Brief: Typed configuration model for RateLimit.\n\nInputs:\n  - mode: 'per_client' (default), 'per_client_domain', or 'per_domain'\n    controlling how rate profiles are keyed.\n  - window_seconds: Measurement window size in seconds (>= 1).\n  - warmup_windows: Number of completed windows to observe before enforcing.\n  - alpha: EWMA smoothing factor when the new RPS is >= the learned average\n    (controls how quickly we ramp *up*).\n  - alpha_down: Optional EWMA factor when the new RPS is < the learned\n    average (controls how quickly we ramp *down*). Defaults to alpha when\n    omitted.\n  - burst_factor: Allowed multiplier over learned average RPS when enforcing.\n  - burst_windows: Number of consecutive burst windows allowed before the\n    burst factor is disabled (0 means unlimited).\n  - burst_reset_windows: Number of consecutive completed windows at or below\n    threshold required to reset burst state back to zero.\n  - min_enforce_rps: Minimum RPS threshold for enforcement.\n  - max_enforce_rps: Hard upper bound on allowed RPS per key (0 disables).\n  - global_max_rps: Optional hard upper bound on total RPS across all keys\n    (0 disables).\n  - db_path: Path to sqlite3 database storing learned profiles.\n\n  - max_profiles: Maximum number of rows permitted in rate_profiles (>= 1).\n  - profile_ttl_seconds: Best-effort TTL for profiles; rows older than this\n    are pruned during periodic maintenance (0 disables TTL pruning).\n  - prune_interval_seconds: Minimum seconds between prune passes (>= 0).\n\n  - udp_keying: Keying override applied when ctx.listener == 'udp' and the\n    request is not secure. Options:\n      - 'cidr' (default): bucket client IPs into /bucket_network_prefix_v4 or\n        /bucket_network_prefix_v6 to reduce spoofed-IP cardinality.\n      - 'domain': ignore client identity and key only by base domain.\n  - assume_udp_when_listener_missing: When True, treat missing/unknown\n    listener values on insecure transports as UDP for spoofing mitigation.\n  - bucket_network_prefix_v4: IPv4 prefix length used for udp_keying='cidr'.\n  - bucket_network_prefix_v6: IPv6 prefix length used for udp_keying='cidr'.\n  - warmup_max_rps: Optional hard RPS cap enforced during warmup\n    (0 disables).\n  - bootstrap_rps: Optional baseline RPS used to seed profiles when\n    no historical samples exist. When omitted, defaults to max_enforce_rps;\n    set to 0 to disable bootstrap seeding.\n\n  - deny_response: Policy for limited queries ('nxdomain', 'refused', 'servfail',\n    'noerror_empty'/'nodata', or 'ip'). Defaults to 'refused'.\n  - deny_response_ip4 / deny_response_ip6: Optional IPs used when deny_response=='ip'.\n  - ttl: Optional TTL used when synthesizing IP responses.\n  - stats_log_interval_seconds: Interval for periodic rate-limit summary logs\n    (0 disables).\n  - stats_window_seconds: Optional lookback window in seconds applied when\n    computing periodic summary avg/max values (0 uses all profiles).\n  - psl_strict: When True, fail startup if PSL extraction is unavailable\n    in domain-based modes.\n\nOutputs:\n  - RateLimitConfig instance with normalized field types.",
           "properties": {
             "alpha": {
               "default": 0.2,
@@ -1028,8 +1028,8 @@
               "type": "boolean"
             },
             "bootstrap_rps": {
-              "default": 0.0,
-              "description": "Type: number. Default: 0.0.",
+              "default": 5000.0,
+              "description": "Type: number. Default: 5000.0.",
               "minimum": 0.0,
               "title": "Bootstrap Rps",
               "type": "number"
@@ -1057,27 +1057,18 @@
               "title": "Burst Factor",
               "type": "number"
             },
+            "burst_reset_windows": {
+              "default": 20,
+              "description": "Type: integer. Default: 20.",
+              "minimum": 1,
+              "title": "Burst Reset Windows",
+              "type": "integer"
+            },
             "burst_windows": {
               "default": 6,
               "description": "Type: integer. Default: 6.",
               "minimum": 0,
               "title": "Burst Windows",
-              "type": "integer"
-            },
-            "client_prefix_v4": {
-              "default": 32,
-              "description": "Type: integer. Default: 32.",
-              "maximum": 32,
-              "minimum": 0,
-              "title": "Client Prefix V4",
-              "type": "integer"
-            },
-            "client_prefix_v6": {
-              "default": 128,
-              "description": "Type: integer. Default: 128.",
-              "maximum": 128,
-              "minimum": 0,
-              "title": "Client Prefix V6",
               "type": "integer"
             },
             "db_path": {
@@ -1121,10 +1112,17 @@
               "title": "Deny Response Ip6"
             },
             "global_max_rps": {
+              "default": 0.0,
+              "description": "Type: number. Default: 0.0.",
+              "minimum": 0.0,
+              "title": "Global Max Rps",
+              "type": "number"
+            },
+            "max_enforce_rps": {
               "default": 5000.0,
               "description": "Type: number. Default: 5000.0.",
               "minimum": 0.0,
-              "title": "Global Max Rps",
+              "title": "Max Enforce Rps",
               "type": "number"
             },
             "max_profiles": {
@@ -1494,7 +1492,7 @@
           "$defs": {
             "AxfrUpstreamConfig": {
               "additionalProperties": false,
-              "description": "Brief: Configuration for a single AXFR upstream server.\n\nInputs:\n  - host: Upstream authoritative server hostname or IP.\n  - port: TCP port (default 53).\n  - timeout_ms: Transfer timeout in milliseconds (default 5000).\n  - transport: \"tcp\" (default) or \"dot\" for DNS-over-TLS.\n  - server_name: Optional TLS SNI name for DoT.\n  - verify: TLS certificate verification for DoT (default True).\n  - ca_file: Optional CA bundle path for DoT.\n\nOutputs:\n  - AxfrUpstreamConfig instance.",
+              "description": "Brief: Configuration for a single AXFR upstream server.\n\nInputs:\n  - host: Upstream authoritative server hostname or IP.\n  - port: TCP port (default 53).\n  - timeout_ms: Transfer timeout in milliseconds (default 5000).\n  - transport: \"tcp\" (default) or \"dot\" for DNS-over-TLS.\n  - server_name: Optional TLS SNI name for DoT.\n  - verify: TLS certificate verification for DoT (default True).\n  - ca_file: Optional CA bundle path for DoT.\n  - tsig: Optional TSIG credentials for AXFR authentication.\n\nOutputs:\n  - AxfrUpstreamConfig instance.",
               "properties": {
                 "ca_file": {
                   "anyOf": [
@@ -1551,6 +1549,24 @@
                   "description": "Transport: 'tcp' or 'dot'. Default: \"tcp\".",
                   "title": "Transport",
                   "type": "string"
+                },
+                "tsig": {
+                  "anyOf": [
+                    {
+                      "additionalProperties": {
+                        "type": "string"
+                      },
+                      "description": "Type: object.",
+                      "type": "object"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Optional TSIG credentials for AXFR requests (name/secret/algorithm).",
+                  "title": "Tsig"
                 },
                 "verify": {
                   "default": true,
@@ -2366,7 +2382,7 @@
             }
           },
           "additionalProperties": true,
-          "description": "Brief: Typed configuration model for ZoneRecords.\n\nInputs:\n  - file_paths: Preferred list of records file paths.\n  - path_allowlist: Optional list of allowed directory prefixes for file_paths\n    and bind_paths; paths outside these prefixes are ignored with a warning.\n  - bind_paths: Optional list of RFC-1035 style BIND zone files. Entries may\n    be plain strings (paths) or objects with per-file origin/ttl overrides.\n  - records: Optional list of inline records using\n    ``<domain>|<qtype>|<ttl>|<value>`` format.\n  - load_mode: Controls load/reload behaviour:\n    - \"merge\" (default): preserve existing records and overlay newly loaded ones.\n    - \"replace\": rebuild records from configured sources on each load.\n    - \"first\": use the first configured source group in this order:\n      records (inline) \u2192 axfr_zones \u2192 file_paths \u2192 bind_paths, and ignore the others.\n  - merge_policy: \"add\" (default) to append unique values into existing\n    RRsets, or \"overwrite\" to replace RRsets when the same (name,qtype)\n    appears in a later source.\n  - max_file_size_bytes: Maximum bytes allowed for any file_path/bind_path.\n  - max_records: Maximum total record values accepted during one load cycle.\n  - max_record_value_length: Maximum allowed rdata value length in characters.\n  - auto_ptr_enabled: Enables/disables automatic PTR synthesis from A/AAAA.\n  - max_auto_ptr_records: Maximum number of auto-generated PTR values.\n  - soa_synthesis_enabled: Enables/disables fallback SOA synthesis when absent.\n  - watchdog_enabled: Enable watchdog-based reloads.\n  - watchdog_min_interval_seconds: Minimum seconds between reloads.\n  - watchdog_poll_interval_seconds: Optional polling interval.\n  - ttl: Default TTL in seconds.\n  - nxdomain_zones: Optional list of zone suffixes for which ZoneRecords\n    should return NXDOMAIN/NODATA instead of falling through to upstream.\n  - any_query_enabled: Allow QTYPE=ANY responses (default False).\n  - any_answer_rrset_limit: Max RRsets returned for QTYPE=ANY responses.\n  - any_answer_record_limit: Max total records returned for QTYPE=ANY responses.\n  - axfr_zones: Optional list of AXFR-backed zones.\n- axfr_poll_min_interval_seconds: Minimum poll interval enforced for AXFR polling.\n\nOutputs:\n  - ZoneRecordsConfig instance with normalized field types.",
+          "description": "Brief: Typed configuration model for ZoneRecords.\n\nInputs:\n  - file_paths: Preferred list of records file paths.\n  - path_allowlist: Optional list of allowed directory prefixes for file_paths\n    and bind_paths; paths outside these prefixes are ignored with a warning.\n  - bind_paths: Optional list of RFC-1035 style BIND zone files. Entries may\n    be plain strings (paths) or objects with per-file origin/ttl overrides.\n  - records: Optional list of inline records using\n    ``<domain>|<qtype>|<ttl>|<value>`` format.\n  - load_mode: Controls load/reload behaviour:\n    - \"merge\" (default): preserve existing records and overlay newly loaded ones.\n    - \"replace\": rebuild records from configured sources on each load.\n    - \"first\": use the first configured source group in this order:\n      records (inline) \u2192 axfr_zones \u2192 file_paths \u2192 bind_paths, and ignore the others.\n  - merge_policy: \"add\" (default) to append unique values into existing\n    RRsets, or \"overwrite\" to replace RRsets when the same (name,qtype)\n    appears in a later source.\n  - max_file_size_bytes: Maximum bytes allowed for any file_path/bind_path.\n  - max_records: Maximum total record values accepted during one load cycle.\n  - max_record_value_length: Maximum allowed rdata value length in characters.\n  - auto_ptr_enabled: Enables/disables automatic PTR synthesis from A/AAAA.\n  - max_auto_ptr_records: Maximum number of auto-generated PTR values.\n  - soa_synthesis_enabled: Enables/disables fallback SOA synthesis when absent.\n  - watchdog_enabled: Enable watchdog-based reloads.\n  - watchdog_min_interval_seconds: Minimum seconds between reloads.\n  - watchdog_poll_interval_seconds: Optional polling interval.\n  - watchdog_data_directories: Optional allowed directory prefixes used by\n    watchdog/polling filesystem operations.\n  - watchdog_reject_absolute_paths: Reject absolute paths for watcher files.\n  - watchdog_max_files: Maximum number of watched files.\n  - watchdog_max_directories: Maximum number of watched parent directories.\n  - watchdog_snapshot_max_entries: Maximum stat snapshot entries retained.\n  - ttl: Default TTL in seconds.\n  - nxdomain_zones: Optional list of zone suffixes for which ZoneRecords\n    should return NXDOMAIN/NODATA instead of falling through to upstream.\n  - any_query_enabled: Allow QTYPE=ANY responses (default False).\n  - any_answer_rrset_limit: Max RRsets returned for QTYPE=ANY responses.\n  - any_answer_record_limit: Max total records returned for QTYPE=ANY responses.\n  - axfr_zones: Optional list of AXFR-backed zones.\n- axfr_poll_min_interval_seconds: Minimum poll interval enforced for AXFR polling.\n\nOutputs:\n  - ZoneRecordsConfig instance with normalized field types.",
           "properties": {
             "any_answer_record_limit": {
               "default": 64,
@@ -2667,6 +2683,25 @@
               "title": "Ttl",
               "type": "integer"
             },
+            "watchdog_data_directories": {
+              "anyOf": [
+                {
+                  "description": "Type: array.",
+                  "items": {
+                    "description": "Type: string.",
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "description": "Type: null.",
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional directory prefixes allowed for watchdog/polling file operations. When omitted, path_allowlist is reused.",
+              "title": "Watchdog Data Directories"
+            },
             "watchdog_enabled": {
               "anyOf": [
                 {
@@ -2681,6 +2716,20 @@
               "default": null,
               "title": "Watchdog Enabled"
             },
+            "watchdog_max_directories": {
+              "default": 256,
+              "description": "Maximum number of parent directories watched by watchdog observers. Default: 256.",
+              "minimum": 1,
+              "title": "Watchdog Max Directories",
+              "type": "integer"
+            },
+            "watchdog_max_files": {
+              "default": 4096,
+              "description": "Maximum number of record files considered by watchdog/polling. Default: 4096.",
+              "minimum": 1,
+              "title": "Watchdog Max Files",
+              "type": "integer"
+            },
             "watchdog_min_interval_seconds": {
               "default": 1.0,
               "description": "Type: number. Default: 1.0.",
@@ -2694,6 +2743,19 @@
               "minimum": 0,
               "title": "Watchdog Poll Interval Seconds",
               "type": "number"
+            },
+            "watchdog_reject_absolute_paths": {
+              "default": false,
+              "description": "Reject absolute configured watch paths. Set true to enforce relative, deployment-local record paths. Default: false.",
+              "title": "Watchdog Reject Absolute Paths",
+              "type": "boolean"
+            },
+            "watchdog_snapshot_max_entries": {
+              "default": 4096,
+              "description": "Maximum number of per-file stat entries stored in polling snapshots. Default: 4096.",
+              "minimum": 1,
+              "title": "Watchdog Snapshot Max Entries",
+              "type": "integer"
             }
           },
           "title": "ZoneRecordsConfig",
@@ -3875,7 +3937,7 @@
         ],
         "config_schema": {
           "additionalProperties": true,
-          "description": "Brief: Typed configuration model for RateLimit.\n\nInputs:\n  - mode: 'per_client' (default), 'per_client_domain', or 'per_domain'\n    controlling how rate profiles are keyed.\n  - window_seconds: Measurement window size in seconds (>= 1).\n  - warmup_windows: Number of completed windows to observe before enforcing.\n  - alpha: EWMA smoothing factor when the new RPS is >= the learned average\n    (controls how quickly we ramp *up*).\n  - alpha_down: Optional EWMA factor when the new RPS is < the learned\n    average (controls how quickly we ramp *down*). Defaults to alpha when\n    omitted.\n  - burst_factor: Allowed multiplier over learned average RPS when enforcing.\n  - burst_windows: Number of consecutive burst windows allowed before the\n    burst factor is disabled (0 means unlimited).\n  - min_enforce_rps: Minimum RPS threshold for enforcement.\n  - global_max_rps: Hard upper bound on allowed RPS per key (0 disables).\n  - db_path: Path to sqlite3 database storing learned profiles.\n\n  - max_profiles: Maximum number of rows permitted in rate_profiles (>= 1).\n  - profile_ttl_seconds: Best-effort TTL for profiles; rows older than this\n    are pruned during periodic maintenance (0 disables TTL pruning).\n  - prune_interval_seconds: Minimum seconds between prune passes (>= 0).\n\n  - udp_keying: Keying override applied when ctx.listener == 'udp' and the\n    request is not secure. Options:\n      - 'cidr' (default): bucket client IPs into /bucket_network_prefix_v4 or\n        /bucket_network_prefix_v6 to reduce spoofed-IP cardinality.\n      - 'domain': ignore client identity and key only by base domain.\n  - client_prefix_v4: IPv4 prefix length applied to client identity keying\n    for all transports when configured.\n  - client_prefix_v6: IPv6 prefix length applied to client identity keying\n    for all transports when configured.\n  - assume_udp_when_listener_missing: When True, treat missing/unknown\n    listener values on insecure transports as UDP for spoofing mitigation.\n  - bucket_network_prefix_v4: IPv4 prefix length used for udp_keying='cidr'.\n  - bucket_network_prefix_v6: IPv6 prefix length used for udp_keying='cidr'.\n  - warmup_max_rps: Optional hard RPS cap enforced during warmup\n    (0 disables).\n  - bootstrap_rps: Optional baseline RPS used to seed profiles when\n    no historical samples exist (0 disables).\n\n  - deny_response: Policy for limited queries ('nxdomain', 'refused', 'servfail',\n    'noerror_empty'/'nodata', or 'ip'). Defaults to 'refused'.\n  - deny_response_ip4 / deny_response_ip6: Optional IPs used when deny_response=='ip'.\n  - ttl: Optional TTL used when synthesizing IP responses.\n  - stats_log_interval_seconds: Interval for periodic rate-limit summary logs\n    (0 disables).\n  - stats_window_seconds: Optional lookback window in seconds applied when\n    computing periodic summary avg/max values (0 uses all profiles).\n  - psl_strict: When True, fail startup if PSL extraction is unavailable\n    in domain-based modes.\n\nOutputs:\n  - RateLimitConfig instance with normalized field types.",
+          "description": "Brief: Typed configuration model for RateLimit.\n\nInputs:\n  - mode: 'per_client' (default), 'per_client_domain', or 'per_domain'\n    controlling how rate profiles are keyed.\n  - window_seconds: Measurement window size in seconds (>= 1).\n  - warmup_windows: Number of completed windows to observe before enforcing.\n  - alpha: EWMA smoothing factor when the new RPS is >= the learned average\n    (controls how quickly we ramp *up*).\n  - alpha_down: Optional EWMA factor when the new RPS is < the learned\n    average (controls how quickly we ramp *down*). Defaults to alpha when\n    omitted.\n  - burst_factor: Allowed multiplier over learned average RPS when enforcing.\n  - burst_windows: Number of consecutive burst windows allowed before the\n    burst factor is disabled (0 means unlimited).\n  - burst_reset_windows: Number of consecutive completed windows at or below\n    threshold required to reset burst state back to zero.\n  - min_enforce_rps: Minimum RPS threshold for enforcement.\n  - max_enforce_rps: Hard upper bound on allowed RPS per key (0 disables).\n  - global_max_rps: Optional hard upper bound on total RPS across all keys\n    (0 disables).\n  - db_path: Path to sqlite3 database storing learned profiles.\n\n  - max_profiles: Maximum number of rows permitted in rate_profiles (>= 1).\n  - profile_ttl_seconds: Best-effort TTL for profiles; rows older than this\n    are pruned during periodic maintenance (0 disables TTL pruning).\n  - prune_interval_seconds: Minimum seconds between prune passes (>= 0).\n\n  - udp_keying: Keying override applied when ctx.listener == 'udp' and the\n    request is not secure. Options:\n      - 'cidr' (default): bucket client IPs into /bucket_network_prefix_v4 or\n        /bucket_network_prefix_v6 to reduce spoofed-IP cardinality.\n      - 'domain': ignore client identity and key only by base domain.\n  - assume_udp_when_listener_missing: When True, treat missing/unknown\n    listener values on insecure transports as UDP for spoofing mitigation.\n  - bucket_network_prefix_v4: IPv4 prefix length used for udp_keying='cidr'.\n  - bucket_network_prefix_v6: IPv6 prefix length used for udp_keying='cidr'.\n  - warmup_max_rps: Optional hard RPS cap enforced during warmup\n    (0 disables).\n  - bootstrap_rps: Optional baseline RPS used to seed profiles when\n    no historical samples exist. When omitted, defaults to max_enforce_rps;\n    set to 0 to disable bootstrap seeding.\n\n  - deny_response: Policy for limited queries ('nxdomain', 'refused', 'servfail',\n    'noerror_empty'/'nodata', or 'ip'). Defaults to 'refused'.\n  - deny_response_ip4 / deny_response_ip6: Optional IPs used when deny_response=='ip'.\n  - ttl: Optional TTL used when synthesizing IP responses.\n  - stats_log_interval_seconds: Interval for periodic rate-limit summary logs\n    (0 disables).\n  - stats_window_seconds: Optional lookback window in seconds applied when\n    computing periodic summary avg/max values (0 uses all profiles).\n  - psl_strict: When True, fail startup if PSL extraction is unavailable\n    in domain-based modes.\n\nOutputs:\n  - RateLimitConfig instance with normalized field types.",
           "properties": {
             "alpha": {
               "default": 0.2,
@@ -3909,8 +3971,8 @@
               "type": "boolean"
             },
             "bootstrap_rps": {
-              "default": 0.0,
-              "description": "Type: number. Default: 0.0.",
+              "default": 5000.0,
+              "description": "Type: number. Default: 5000.0.",
               "minimum": 0.0,
               "title": "Bootstrap Rps",
               "type": "number"
@@ -3938,27 +4000,18 @@
               "title": "Burst Factor",
               "type": "number"
             },
+            "burst_reset_windows": {
+              "default": 20,
+              "description": "Type: integer. Default: 20.",
+              "minimum": 1,
+              "title": "Burst Reset Windows",
+              "type": "integer"
+            },
             "burst_windows": {
               "default": 6,
               "description": "Type: integer. Default: 6.",
               "minimum": 0,
               "title": "Burst Windows",
-              "type": "integer"
-            },
-            "client_prefix_v4": {
-              "default": 32,
-              "description": "Type: integer. Default: 32.",
-              "maximum": 32,
-              "minimum": 0,
-              "title": "Client Prefix V4",
-              "type": "integer"
-            },
-            "client_prefix_v6": {
-              "default": 128,
-              "description": "Type: integer. Default: 128.",
-              "maximum": 128,
-              "minimum": 0,
-              "title": "Client Prefix V6",
               "type": "integer"
             },
             "db_path": {
@@ -4002,10 +4055,17 @@
               "title": "Deny Response Ip6"
             },
             "global_max_rps": {
+              "default": 0.0,
+              "description": "Type: number. Default: 0.0.",
+              "minimum": 0.0,
+              "title": "Global Max Rps",
+              "type": "number"
+            },
+            "max_enforce_rps": {
               "default": 5000.0,
               "description": "Type: number. Default: 5000.0.",
               "minimum": 0.0,
-              "title": "Global Max Rps",
+              "title": "Max Enforce Rps",
               "type": "number"
             },
             "max_profiles": {
@@ -4375,7 +4435,7 @@
           "$defs": {
             "AxfrUpstreamConfig": {
               "additionalProperties": false,
-              "description": "Brief: Configuration for a single AXFR upstream server.\n\nInputs:\n  - host: Upstream authoritative server hostname or IP.\n  - port: TCP port (default 53).\n  - timeout_ms: Transfer timeout in milliseconds (default 5000).\n  - transport: \"tcp\" (default) or \"dot\" for DNS-over-TLS.\n  - server_name: Optional TLS SNI name for DoT.\n  - verify: TLS certificate verification for DoT (default True).\n  - ca_file: Optional CA bundle path for DoT.\n\nOutputs:\n  - AxfrUpstreamConfig instance.",
+              "description": "Brief: Configuration for a single AXFR upstream server.\n\nInputs:\n  - host: Upstream authoritative server hostname or IP.\n  - port: TCP port (default 53).\n  - timeout_ms: Transfer timeout in milliseconds (default 5000).\n  - transport: \"tcp\" (default) or \"dot\" for DNS-over-TLS.\n  - server_name: Optional TLS SNI name for DoT.\n  - verify: TLS certificate verification for DoT (default True).\n  - ca_file: Optional CA bundle path for DoT.\n  - tsig: Optional TSIG credentials for AXFR authentication.\n\nOutputs:\n  - AxfrUpstreamConfig instance.",
               "properties": {
                 "ca_file": {
                   "anyOf": [
@@ -4432,6 +4492,24 @@
                   "description": "Transport: 'tcp' or 'dot'. Default: \"tcp\".",
                   "title": "Transport",
                   "type": "string"
+                },
+                "tsig": {
+                  "anyOf": [
+                    {
+                      "additionalProperties": {
+                        "type": "string"
+                      },
+                      "description": "Type: object.",
+                      "type": "object"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Optional TSIG credentials for AXFR requests (name/secret/algorithm).",
+                  "title": "Tsig"
                 },
                 "verify": {
                   "default": true,
@@ -5247,7 +5325,7 @@
             }
           },
           "additionalProperties": true,
-          "description": "Brief: Typed configuration model for ZoneRecords.\n\nInputs:\n  - file_paths: Preferred list of records file paths.\n  - path_allowlist: Optional list of allowed directory prefixes for file_paths\n    and bind_paths; paths outside these prefixes are ignored with a warning.\n  - bind_paths: Optional list of RFC-1035 style BIND zone files. Entries may\n    be plain strings (paths) or objects with per-file origin/ttl overrides.\n  - records: Optional list of inline records using\n    ``<domain>|<qtype>|<ttl>|<value>`` format.\n  - load_mode: Controls load/reload behaviour:\n    - \"merge\" (default): preserve existing records and overlay newly loaded ones.\n    - \"replace\": rebuild records from configured sources on each load.\n    - \"first\": use the first configured source group in this order:\n      records (inline) \u2192 axfr_zones \u2192 file_paths \u2192 bind_paths, and ignore the others.\n  - merge_policy: \"add\" (default) to append unique values into existing\n    RRsets, or \"overwrite\" to replace RRsets when the same (name,qtype)\n    appears in a later source.\n  - max_file_size_bytes: Maximum bytes allowed for any file_path/bind_path.\n  - max_records: Maximum total record values accepted during one load cycle.\n  - max_record_value_length: Maximum allowed rdata value length in characters.\n  - auto_ptr_enabled: Enables/disables automatic PTR synthesis from A/AAAA.\n  - max_auto_ptr_records: Maximum number of auto-generated PTR values.\n  - soa_synthesis_enabled: Enables/disables fallback SOA synthesis when absent.\n  - watchdog_enabled: Enable watchdog-based reloads.\n  - watchdog_min_interval_seconds: Minimum seconds between reloads.\n  - watchdog_poll_interval_seconds: Optional polling interval.\n  - ttl: Default TTL in seconds.\n  - nxdomain_zones: Optional list of zone suffixes for which ZoneRecords\n    should return NXDOMAIN/NODATA instead of falling through to upstream.\n  - any_query_enabled: Allow QTYPE=ANY responses (default False).\n  - any_answer_rrset_limit: Max RRsets returned for QTYPE=ANY responses.\n  - any_answer_record_limit: Max total records returned for QTYPE=ANY responses.\n  - axfr_zones: Optional list of AXFR-backed zones.\n- axfr_poll_min_interval_seconds: Minimum poll interval enforced for AXFR polling.\n\nOutputs:\n  - ZoneRecordsConfig instance with normalized field types.",
+          "description": "Brief: Typed configuration model for ZoneRecords.\n\nInputs:\n  - file_paths: Preferred list of records file paths.\n  - path_allowlist: Optional list of allowed directory prefixes for file_paths\n    and bind_paths; paths outside these prefixes are ignored with a warning.\n  - bind_paths: Optional list of RFC-1035 style BIND zone files. Entries may\n    be plain strings (paths) or objects with per-file origin/ttl overrides.\n  - records: Optional list of inline records using\n    ``<domain>|<qtype>|<ttl>|<value>`` format.\n  - load_mode: Controls load/reload behaviour:\n    - \"merge\" (default): preserve existing records and overlay newly loaded ones.\n    - \"replace\": rebuild records from configured sources on each load.\n    - \"first\": use the first configured source group in this order:\n      records (inline) \u2192 axfr_zones \u2192 file_paths \u2192 bind_paths, and ignore the others.\n  - merge_policy: \"add\" (default) to append unique values into existing\n    RRsets, or \"overwrite\" to replace RRsets when the same (name,qtype)\n    appears in a later source.\n  - max_file_size_bytes: Maximum bytes allowed for any file_path/bind_path.\n  - max_records: Maximum total record values accepted during one load cycle.\n  - max_record_value_length: Maximum allowed rdata value length in characters.\n  - auto_ptr_enabled: Enables/disables automatic PTR synthesis from A/AAAA.\n  - max_auto_ptr_records: Maximum number of auto-generated PTR values.\n  - soa_synthesis_enabled: Enables/disables fallback SOA synthesis when absent.\n  - watchdog_enabled: Enable watchdog-based reloads.\n  - watchdog_min_interval_seconds: Minimum seconds between reloads.\n  - watchdog_poll_interval_seconds: Optional polling interval.\n  - watchdog_data_directories: Optional allowed directory prefixes used by\n    watchdog/polling filesystem operations.\n  - watchdog_reject_absolute_paths: Reject absolute paths for watcher files.\n  - watchdog_max_files: Maximum number of watched files.\n  - watchdog_max_directories: Maximum number of watched parent directories.\n  - watchdog_snapshot_max_entries: Maximum stat snapshot entries retained.\n  - ttl: Default TTL in seconds.\n  - nxdomain_zones: Optional list of zone suffixes for which ZoneRecords\n    should return NXDOMAIN/NODATA instead of falling through to upstream.\n  - any_query_enabled: Allow QTYPE=ANY responses (default False).\n  - any_answer_rrset_limit: Max RRsets returned for QTYPE=ANY responses.\n  - any_answer_record_limit: Max total records returned for QTYPE=ANY responses.\n  - axfr_zones: Optional list of AXFR-backed zones.\n- axfr_poll_min_interval_seconds: Minimum poll interval enforced for AXFR polling.\n\nOutputs:\n  - ZoneRecordsConfig instance with normalized field types.",
           "properties": {
             "any_answer_record_limit": {
               "default": 64,
@@ -5548,6 +5626,25 @@
               "title": "Ttl",
               "type": "integer"
             },
+            "watchdog_data_directories": {
+              "anyOf": [
+                {
+                  "description": "Type: array.",
+                  "items": {
+                    "description": "Type: string.",
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "description": "Type: null.",
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional directory prefixes allowed for watchdog/polling file operations. When omitted, path_allowlist is reused.",
+              "title": "Watchdog Data Directories"
+            },
             "watchdog_enabled": {
               "anyOf": [
                 {
@@ -5562,6 +5659,20 @@
               "default": null,
               "title": "Watchdog Enabled"
             },
+            "watchdog_max_directories": {
+              "default": 256,
+              "description": "Maximum number of parent directories watched by watchdog observers. Default: 256.",
+              "minimum": 1,
+              "title": "Watchdog Max Directories",
+              "type": "integer"
+            },
+            "watchdog_max_files": {
+              "default": 4096,
+              "description": "Maximum number of record files considered by watchdog/polling. Default: 4096.",
+              "minimum": 1,
+              "title": "Watchdog Max Files",
+              "type": "integer"
+            },
             "watchdog_min_interval_seconds": {
               "default": 1.0,
               "description": "Type: number. Default: 1.0.",
@@ -5575,6 +5686,19 @@
               "minimum": 0,
               "title": "Watchdog Poll Interval Seconds",
               "type": "number"
+            },
+            "watchdog_reject_absolute_paths": {
+              "default": false,
+              "description": "Reject absolute configured watch paths. Set true to enforce relative, deployment-local record paths. Default: false.",
+              "title": "Watchdog Reject Absolute Paths",
+              "type": "boolean"
+            },
+            "watchdog_snapshot_max_entries": {
+              "default": 4096,
+              "description": "Maximum number of per-file stat entries stored in polling snapshots. Default: 4096.",
+              "minimum": 1,
+              "title": "Watchdog Snapshot Max Entries",
+              "type": "integer"
             }
           },
           "title": "ZoneRecordsConfig",
@@ -6105,6 +6229,124 @@
     "server": {
       "additionalProperties": false,
       "properties": {
+        "axfr": {
+          "additionalProperties": true,
+          "description": "Type: object. Object with subkeys: allow_clients, enabled, max_concurrent_transfers, max_transfer_rate_bytes_per_second, max_zone_rrs, message_max_bytes, rate_limit_burst, rate_limit_per_client_per_second.",
+          "properties": {
+            "allow_clients": {
+              "default": [],
+              "description": "Client IP/CIDR allowlist for AXFR/IXFR requests. When empty, all transfers are denied. Default: [].",
+              "items": {
+                "description": "Type: string.",
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "comment": {
+              "description": "Optional human metadata string (max 254 characters).",
+              "maxLength": 254,
+              "type": "string"
+            },
+            "enabled": {
+              "default": false,
+              "description": "Enable serving AXFR/IXFR over TCP/DoT. Default: false.",
+              "type": "boolean"
+            },
+            "id": {
+              "description": "Optional human metadata string (max 254 characters).",
+              "maxLength": 254,
+              "type": "string"
+            },
+            "max_concurrent_transfers": {
+              "default": 4,
+              "description": "Maximum concurrent AXFR/IXFR sessions. Default: 4.",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "max_transfer_rate_bytes_per_second": {
+              "default": null,
+              "description": "Optional best-effort per-transfer throughput cap in bytes per second.",
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "max_zone_rrs": {
+              "default": null,
+              "description": "Optional maximum RR count per zone transfer. Transfers exceeding this limit are refused.",
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "message_max_bytes": {
+              "default": 64000,
+              "description": "Maximum packed DNS message size for AXFR chunks. Default: 64000.",
+              "maximum": 65535,
+              "minimum": 512,
+              "type": "integer"
+            },
+            "rate_limit_burst": {
+              "default": 2.0,
+              "description": "Per-client AXFR request token bucket burst size. Default: 2.0.",
+              "minimum": 1,
+              "type": "number"
+            },
+            "rate_limit_per_client_per_second": {
+              "default": 0.0,
+              "description": "Per-client AXFR request token refill rate. Set to 0 to disable per-client rate limiting. Default: 0.0.",
+              "minimum": 0,
+              "type": "number"
+            },
+            "require_tsig": {
+              "default": false,
+              "description": "Require inbound AXFR/IXFR requests to be TSIG-signed with one of server.axfr.tsig_keys. Default: false.",
+              "type": "boolean"
+            },
+            "tsig_keys": {
+              "default": [],
+              "description": "AXFR/IXFR TSIG keys (name/algorithm/secret). Default: [].",
+              "items": {
+                "additionalProperties": false,
+                "description": "Type: object. Object with subkeys: algorithm, name, secret.",
+                "properties": {
+                  "algorithm": {
+                    "default": "hmac-sha256",
+                    "description": "Type: string. Default: \"hmac-sha256\".",
+                    "type": "string"
+                  },
+                  "comment": {
+                    "description": "Optional human metadata string (max 254 characters).",
+                    "maxLength": 254,
+                    "type": "string"
+                  },
+                  "id": {
+                    "description": "Optional human metadata string (max 254 characters).",
+                    "maxLength": 254,
+                    "type": "string"
+                  },
+                  "name": {
+                    "description": "Type: string.",
+                    "type": "string"
+                  },
+                  "secret": {
+                    "description": "Type: string.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "name",
+                  "secret"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            }
+          },
+          "type": "object"
+        },
         "cache": {
           "description": "Types: object, null. Object with subkeys: decorated_overrides, modify.",
           "properties": {
@@ -6214,6 +6456,24 @@
         "limits": {
           "additionalProperties": true,
           "properties": {
+            "bg_executor_max_pending": {
+              "default": null,
+              "description": "Cap on accepted running+queued background tasks. Null derives capacity from bg_executor_workers * 32.",
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "bg_executor_workers": {
+              "default": 4,
+              "description": "Max workers for the shared background ThreadPoolExecutor used by best-effort tasks (cache refresh/NOTIFY). Null uses a default of 4.",
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
             "comment": {
               "description": "Optional human metadata string (max 254 characters).",
               "maxLength": 254,
