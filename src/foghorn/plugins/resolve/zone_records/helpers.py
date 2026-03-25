@@ -10,10 +10,10 @@ import logging
 import os
 import pathlib
 import re
-from functools import lru_cache
 from typing import Dict, Iterable, List, Optional, Tuple
 
 from foghorn.utils import dns_names
+from foghorn.utils.register_caches import registered_lru_cached
 
 logger = logging.getLogger(__name__)
 _ZONE_SUFFIX_TERMINAL = object()
@@ -545,6 +545,18 @@ def normalize_axfr_config(raw: object) -> List[Dict[str, object]]:
                 server_name = m.get("server_name")
                 verify_flag = m.get("verify", True)
                 ca_file = m.get("ca_file")
+                tsig_raw = m.get("tsig")
+                tsig_cfg = None
+                if isinstance(tsig_raw, dict):
+                    tsig_name = tsig_raw.get("name")
+                    tsig_secret = tsig_raw.get("secret")
+                    tsig_algorithm = tsig_raw.get("algorithm", "hmac-sha256")
+                    if tsig_name and tsig_secret:
+                        tsig_cfg = {
+                            "name": str(tsig_name),
+                            "secret": str(tsig_secret),
+                            "algorithm": str(tsig_algorithm or "hmac-sha256"),
+                        }
                 try:
                     port_i = int(port)
                     timeout_i = int(timeout_ms)
@@ -568,6 +580,7 @@ def normalize_axfr_config(raw: object) -> List[Dict[str, object]]:
                         ),
                         "verify": bool(verify_flag),
                         "ca_file": str(ca_file) if ca_file is not None else None,
+                        "tsig": tsig_cfg,
                     }
                 )
 
@@ -794,7 +807,7 @@ def _normalize_dns_name_for_cache(text: object) -> Optional[str]:
     return norm
 
 
-@lru_cache(maxsize=4096)
+@registered_lru_cached(maxsize=4096)
 def _split_dns_labels_cached(norm: str) -> tuple[str, ...]:
     """Brief: Split a normalized domain into DNS labels (cached).
 
@@ -842,7 +855,7 @@ def _split_dns_labels(text: str) -> tuple[str, ...]:
     return _split_dns_labels_cached(norm)
 
 
-@lru_cache(maxsize=8192)
+@registered_lru_cached(maxsize=8192)
 def is_wildcard_domain_pattern(pattern: str) -> bool:
     """Brief: Return True when *pattern* contains one or more wildcard labels.
 
@@ -860,7 +873,7 @@ def is_wildcard_domain_pattern(pattern: str) -> bool:
     return any(lbl == "*" for lbl in labels)
 
 
-@lru_cache(maxsize=8192)
+@registered_lru_cached(maxsize=8192)
 def match_wildcard_domain(name: str, pattern: str) -> bool:
     """Brief: Match a domain name against a ZoneRecords wildcard pattern.
 
@@ -922,7 +935,7 @@ def match_wildcard_domain(name: str, pattern: str) -> bool:
     return True
 
 
-@lru_cache(maxsize=8192)
+@registered_lru_cached(maxsize=8196)
 def wildcard_matched_character_count(name: str, pattern: str) -> Optional[int]:
     """Brief: Count how many characters were consumed by a leading wildcard match.
 

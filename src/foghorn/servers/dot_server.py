@@ -164,7 +164,7 @@ async def _handle_conn(
 
             if is_transfer and req is not None:
                 try:
-                    messages = _server_mod.iter_axfr_messages(req, client_ip)
+                    messages = _server_mod.iter_axfr_messages(req, client_ip, query)
                 except TypeError:
                     messages = _server_mod.iter_axfr_messages(req)
                 for wire in messages:

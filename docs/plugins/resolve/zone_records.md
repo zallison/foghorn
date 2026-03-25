@@ -116,6 +116,12 @@ plugins:
 	  watchdog_enabled: true
 	  watchdog_min_interval_seconds: 1.0
 	  watchdog_poll_interval_seconds: 60.0  # set to 0 to disable
+      watchdog_data_directories:
+        - ./config/var
+      watchdog_reject_absolute_paths: false
+      watchdog_max_files: 4096
+      watchdog_max_directories: 256
+      watchdog_snapshot_max_entries: 4096
 
 	  # Default TTL when a record omits TTL
 	  ttl: 300
@@ -269,7 +275,7 @@ Clients without DO=1 receive only the base RRsets without signatures.
 - `axfr_zones: list[object] | null`
   - Optional list of zones fetched via AXFR at startup. Each entry should include:
     - `zone: str` – zone apex (e.g. `"example.com"`, `"0.0.10.in-addr.arpa"`).
-    - `upstreams: list[object]` – authoritative servers to AXFR from; each upstream supports at least `host`, `port` (default `53`), `timeout_ms` (default `5000`), and optional DoT fields (`transport`, `server_name`, `verify`, `ca_file`).
+    - `upstreams: list[object]` – authoritative servers to AXFR from; each upstream supports at least `host`, `port` (default `53`), `timeout_ms` (default `5000`), optional DoT fields (`transport`, `server_name`, `verify`, `ca_file`), and optional TSIG (`tsig.name`, `tsig.secret`, `tsig.algorithm`).
     - `allow_no_dnssec: bool` – hint for future DNSSEC policies. Currently all zones are
       loaded regardless of DNSSEC state; Foghorn classifies each AXFR-backed
       zone as having `dnssec_state=present|partial|none` and logs a warning when
@@ -332,6 +338,23 @@ Clients without DO=1 receive only the base RRsets without signatures.
   - When `> 0`, start a stat-based polling loop that periodically checks for
 	changes (useful where filesystem events are unreliable).
   - Default: `60.0` (set to `0.0` to disable).
+- `watchdog_data_directories: list[str] | null`
+  - Optional directory prefixes used to constrain watchdog/polling filesystem
+    operations.
+  - When omitted, `path_allowlist` is reused.
+  - Paths outside these prefixes are skipped with warnings.
+- `watchdog_reject_absolute_paths: bool`
+  - Default: `false`.
+  - When `true`, absolute paths in watched record sources are skipped.
+- `watchdog_max_files: int`
+  - Maximum record files considered by watchdog/polling.
+  - Default: `4096`.
+- `watchdog_max_directories: int`
+  - Maximum parent directories scheduled in watchdog.
+  - Default: `256`.
+- `watchdog_snapshot_max_entries: int`
+  - Maximum polling stat snapshot entries retained in memory.
+  - Default: `4096`.
 - `ttl: int`
   - Default TTL in seconds. Used when an individual record omits its own TTL.
 - `nxdomain_zones: list[str] | null`
@@ -345,6 +368,10 @@ Clients without DO=1 receive only the base RRsets without signatures.
   into an internal mapping of `(domain, qtype) -> (ttl, [values])`.
 - Reloads are atomic: new mappings are built off-thread and swapped in under a
   lock so readers never see partial state.
+- Watchdog observes parent directories (non-recursive) for configured files and
+  then filters events down to concrete target files.
+- To reduce filesystem disclosure/scope, use `watchdog_data_directories`,
+  `path_allowlist`, and the watcher size limits in production.
 - Zone apex SOA records are tracked separately for SOA queries and are used to
   build proper NOERROR/NODATA and NXDOMAIN authority sections for names inside
   authoritative zones.
@@ -356,10 +383,14 @@ Clients without DO=1 receive only the base RRsets without signatures.
   startup; subsequent reloads only use local files and inline records.
 - When a zone apex carries an SOA record (from any source), ZoneRecords marks
   that apex as authoritative. The core server exposes a simple AXFR/IXFR server
-  for such zones over DNS-over-TCP and DoT: AXFR/IXFR queries are answered by
-  streaming the zone contents provided by `iter_zone_rrs_for_transfer()`,
-  bounded by matching SOA records. IXFR is currently implemented as a full
-  AXFR-style transfer (no deltas).
+  for such zones over DNS-over-TCP and DoT when `server.axfr.enabled` is true:
+  AXFR/IXFR queries are answered by streaming the zone contents provided by
+  `iter_zone_rrs_for_transfer()`, bounded by matching SOA records. IXFR is
+  currently implemented as a full AXFR-style transfer (no deltas).
+- AXFR/IXFR returns the full zone contents (including DNSSEC material when
+  present). Only explicitly allowlisted clients should be permitted.
+- Transfer attempts and completed transfers are logged with client IP, zone
+  apex, RR count, message count, transfer bytes, and duration for auditing.
 
 #### Wildcard semantics
 
@@ -410,6 +441,24 @@ AXFR transfers can be constrained and retried with backoff on failure:
 
 This allows balancing between keeping zones up-to-date and avoiding excessive transfer
 load on upstream servers.
+
+#### AXFR Serve-Side Limits (`server.axfr`)
+
+When serving AXFR/IXFR to downstream clients (TCP/DoT listeners), hardening is
+configured under `server.axfr`:
+
+- `enabled: bool` – enable/disable serving AXFR/IXFR.
+- `allow_clients: list[str]` – required client CIDR/IP allowlist.
+- `require_tsig: bool` – require TSIG on inbound AXFR/IXFR requests.
+- `tsig_keys: list[object]` – accepted TSIG keys (`name`, `secret`, optional `algorithm`).
+- `max_zone_rrs: int | null` – optional cap on transfer RR count per zone.
+- `max_concurrent_transfers: int` – global limit for concurrent transfers.
+- `rate_limit_per_client_per_second: float` – per-client request token refill
+  rate (`0` disables this limiter).
+- `rate_limit_burst: float` – per-client request burst tokens.
+- `max_transfer_rate_bytes_per_second: int | null` – optional best-effort
+  transfer pacing cap.
+- `message_max_bytes: int` – maximum packed DNS message size per AXFR frame.
 
 The `load_mode=replace` mode always forces a reload when the plugin starts up.
 

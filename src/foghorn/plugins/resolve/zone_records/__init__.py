@@ -447,6 +447,7 @@ class AxfrUpstreamConfig(BaseModel):
       - server_name: Optional TLS SNI name for DoT.
       - verify: TLS certificate verification for DoT (default True).
       - ca_file: Optional CA bundle path for DoT.
+      - tsig: Optional TSIG credentials for AXFR authentication.
 
     Outputs:
       - AxfrUpstreamConfig instance.
@@ -465,6 +466,12 @@ class AxfrUpstreamConfig(BaseModel):
         default=True, description="TLS certificate verification for DoT."
     )
     ca_file: Optional[str] = Field(default=None, description="CA bundle path for DoT.")
+    tsig: Optional[Dict[str, str]] = Field(
+        default=None,
+        description=(
+            "Optional TSIG credentials for AXFR requests " "(name/secret/algorithm)."
+        ),
+    )
 
     model_config = ConfigDict(extra="forbid")
 
@@ -748,6 +755,12 @@ class ZoneRecordsConfig(BaseModel):
       - watchdog_enabled: Enable watchdog-based reloads.
       - watchdog_min_interval_seconds: Minimum seconds between reloads.
       - watchdog_poll_interval_seconds: Optional polling interval.
+      - watchdog_data_directories: Optional allowed directory prefixes used by
+        watchdog/polling filesystem operations.
+      - watchdog_reject_absolute_paths: Reject absolute paths for watcher files.
+      - watchdog_max_files: Maximum number of watched files.
+      - watchdog_max_directories: Maximum number of watched parent directories.
+      - watchdog_snapshot_max_entries: Maximum stat snapshot entries retained.
       - ttl: Default TTL in seconds.
       - nxdomain_zones: Optional list of zone suffixes for which ZoneRecords
         should return NXDOMAIN/NODATA instead of falling through to upstream.
@@ -827,6 +840,39 @@ class ZoneRecordsConfig(BaseModel):
     watchdog_enabled: Optional[bool] = None
     watchdog_min_interval_seconds: float = Field(default=1.0, ge=0)
     watchdog_poll_interval_seconds: float = Field(default=60.0, ge=0)
+    watchdog_data_directories: Optional[List[str]] = Field(
+        default=None,
+        description=(
+            "Optional directory prefixes allowed for watchdog/polling file "
+            "operations. When omitted, path_allowlist is reused."
+        ),
+    )
+    watchdog_reject_absolute_paths: bool = Field(
+        default=False,
+        description=(
+            "Reject absolute configured watch paths. Set true to enforce "
+            "relative, deployment-local record paths."
+        ),
+    )
+    watchdog_max_files: int = Field(
+        default=4096,
+        ge=1,
+        description="Maximum number of record files considered by watchdog/polling.",
+    )
+    watchdog_max_directories: int = Field(
+        default=256,
+        ge=1,
+        description=(
+            "Maximum number of parent directories watched by watchdog observers."
+        ),
+    )
+    watchdog_snapshot_max_entries: int = Field(
+        default=4096,
+        ge=1,
+        description=(
+            "Maximum number of per-file stat entries stored in polling snapshots."
+        ),
+    )
     ttl: int = Field(default=300, ge=0)
     nxdomain_zones: Optional[List[str]] = Field(
         default=None,
@@ -1843,6 +1889,34 @@ class ZoneRecords(BasePlugin):
         self._watchdog_min_interval = float(
             self.config.get("watchdog_min_interval_seconds", 1.0)
         )
+        self._watchdog_reject_absolute_paths = bool(
+            self.config.get("watchdog_reject_absolute_paths", False)
+        )
+        watcher_path_allowlist_cfg = self.config.get("watchdog_data_directories")
+        if watcher_path_allowlist_cfg is not None:
+            self._watchdog_path_allowlist = helpers.normalize_path_allowlist(
+                watcher_path_allowlist_cfg
+            )
+        else:
+            self._watchdog_path_allowlist = list(self._path_allowlist or [])
+        try:
+            self._watchdog_max_files = max(
+                1, int(self.config.get("watchdog_max_files", 4096))
+            )
+        except (TypeError, ValueError):
+            self._watchdog_max_files = 4096
+        try:
+            self._watchdog_max_directories = max(
+                1, int(self.config.get("watchdog_max_directories", 256))
+            )
+        except (TypeError, ValueError):
+            self._watchdog_max_directories = 256
+        try:
+            self._watchdog_snapshot_max_entries = max(
+                1, int(self.config.get("watchdog_snapshot_max_entries", 4096))
+            )
+        except (TypeError, ValueError):
+            self._watchdog_snapshot_max_entries = 4096
         self._last_watchdog_reload_ts = 0.0
         self._reload_debounce_timer = None
         self._reload_timer_lock = threading.Lock()
@@ -2405,9 +2479,13 @@ def _client_allowed_for_axfr(client_ip: Optional[str]) -> bool:
     return transfer._client_allowed_for_axfr(client_ip)
 
 
-def iter_axfr_messages(req: DNSRecord, client_ip: Optional[str] = None) -> List[bytes]:
+def iter_axfr_messages(
+    req: DNSRecord,
+    client_ip: Optional[str] = None,
+    req_wire: Optional[bytes] = None,
+) -> List[bytes]:
     """Backward-compat wrapper for ZoneRecords-owned AXFR/IXFR message streaming."""
-    return transfer.iter_axfr_messages(req, client_ip=client_ip)
+    return transfer.iter_axfr_messages(req, client_ip=client_ip, req_wire=req_wire)
 
 
 # Re-export config models for public API

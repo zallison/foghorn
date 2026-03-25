@@ -65,7 +65,11 @@ class _TCPHandler(socketserver.BaseRequestHandler):
                     # Stream AXFR/IXFR messages using the shared helper so TCP
                     # and DoT use the same zone-transfer semantics.
                     try:
-                        messages = _server_mod.iter_axfr_messages(req, peer_ip)
+                        messages = _server_mod.iter_axfr_messages(
+                            req,
+                            peer_ip,
+                            body,
+                        )
                     except TypeError:
                         messages = _server_mod.iter_axfr_messages(req)
                     for wire in messages:
@@ -305,7 +309,11 @@ async def _handle_conn(
             if is_transfer and req is not None:
                 try:
                     try:
-                        messages = _server_mod.iter_axfr_messages(req, client_ip)
+                        messages = _server_mod.iter_axfr_messages(
+                            req,
+                            client_ip,
+                            query,
+                        )
                     except TypeError:
                         messages = _server_mod.iter_axfr_messages(req)
                     for wire in messages:
