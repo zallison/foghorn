@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
-from typing import Dict, List, Optional, Tuple
+from typing import Optional, Tuple
 
 from dnslib import OPCODE, QTYPE, RCODE, DNSHeader, DNSRecord
 

@@ -9,7 +9,7 @@ from __future__ import annotations
 import bisect
 import logging
 from functools import lru_cache
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from dnslib import QTYPE, RR, DNSRecord
 from foghorn.utils import dns_names
