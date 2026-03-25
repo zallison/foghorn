@@ -425,6 +425,36 @@ class EtcHosts(BasePlugin):
             "layout": layout,
         }
 
+    def _targets_ptr_hostname(self, ctx: PluginContext, hostname: str) -> bool:
+        """Brief: Re-evaluate domain targets for PTR answers using PTR target name.
+
+        Inputs:
+          - ctx: PluginContext for the current query.
+          - hostname: PTR target hostname from hosts mapping.
+
+        Outputs:
+          - bool: True when client/listener/domain targeting passes for the
+            PTR target hostname; False otherwise.
+        """
+        domains_cfg = list(getattr(self, "_targets_domains", []) or [])
+        domains_mode = str(getattr(self, "_targets_domains_mode", "any") or "any")
+        if not domains_cfg or domains_mode == "any":
+            return False
+
+        target_name = dns_names.normalize_name(hostname)
+        if not target_name:
+            return False
+
+        original_qname = getattr(ctx, "qname", None)
+        try:
+            setattr(ctx, "qname", target_name)
+            return bool(self.targets(ctx))
+        finally:
+            try:
+                setattr(ctx, "qname", original_qname)
+            except Exception:  # pragma: no cover - defensive
+                pass
+
     def pre_resolve(
         self, qname: str, qtype: int, req: bytes, ctx: PluginContext
     ) -> Optional[PluginDecision]:
@@ -442,10 +472,11 @@ class EtcHosts(BasePlugin):
             None.
 
         """
-        if not self.targets(ctx):
-            return None
 
         qname = dns_names.normalize_name(qname)
+        is_reverse_ptr_name = qname.endswith(".in-addr.arpa") or qname.endswith(
+            ".ip6.arpa"
+        )
 
         # Safe concurrent read from the hosts mapping when a watcher may be
         # reloading it in the background.
@@ -458,10 +489,17 @@ class EtcHosts(BasePlugin):
 
         if not value:
             return None
+        if not self.targets(ctx):
+            if not (
+                qtype == QTYPE.PTR
+                and is_reverse_ptr_name
+                and self._targets_ptr_hostname(ctx, str(value))
+            ):
+                return None
 
         # Handle reverse lookups using the precomputed in-addr.arpa entries.
         if qtype == QTYPE.PTR:
-            if not (qname.endswith(".in-addr.arpa") or qname.endswith(".ip6.arpa")):
+            if not is_reverse_ptr_name:
                 return None
             hostname = str(value).rstrip(".") + "."
             try:

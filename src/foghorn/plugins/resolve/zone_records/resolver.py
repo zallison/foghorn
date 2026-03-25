@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 from dnslib import OPCODE, QTYPE, RCODE, DNSHeader, DNSRecord
 
@@ -71,6 +71,112 @@ def _entry_has_update_source(entry: object) -> bool:
     if not isinstance(sources, (list, set)):
         return False
     return "update" in sources
+
+
+def _get_reverse_ptr_values(
+    plugin: object,
+    reverse_owner: str,
+    ptr_qtype: int,
+) -> List[str]:
+    """Brief: Read PTR values for one reverse owner from ZoneRecords state.
+
+    Inputs:
+      - plugin: ZoneRecords plugin instance.
+      - reverse_owner: Normalized reverse owner (in-addr.arpa/ip6.arpa).
+      - ptr_qtype: Numeric PTR qtype code.
+
+    Outputs:
+      - list[str]: PTR rdata values for the owner, or an empty list.
+    """
+    lock = getattr(plugin, "_records_lock", None)
+    lock_context = lock if lock is not None else contextlib.nullcontext()
+    with lock_context:
+        records = getattr(plugin, "records", {}) or {}
+        entry = records.get((reverse_owner, int(ptr_qtype)))
+
+    if entry is None:
+        return []
+
+    try:
+        _ttl, values, _sources = entry
+    except (ValueError, TypeError):
+        try:
+            _ttl, values = entry
+        except (ValueError, TypeError):
+            return []
+
+    if isinstance(values, (list, tuple, set)):
+        items = list(values)
+    else:
+        items = [values]
+
+    out: List[str] = []
+    for item in items:
+        text = str(item).strip()
+        if text:
+            out.append(text)
+    return out
+
+
+def _targets_match_reverse_ptr_hostname(
+    plugin: object,
+    ctx: PluginContext,
+    reverse_owner: str,
+    qtype: int,
+) -> bool:
+    """Brief: Check domain targeting against PTR target hostnames.
+
+    Inputs:
+      - plugin: ZoneRecords plugin instance.
+      - ctx: PluginContext for the active query.
+      - reverse_owner: Queried reverse owner name.
+      - qtype: Query qtype integer.
+
+    Outputs:
+      - bool: True when any PTR target hostname satisfies plugin targets().
+    """
+    from foghorn.utils import dns_names
+
+    try:
+        ptr_code = int(QTYPE.PTR)
+    except Exception:  # pragma: no cover - defensive
+        ptr_code = 12
+
+    if int(qtype) != int(ptr_code):
+        return False
+
+    reverse_name = dns_names.normalize_name(reverse_owner)
+    if not (
+        reverse_name.endswith(".in-addr.arpa") or reverse_name.endswith(".ip6.arpa")
+    ):
+        return False
+
+    domains_cfg = list(getattr(plugin, "_targets_domains", []) or [])
+    domains_mode = str(getattr(plugin, "_targets_domains_mode", "any") or "any")
+    if not domains_cfg or domains_mode == "any":
+        return False
+
+    ptr_values = _get_reverse_ptr_values(plugin, reverse_name, int(ptr_code))
+    if not ptr_values:
+        return False
+
+    original_qname = getattr(ctx, "qname", None)
+    try:
+        for value in ptr_values:
+            target_name = dns_names.normalize_name(value)
+            if not target_name:
+                continue
+            setattr(ctx, "qname", target_name)
+            if bool(plugin.targets(ctx)):
+                return True
+    except Exception:
+        return False
+    finally:
+        try:
+            setattr(ctx, "qname", original_qname)
+        except Exception:  # pragma: no cover - defensive
+            pass
+    return False
 
 
 def handle_opcode(
@@ -214,7 +320,8 @@ def pre_resolve(
     # Honour BasePlugin client/listener/domain targeting.
     try:
         if ctx is not None and not plugin.targets(ctx):
-            return None
+            if not _targets_match_reverse_ptr_hostname(plugin, ctx, name, qtype_int):
+                return None
     except Exception:  # pragma: no cover - defensive
         logger.warning(
             "ZoneRecords: targets() evaluation failed; skipping plugin for safety",

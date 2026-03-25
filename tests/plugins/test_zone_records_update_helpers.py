@@ -20,6 +20,7 @@ import pytest
 
 from foghorn.plugins.resolve.zone_records import update_helpers as uh
 from foghorn.plugins.resolve.zone_records import UpdateZoneApexConfig
+from foghorn.utils import ip_networks
 
 
 def test_load_list_helpers_strip_comments_and_normalize(tmp_path) -> None:
@@ -87,18 +88,21 @@ def test_combine_lists_is_ordered_concatenation(tmp_path) -> None:
     ],
 )
 def test_normalize_cidr_accepts_network_or_host(cidr: str, ok_prefix: int) -> None:
-    net = uh.normalize_cidr(cidr)
+    net = ip_networks.parse_network(cidr, strict=False)
     assert net is not None
     assert int(net.prefixlen) == ok_prefix
 
 
 def test_normalize_cidr_rejects_invalid() -> None:
-    assert uh.normalize_cidr("not-a-cidr") is None
+    assert ip_networks.parse_network("not-a-cidr", strict=False) is None
 
 
 def test_is_ip_in_cidr_list_handles_invalid_ip_and_invalid_cidr() -> None:
-    assert uh.is_ip_in_cidr_list("not-an-ip", ["192.0.2.0/24"]) is False
-    assert uh.is_ip_in_cidr_list("192.0.2.5", ["not-a-cidr", "192.0.2.0/24"]) is True
+    assert ip_networks.ip_string_in_cidrs("not-an-ip", ["192.0.2.0/24"]) is False
+    assert (
+        ip_networks.ip_string_in_cidrs("192.0.2.5", ["not-a-cidr", "192.0.2.0/24"])
+        is True
+    )
 
 
 def test_matches_name_pattern_normalizes_case_and_trailing_dot() -> None:
