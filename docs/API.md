@@ -262,6 +262,10 @@ Auth: protected when `server.http.auth.mode: token`
 Inputs:
 - Query: none
 
+Notes:
+- `items[].config` is returned as a redacted copy of upstream config values.
+- `items[].last_error` is a truncated string for safe admin display.
+
 Example:
 ```bash
 curl -sS \
@@ -278,7 +282,7 @@ Example response:
   "items": [
     {
       "id": "udp:1.1.1.1:53",
-      "config": {"host": "1.1.1.1", "port": 53, "transport": "udp"},
+      "config": {"host": "1.1.1.1", "port": 53, "transport": "udp", "token": "***REDACTED***"},
       "state": "up",
       "fail_count": 0,
       "down_until": 1708750000.0

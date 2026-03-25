@@ -4,6 +4,46 @@ from typing import Dict, Optional
 
 from .dns_runtime_state import DNSRuntimeState
 
+_REDACTED_VALUE = "***REDACTED***"
+_MAX_LAST_ERROR_LEN = 200
+_SENSITIVE_CONFIG_KEYS = frozenset(
+    {
+        "secret",
+        "key",
+        "password",
+        "token",
+        "api_key",
+        "private_key",
+        "tsig_key",
+        "tls_key",
+        "ca_file",
+        "cert_file",
+    }
+)
+
+
+def _redact_upstream_config(upstream: Dict) -> Dict:
+    """Brief: Return a recursively redacted copy of upstream config.
+
+    Inputs:
+      - upstream: Upstream mapping that may include nested dictionaries.
+
+    Outputs:
+      - Dict copy where sensitive keys are replaced with a redaction marker.
+    """
+    if not isinstance(upstream, dict):
+        return {}
+    redacted = {}
+    for key, value in upstream.items():
+        key_str = str(key)
+        if key_str.lower() in _SENSITIVE_CONFIG_KEYS:
+            redacted[key] = _REDACTED_VALUE
+        elif isinstance(value, dict):
+            redacted[key] = _redact_upstream_config(value)
+        else:
+            redacted[key] = value
+    return redacted
+
 
 class _UpstreamHealth:
     """Brief: Describe upstream health state for admin UI payloads.
@@ -14,6 +54,9 @@ class _UpstreamHealth:
     Outputs:
       - upstream_id returns a stable identifier string, or an empty string.
       - describe_upstream returns a dict of upstream status fields, or None.
+
+    Notes:
+      - Callers must enforce admin authorization before exposing this payload.
     """
 
     def upstream_id(self, upstream: Dict) -> str:
@@ -143,7 +186,7 @@ class _UpstreamHealth:
             if raw_last_error_ts > 0:
                 last_error_ts = raw_last_error_ts
             if raw_last_error is not None:
-                last_error = str(raw_last_error)
+                last_error = str(raw_last_error)[:_MAX_LAST_ERROR_LEN]
 
         if not upstream_id:
             upstream_id = self.upstream_id(upstream)
@@ -160,7 +203,7 @@ class _UpstreamHealth:
             "url": str(url) if url is not None else None,
             "last_error": last_error,
             "last_error_ts": last_error_ts,
-            "config": dict(upstream),
+            "config": _redact_upstream_config(upstream),
         }
 
 
