@@ -222,11 +222,16 @@ def main(argv: List[str] | None = None) -> int:
         from .servers.bg_executor import configure_bg_executor
 
         raw_workers = limits_cfg.get("bg_executor_workers")
+        raw_pending = limits_cfg.get("bg_executor_max_pending")
         try:
             bg_workers = int(raw_workers) if raw_workers is not None else None
         except Exception:
             bg_workers = None
-        configure_bg_executor(max_workers=bg_workers)
+        try:
+            bg_pending = int(raw_pending) if raw_pending is not None else None
+        except Exception:
+            bg_pending = None
+        configure_bg_executor(max_workers=bg_workers, max_pending=bg_pending)
     except Exception:
         logger.warning("Failed to configure background executor", exc_info=True)
 
@@ -567,6 +572,72 @@ def main(argv: List[str] | None = None) -> int:
     if not isinstance(axfr_allow_clients, list):
         axfr_allow_clients = []
     axfr_allow_clients = [str(x) for x in axfr_allow_clients if x]
+    try:
+        raw_axfr_max_zone_rrs = axfr_cfg.get("max_zone_rrs")
+        axfr_max_zone_rrs = (
+            int(raw_axfr_max_zone_rrs)
+            if raw_axfr_max_zone_rrs is not None
+            and str(raw_axfr_max_zone_rrs).strip() != ""
+            else None
+        )
+    except Exception:
+        axfr_max_zone_rrs = None
+    if axfr_max_zone_rrs is not None and axfr_max_zone_rrs <= 0:
+        axfr_max_zone_rrs = None
+    try:
+        axfr_max_concurrent_transfers = int(axfr_cfg.get("max_concurrent_transfers", 4))
+    except Exception:
+        axfr_max_concurrent_transfers = 4
+    axfr_max_concurrent_transfers = max(1, int(axfr_max_concurrent_transfers))
+    try:
+        axfr_rate_limit_per_client_per_second = float(
+            axfr_cfg.get("rate_limit_per_client_per_second", 0.0)
+        )
+    except Exception:
+        axfr_rate_limit_per_client_per_second = 0.0
+    axfr_rate_limit_per_client_per_second = max(
+        0.0, float(axfr_rate_limit_per_client_per_second)
+    )
+    try:
+        axfr_rate_limit_burst = float(axfr_cfg.get("rate_limit_burst", 2.0))
+    except Exception:
+        axfr_rate_limit_burst = 2.0
+    axfr_rate_limit_burst = max(1.0, float(axfr_rate_limit_burst))
+    try:
+        raw_axfr_max_transfer_rate = axfr_cfg.get("max_transfer_rate_bytes_per_second")
+        axfr_max_transfer_rate_bytes_per_second = (
+            int(raw_axfr_max_transfer_rate)
+            if raw_axfr_max_transfer_rate is not None
+            and str(raw_axfr_max_transfer_rate).strip() != ""
+            else None
+        )
+    except Exception:
+        axfr_max_transfer_rate_bytes_per_second = None
+    if (
+        axfr_max_transfer_rate_bytes_per_second is not None
+        and axfr_max_transfer_rate_bytes_per_second <= 0
+    ):
+        axfr_max_transfer_rate_bytes_per_second = None
+    try:
+        axfr_message_max_bytes = int(axfr_cfg.get("message_max_bytes", 64000))
+    except Exception:
+        axfr_message_max_bytes = 64000
+    axfr_message_max_bytes = max(512, min(65535, int(axfr_message_max_bytes)))
+    axfr_require_tsig = bool(axfr_cfg.get("require_tsig", False))
+    axfr_tsig_keys_raw = axfr_cfg.get("tsig_keys") or []
+    axfr_tsig_keys: list[dict[str, str]] = []
+    if isinstance(axfr_tsig_keys_raw, list):
+        for entry in axfr_tsig_keys_raw:
+            if not isinstance(entry, dict):
+                continue
+            name = str(entry.get("name") or "").strip()
+            secret = str(entry.get("secret") or "").strip()
+            algorithm = str(entry.get("algorithm") or "hmac-sha256").strip().lower()
+            if not name or not secret:
+                continue
+            axfr_tsig_keys.append(
+                {"name": name, "secret": secret, "algorithm": algorithm}
+            )
 
     # When performing local DNSSEC validation (including local_extended), point
     # the validator's internal resolver at the configured upstream hosts so that
@@ -600,6 +671,14 @@ def main(argv: List[str] | None = None) -> int:
             udp_cfg=udp_cfg,
             axfr_enabled=axfr_enabled,
             axfr_allow_clients=axfr_allow_clients,
+            axfr_max_zone_rrs=axfr_max_zone_rrs,
+            axfr_max_concurrent_transfers=axfr_max_concurrent_transfers,
+            axfr_rate_limit_per_client_per_second=axfr_rate_limit_per_client_per_second,
+            axfr_rate_limit_burst=axfr_rate_limit_burst,
+            axfr_max_transfer_rate_bytes_per_second=axfr_max_transfer_rate_bytes_per_second,
+            axfr_message_max_bytes=axfr_message_max_bytes,
+            axfr_require_tsig=axfr_require_tsig,
+            axfr_tsig_keys=axfr_tsig_keys,
             cfg_path=cfg_path,
             args=args,
         )
@@ -1298,6 +1377,15 @@ def main(argv: List[str] | None = None) -> int:
             logger.info("Stopping webserver")
             web_handle.stop()
 
+        # Shutdown best-effort background executor so pending refresh/notify
+        # tasks do not outlive controlled process termination.
+        try:
+            from .servers.bg_executor import shutdown_bg_executor
+
+            shutdown_bg_executor(wait=False)
+        except Exception:
+            logger.exception("Unexpected error while shutting down background executor")
+
         # Best-effort lifecycle teardown for loaded resolver plugins, optional
         # query-log backend, and cache plugin. Errors are logged inside the
         # helper and must not abort process shutdown.
@@ -1868,6 +1956,14 @@ def _initialize_runtime_snapshot(
     udp_cfg: dict,
     axfr_enabled: bool,
     axfr_allow_clients: list[str],
+    axfr_max_zone_rrs: int | None,
+    axfr_max_concurrent_transfers: int,
+    axfr_rate_limit_per_client_per_second: float,
+    axfr_rate_limit_burst: float,
+    axfr_max_transfer_rate_bytes_per_second: int | None,
+    axfr_message_max_bytes: int,
+    axfr_require_tsig: bool,
+    axfr_tsig_keys: list[dict[str, str]],
     cfg_path: str,
     args: argparse.Namespace,
 ) -> None:
@@ -1898,6 +1994,14 @@ def _initialize_runtime_snapshot(
       - udp_cfg: UDP listener config.
       - axfr_enabled: AXFR enable flag.
       - axfr_allow_clients: AXFR allowlist client entries.
+      - axfr_max_zone_rrs: Optional max RR count per AXFR/IXFR zone transfer.
+      - axfr_max_concurrent_transfers: Max in-flight AXFR/IXFR transfers.
+      - axfr_rate_limit_per_client_per_second: Per-client transfer request rate.
+      - axfr_rate_limit_burst: Per-client AXFR token bucket burst size.
+      - axfr_max_transfer_rate_bytes_per_second: Optional transfer pacing cap.
+      - axfr_message_max_bytes: Max packed DNS message bytes per transfer frame.
+      - axfr_require_tsig: Whether inbound AXFR/IXFR requests must use TSIG.
+      - axfr_tsig_keys: Configured TSIG keys for AXFR/IXFR auth.
       - cfg_path: Active config file path.
       - args: Parsed CLI args.
 
@@ -1965,6 +2069,22 @@ def _initialize_runtime_snapshot(
             udp_max_response_bytes=udp_max_response_bytes,
             axfr_enabled=bool(axfr_enabled),
             axfr_allow_clients=list(axfr_allow_clients or []),
+            axfr_max_zone_rrs=(
+                int(axfr_max_zone_rrs) if axfr_max_zone_rrs is not None else None
+            ),
+            axfr_max_concurrent_transfers=max(1, int(axfr_max_concurrent_transfers)),
+            axfr_rate_limit_per_client_per_second=max(
+                0.0, float(axfr_rate_limit_per_client_per_second)
+            ),
+            axfr_rate_limit_burst=max(1.0, float(axfr_rate_limit_burst)),
+            axfr_max_transfer_rate_bytes_per_second=(
+                int(axfr_max_transfer_rate_bytes_per_second)
+                if axfr_max_transfer_rate_bytes_per_second is not None
+                else None
+            ),
+            axfr_message_max_bytes=max(512, min(65535, int(axfr_message_max_bytes))),
+            axfr_require_tsig=bool(axfr_require_tsig),
+            axfr_tsig_keys=list(axfr_tsig_keys or []),
             generation=1,
             applied_at_epoch=_time.time(),
         )
