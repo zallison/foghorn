@@ -4,7 +4,6 @@ import importlib
 import ssl
 import urllib.parse
 from typing import Dict, Optional, Tuple
-
 from foghorn.utils.register_caches import registered_lru_cached
 
 try:
