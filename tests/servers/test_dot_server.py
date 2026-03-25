@@ -409,7 +409,7 @@ def test_handle_conn_axfr_streams_messages_and_skips_empty(
 
     seen_ips: list[str] = []
 
-    def fake_iter_axfr_messages(req, client_ip):  # noqa: ARG001
+    def fake_iter_axfr_messages(req, client_ip, raw_query):  # noqa: ARG001
         seen_ips.append(client_ip)
         return [b"\x00" * 12, b"", b"\x01" * 12]
 

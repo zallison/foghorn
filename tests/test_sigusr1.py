@@ -69,6 +69,9 @@ def test_sigusr1_resets_stats_and_notifies_plugins(monkeypatch, caplog):
         def handle_sigusr(self, sig_label: str) -> None:
             self.seen.append(str(sig_label))
 
+        def post_setup(self) -> None:
+            return None
+
     captured = {"handler": None}
 
     def fake_signal(sig, handler):

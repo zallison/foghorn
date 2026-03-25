@@ -30,9 +30,10 @@ def test_axfr_refused_when_not_enabled(set_runtime_snapshot):
     )
 
     req = _make_axfr_query("example.com")
-    messages = iter_axfr_messages(req, client_ip="127.0.0.1")
-    assert messages
-    resp = DNSRecord.parse(messages[0])
+    messages = iter(iter_axfr_messages(req, client_ip="127.0.0.1"))
+    first_wire = next(messages, None)
+    assert first_wire is not None
+    resp = DNSRecord.parse(first_wire)
     assert resp.header.rcode == RCODE.REFUSED
 
 
@@ -44,9 +45,10 @@ def test_axfr_refused_when_client_not_allowlisted(set_runtime_snapshot):
     )
 
     req = _make_axfr_query("example.com")
-    messages = iter_axfr_messages(req, client_ip="127.0.0.1")
-    assert messages
-    resp = DNSRecord.parse(messages[0])
+    messages = iter(iter_axfr_messages(req, client_ip="127.0.0.1"))
+    first_wire = next(messages, None)
+    assert first_wire is not None
+    resp = DNSRecord.parse(first_wire)
     assert resp.header.rcode == RCODE.REFUSED
 
 
@@ -58,10 +60,11 @@ def test_axfr_allows_allowlisted_client(set_runtime_snapshot):
     )
 
     req = _make_axfr_query("example.com")
-    messages = iter_axfr_messages(req, client_ip="127.0.0.1")
-    assert messages
+    messages = iter(iter_axfr_messages(req, client_ip="127.0.0.1"))
+    first_wire = next(messages, None)
+    assert first_wire is not None
     # First message should be a normal response (not REFUSED)
-    resp0 = DNSRecord.parse(messages[0])
+    resp0 = DNSRecord.parse(first_wire)
     assert resp0.header.rcode != RCODE.REFUSED
     # Ensure we are actually returning transfer content
     assert any(rr.rtype == QTYPE.SOA for rr in resp0.rr)
