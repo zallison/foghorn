@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import errno
+import re
 import time
 
 import logging
 import threading
+from collections import OrderedDict
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from typing import Dict, List, Optional, Set, Tuple
 
@@ -22,7 +24,8 @@ logger = logging.getLogger("foghorn.server")
 # Track whether we've already emitted a warning for a given upstream being
 # skipped. This prevents log spam when an upstream is repeatedly failing.
 # The "warned" state is cleared the next time the upstream succeeds.
-_UPSTREAM_SKIP_WARNED: Dict[str, bool] = {}
+_MAX_SKIP_WARNED_ENTRIES = 1024
+_UPSTREAM_SKIP_WARNED: "OrderedDict[str, bool]" = OrderedDict()
 _UPSTREAM_SKIP_LOCK = threading.Lock()
 
 # Shared executor used only for per-query upstream fanout when failover is in
@@ -30,6 +33,22 @@ _UPSTREAM_SKIP_LOCK = threading.Lock()
 _FAILOVER_EXECUTOR: ThreadPoolExecutor | None = None
 _FAILOVER_EXECUTOR_LOCK = threading.Lock()
 _FAILOVER_EXECUTOR_MAX_WORKERS: int | None = 8
+
+
+def shutdown_failover_executor(wait: bool = True) -> None:
+    """Brief: Shut down the shared failover executor during teardown.
+
+    Inputs:
+      - wait: True to block until queued tasks finish.
+
+    Outputs:
+      - None.
+    """
+    global _FAILOVER_EXECUTOR
+    with _FAILOVER_EXECUTOR_LOCK:
+        if _FAILOVER_EXECUTOR is not None:
+            _FAILOVER_EXECUTOR.shutdown(wait=bool(wait))
+            _FAILOVER_EXECUTOR = None
 
 
 def _get_failover_executor() -> ThreadPoolExecutor:
@@ -364,7 +383,13 @@ def _warn_upstream_skip_once(upstream_key: str, fmt: str, *args) -> None:
     try:
         with _UPSTREAM_SKIP_LOCK:
             if _UPSTREAM_SKIP_WARNED.get(upstream_key):
+                try:
+                    _UPSTREAM_SKIP_WARNED.move_to_end(upstream_key, last=True)
+                except Exception:  # pragma: no cover - defensive
+                    pass
                 return
+            while len(_UPSTREAM_SKIP_WARNED) >= int(_MAX_SKIP_WARNED_ENTRIES):
+                _UPSTREAM_SKIP_WARNED.popitem(last=False)
             _UPSTREAM_SKIP_WARNED[upstream_key] = True
     except Exception:  # pragma: no cover - defensive
         # If the de-dupe bookkeeping fails, fall back to logging.
@@ -434,11 +459,25 @@ def _send_query_with_failover_impl(
 
     timeout_sec = timeout_ms / 1000.0
     last_exception: Optional[Exception] = None
+    last_exception_lock = threading.Lock()
     attempted_upstream_labels: list[str] = []
     attempted_upstream_label_set: Set[str] = set()
     attempted_upstream_health: dict[str, str] = {}
     attempted_upstream_fail_counts: dict[str, float] = {}
     attempted_upstreams_lock = threading.Lock()
+
+    def _set_last_exception(exc: Exception) -> None:
+        """Brief: Track the latest upstream exception in a thread-safe way.
+
+        Inputs:
+          - exc: Exception raised by an upstream attempt.
+
+        Outputs:
+          - None.
+        """
+        nonlocal last_exception
+        with last_exception_lock:
+            last_exception = exc
 
     # Precompute whether the original query advertised EDNS(0) via an OPT RR in
     # the additional section. This is used by the EDNS fallback shim below.
@@ -473,16 +512,17 @@ def _send_query_with_failover_impl(
         """
 
         # TXID validation when the caller passed a dnslib-style DNSRecord.
-        try:
-            expected_id = getattr(getattr(query, "header", None), "id", None)
-            if expected_id is not None and int(getattr(parsed.header, "id", -1)) != int(
-                expected_id
-            ):
+        query_header = getattr(query, "header", None)
+        if query_header is not None:
+            try:
+                expected_id = int(getattr(query_header, "id"))
+            except Exception:
+                logger.debug(
+                    "TXID validation failed due to missing/invalid query header id"
+                )
                 return False
-        except Exception:
-            # If we cannot determine the expected ID (legacy objects), skip
-            # TXID validation.
-            pass
+            if int(getattr(parsed.header, "id", -1)) != expected_id:
+                return False
 
         try:
             qs = getattr(parsed, "questions", None) or []
@@ -731,8 +771,8 @@ def _send_query_with_failover_impl(
                         transport,
                         upstream_health,
                     )
-                last_exception = Exception(
-                    f"mismatched response from {host}:{port} via {transport}"
+                _set_last_exception(
+                    Exception(f"mismatched response from {host}:{port} via {transport}")
                 )
                 return None, None, "all_failed"
 
@@ -788,8 +828,10 @@ def _send_query_with_failover_impl(
                                 transport,
                                 upstream_health,
                             )
-                        last_exception = Exception(
-                            f"mismatched response from {host}:{port} without EDNS"
+                        _set_last_exception(
+                            Exception(
+                                f"mismatched response from {host}:{port} without EDNS"
+                            )
                         )
                         return None, None, "all_failed"
                 except Exception as e2:  # pragma: no cover - defensive
@@ -803,7 +845,7 @@ def _send_query_with_failover_impl(
                         transport,
                         e2,
                     )
-                    last_exception = e2
+                    _set_last_exception(e2)
                     return None, None, "all_failed"
 
                 # After fallback, treat SERVFAIL as failure as usual.
@@ -818,8 +860,8 @@ def _send_query_with_failover_impl(
                             port,
                             transport,
                         )
-                    last_exception = Exception(
-                        f"FORMERR/SERVFAIL from {host}:{port} without EDNS"
+                    _set_last_exception(
+                        Exception(f"FORMERR/SERVFAIL from {host}:{port} without EDNS")
                     )
                     return None, None, "all_failed"
 
@@ -847,7 +889,7 @@ def _send_query_with_failover_impl(
                         transport,
                         upstream_health,
                     )
-                last_exception = Exception(f"SERVFAIL from {host}:{port}")
+                _set_last_exception(Exception(f"SERVFAIL from {host}:{port}"))
                 return None, None, "all_failed"
 
             # If UDP and TC=1, fallback to TCP for full response
@@ -876,7 +918,7 @@ def _send_query_with_failover_impl(
                             port,
                             e3,
                         )
-                        last_exception = e3
+                        _set_last_exception(e3)
                         return None, None, "all_failed"
 
                     _reset_upstream_skip_warning(upstream_key)
@@ -892,7 +934,7 @@ def _send_query_with_failover_impl(
                         transport,
                         e2,
                     )
-                    last_exception = e2
+                    _set_last_exception(e2)
                     return None, None, "all_failed"
         except Exception as e:  # pragma: no cover - defensive
             # If parsing fails, treat as a server failure
@@ -906,7 +948,7 @@ def _send_query_with_failover_impl(
                 transport,
                 e,
             )
-            last_exception = e
+            _set_last_exception(e)
             return None, None, "all_failed"
 
         # Success (NOERROR, NXDOMAIN, etc.)
@@ -950,6 +992,20 @@ def _send_query_with_failover_impl(
 
         return file_info
 
+    def _sanitize_error_message(msg: str) -> str:
+        """Brief: Remove sensitive URL details from exception message text.
+
+        Inputs:
+          - msg: Raw exception string.
+
+        Outputs:
+          - str: Message with URL userinfo/query redacted.
+        """
+        safe = str(msg or "")
+        safe = re.sub(r"(https?://)([^/@\s]+)@", r"\1***@", safe, flags=re.IGNORECASE)
+        safe = re.sub(r"(https?://[^\s\?]+)\?[^\s)]*", r"\1?...", safe)
+        return safe
+
     def _try_single(upstream: Dict) -> Tuple[Optional[bytes], Optional[Dict], str]:
         """Send query to a single upstream and classify the result.
 
@@ -961,8 +1017,6 @@ def _send_query_with_failover_impl(
             None when this upstream failed and reason is 'ok' on success or
             'all_failed' on per-upstream failure.
         """
-
-        nonlocal last_exception
 
         host, port, transport, upstream_key, tls_ca_file_hint, upstream_label = (
             _upstream_attempt_context(upstream)
@@ -1005,6 +1059,7 @@ def _send_query_with_failover_impl(
             tcp_error_cls,
             Exception,
         ) as e:  # pragma: no cover - defensive: network/transport failure
+            err_msg = _sanitize_error_message(str(e))
             file_info = _format_transport_error_file_info(e, tls_ca_file_hint)
             if should_warn:
                 if _is_connection_refused_error(e):
@@ -1017,7 +1072,7 @@ def _send_query_with_failover_impl(
                         port,
                         transport,
                         type(e).__name__,
-                        str(e),
+                        err_msg,
                         file_info,
                     )
                 else:
@@ -1030,7 +1085,7 @@ def _send_query_with_failover_impl(
                         port,
                         transport,
                         type(e).__name__,
-                        str(e),
+                        err_msg,
                         file_info,
                     )
             else:
@@ -1043,7 +1098,7 @@ def _send_query_with_failover_impl(
                         port,
                         transport,
                         type(e).__name__,
-                        str(e),
+                        err_msg,
                         file_info,
                         upstream_health,
                     )
@@ -1056,7 +1111,7 @@ def _send_query_with_failover_impl(
                             port,
                             transport,
                             type(e).__name__,
-                            str(e),
+                            err_msg,
                             file_info,
                             upstream_health,
                         )
@@ -1068,11 +1123,10 @@ def _send_query_with_failover_impl(
                             port,
                             transport,
                             type(e).__name__,
-                            str(e),
+                            err_msg,
                             file_info,
                         )
-
-            last_exception = e
+            _set_last_exception(e)
             return None, None, "all_failed"
 
     # Sequential path: same semantics as the original implementation when
@@ -1106,7 +1160,7 @@ def _send_query_with_failover_impl(
                 try:
                     resp, used, reason = completed.result()
                 except Exception as e:  # pragma: no cover - defensive
-                    last_exception = e
+                    _set_last_exception(e)
                     resp, used, reason = None, None, "all_failed"
 
                 if resp is not None:
@@ -1124,7 +1178,7 @@ def _send_query_with_failover_impl(
                     pending[fut] = next_index
                     next_index += 1
         except Exception as e:  # pragma: no cover - defensive: executor failure
-            last_exception = e
+            _set_last_exception(e)
         finally:
             # Shared executor: do not shut down per query.
             pass
@@ -1147,10 +1201,12 @@ def _send_query_with_failover_impl(
         all_failed_should_warn = False
 
     all_failed_logger = logger.warning if all_failed_should_warn else logger.debug
+    with last_exception_lock:
+        last_error_snapshot = last_exception
     all_failed_logger(
         "All upstreams failed. qtype=%s. Last error: %s (attempted: %s health: %s)",
         qtype,
-        last_exception,
+        _sanitize_error_message(str(last_error_snapshot)),
         attempted_summary,
         health_summary,
     )
