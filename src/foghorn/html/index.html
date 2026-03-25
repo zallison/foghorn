@@ -197,14 +197,14 @@
 					<thead>
 						<tr>
 							<th>Timestamp</th>
-							<th>qname</th>
-							<th>qtype</th>
-							<th>client_ip</th>
-							<th>rcode</th>
-							<th>status</th>
-							<th>source</th>
+							<th>QName</th>
+							<th>QType</th>
+							<th>Client IP</th>
+							<th>RCode</th>
+							<th>Status</th>
+							<th>Source</th>
 							<th>First Record</th>
-							<th>error</th>
+							<th>Error</th>
 						</tr>
 					</thead>
 					<tbody id="query-log-table-body"></tbody>
@@ -239,7 +239,6 @@
 
 			var root = document.documentElement;
 			var logoEl = document.getElementById('fh-logo');
-			var statsRawEl = document.getElementById('stats-raw');
 			var statsGroupsEl = document.getElementById('stats-groups');
 			var statsGroupsRightEl = document.getElementById('stats-groups-right');
 			var statsDetailsPane = document.getElementById('stats-details-pane');
@@ -261,7 +260,6 @@
 			var configViewContainer = document.getElementById('config-view-container');
 			var configEditContainer = document.getElementById('config-edit-container');
 			var msgEl = document.getElementById('config-messages');
-			var dockerShowHashEl = null;
 			if (msgEl) {
 				msgEl.style.display = 'none';
 			}
@@ -270,7 +268,6 @@
 				warningEl.style.display = 'none';
 			}
 
-			var btnDisk = document.getElementById('btn-config-disk');
 			var btnEdit = document.getElementById('btn-edit');
 			var btnCancel = document.getElementById('btn-cancel');
 			var btnSave = document.getElementById('btn-save');
@@ -300,7 +297,6 @@
 			};
 			var queryLogPage = 1;
 			var queryLogPageSize = 50;
-			var queryLogLastPayload = null;
 			var queryLogSummaryEl = document.getElementById('query-log-summary');
 			var queryLogErrorEl = document.getElementById('query-log-error');
 			var queryLogChipsEl = document.getElementById('query-log-filter-chips');
@@ -319,7 +315,6 @@
 			var btnQueryLogPrev = document.getElementById('btn-query-log-prev');
 			var btnQueryLogNext = document.getElementById('btn-query-log-next');
 			var queryLogPageSizeEl = document.getElementById('query-log-page-size');
-			var latestStatsPayload = null;
 			var UI_QUERY_TAB_PARAM = 'tab';
 			var QUERY_LOG_FILTER_KEYS = [
 				'qname',
@@ -728,27 +723,6 @@
 				return 'anomaly';
 			}
 
-			function appendQueryLogCell(row, value, className, severity, titleText) {
-				var td = document.createElement('td');
-				td.textContent = value != null ? String(value) : '';
-				if (Array.isArray(className)) {
-					className.forEach(function (name) {
-						if (name) {
-							td.classList.add(name);
-						}
-					});
-				} else if (className) {
-					td.classList.add(className);
-				}
-				if (severity) {
-					td.classList.add('fh-query-log-severity');
-					td.classList.add('fh-query-log-severity-' + severity);
-				}
-				if (titleText) {
-					td.title = String(titleText);
-				}
-				row.appendChild(td);
-			}
 
 			function formatDurationSeconds(value) {
 				if (value == null) {
@@ -780,6 +754,217 @@
 					return '';
 				}
 				return String(value).trim();
+			}
+
+			function clearQueryLogFilterState() {
+				QUERY_LOG_FILTER_KEYS.forEach(function (key) {
+					queryLogFilters[key] = '';
+				});
+			}
+
+			function isIpv4Address(value) {
+				var text = normalizeQueryLogFilterValue(value);
+				if (!text) {
+					return false;
+				}
+				var parts = text.split('.');
+				if (parts.length !== 4) {
+					return false;
+				}
+				for (var i = 0; i < parts.length; i++) {
+					var part = parts[i];
+					if (!/^\d+$/.test(part)) {
+						return false;
+					}
+					var n = Number(part);
+					if (!isFinite(n) || n < 0 || n > 255) {
+						return false;
+					}
+				}
+				return true;
+			}
+
+			function isProbablyIpv6Address(value) {
+				var text = normalizeQueryLogFilterValue(value);
+				if (!text) {
+					return false;
+				}
+				if (text.charAt(0) === '[' && text.charAt(text.length - 1) === ']') {
+					text = text.slice(1, -1);
+				}
+				var zoneIdx = text.indexOf('%');
+				if (zoneIdx !== -1) {
+					text = text.slice(0, zoneIdx);
+				}
+				if (!text || text.indexOf(':') === -1) {
+					return false;
+				}
+				if (/[^0-9a-f:.]/i.test(text)) {
+					return false;
+				}
+				if (text.indexOf(':::') !== -1) {
+					return false;
+				}
+				var doubleColonCount = text.split('::').length - 1;
+				if (doubleColonCount > 1) {
+					return false;
+				}
+				var groups = text.split(':');
+				if (groups.length > 8 && doubleColonCount === 0) {
+					return false;
+				}
+				if (groups.length > 9) {
+					return false;
+				}
+				var hasPayload = false;
+				for (var i = 0; i < groups.length; i++) {
+					var g = groups[i];
+					if (!g) {
+						continue;
+					}
+					hasPayload = true;
+					if (g.indexOf('.') !== -1) {
+						if (!isIpv4Address(g)) {
+							return false;
+						}
+						continue;
+					}
+					if (!/^[0-9a-f]{1,4}$/i.test(g)) {
+						return false;
+					}
+				}
+				return hasPayload;
+			}
+
+			function isIpAddress(value) {
+				return isIpv4Address(value) || isProbablyIpv6Address(value);
+			}
+
+			function shouldEnableQueryLogFilterControl(value, mode) {
+				var normalized = normalizeQueryLogFilterValue(value);
+				if (!normalized) {
+					return false;
+				}
+				var m = mode ? String(mode) : 'any';
+				if (m === 'ip_no_cidr') {
+					if (normalized.indexOf('/') !== -1) {
+						return false;
+					}
+					return isIpAddress(normalized);
+				}
+				return true;
+			}
+
+			function applyQueryLogFilterAction(filterKey, filterValue, mode) {
+				var key = filterKey != null ? String(filterKey) : '';
+				var value = normalizeQueryLogFilterValue(filterValue);
+				if (!key || QUERY_LOG_FILTER_KEYS.indexOf(key) === -1 || !value) {
+					return;
+				}
+				if (mode !== 'add') {
+					clearQueryLogFilterState();
+				}
+				queryLogFilters[key] = value;
+				queryLogPage = 1;
+				syncQueryLogInputsFromState();
+				applyTab('query-log');
+			}
+
+			function buildQueryLogFilterControl(displayText, filterKey, filterValue, options) {
+				var text = displayText != null ? String(displayText) : '';
+				var value = normalizeQueryLogFilterValue(filterValue);
+				var key = filterKey != null ? String(filterKey) : '';
+				options = options && typeof options === 'object' ? options : {};
+				var allowAdd = Boolean(options.allowAdd);
+				if (!text || !value || !key) {
+					return null;
+				}
+				var wrap = document.createElement('span');
+				wrap.className = 'fh-query-log-filter-control';
+
+				var textBtn = document.createElement('button');
+				textBtn.type = 'button';
+				textBtn.className = 'fh-query-log-filter-main';
+				textBtn.textContent = text;
+				textBtn.title = 'Replace filters with ' + key + '=' + value;
+				textBtn.addEventListener('click', function (ev) {
+					ev.preventDefault();
+					ev.stopPropagation();
+					applyQueryLogFilterAction(key, value, 'replace');
+				});
+				wrap.appendChild(textBtn);
+
+				if (allowAdd) {
+					var addBtn = document.createElement('button');
+					addBtn.type = 'button';
+					addBtn.className = 'fh-query-log-filter-add';
+					addBtn.textContent = '+';
+					addBtn.title = 'Add ' + key + '=' + value + ' to current filters';
+					addBtn.setAttribute('aria-label', addBtn.title);
+					addBtn.addEventListener('click', function (ev) {
+						ev.preventDefault();
+						ev.stopPropagation();
+						applyQueryLogFilterAction(key, value, 'add');
+					});
+					wrap.appendChild(addBtn);
+				}
+
+				return wrap;
+			}
+
+			function appendQueryLogCell(
+				row,
+				value,
+				className,
+				severity,
+				titleText,
+				filterSpec
+			) {
+				var td = document.createElement('td');
+				var text = value != null ? String(value) : '';
+				var filterKey = '';
+				var filterValue = '';
+				var filterMode = 'any';
+				if (filterSpec && typeof filterSpec === 'object') {
+					filterKey = filterSpec.key != null ? String(filterSpec.key) : '';
+					filterValue = filterSpec.value != null ? String(filterSpec.value) : text;
+					filterMode = filterSpec.mode != null ? String(filterSpec.mode) : 'any';
+				}
+				if (
+					filterKey &&
+					shouldEnableQueryLogFilterControl(filterValue, filterMode)
+				) {
+					var control = buildQueryLogFilterControl(
+						text,
+						filterKey,
+						filterValue,
+						{ allowAdd: true }
+					);
+					if (control) {
+						td.appendChild(control);
+					} else {
+						td.textContent = text;
+					}
+				} else {
+					td.textContent = text;
+				}
+				if (Array.isArray(className)) {
+					className.forEach(function (name) {
+						if (name) {
+							td.classList.add(name);
+						}
+					});
+				} else if (className) {
+					td.classList.add(className);
+				}
+				if (severity) {
+					td.classList.add('fh-query-log-severity');
+					td.classList.add('fh-query-log-severity-' + severity);
+				}
+				if (titleText) {
+					td.title = String(titleText);
+				}
+				row.appendChild(td);
 			}
 
 			function parsePositiveInt(value, fallback) {
@@ -1043,7 +1228,8 @@
 						qnameValue,
 						overrideHighlightClass ? [overrideHighlightClass] : '',
 						qnameSeverity,
-						''
+						'',
+						{ key: 'qname', value: qnameValue }
 					);
 					appendQueryLogCell(
 						row,
@@ -1052,15 +1238,20 @@
 							? ['fh-query-log-qtype', overrideHighlightClass]
 							: 'fh-query-log-qtype',
 						qtypeSeverity,
-						''
+						'',
+						{ key: 'qtype', value: qtypeValue }
 					);
-					appendQueryLogCell(row, clientIpValue, '', '', '');
+					appendQueryLogCell(row, clientIpValue, '', '', '', {
+						key: 'client_ip',
+						value: clientIpValue,
+					});
 					appendQueryLogCell(
 						row,
 						rcodeValue,
 						'fh-query-log-rcode',
 						classifyQueryLogRcode(rcodeValue),
-						''
+						'',
+						{ key: 'rcode', value: rcodeValue }
 					);
 					appendQueryLogCell(
 						row,
@@ -1069,7 +1260,8 @@
 							? ['fh-query-log-status', overrideHighlightClass]
 							: 'fh-query-log-status',
 						statusSeverity,
-						''
+						'',
+						{ key: 'status', value: statusValue }
 					);
 					appendQueryLogCell(
 						row,
@@ -1078,7 +1270,8 @@
 							? ['fh-query-log-source', overrideHighlightClass]
 							: 'fh-query-log-source',
 						sourceSeverity,
-						sourceTooltip
+						sourceTooltip,
+						{ key: 'source', value: sourceRaw || sourceDisplay }
 					);
 					appendQueryLogCell(
 						row,
@@ -1154,7 +1347,6 @@
 				var url = buildQueryLogApiUrl();
 				return fetchJson(url)
 					.then(function (payload) {
-						queryLogLastPayload = payload || null;
 						if (payload && payload.status === 'disabled') {
 							renderQueryLogRows([]);
 							if (queryLogSummaryEl) {
@@ -1178,7 +1370,6 @@
 						writeUiStateToUrl('query-log');
 					})
 					.catch(function (err) {
-						queryLogLastPayload = null;
 						renderQueryLogRows([]);
 						setQueryLogError(
 							'Failed to load query-log rows: ' +
@@ -1229,6 +1420,9 @@
 					return null;
 				}
 				var titleText = String(title);
+				if (titleText === 'Top Sub Domains') {
+					titleText = 'Top Subdomains';
+				}
 				var value = normalizeQueryLogFilterValue(key);
 				if (!value) {
 					return null;
@@ -1248,7 +1442,7 @@
 				) {
 					return { qname: value, source: 'upstream' };
 				}
-				if (titleText === 'Top Domains' || titleText === 'Top Sub Domains') {
+				if (titleText === 'Top Domains' || titleText === 'Top Subdomains') {
 					return { qname: value };
 				}
 				if (
@@ -1430,7 +1624,7 @@
 					// to alphabetical ordering for any remaining keys.
 					if (title === 'Meta') {
 						// Meta ordering: host (combined row) is injected above via
-						// mapping.hostname/version/ip. Within the Meta group we want
+						// mapping.hostname/version. Within the Meta group we want
 						// ip, created_at, uptime, domains, clients, with any other
 						// keys alphabetically in the middle.
 						var headOrder = ['ip', 'created_at'];
@@ -1440,7 +1634,7 @@
 							var bHead = headOrder.indexOf(b.key);
 							var aTail = tailOrder.indexOf(a.key);
 							var bTail = tailOrder.indexOf(b.key);
-							// Head keys (hostname, version, ip) always first in fixed order.
+							// Head keys (ip, created_at) always first in fixed order.
 							if (aHead !== -1 || bHead !== -1) {
 								if (aHead === -1) return 1;
 								if (bHead === -1) return -1;
@@ -1503,6 +1697,15 @@
 					if (Object.prototype.hasOwnProperty.call(STATS_TOOLTIPS, key)) {
 						dt.title = STATS_TOOLTIPS[key];
 					}
+					if (title === 'Query types') {
+						(function (qtypeValue) {
+							dt.classList.add('fh-stats-group-title-link');
+							dt.title = (dt.title ? dt.title + ' ' : '') + 'Open related query-log rows.';
+							dt.addEventListener('click', function () {
+								openQueryLogWithFilters({ qtype: qtypeValue });
+							});
+						})(String(key));
+					}
 					var dd = document.createElement('dd');
 					dd.textContent = formatNumber(entry.value);
 					if (dt.title) {
@@ -1520,13 +1723,16 @@
 					return null;
 				}
 				title = String(title);
+				if (title === 'Top Sub Domains') {
+					title = 'Top Subdomains';
+				}
 				var info = { title: title, table_id: null, group_key: null, help: '' };
 
 				// Fixed-name tables (direct stats snapshot fields).
 				var fixed = {
 					'Top Client': 'top_clients',
 					'Top Domains': 'top_domains',
-					'Top Sub Domains': 'top_subdomains',
+					'Top Subdomains': 'top_subdomains',
 					'Top Cache Hit Domains': 'cache_hit_domains',
 					'Top Cache Miss Domains': 'cache_miss_domains',
 					'Top Cache Hit Subdomains': 'cache_hit_subdomains',
@@ -1596,7 +1802,7 @@
 				// is clear that the entries are full subdomain qnames.
 				if (
 					typeof title === 'string' &&
-					(title.indexOf('Subdomain') !== -1 || title.indexOf('Sub Domains') !== -1)
+					title.indexOf('Subdomain') !== -1
 				) {
 					heading.title = 'Entries are subdomain names (full qnames, for example "www.example.com").';
 				}
@@ -1639,6 +1845,94 @@
 				group.appendChild(dl);
 				target.appendChild(group);
 			}
+			function sortEntriesByNumericThenKey(entries) {
+				entries = Array.isArray(entries) ? entries : [];
+				entries.sort(function (a, b) {
+					if (b.numeric === a.numeric) {
+						if (a.key < b.key) return -1;
+						if (a.key > b.key) return 1;
+						return 0;
+					}
+					return b.numeric - a.numeric;
+				});
+				return entries;
+			}
+
+			function buildCountEntries(countMap, options) {
+				options = options || {};
+				countMap = countMap && typeof countMap === 'object' ? countMap : {};
+				var exclude = options.excludeKeys || [];
+				var entries = Object.keys(countMap)
+					.filter(function (key) {
+						return exclude.indexOf(key) === -1;
+					})
+					.map(function (key) {
+						var num = Number(countMap[key]);
+						if (!isFinite(num)) {
+							num = 0;
+						}
+						return { key: key, value: countMap[key], numeric: num };
+					});
+				return sortEntriesByNumericThenKey(entries);
+			}
+
+			function sortUpstreamRowsByTotalThenId(rows) {
+				rows = Array.isArray(rows) ? rows : [];
+				rows.sort(function (a, b) {
+					if (b.total === a.total) {
+						if (a.id < b.id) return -1;
+						if (a.id > b.id) return 1;
+						return 0;
+					}
+					return b.total - a.total;
+				});
+				return rows;
+			}
+
+			function appendGroupedUpstreamRows(tbody, rows, labelFormatter) {
+				rows = Array.isArray(rows) ? rows : [];
+				rows.forEach(function (rowData) {
+					var mainRow = document.createElement('tr');
+					var mainUpstreamCell = document.createElement('td');
+					mainUpstreamCell.textContent = rowData.id;
+					var mainBlankCell = document.createElement('td');
+					mainBlankCell.textContent = '';
+					var mainTotalParts = getNumberParts(rowData.total);
+					var mainTotalIntCell = document.createElement('td');
+					mainTotalIntCell.className = 'fh-num-int';
+					mainTotalIntCell.textContent = mainTotalParts.intPart;
+					var mainTotalDecCell = document.createElement('td');
+					mainTotalDecCell.className = 'fh-num-dec';
+					mainTotalDecCell.textContent = mainTotalParts.decPart;
+					mainRow.appendChild(mainUpstreamCell);
+					mainRow.appendChild(mainBlankCell);
+					mainRow.appendChild(mainTotalIntCell);
+					mainRow.appendChild(mainTotalDecCell);
+					tbody.appendChild(mainRow);
+
+					(rowData.detailEntries || []).forEach(function (entry) {
+						var row = document.createElement('tr');
+						var blankCell = document.createElement('td');
+						blankCell.textContent = '';
+						var labelCell = document.createElement('td');
+						labelCell.textContent = labelFormatter
+							? labelFormatter(entry.key)
+							: entry.key;
+						var parts = getNumberParts(entry.value);
+						var countIntCell = document.createElement('td');
+						countIntCell.className = 'fh-num-int';
+						countIntCell.textContent = parts.intPart;
+						var countDecCell = document.createElement('td');
+						countDecCell.className = 'fh-num-dec';
+						countDecCell.textContent = parts.decPart;
+						row.appendChild(blankCell);
+						row.appendChild(labelCell);
+						row.appendChild(countIntCell);
+						row.appendChild(countDecCell);
+						tbody.appendChild(row);
+					});
+				});
+			}
 
 			function appendUpstreamsGroup(upstreams, upstreamRcodes) {
 				if (!upstreams || typeof upstreams !== 'object') {
@@ -1661,8 +1955,6 @@
 				var table = document.createElement('table');
 				table.className = 'fh-table fh-table-upstreams';
 				var tbody = document.createElement('tbody');
-
-				// Build sortable rows with pre-computed totals.
 				var upstreamRows = [];
 				upstreamRcodes = upstreamRcodes || {};
 
@@ -1679,6 +1971,7 @@
 					var rcodeKeys = Object.keys(rcMap).sort();
 
 					var total = 0;
+					var detailEntries = [];
 					if (rcodeKeys.length) {
 						rcodeKeys.forEach(function (key) {
 							var val = Number(rcMap[key]);
@@ -1687,8 +1980,13 @@
 							}
 							total += val;
 						});
+						if (rcodeKeys.length > 1) {
+							detailEntries = buildCountEntries(rcMap, {
+								excludeKeys: ['NOERROR'],
+							});
+						}
 					} else {
-						var outcomeKeys = Object.keys(outcomes).sort();
+						var outcomeKeys = Object.keys(outcomes);
 						if (!outcomeKeys.length) {
 							return;
 						}
@@ -1699,148 +1997,26 @@
 							}
 							total += val;
 						});
+						var onlySuccess =
+							outcomeKeys.length === 1 && outcomeKeys[0] === 'success';
+						if (!onlySuccess) {
+							detailEntries = buildCountEntries(outcomes);
+						}
 					}
 
 					upstreamRows.push({
 						id: upstreamId,
-						outcomes: outcomes,
-						rcodes: rcMap,
-						rcodeKeys: rcodeKeys,
 						total: total,
+						detailEntries: detailEntries,
 					});
 				});
-
-				// Sort by total count (descending), then by upstream id (ascending).
-				upstreamRows.sort(function (a, b) {
-					if (b.total === a.total) {
-						if (a.id < b.id) return -1;
-						if (a.id > b.id) return 1;
-						return 0;
+				appendGroupedUpstreamRows(
+					tbody,
+					sortUpstreamRowsByTotalThenId(upstreamRows),
+					function (key) {
+						return String(key).toLowerCase();
 					}
-					return b.total - a.total;
-				});
-
-				upstreamRows.forEach(function (rowData) {
-					var upstreamId = rowData.id;
-					var total = rowData.total;
-					var rcodes = rowData.rcodes || {};
-					var rcodeKeys = rowData.rcodeKeys || [];
-
-					// Main row: "upstream", "", "total"
-					var mainRow = document.createElement('tr');
-					var mainUpstreamCell = document.createElement('td');
-					mainUpstreamCell.textContent = upstreamId;
-					var mainBlankCell = document.createElement('td');
-					mainBlankCell.textContent = '';
-					var mainTotalParts = getNumberParts(total);
-					var mainTotalIntCell = document.createElement('td');
-					mainTotalIntCell.className = 'fh-num-int';
-					mainTotalIntCell.textContent = mainTotalParts.intPart;
-					var mainTotalDecCell = document.createElement('td');
-					mainTotalDecCell.className = 'fh-num-dec';
-					mainTotalDecCell.textContent = mainTotalParts.decPart;
-					mainRow.appendChild(mainUpstreamCell);
-					mainRow.appendChild(mainBlankCell);
-					mainRow.appendChild(mainTotalIntCell);
-					mainRow.appendChild(mainTotalDecCell);
-					tbody.appendChild(mainRow);
-
-					// Detail rows: "", rcode or outcome, count. Prefer rcodes
-					// when available, fall back to outcomes otherwise.
-					if (rcodeKeys.length > 1) {
-						// Sort rcodes (excluding NOERROR) by count descending, then name.
-						var rcodeEntries = rcodeKeys
-							.filter(function (key) {
-								return key !== 'NOERROR';
-							})
-							.map(function (key) {
-								var num = Number(rcodes[key]);
-								if (!isFinite(num)) {
-									num = 0;
-								}
-								return { key: key, value: rcodes[key], numeric: num };
-							});
-
-						rcodeEntries.sort(function (a, b) {
-							if (b.numeric === a.numeric) {
-								if (a.key < b.key) return -1;
-								if (a.key > b.key) return 1;
-								return 0;
-							}
-							return b.numeric - a.numeric;
-						});
-
-						rcodeEntries.forEach(function (entry) {
-							var key = entry.key;
-							var val = entry.value;
-							var row = document.createElement('tr');
-
-							var blankCell = document.createElement('td');
-							blankCell.textContent = '';
-							var labelCell = document.createElement('td');
-							labelCell.textContent = key.toLowerCase();
-							var parts = getNumberParts(val);
-							var countIntCell = document.createElement('td');
-							countIntCell.className = 'fh-num-int';
-							countIntCell.textContent = parts.intPart;
-							var countDecCell = document.createElement('td');
-							countDecCell.className = 'fh-num-dec';
-							countDecCell.textContent = parts.decPart;
-							row.appendChild(blankCell);
-							row.appendChild(labelCell);
-							row.appendChild(countIntCell);
-							row.appendChild(countDecCell);
-							tbody.appendChild(row);
-						});
-					} else if (!rcodeKeys.length) {
-						var outcomes = rowData.outcomes || {};
-						var outcomeKeys = Object.keys(outcomes);
-						var onlySuccess =
-							outcomeKeys.length === 1 && outcomeKeys[0] === 'success';
-						if (!onlySuccess) {
-							var outcomeEntries = outcomeKeys.map(function (key) {
-								var num = Number(outcomes[key]);
-								if (!isFinite(num)) {
-									num = 0;
-								}
-								return { key: key, value: outcomes[key], numeric: num };
-							});
-
-							outcomeEntries.sort(function (a, b) {
-								if (b.numeric === a.numeric) {
-									if (a.key < b.key) return -1;
-									if (a.key > b.key) return 1;
-									return 0;
-								}
-								return b.numeric - a.numeric;
-							});
-
-							outcomeEntries.forEach(function (entry) {
-								var key = entry.key;
-								var val = entry.value;
-								var row = document.createElement('tr');
-
-								var blankCell = document.createElement('td');
-								blankCell.textContent = '';
-								var outcomeCell = document.createElement('td');
-								outcomeCell.textContent = key;
-								var parts = getNumberParts(val);
-								var countIntCell = document.createElement('td');
-								countIntCell.className = 'fh-num-int';
-								countIntCell.textContent = parts.intPart;
-								var countDecCell = document.createElement('td');
-								countDecCell.className = 'fh-num-dec';
-								countDecCell.textContent = parts.decPart;
-
-								row.appendChild(blankCell);
-								row.appendChild(outcomeCell);
-								row.appendChild(countIntCell);
-								row.appendChild(countDecCell);
-								tbody.appendChild(row);
-							});
-						}
-					}
-				});
+				);
 
 				table.appendChild(tbody);
 				group.appendChild(table);
@@ -1889,9 +2065,8 @@
 					});
 					upstreamRows.push({
 						id: upstreamId,
-						qtypes: qmap,
-						qtypeKeys: qtypes,
 						total: total,
+						detailEntries: buildCountEntries(qmap),
 					});
 				});
 
@@ -1899,80 +2074,7 @@
 					return;
 				}
 
-				upstreamRows.sort(function (a, b) {
-					if (b.total === a.total) {
-						if (a.id < b.id) return -1;
-						if (a.id > b.id) return 1;
-						return 0;
-					}
-					return b.total - a.total;
-				});
-
-				upstreamRows.forEach(function (rowData) {
-					var upstreamId = rowData.id;
-					var total = rowData.total;
-					var qtypes = rowData.qtypes || {};
-					var qtypeKeys = rowData.qtypeKeys || [];
-
-					var mainRow = document.createElement('tr');
-					var mainUpstreamCell = document.createElement('td');
-					mainUpstreamCell.textContent = upstreamId;
-					var mainBlankCell = document.createElement('td');
-					mainBlankCell.textContent = '';
-					var mainTotalParts = getNumberParts(total);
-					var mainTotalIntCell = document.createElement('td');
-					mainTotalIntCell.className = 'fh-num-int';
-					mainTotalIntCell.textContent = mainTotalParts.intPart;
-					var mainTotalDecCell = document.createElement('td');
-					mainTotalDecCell.className = 'fh-num-dec';
-					mainTotalDecCell.textContent = mainTotalParts.decPart;
-					mainRow.appendChild(mainUpstreamCell);
-					mainRow.appendChild(mainBlankCell);
-					mainRow.appendChild(mainTotalIntCell);
-					mainRow.appendChild(mainTotalDecCell);
-					tbody.appendChild(mainRow);
-
-					var qtypeEntries = qtypeKeys.map(function (qt) {
-						var num = Number(qtypes[qt]);
-						if (!isFinite(num)) {
-							num = 0;
-						}
-						return { key: qt, value: qtypes[qt], numeric: num };
-					});
-
-					qtypeEntries.sort(function (a, b) {
-						if (b.numeric === a.numeric) {
-							if (a.key < b.key) return -1;
-							if (a.key > b.key) return 1;
-							return 0;
-						}
-						return b.numeric - a.numeric;
-					});
-
-					qtypeEntries.forEach(function (entry) {
-						var qt = entry.key;
-						var val = entry.value;
-						var row = document.createElement('tr');
-
-						var blankCell = document.createElement('td');
-						blankCell.textContent = '';
-						var labelCell = document.createElement('td');
-						labelCell.textContent = qt;
-						var parts = getNumberParts(val);
-						var countIntCell = document.createElement('td');
-						countIntCell.className = 'fh-num-int';
-						countIntCell.textContent = parts.intPart;
-						var countDecCell = document.createElement('td');
-						countDecCell.className = 'fh-num-dec';
-						countDecCell.textContent = parts.decPart;
-
-						row.appendChild(blankCell);
-						row.appendChild(labelCell);
-						row.appendChild(countIntCell);
-						row.appendChild(countDecCell);
-						tbody.appendChild(row);
-					});
-				});
+				appendGroupedUpstreamRows(tbody, sortUpstreamRowsByTotalThenId(upstreamRows));
 
 				table.appendChild(tbody);
 				group.appendChild(table);
@@ -2161,7 +2263,6 @@
 				[
 					'Upstream',
 					'Role',
-					'Endpoint',
 					'State',
 					'Failures',
 					'Run queries',
@@ -2190,14 +2291,6 @@
 					var host = item.host != null ? String(item.host) : '';
 					var port = item.port != null ? String(item.port) : '';
 					var transport = item.transport != null ? String(item.transport) : '';
-					var url = item.url != null ? String(item.url) : '';
-					var endpoint = url;
-					if (!endpoint && (host || port)) {
-						endpoint = host + (port ? ':' + port : '');
-					}
-					if (transport && endpoint && endpoint.indexOf('://') === -1) {
-						endpoint = transport + '://' + endpoint;
-					}
 					var runQueries = item.run_query_count;
 					if (runQueries == null) {
 						runQueries = item.query_count;
@@ -2250,8 +2343,6 @@
 					tdId.textContent = id;
 					var tdRole = document.createElement('td');
 					tdRole.textContent = role;
-					var tdEndpoint = document.createElement('td');
-					tdEndpoint.textContent = endpoint;
 					var tdState = document.createElement('td');
 					tdState.textContent = state;
 					var tdFail = document.createElement('td');
@@ -2270,7 +2361,6 @@
 					tdBackoff.textContent = backoffText;
 					tr.appendChild(tdId);
 					tr.appendChild(tdRole);
-					tr.appendChild(tdEndpoint);
 					tr.appendChild(tdState);
 					tr.appendChild(tdFail);
 					tr.appendChild(tdRunQueries);
@@ -2312,9 +2402,6 @@
 				clearStatsGroups();
 
 				if (!data || typeof data !== 'object') {
-					if (statsRawEl) {
-						statsRawEl.textContent = 'No statistics payload returned from /stats';
-					}
 					return;
 				}
 
@@ -2330,9 +2417,6 @@
 					p.textContent = 'Statistics are disabled for this server instance.';
 					disabledGroup.appendChild(p);
 					statsGroupsEl.appendChild(disabledGroup);
-					if (statsRawEl) {
-						statsRawEl.textContent = pretty(data);
-					}
 					return;
 				}
 
@@ -2454,7 +2538,7 @@
 
 				appendTopListGroup('Top Client', data.top_clients || []);
 				appendTopListGroup('Top Domains', data.top_domains || [], statsGroupsRightEl || statsGroupsEl);
-				appendTopListGroup('Top Sub Domains', data.top_subdomains || [], statsGroupsRightEl || statsGroupsEl);
+				appendTopListGroup('Top Subdomains', data.top_subdomains || [], statsGroupsRightEl || statsGroupsEl);
 				// Cache hit/miss lists live in the right-hand pane when available.
 				appendTopListGroup('Top Cache Hit Domains', data.cache_hit_domains || [], statsGroupsRightEl || statsGroupsEl);
 				appendTopListGroup('Top Cache Miss Domains', data.cache_miss_domains || [], statsGroupsRightEl || statsGroupsEl);
@@ -2473,9 +2557,6 @@
 					appendSystemGroup(data.system);
 				}
 
-				if (statsRawEl) {
-					statsRawEl.textContent = pretty(data);
-				}
 			}
 
 			function loadStats() {
@@ -2490,11 +2571,7 @@
 								// Upstream status is optional; ignore errors here.
 							});
 					})
-					.catch(function (err) {
-						if (statsRawEl) {
-							statsRawEl.textContent = 'Failed to load statistics: ' + err.message;
-						}
-					});
+					.catch(function () {});
 			}
 
 			function loadConfigDiagram() {
@@ -2724,6 +2801,305 @@
 					.replace(/>/g, '&gt;')
 					.replace(/"/g, '&quot;')
 					.replace(/'/g, '&#39;');
+			}
+
+			function parseNumericSortValue(value) {
+				if (value == null) {
+					return null;
+				}
+				var text = String(value).trim();
+				if (!text) {
+					return null;
+				}
+				var compact = text.replace(/,/g, '');
+				if (!/^[-+]?\d+(?:\.\d+)?$/.test(compact)) {
+					return null;
+				}
+				var n = Number(compact);
+				return isFinite(n) ? n : null;
+			}
+
+			function toComparableSortValue(raw) {
+				if (raw == null) {
+					return { rank: 2, value: '' };
+				}
+				if (typeof raw === 'number') {
+					if (!isFinite(raw)) {
+						return { rank: 2, value: '' };
+					}
+					return { rank: 0, value: raw };
+				}
+				if (typeof raw === 'boolean') {
+					return { rank: 0, value: raw ? 1 : 0 };
+				}
+				if (Array.isArray(raw)) {
+					raw = raw.join(' ');
+				}
+				var text = String(raw).trim();
+				if (!text) {
+					return { rank: 2, value: '' };
+				}
+				var numeric = parseNumericSortValue(text);
+				if (numeric != null) {
+					return { rank: 0, value: numeric };
+				}
+				var maybeTimestamp = Date.parse(text);
+				if (
+					!isNaN(maybeTimestamp) &&
+					text.length >= 10 &&
+					text.charAt(4) === '-' &&
+					text.charAt(7) === '-'
+				) {
+					return { rank: 0, value: maybeTimestamp };
+				}
+				return { rank: 1, value: text.toLowerCase(), raw: text };
+			}
+
+			function compareComparableSortValues(left, right) {
+				if (left.rank !== right.rank) {
+					return left.rank - right.rank;
+				}
+				if (left.rank === 0) {
+					if (left.value < right.value) {
+						return -1;
+					}
+					if (left.value > right.value) {
+						return 1;
+					}
+					return 0;
+				}
+				if (left.rank === 1) {
+					return String(left.value).localeCompare(String(right.value), undefined, {
+						numeric: true,
+						sensitivity: 'base',
+					});
+				}
+				return 0;
+			}
+
+			function sortRowsByColumn(rows, column, direction) {
+				rows = Array.isArray(rows) ? rows.slice() : [];
+				if (!column || !column.key) {
+					return rows;
+				}
+				var sortPath = column.sort_key ? String(column.sort_key) : String(column.key);
+				var dir = direction === 'desc' ? -1 : 1;
+				var decorated = rows.map(function (row, index) {
+					var raw = resolvePath(row, sortPath);
+					return {
+						row: row,
+						index: index,
+						comparable: toComparableSortValue(raw),
+					};
+				});
+				decorated.sort(function (a, b) {
+					var cmp = compareComparableSortValues(a.comparable, b.comparable);
+					if (cmp === 0) {
+						return a.index - b.index;
+					}
+					return cmp * dir;
+				});
+				return decorated.map(function (item) {
+					return item.row;
+				});
+			}
+
+			function getTableColumnByKey(columns, key) {
+				for (var i = 0; i < columns.length; i++) {
+					var col = columns[i];
+					if (col && col.key && String(col.key) === key) {
+						return col;
+					}
+				}
+				return null;
+			}
+
+			function getDefaultSortDirection(rows, column) {
+				if (!column || !column.key) {
+					return 'asc';
+				}
+				var explicitDirection = column.default_sort_dir
+					? String(column.default_sort_dir).toLowerCase()
+					: '';
+				if (explicitDirection === 'asc' || explicitDirection === 'desc') {
+					return explicitDirection;
+				}
+				var sortPath = column.sort_key ? String(column.sort_key) : String(column.key);
+				rows = Array.isArray(rows) ? rows : [];
+				for (var i = 0; i < rows.length; i++) {
+					var raw = resolvePath(rows[i], sortPath);
+					var comparable = toComparableSortValue(raw);
+					if (comparable.rank === 0) {
+						return 'desc';
+					}
+					if (comparable.rank === 1) {
+						return 'asc';
+					}
+				}
+				if (column.align === 'right') {
+					return 'desc';
+				}
+				return 'asc';
+			}
+
+			function renderSortableHeader(columns, sortState, onSort) {
+				var thead = document.createElement('thead');
+				var hrow = document.createElement('tr');
+				columns.forEach(function (col) {
+					var th = document.createElement('th');
+					var key = col && col.key ? String(col.key) : '';
+					var label = col && col.label ? col.label : key;
+					var suffix = '';
+					if (key && sortState && sortState.key === key) {
+						suffix = sortState.dir === 'desc' ? ' ▼' : ' ▲';
+					}
+					th.textContent = label + suffix;
+					if (String(label).indexOf('\n') !== -1) {
+						th.style.whiteSpace = 'pre-line';
+					}
+					if (col && col.align === 'right') {
+						th.style.textAlign = 'right';
+					}
+					if (key && typeof onSort === 'function') {
+						th.style.cursor = 'pointer';
+						th.addEventListener('click', function () {
+							onSort(key);
+						});
+					}
+					hrow.appendChild(th);
+				});
+				thead.appendChild(hrow);
+				return thead;
+			}
+
+			function formatTableCellValue(raw, key, rowData, col) {
+				var text = '';
+				var title = '';
+				if (key === 'last_seen') {
+					var iso = rowData && rowData._lastSeenRaw != null ? String(rowData._lastSeenRaw) : (raw != null ? String(raw) : '');
+					var fmt = formatTimestamp(iso || raw);
+					text = fmt != null ? String(fmt) : '';
+					title = iso || '';
+					return { text: text, title: title };
+				}
+				if (raw == null) {
+					return { text: '', title: '' };
+				}
+				if (Array.isArray(raw) && col && col.join) {
+					return { text: raw.join(String(col.join)), title: '' };
+				}
+				if (typeof raw === 'boolean') {
+					return { text: raw ? 'yes' : '', title: '' };
+				}
+				if (typeof raw === 'number') {
+					return { text: formatNumber(raw), title: '' };
+				}
+				return { text: String(raw), title: '' };
+			}
+
+			function formatTableCellSearchText(raw, key, rowData) {
+				if (key === 'last_seen') {
+					var iso = rowData && rowData._lastSeenRaw != null ? String(rowData._lastSeenRaw) : (raw != null ? String(raw) : '');
+					var fmt = formatTimestamp(iso || raw);
+					return fmt != null ? String(fmt) : '';
+				}
+				if (raw == null) {
+					return '';
+				}
+				if (typeof raw === 'boolean') {
+					return raw ? 'yes' : '';
+				}
+				if (typeof raw === 'number') {
+					return formatNumber(raw);
+				}
+				if (Array.isArray(raw)) {
+					return raw.join(', ');
+				}
+				return String(raw);
+			}
+
+			function renderTableBodyRows(columns, items, options) {
+				options = options || {};
+				items = Array.isArray(items) ? items : [];
+				var tbody = document.createElement('tbody');
+				items.forEach(function (rowData) {
+					if (!rowData || typeof rowData !== 'object') {
+						return;
+					}
+					var tr = document.createElement('tr');
+					if (options.setMetricsAttrs) {
+						if (typeof rowData.calls_total === 'number') {
+							tr.setAttribute('data-calls-total', String(rowData.calls_total));
+						}
+						if (typeof rowData.cache_hits === 'number') {
+							tr.setAttribute('data-cache-hits', String(rowData.cache_hits));
+						}
+						if (typeof rowData.status === 'string') {
+							tr.setAttribute('data-status', String(rowData.status).toLowerCase());
+						}
+					}
+					columns.forEach(function (col) {
+						var key = col && col.key ? col.key : '';
+						var raw = key ? resolvePath(rowData, key) : null;
+						var td = document.createElement('td');
+						if (col && col.align === 'right') {
+							td.style.textAlign = 'right';
+						}
+						if (col && col.nowrap) {
+							td.style.whiteSpace = 'nowrap';
+						}
+						if (options.sectionStyle === 'docker_group_by_txt' && col && col.key === 'name') {
+							td.classList.add('fh-cell-multiline');
+						}
+						var formatted = formatTableCellValue(raw, key, rowData, col);
+						if (col && col.html) {
+							td.innerHTML = formatted.text;
+						} else {
+							td.textContent = formatted.text;
+						}
+						if (formatted.title) {
+							td.title = formatted.title;
+						}
+						if (col && col.key === 'txt' && rowData && rowData._txtTooltip) {
+							td.title = String(rowData._txtTooltip);
+						}
+						var filterKey = col && col.query_log_filter_key
+							? String(col.query_log_filter_key)
+							: '';
+						var filterMode = col && col.query_log_filter_mode
+							? String(col.query_log_filter_mode)
+							: 'any';
+						if (
+							filterKey &&
+							shouldEnableQueryLogFilterControl(raw, filterMode) &&
+							!col.html
+						) {
+							td.textContent = '';
+							var control = buildQueryLogFilterControl(
+								formatted.text,
+								filterKey,
+								raw
+							);
+							if (control) {
+								td.appendChild(control);
+							} else {
+								td.textContent = formatted.text;
+							}
+						}
+						tr.appendChild(td);
+					});
+					tbody.appendChild(tr);
+				});
+				if (!items.length && options.emptyText) {
+					var trEmpty = document.createElement('tr');
+					var tdEmpty = document.createElement('td');
+					tdEmpty.colSpan = columns.length;
+					tdEmpty.className = 'fh-pane-help';
+					tdEmpty.textContent = String(options.emptyText);
+					trEmpty.appendChild(tdEmpty);
+					tbody.appendChild(trEmpty);
+				}
+				return tbody;
 			}
 
 			function renderKvSection(root, valueMap, section) {
@@ -3339,79 +3715,38 @@
 				var table = document.createElement('table');
 				table.className = 'fh-table fh-table-upstreams';
 				table.setAttribute('data-section-id', section && section.id ? String(section.id) : '');
-				var thead = document.createElement('thead');
-				var hrow = document.createElement('tr');
-				columns.forEach(function (col) {
-					var th = document.createElement('th');
-					th.textContent = col.label || String(col.key || '');
-					if (col.align === 'right') {
-						th.style.textAlign = 'right';
+				var sortState = { key: '', dir: 'asc' };
+
+				function renderTable() {
+					var displayRows = rows.slice();
+					if (sortState.key) {
+						var activeCol = getTableColumnByKey(columns, sortState.key);
+						displayRows = sortRowsByColumn(displayRows, activeCol, sortState.dir);
 					}
-					hrow.appendChild(th);
-				});
-				thead.appendChild(hrow);
-				table.appendChild(thead);
-				var tbody = document.createElement('tbody');
-				rows.forEach(function (rowData) {
-					if (!rowData || typeof rowData !== 'object') {
-						return;
-					}
-					var tr = document.createElement('tr');
-					if (rowData && typeof rowData.calls_total === 'number') {
-						tr.setAttribute('data-calls-total', String(rowData.calls_total));
-					}
-					if (rowData && typeof rowData.cache_hits === 'number') {
-						tr.setAttribute('data-cache-hits', String(rowData.cache_hits));
-					}
-					if (rowData && typeof rowData.status === 'string') {
-						tr.setAttribute('data-status', String(rowData.status).toLowerCase());
-					}
-					columns.forEach(function (col) {
-						var key = col.key;
-						var joiner = col.join || null;
-						var raw = key ? resolvePath(rowData, key) : null;
-						var td = document.createElement('td');
-						if (col.align === 'right') {
-							td.style.textAlign = 'right';
-						}
-						if (col.nowrap) {
-							td.style.whiteSpace = 'nowrap';
-						}
-						if (section && section.style === 'docker_group_by_txt' && col && col.key === 'name') {
-							td.classList.add('fh-cell-multiline');
-						}
-						var text = '';
-						if (key === 'last_seen') {
-							var iso = rowData && rowData._lastSeenRaw != null ? String(rowData._lastSeenRaw) : (raw != null ? String(raw) : '');
-							var fmt = formatTimestamp(iso || raw);
-							text = fmt != null ? String(fmt) : '';
-							if (iso) {
-								td.title = iso;
+					table.textContent = '';
+					table.appendChild(
+						renderSortableHeader(columns, sortState, function (key) {
+							if (sortState.key === key) {
+								sortState.dir = sortState.dir === 'asc' ? 'desc' : 'asc';
+							} else {
+								sortState.key = key;
+								sortState.dir = getDefaultSortDirection(
+									rows,
+									getTableColumnByKey(columns, key)
+								);
 							}
-						} else if (raw == null) {
-							text = '';
-						} else if (Array.isArray(raw) && joiner) {
-							text = raw.join(String(joiner));
-						} else if (typeof raw === 'boolean') {
-							text = raw ? 'yes' : '';
-						} else if (typeof raw === 'number') {
-							text = formatNumber(raw);
-						} else {
-							text = String(raw);
-						}
-						if (col.html) {
-							td.innerHTML = text;
-						} else {
-							td.textContent = text;
-						}
-						if (col.key === 'txt' && rowData && rowData._txtTooltip) {
-							td.title = String(rowData._txtTooltip);
-						}
-						tr.appendChild(td);
-					});
-					tbody.appendChild(tr);
-				});
-				table.appendChild(tbody);
+							renderTable();
+						})
+					);
+					table.appendChild(
+						renderTableBodyRows(columns, displayRows, {
+							sectionStyle: section && section.style,
+							setMetricsAttrs: true,
+						})
+					);
+				}
+
+				renderTable();
 				group.appendChild(table);
 				root.appendChild(group);
 			}
@@ -3455,42 +3790,10 @@
 				var table = document.createElement('table');
 				table.className = 'fh-table fh-table-upstreams';
 				group.appendChild(table);
-
-				function renderHeader() {
-					var thead = document.createElement('thead');
-					var hrow = document.createElement('tr');
-					columns.forEach(function (col) {
-						var th = document.createElement('th');
-						th.textContent = col.label || String(col.key || '');
-						if (col.align === 'right') {
-							th.style.textAlign = 'right';
-						}
-						hrow.appendChild(th);
-					});
-					thead.appendChild(hrow);
-					return thead;
-				}
-
-				function formatCellText(raw, key, rowData) {
-					if (key === 'last_seen') {
-						var iso = rowData && rowData._lastSeenRaw != null ? String(rowData._lastSeenRaw) : (raw != null ? String(raw) : '');
-						var fmt = formatTimestamp(iso || raw);
-						return fmt != null ? String(fmt) : '';
-					}
-					if (raw == null) {
-						return '';
-					}
-					if (typeof raw === 'boolean') {
-						return raw ? 'yes' : '';
-					}
-					if (typeof raw === 'number') {
-						return formatNumber(raw);
-					}
-					if (Array.isArray(raw)) {
-						return raw.join(', ');
-					}
-					return String(raw);
-				}
+				var sortState = {
+					key: '',
+					dir: 'asc',
+				};
 
 				function matchesSearch(rowData, queryLower) {
 					if (!queryLower) {
@@ -3502,7 +3805,7 @@
 							continue;
 						}
 						var raw = resolvePath(rowData, col.key);
-						var text = formatCellText(raw, col.key, rowData).toLowerCase();
+						var text = formatTableCellSearchText(raw, col.key, rowData).toLowerCase();
 						if (text.indexOf(queryLower) !== -1) {
 							return true;
 						}
@@ -3511,66 +3814,24 @@
 				}
 
 				function renderBody(items) {
-					var tbody = document.createElement('tbody');
-					items = Array.isArray(items) ? items : [];
-					items.forEach(function (rowData) {
-						if (!rowData || typeof rowData !== 'object') {
-							return;
-						}
-						var tr = document.createElement('tr');
-						columns.forEach(function (col) {
-							var key = col.key;
-							var joiner = col.join || null;
-							var raw = key ? resolvePath(rowData, key) : null;
-							var td = document.createElement('td');
-							if (col.align === 'right') {
-								td.style.textAlign = 'right';
-							}
-							if (col.nowrap) {
-								td.style.whiteSpace = 'nowrap';
-							}
-							var text = '';
-							if (key === 'last_seen') {
-								var iso = rowData && rowData._lastSeenRaw != null ? String(rowData._lastSeenRaw) : (raw != null ? String(raw) : '');
-								var fmt = formatTimestamp(iso || raw);
-								text = fmt != null ? String(fmt) : '';
-								if (iso) {
-									td.title = iso;
-								}
-							} else if (raw == null) {
-								text = '';
-							} else if (Array.isArray(raw) && joiner) {
-								text = raw.join(String(joiner));
-							} else if (typeof raw === 'boolean') {
-								text = raw ? 'yes' : '';
-							} else if (typeof raw === 'number') {
-								text = formatNumber(raw);
-							} else {
-								text = String(raw);
-							}
-							if (col.html) {
-								td.innerHTML = text;
-							} else {
-								td.textContent = text;
-							}
-							if (col.key === 'txt' && rowData && rowData._txtTooltip) {
-								td.title = String(rowData._txtTooltip);
-							}
-							tr.appendChild(td);
-						});
-						tbody.appendChild(tr);
+					var tbody = renderTableBodyRows(columns, items, {
+						emptyText: 'No matching rows.',
 					});
-					if (!items.length) {
-						var trEmpty = document.createElement('tr');
-						var tdEmpty = document.createElement('td');
-						tdEmpty.colSpan = columns.length;
-						tdEmpty.className = 'fh-pane-help';
-						tdEmpty.textContent = 'No matching rows.';
-						trEmpty.appendChild(tdEmpty);
-						tbody.appendChild(trEmpty);
-					}
 					table.textContent = '';
-					table.appendChild(renderHeader());
+					table.appendChild(
+						renderSortableHeader(columns, sortState, function (key) {
+							if (sortState.key === key) {
+								sortState.dir = sortState.dir === 'asc' ? 'desc' : 'asc';
+							} else {
+								sortState.key = key;
+								sortState.dir = getDefaultSortDirection(
+									rows,
+									getTableColumnByKey(columns, key)
+								);
+							}
+							applySearch();
+						})
+					);
 					table.appendChild(tbody);
 				}
 
@@ -3579,6 +3840,10 @@
 					var filtered = rows.filter(function (rowData) {
 						return matchesSearch(rowData, queryLower);
 					});
+					if (sortState.key) {
+						var activeCol = getTableColumnByKey(columns, sortState.key);
+						filtered = sortRowsByColumn(filtered, activeCol, sortState.dir);
+					}
 					renderBody(filtered);
 				}
 
@@ -3591,7 +3856,7 @@
 				});
 
 				root.appendChild(group);
-				renderBody(rows);
+				applySearch();
 			}
 
 			function _getTableSectionUrl(desc, pluginName, sectionId) {
@@ -3648,6 +3913,7 @@
 					// server-side defaults (for stats tables this is count/desc).
 					sortDir: '',
 					search: '',
+					lastItems: [],
 					filters: {
 						hide_zero_calls: true,
 						hide_zero_hits: true,
@@ -3784,6 +4050,9 @@
 							suffix = state.sortDir === 'desc' ? ' ▼' : ' ▲';
 						}
 						th.textContent = label + suffix;
+						if (String(label).indexOf('\n') !== -1) {
+							th.style.whiteSpace = 'pre-line';
+						}
 						th.style.cursor = key ? 'pointer' : '';
 						if (col.align === 'right') {
 							th.style.textAlign = 'right';
@@ -3796,7 +4065,10 @@
 								state.sortDir = state.sortDir === 'asc' ? 'desc' : 'asc';
 							} else {
 								state.sortKey = key;
-								state.sortDir = 'asc';
+								state.sortDir = getDefaultSortDirection(
+									state.lastItems,
+									getTableColumnByKey(columns, key)
+								);
 							}
 							state.page = 1;
 							loadPage();
@@ -3921,10 +4193,11 @@
 							state.pageSize = payload && payload.page_size ? payload.page_size : state.pageSize;
 							state.sortKey = payload && payload.sort_key ? payload.sort_key : state.sortKey;
 							state.sortDir = payload && payload.sort_dir ? payload.sort_dir : state.sortDir;
+							state.lastItems = payload && Array.isArray(payload.items) ? payload.items : [];
 
 							table.textContent = '';
 							table.appendChild(renderHeader());
-							table.appendChild(renderBody(payload && payload.items ? payload.items : []));
+							table.appendChild(renderBody(state.lastItems));
 							updatePager(payload);
 						})
 						.catch(function (err) {
@@ -3999,49 +4272,117 @@
 				}
 				return endpoint.indexOf('/rate_limit') !== -1;
 			}
+			function formatRateLimitRps(value) {
+				var n = Number(value);
+				if (!isFinite(n) || n < 0.01) {
+					return '-';
+				}
+				return n.toFixed(1);
+			}
 
 			function buildRateLimitProfileRows(payload) {
 				var rows = [];
 				var databases = payload && Array.isArray(payload.databases) ? payload.databases : [];
+				function firstFiniteNumber(values) {
+					if (!Array.isArray(values)) {
+						return NaN;
+					}
+					for (var i = 0; i < values.length; i += 1) {
+						var n = Number(values[i]);
+						if (isFinite(n)) {
+							return n;
+						}
+					}
+					return NaN;
+				}
 
 				databases.forEach(function (db) {
 					if (!db || typeof db !== 'object') {
 						return;
 					}
 					var dbPath = db.db_path != null ? String(db.db_path) : '';
+					var dbLookback = Number(db.lookback_seconds);
+					var lookbackValue = isFinite(dbLookback) && dbLookback > 0 ? dbLookback : '';
 					var profiles = Array.isArray(db.profiles) ? db.profiles : [];
 					profiles.forEach(function (item) {
 						if (!item || typeof item !== 'object') {
 							return;
 						}
-						var avg = Number(item.avg_rps);
-						var max = Number(item.max_rps);
+						var rpsLimit = firstFiniteNumber([
+							item.rps_limit,
+							item.current_limit_rps,
+							item.current_limit,
+						]);
+						var avgOverall = firstFiniteNumber([
+							item.avg_rps_overall,
+							item.avg_rps_total,
+							item.avg_rps,
+						]);
+						var maxOverall = firstFiniteNumber([
+							item.max_rps_overall,
+							item.max_rps_total,
+							item.max_rps,
+						]);
+						var avgInterval = firstFiniteNumber([
+							item.avg_rps_interval,
+							item.window_avg_rps,
+						]);
+						var maxInterval = firstFiniteNumber([
+							item.max_rps_interval,
+							item.window_max_rps,
+						]);
 						var samples = Number(item.samples);
 						var lastRaw = item.last_update;
+						var lastUpdateTs = null;
+						if (lastRaw != null) {
+							var parsedLastUpdateTs = Number(lastRaw);
+							if (isFinite(parsedLastUpdateTs)) {
+								lastUpdateTs = parsedLastUpdateTs;
+							}
+						}
 						var lastText = '';
 						if (lastRaw != null) {
 							lastText = formatTimestamp(lastRaw) || String(lastRaw);
 						}
+						var rpsLimitText = '';
+						var rpsLimitRaw = -1;
+						if (isFinite(rpsLimit)) {
+							rpsLimitText = formatRateLimitRps(rpsLimit);
+							rpsLimitRaw = rpsLimit;
+						} else {
+							rpsLimitText = '-';
+						}
 						rows.push({
 							db_path: dbPath,
 							key: item.key != null ? String(item.key) : '',
-							avg_rps: isFinite(avg) ? avg : 0,
-							max_rps: isFinite(max) ? max : 0,
+							rps_limit: rpsLimitText,
+							rps_limit_raw: rpsLimitRaw,
+							avg_rps_overall: formatRateLimitRps(avgOverall),
+							avg_rps_overall_raw: isFinite(avgOverall) ? avgOverall : 0,
+							max_rps_overall: formatRateLimitRps(maxOverall),
+							max_rps_overall_raw: isFinite(maxOverall) ? maxOverall : 0,
+							avg_rps_interval: formatRateLimitRps(avgInterval),
+							avg_rps_interval_raw: isFinite(avgInterval) ? avgInterval : 0,
+							max_rps_interval: formatRateLimitRps(maxInterval),
+							max_rps_interval_raw: isFinite(maxInterval) ? maxInterval : 0,
+							lookback_seconds: lookbackValue,
+							lookback_seconds_raw: isFinite(dbLookback) ? dbLookback : 0,
 							samples: isFinite(samples) ? samples : 0,
 							last_update: lastText,
+							last_update_ts: lastUpdateTs,
 						});
 					});
 				});
 
 				rows.sort(function (a, b) {
-					if (b.avg_rps === a.avg_rps) {
+					if (b.avg_rps_overall_raw === a.avg_rps_overall_raw) {
 						if (a.key < b.key) return -1;
 						if (a.key > b.key) return 1;
 						if (a.db_path < b.db_path) return -1;
 						if (a.db_path > b.db_path) return 1;
 						return 0;
 					}
-					return b.avg_rps - a.avg_rps;
+					return b.avg_rps_overall_raw - a.avg_rps_overall_raw;
 				});
 
 				return rows;
@@ -4057,7 +4398,7 @@
 				var sections = Array.isArray(layout.sections) ? layout.sections : [];
 				var configSection = null;
 				sections.forEach(function (section) {
-					if (configSection || !section || typeof section !== 'object') {
+					if (!section || typeof section !== 'object') {
 						return;
 					}
 					if (section.type === 'table' && String(section.id || '') === 'config') {
@@ -4080,7 +4421,6 @@
 				}
 				configSection.className = 'fh-rate-limit-config';
 
-
 				var profilesRoot = document.createElement('div');
 				body.appendChild(profilesRoot);
 				var profilesSection = {
@@ -4089,33 +4429,102 @@
 					className: 'fh-rate-limit-profiles',
 					columns: [
 						{ key: 'db_path', label: 'Database' },
-						{ key: 'key', label: 'Key' },
-						{ key: 'avg_rps', label: 'Avg RPS', align: 'right', nowrap: true },
-						{ key: 'max_rps', label: 'Max RPS', align: 'right', nowrap: true },
-						{ key: 'samples', label: 'Samples', align: 'right', nowrap: true },
-						{ key: 'last_update', label: 'Last update', nowrap: true },
+						{
+							key: 'key',
+							label: 'Key',
+							query_log_filter_key: 'client_ip',
+							query_log_filter_mode: 'ip_no_cidr',
+						},
+						{
+							key: 'rps_limit',
+							sort_key: 'rps_limit_raw',
+							label: 'RPS Limit',
+							align: 'right',
+							default_sort_dir: 'desc',
+							nowrap: true,
+						},
+						{
+							key: 'avg_rps_overall',
+							label: 'Avg RPS\n(overall)',
+							align: 'right',
+							default_sort_dir: 'desc',
+							nowrap: true,
+						},
+						{
+							key: 'max_rps_overall',
+							label: 'Max RPS\n(overall)',
+							align: 'right',
+							default_sort_dir: 'desc',
+							nowrap: true,
+						},
+						{
+							key: 'avg_rps_interval',
+							label: 'Avg RPS\n(interval)',
+							align: 'right',
+							default_sort_dir: 'desc',
+							nowrap: true,
+						},
+						{
+							key: 'max_rps_interval',
+							label: 'Max RPS\n(interval)',
+							align: 'right',
+							default_sort_dir: 'desc',
+							nowrap: true,
+						},
+						{
+							key: 'samples',
+							label: 'Samples',
+							align: 'right',
+							default_sort_dir: 'desc',
+							nowrap: true,
+						},
+						{ key: 'last_update', sort_key: 'last_update_ts', label: 'Last update', nowrap: true },
 					],
 				};
-
-				fetchJson('/api/v1/ratelimit')
-					.then(function (payload) {
-						var rows = buildRateLimitProfileRows(payload);
-						renderTableSectionSearchable(profilesRoot, rows, profilesSection);
-					})
-					.catch(function (err) {
-						profilesRoot.textContent = '';
-						var group = document.createElement('section');
-						group.className = 'fh-stats-group fh-rate-limit-profiles';
-						var heading = document.createElement('h3');
-						heading.className = 'fh-stats-group-title';
-						heading.textContent = 'Profiles';
-						var pre = document.createElement('pre');
-						pre.className = 'fh-pre fh-pre-compact';
-						pre.textContent = 'Failed to load profiles: ' + err.message;
-						group.appendChild(heading);
-						group.appendChild(pre);
-						profilesRoot.appendChild(group);
+				function renderRateLimitProfiles(payload) {
+					var rows = buildRateLimitProfileRows(payload);
+					renderTableSectionSearchable(profilesRoot, rows, profilesSection);
+				}
+				var snapshotProfiles = Array.isArray(snapshot.profiles) ? snapshot.profiles : [];
+				if (snapshotProfiles.length > 0) {
+					var settingsObj = snapshot && typeof snapshot.settings === 'object'
+						? snapshot.settings
+						: {};
+					var snapshotDbPath = settingsObj && settingsObj.db_path != null
+						? String(settingsObj.db_path)
+						: '';
+					var snapshotWindow = Number(settingsObj && settingsObj.stats_window_seconds);
+					var snapshotInterval = Number(settingsObj && settingsObj.stats_log_interval_seconds);
+					var snapshotLookback = isFinite(snapshotWindow) && snapshotWindow > 0
+						? snapshotWindow
+						: (isFinite(snapshotInterval) && snapshotInterval > 0 ? snapshotInterval : 0);
+					renderRateLimitProfiles({
+						databases: [{
+							db_path: snapshotDbPath,
+							lookback_seconds: snapshotLookback,
+							profiles: snapshotProfiles,
+						}],
 					});
+				} else {
+					fetchJson('/api/v1/ratelimit')
+						.then(function (payload) {
+							renderRateLimitProfiles(payload);
+						})
+						.catch(function (err) {
+							profilesRoot.textContent = '';
+							var group = document.createElement('section');
+							group.className = 'fh-stats-group fh-rate-limit-profiles';
+							var heading = document.createElement('h3');
+							heading.className = 'fh-stats-group-title';
+							heading.textContent = 'Profiles';
+							var pre = document.createElement('pre');
+							pre.className = 'fh-pre fh-pre-compact';
+							pre.textContent = 'Failed to load profiles: ' + err.message;
+							group.appendChild(heading);
+							group.appendChild(pre);
+							profilesRoot.appendChild(group);
+						});
+				}
 
 				var configRoot = document.createElement('div');
 				body.appendChild(configRoot);

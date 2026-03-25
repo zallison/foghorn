@@ -488,25 +488,6 @@ class SQLite3Cache(CachePlugin):
         layout: dict[str, object] = {
             "sections": [
                 {
-                    "id": "summary",
-                    "title": "Summary",
-                    "type": "kv",
-                    "path": "summary",
-                    "align": "right",
-                    "rows": [
-                        {"key": "db_path", "label": "Database path"},
-                        {"key": "namespace", "label": "Namespace"},
-                        {"key": "journal_mode", "label": "Journal mode"},
-                        {"key": "total_entries", "label": "Total entries"},
-                        {"key": "live_entries", "label": "Live entries"},
-                        {"key": "expired_entries", "label": "Expired entries"},
-                        {"key": "db_size_bytes", "label": "DB size (bytes)"},
-                        {"key": "calls_total", "label": "Calls"},
-                        {"key": "cache_hits", "label": "Hits"},
-                        {"key": "cache_misses", "label": "Misses"},
-                    ],
-                },
-                {
                     "id": "caches",
                     "title": "DNS and plugin target caches",
                     "type": "table",
@@ -548,6 +529,25 @@ class SQLite3Cache(CachePlugin):
                         {"key": "cache_hits", "label": "Hits", "align": "right"},
                         {"key": "cache_misses", "label": "Misses", "align": "right"},
                         {"key": "hit_pct", "label": "Hit %", "align": "right"},
+                    ],
+                },
+                {
+                    "id": "summary",
+                    "title": "Summary",
+                    "type": "kv",
+                    "path": "summary",
+                    "align": "right",
+                    "rows": [
+                        {"key": "db_path", "label": "Database path"},
+                        {"key": "namespace", "label": "Namespace"},
+                        {"key": "journal_mode", "label": "Journal mode"},
+                        {"key": "total_entries", "label": "Total entries"},
+                        {"key": "live_entries", "label": "Live entries"},
+                        {"key": "expired_entries", "label": "Expired entries"},
+                        {"key": "db_size_bytes", "label": "DB size (bytes)"},
+                        {"key": "calls_total", "label": "Calls"},
+                        {"key": "cache_hits", "label": "Hits"},
+                        {"key": "cache_misses", "label": "Misses"},
                     ],
                 },
             ]
