@@ -965,6 +965,7 @@ def test_sigusr2_error_paths_more(monkeypatch, caplog):
 
     monkeypatch.setattr(socketserver, "ThreadingUDPServer", DummyUDPServer)
     monkeypatch.setattr(time, "sleep", _sleep_once)
+    monkeypatch.setattr(DummyPlugin, "post_setup", lambda self: None, raising=False)
     monkeypatch.setattr(main_mod, "StatsCollector", lambda **kw: ErrorCollector())
     monkeypatch.setattr(main_mod, "load_plugins", fake_load_plugins)
     monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)

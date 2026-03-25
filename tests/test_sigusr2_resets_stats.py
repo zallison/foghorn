@@ -53,6 +53,9 @@ def test_sigusr2_resets_stats_when_configured(monkeypatch, caplog):
         def handle_sigusr2(self):
             self.called = True
 
+        def post_setup(self) -> None:
+            return None
+
     class FakeCollector:
         def __init__(self, *a, **kw):
             self.reset_called = False
