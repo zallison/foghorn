@@ -3403,6 +3403,14 @@ def test_collect_rate_limit_stats_handles_empty_and_populated_dbs(
     assert populated_summary["total_profiles"] == 2
     assert populated_summary["max_avg_rps"] >= 0.0
     assert populated_summary["max_max_rps"] >= 0.0
+    assert "max_burst_threshold_rps" in populated_summary
+    assert all(
+        isinstance(profile, dict)
+        and "current_rps" in profile
+        and "burst_threshold_rps" in profile
+        and "enforcement_active" in profile
+        for profile in populated_summary["profiles"]
+    )
 
 
 def test_restart_endpoint_zero_delay_calls_kill(monkeypatch) -> None:
@@ -3508,8 +3516,12 @@ def test_rate_limit_endpoint_wraps_collect_rate_limit_stats(monkeypatch) -> None
 
     called: dict[str, object] = {}
 
-    def fake_collect(config: dict | None) -> dict:  # noqa: ANN001
+    def fake_collect(
+        config: dict | None,
+        plugins: list[object] | None = None,
+    ) -> dict:  # noqa: ANN001
         called["config"] = config
+        called["plugins"] = plugins
         return {"databases": []}
 
     monkeypatch.setattr(web_core, "_collect_rate_limit_stats", fake_collect)
@@ -3536,6 +3548,8 @@ def test_rate_limit_endpoint_wraps_collect_rate_limit_stats(monkeypatch) -> None
     assert isinstance(cfg_seen, dict)
     assert cfg_seen.get("webserver", {}).get("enabled") is True
     assert cfg_seen.get("server", {}).get("http", {}).get("enabled") is True
+    plugins_seen = called.get("plugins")
+    assert isinstance(plugins_seen, list)
 
 
 def test_upstream_status_endpoint_returns_configured_entries(
