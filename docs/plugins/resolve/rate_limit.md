@@ -78,8 +78,9 @@ plugins:
       # Enforcement thresholds
       burst_factor: 3.0              # allow up to 3x learned average
       burst_windows: 6               # consecutive burst windows before disabling
+      burst_reset_windows: 20        # consecutive below-threshold windows before reset
       min_enforce_rps: 50.0          # do not enforce on low-traffic keys
-      global_max_rps: 5000.0         # hard ceiling per key (0 => disabled)
+      max_enforce_rps: 5000.0         # hard ceiling per key (0 => disabled)
 
       # Persistence
       db_path: ./config/var/dbs/rate_limit.db
@@ -123,13 +124,16 @@ plugins:
   - Number of consecutive windows where the current RPS exceeds
     `max(avg_rps * burst_factor, min_enforce_rps)` before the burst factor is
     disabled. `0` keeps the existing unlimited burst behavior.
+- `burst_reset_windows: int`
+  - Number of consecutive completed windows at or below the burst threshold
+    required before burst state resets back to zero (default `20`).
 - `bootstrap_rps: float`
   - Optional baseline RPS used to seed a profile when no historical data exists.
     When set, enforcement can occur immediately instead of waiting for warmup.
 - `min_enforce_rps: float`
   - Minimum baseline RPS required before enforcement is considered; protects
     low-traffic keys from being throttled by a few extra queries.
-- `global_max_rps: float`
+- `max_enforce_rps: float`
   - Hard upper bound on allowed RPS per key. `0` disables this cap.
 - `db_path: str`
   - sqlite3 file path used to persist learned profiles across restarts.
@@ -165,13 +169,15 @@ plugins:
 - Once a key has at least `warmup_windows` completed windows and a baseline
   above `min_enforce_rps`, new windows are evaluated against:
   - `burst_factor * baseline`, and
-  - `global_max_rps` (if non-zero).
+  - `max_enforce_rps` (if non-zero).
 - When `warmup_max_rps` is set, the plugin enforces that cap even during warmup
   or before any profile exists.
 - When `bootstrap_rps` is set, the plugin seeds a baseline to reduce the
   first-window blind spot.
 - When `burst_windows > 0`, the burst factor is disabled after the configured
   number of consecutive burst windows.
+- Burst state resets only after `burst_reset_windows` consecutive completed
+  windows at or below threshold.
 - When the current window's RPS exceeds allowed thresholds, the plugin returns a
   deny decision according to `deny_response`; otherwise it returns `None` and
   allows normal processing.

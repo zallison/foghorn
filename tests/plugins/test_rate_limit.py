@@ -115,6 +115,46 @@ def test_enforces_after_learning_when_rate_spikes(tmp_path, monkeypatch):
         assert denied < total
 
 
+def test_hard_cap_enforces_when_avg_below_min_enforce_rps(tmp_path, monkeypatch):
+    """Brief: max_enforce_rps still enforces below default min_enforce_rps.
+
+    Inputs:
+      - tmp_path: temporary directory for sqlite DB.
+      - monkeypatch: pytest monkeypatch fixture to keep requests in one window.
+
+    Outputs:
+      - None: Asserts hard-cap denials occur when current RPS exceeds cap.
+    """
+
+    db = tmp_path / "rl-hard-cap.db"
+    plugin = RateLimit(
+        db_path=str(db),
+        window_seconds=10,
+        warmup_windows=0,
+        burst_factor=4.0,
+        max_enforce_rps=10.0,
+        bootstrap_rps=10.0,
+        deny_response="nxdomain",
+    )
+    plugin.setup()
+    ctx = PluginContext(client_ip="1.2.3.4", listener="tcp")
+
+    with closing(plugin._conn):
+        _set_time(monkeypatch, 0.0)
+        total = 120
+        denied = 0
+        for _ in range(total):
+            decision = plugin.pre_resolve("example.com", QTYPE.A, b"", ctx)
+            if decision is not None:
+                assert decision.action == "deny"
+                denied += 1
+
+        # avg_rps/bootstrap is 10 while min_enforce_rps defaults to 50; the
+        # configured hard cap should still deny once current_rps exceeds 10.
+        assert denied > 0
+        assert denied < total
+
+
 def test_per_domain_mode_uses_base_domain_key(tmp_path, monkeypatch):
     """Brief: mode='per_domain' keys profiles by base domain only.
 
@@ -286,7 +326,8 @@ def test_rate_limit_config_applies_defaults_for_new_fields():
     assert cfg.bucket_network_prefix_v4 == 24
     assert cfg.bucket_network_prefix_v6 == 56
     assert cfg.warmup_max_rps == 0.0
-    assert cfg.bootstrap_rps == 0.0
+    assert cfg.burst_reset_windows == 20
+    assert cfg.bootstrap_rps == 5000.0
     assert cfg.stats_window_seconds == 0
     assert cfg.psl_strict is False
 
@@ -681,6 +722,47 @@ def test_asymmetric_alpha_allows_slower_ramp_down(tmp_path, monkeypatch):
     assert samples == 3
     #  new_avg = (1 - 0.1) * 15 + 0.1 * 0 = 13.5
     assert avg_rps == 13.5
+
+
+def test_burst_reset_requires_configured_below_threshold_windows(tmp_path):
+    """Brief: burst_reset_windows controls burst-state reset cadence.
+
+    Inputs:
+      - tmp_path: pytest temporary path for sqlite DB.
+
+    Outputs:
+      - None: asserts burst state only resets after burst_reset_windows
+        consecutive below-threshold completed windows.
+    """
+
+    db = tmp_path / "rl-burst-reset.db"
+    plugin = RateLimit(
+        db_path=str(db),
+        window_seconds=10,
+        warmup_windows=0,
+        min_enforce_rps=0.0,
+        burst_factor=2.0,
+        burst_windows=3,
+        burst_reset_windows=2,
+        max_enforce_rps=0.0,
+    )
+    plugin.setup()
+
+    key = "client-1"
+    plugin._seed_profile(key, rps=10.0, now_ts=1000, samples=20)
+
+    # Two burst windows raise burst count to 2.
+    plugin._update_burst_counter(key, rps=30.0)
+    plugin._update_burst_counter(key, rps=30.0)
+    assert plugin._get_burst_count(key) == 2
+
+    # First low window should not reset yet.
+    plugin._update_burst_counter(key, rps=10.0)
+    assert plugin._get_burst_count(key) == 2
+
+    # Second consecutive low window reaches burst_reset_windows and resets.
+    plugin._update_burst_counter(key, rps=10.0)
+    assert plugin._get_burst_count(key) == 0
 
 
 def test_malformed_rate_profiles_rows_are_ignored(tmp_path, monkeypatch):
