@@ -18,6 +18,10 @@ All notable changes to this project will be documented in this file.
 - Improved RateLimit enforcement and observability: bootstrap profiles now enforce immediately when configured, per-key hard caps apply even below `min_enforce_rps`, burst reset timing is configurable via `burst_reset_windows`, and admin snapshots include effective per-bucket limits plus interval/overall RPS views.
 - Updated built-in RateLimit profiles (`slow`/`medium`/`fast`/`localhost`/`home`/`lan`/`smb`/`enterprise`) and profile resolution paths so profile-backed settings are consistently available in plugin loading and admin/stat helpers.
 - Improved admin usability with richer query-log drilldowns/filter controls, enhanced rate-limit profile rendering, and plugin/cache section ordering updates; upstream status payloads now redact sensitive config keys and truncate oversized error strings.
+- Reworked RateLimit bucket enforcement and profile tuning with `limit_recalc_windows`, per-window active-key tracking, and explicit UDP network prefix bucketing (`bucket_network_prefix_v4` / `bucket_network_prefix_v6`) replacing legacy UDP keying behavior.
+- Expanded admin/API RateLimit observability to include current per-bucket RPS snapshots, burst thresholds, and enforcement-active state in both runtime stats payloads and the web UI tables.
+- Extended PTR-domain targeting for resolve plugins so `EtcHosts` and `ZoneRecords` can evaluate reverse PTR owners against configured domain targets before applying plugin decisions.
+- Added `PluginDecision.suppress_query_log` support in server decision handling and removed the legacy minimal DoH server module/tests that are no longer used by the current server stack.
 
 ### Breaking Changes
 
