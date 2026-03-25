@@ -46,6 +46,7 @@ plugins:
       alpha_down: 0.1
       burst_factor: 5.0
       burst_windows: 6
+      limit_recalc_windows: 10
       min_enforce_rps: 4.0
       global_max_rps: 50.0
       db_path: ./config/var/dbs/rate_limit.db # :memory:
@@ -55,8 +56,7 @@ plugins:
       profile_ttl_seconds: 604800  # 7 days
       prune_interval_seconds: 60
 
-      # Spoofing-robust UDP keying
-      udp_keying: cidr  # options: cidr | domain
+      # Spoofing-robust UDP keying via CIDR bucketing
       bucket_network_prefix_v4: 24
       bucket_network_prefix_v6: 56
 

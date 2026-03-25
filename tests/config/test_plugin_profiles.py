@@ -36,8 +36,8 @@ def test_load_builtin_profiles_rate_limit_returns_yaml_profiles() -> None:
     assert "smb" in profiles
     assert "enterprise" in profiles
     assert "localhost" in profiles
-    assert profiles["home"]["min_enforce_rps"] == 10
-    assert profiles["lan"]["global_max_rps"] == 500
+    assert profiles["home"]["min_enforce_rps"] == 2
+    assert profiles["lan"]["global_max_rps"] == 50
 
 
 def test_load_builtin_profiles_unknown_type_returns_empty() -> None:
@@ -94,8 +94,8 @@ def test_resolve_plugin_profile_applies_default_with_explicit_overrides() -> Non
     )
 
     assert merged["min_enforce_rps"] == 100
-    assert merged["global_max_rps"] == 500  # from default profile
-    assert merged["burst_factor"] == 4.0  # from default profile
+    assert merged["global_max_rps"] == 50  # from default profile
+    assert merged["burst_factor"] == 5.0  # from default profile
 
 
 def test_resolve_plugin_profile_lan_profile_correct_values() -> None:
@@ -105,7 +105,7 @@ def test_resolve_plugin_profile_lan_profile_correct_values() -> None:
       - None.
 
     Outputs:
-      - None; asserts lan profile (5/500/4.0x) is applied.
+      - None; asserts lan profile (2/50/5.0x) is applied.
     """
     merged = resolve_plugin_profile(
         plugin_type="rate_limit",
@@ -114,9 +114,9 @@ def test_resolve_plugin_profile_lan_profile_correct_values() -> None:
         profiles_files=[],
     )
 
-    assert merged["min_enforce_rps"] == 5
-    assert merged["global_max_rps"] == 500
-    assert merged["burst_factor"] == 4.0
+    assert merged["min_enforce_rps"] == 2
+    assert merged["global_max_rps"] == 50
+    assert merged["burst_factor"] == 5.0
 
 
 def test_resolve_plugin_profile_explicit_config_overrides_profile() -> None:
@@ -136,8 +136,8 @@ def test_resolve_plugin_profile_explicit_config_overrides_profile() -> None:
     )
 
     # Profile values
-    assert merged["global_max_rps"] == 500
-    assert merged["burst_factor"] == 4.0
+    assert merged["global_max_rps"] == 50
+    assert merged["burst_factor"] == 5.0
     # Explicit overrides
     assert merged["min_enforce_rps"] == 999
     assert merged["custom_key"] == "value"
@@ -184,8 +184,8 @@ def test_resolve_plugin_profile_unknown_profile_warns_without_abort() -> None:
     )
 
     # Should fall back to default profile
-    assert merged["min_enforce_rps"] == 5
-    assert merged["global_max_rps"] == 500
+    assert merged["min_enforce_rps"] == 2
+    assert merged["global_max_rps"] == 50
 
 
 def test_resolve_plugin_profile_unknown_profile_aborts_when_requested() -> None:
@@ -248,4 +248,4 @@ def test_resolve_plugin_profile_namespace_syntax() -> None:
         explicit_cfg={},
         profiles_files=[],
     )
-    assert merged["global_max_rps"] == 500
+    assert merged["global_max_rps"] == 50
