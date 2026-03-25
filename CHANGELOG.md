@@ -12,6 +12,12 @@ All notable changes to this project will be documented in this file.
 - Hardened ZoneRecords load/notify safety with path traversal rejection, source file/record/value budget limits, optional SOA/PTR synthesis controls, and outbound NOTIFY target allowlist/throttling/private-address policy controls.
 - Added a local Docker Compose observability stack (`docker/`) provisioning InfluxDB + Grafana with a prebuilt Foghorn query-log dashboard and datasource wiring.
 - Improved config-diagram rendering efficiency by skipping PNG re-renders when generated DOT content is unchanged.
+- Expanded AXFR/IXFR hardening with configurable `server.axfr` policy controls (TSIG requirements/keys, per-client rate limiting, concurrent transfer caps, transfer pacing, and per-message sizing limits), plus runtime snapshot/config-dump exposure for these settings.
+- Added TSIG support for ZoneRecords AXFR upstream pulls (`axfr_zones[*].upstreams[*].tsig`) and TSIG-validated/signed downstream AXFR/IXFR serving, including transport plumbing updates for TCP/DoT request-wire verification.
+- Hardened ZoneRecords watchdog/polling file handling with optional watcher path-prefix constraints, parent-traversal rejection, optional absolute-path rejection, capped watched-file/directory counts, and capped polling snapshot sizes.
+- Improved RateLimit enforcement and observability: bootstrap profiles now enforce immediately when configured, per-key hard caps apply even below `min_enforce_rps`, burst reset timing is configurable via `burst_reset_windows`, and admin snapshots include effective per-bucket limits plus interval/overall RPS views.
+- Updated built-in RateLimit profiles (`slow`/`medium`/`fast`/`localhost`/`home`/`lan`/`smb`/`enterprise`) and profile resolution paths so profile-backed settings are consistently available in plugin loading and admin/stat helpers.
+- Improved admin usability with richer query-log drilldowns/filter controls, enhanced rate-limit profile rendering, and plugin/cache section ordering updates; upstream status payloads now redact sensitive config keys and truncate oversized error strings.
 
 ### Breaking Changes
 
