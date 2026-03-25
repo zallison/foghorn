@@ -29,6 +29,7 @@ import yaml
 from ..plugins.cache.registry import load_cache_plugin
 from ..plugins.resolve.base import BasePlugin
 from ..plugins.resolve.registry import discover_plugins, get_plugin_class
+from .plugin_profiles import resolve_plugin_profile
 from .config_schema import validate_config
 
 
@@ -906,6 +907,39 @@ def load_plugins(plugin_specs: List[dict]) -> List[BasePlugin]:
             explicit_name=plugin_name,
             used_names=seen_names,
         )
+
+        # Optional profile presets (e.g., config.profile: "lan") are merged
+        # before typed config validation so model defaults do not mask profile
+        # values. Explicit config keys still override profile values.
+        profile_name = str(plugin_specific_config.get("profile", "") or "").strip()
+        if profile_name:
+            try:
+                plugin_aliases = list(getattr(plugin_cls, "get_aliases", lambda: [])())
+            except Exception:
+                plugin_aliases = []
+            profile_plugin_type = ""
+            for alias in plugin_aliases:
+                alias_text = str(alias or "").strip()
+                if alias_text:
+                    profile_plugin_type = alias_text
+                    break
+            if not profile_plugin_type:
+                profile_plugin_type = (
+                    str(getattr(plugin_cls, "__module__", "") or "")
+                    .split(".")[-1]
+                    .strip()
+                )
+            if not profile_plugin_type:
+                profile_plugin_type = str(module_path)
+            plugin_specific_config = resolve_plugin_profile(
+                plugin_type=profile_plugin_type,
+                profile_name=profile_name,
+                explicit_cfg=plugin_specific_config,
+                profiles_files=[],
+                abort_on_failure=bool(
+                    plugin_specific_config.get("abort_on_failure", False)
+                ),
+            )
 
         # Per-plugin cache selection.
         cache_cfg = plugin_specific_config.pop("cache", None)
