@@ -321,13 +321,13 @@ def test_rate_limit_config_applies_defaults_for_new_fields():
     assert cfg.profile_ttl_seconds == 7 * 24 * 60 * 60
     assert cfg.prune_interval_seconds == 60
 
-    assert cfg.udp_keying == "cidr"
     assert cfg.assume_udp_when_listener_missing is True
     assert cfg.bucket_network_prefix_v4 == 24
     assert cfg.bucket_network_prefix_v6 == 56
+    assert cfg.limit_recalc_windows == 10
     assert cfg.warmup_max_rps == 0.0
     assert cfg.burst_reset_windows == 20
-    assert cfg.bootstrap_rps == 5000.0
+    assert cfg.bootstrap_rps == 50.0
     assert cfg.stats_window_seconds == 0
     assert cfg.psl_strict is False
 
@@ -404,42 +404,168 @@ def test_rate_limit_config_validates_bucket_network_prefix_ranges():
         rate_limit_module.RateLimitConfig(bucket_network_prefix_v6=129)
 
 
-def test_rate_limit_config_udp_keying_valid_and_invalid_values():
-    """Brief: udp_keying accepts strings; None is invalid.
+def test_rate_limit_config_rejects_removed_udp_keying():
+    """Brief: Removed udp_keying config is rejected.
 
     Inputs:
       - None
 
     Outputs:
-      - None: asserts valid values are preserved and None raises.
+      - None: asserts ValidationError when udp_keying is provided.
     """
 
-    assert rate_limit_module.RateLimitConfig(udp_keying="cidr").udp_keying == "cidr"
-    assert rate_limit_module.RateLimitConfig(udp_keying="domain").udp_keying == "domain"
-
     with pytest.raises(ValidationError):
-        rate_limit_module.RateLimitConfig(udp_keying=None)  # type: ignore[arg-type]
+        rate_limit_module.RateLimitConfig(udp_keying="cidr")
 
 
-def test_setup_normalizes_udp_keying_valid_and_invalid_values(tmp_path):
-    """Brief: plugin.setup lowercases udp_keying and defaults invalid values.
+def test_setup_rejects_removed_udp_keying(tmp_path):
+    """Brief: setup() rejects removed udp_keying config key.
 
     Inputs:
       - tmp_path: pytest tmp path for sqlite db.
 
     Outputs:
-      - None: asserts plugin.udp_keying is normalized.
+      - None: asserts ValueError when udp_keying is supplied.
     """
 
-    db1 = tmp_path / "rl-udp-keying-1.db"
-    plugin1 = RateLimit(db_path=str(db1), udp_keying="DOMAIN")
-    plugin1.setup()
-    assert plugin1.udp_keying == "domain"
+    db = tmp_path / "rl-udp-key-removed.db"
+    plugin = RateLimit(db_path=str(db), udp_keying="cidr")
 
-    db2 = tmp_path / "rl-udp-keying-2.db"
-    plugin2 = RateLimit(db_path=str(db2), udp_keying="bogus")
-    plugin2.setup()
-    assert plugin2.udp_keying == "cidr"
+    with pytest.raises(ValueError):
+        plugin.setup()
+
+
+def test_rate_limit_config_validates_limit_recalc_windows_ge_1():
+    """Brief: limit_recalc_windows must be >= 1.
+
+    Inputs:
+      - None
+
+    Outputs:
+      - None: asserts ValidationError for invalid values.
+    """
+
+    rate_limit_module.RateLimitConfig(limit_recalc_windows=1)
+
+    with pytest.raises(ValidationError):
+        rate_limit_module.RateLimitConfig(limit_recalc_windows=0)
+
+
+def test_recalculated_allowed_rps_refreshes_seen_buckets_each_window(tmp_path):
+    """Brief: Seen buckets recalculate once per request window interval.
+
+    Inputs:
+      - tmp_path: pytest tmp path for sqlite db.
+
+    Outputs:
+      - None: asserts same-window values stay cached and next-window values refresh.
+    """
+
+    db = tmp_path / "rl-limit-recalc-seen.db"
+    plugin = RateLimit(
+        db_path=str(db),
+        window_seconds=10,
+        burst_factor=2.0,
+        max_enforce_rps=0.0,
+        limit_recalc_windows=3,
+    )
+    plugin.setup()
+
+    burst_1, base_1 = plugin._get_recalculated_allowed_rps(
+        key="client-1",
+        avg_rps=10.0,
+        samples=5,
+        now=0.0,
+    )
+    assert burst_1 == pytest.approx(20.0)
+    assert base_1 == pytest.approx(10.0)
+
+    # Same window: thresholds remain cached even if avg_rps input changes.
+    burst_2, base_2 = plugin._get_recalculated_allowed_rps(
+        key="client-1",
+        avg_rps=20.0,
+        samples=6,
+        now=9.9,
+    )
+    assert burst_2 == pytest.approx(burst_1)
+    assert base_2 == pytest.approx(base_1)
+
+    # Next window: seen bucket thresholds are recalculated.
+    burst_3, base_3 = plugin._get_recalculated_allowed_rps(
+        key="client-1",
+        avg_rps=20.0,
+        samples=7,
+        now=10.0,
+    )
+    assert burst_3 == pytest.approx(40.0)
+    assert base_3 == pytest.approx(20.0)
+
+
+def test_limit_recalc_windows_globally_refreshes_unseen_bucket_limits(tmp_path):
+    """Brief: limit_recalc_windows globally refreshes unseen bucket thresholds.
+
+    Inputs:
+      - tmp_path: pytest tmp path for sqlite db.
+
+    Outputs:
+      - None: asserts unseen buckets are refreshed from DB on global cadence.
+    """
+
+    db = tmp_path / "rl-limit-recalc-global.db"
+    plugin = RateLimit(
+        db_path=str(db),
+        window_seconds=10,
+        burst_factor=2.0,
+        max_enforce_rps=0.0,
+        limit_recalc_windows=3,
+    )
+    plugin.setup()
+
+    seen_key = "client-seen"
+    unseen_key = "client-unseen"
+    plugin._seed_profile(seen_key, rps=5.0, now_ts=0, samples=5)
+    plugin._seed_profile(unseen_key, rps=10.0, now_ts=0, samples=5)
+
+    unseen_burst_1, unseen_base_1 = plugin._get_recalculated_allowed_rps(
+        key=unseen_key,
+        avg_rps=10.0,
+        samples=5,
+        now=0.0,
+    )
+    assert unseen_burst_1 == pytest.approx(20.0)
+    assert unseen_base_1 == pytest.approx(10.0)
+
+    # Raise unseen key baseline in DB but do not touch that key again.
+    plugin._seed_profile(unseen_key, rps=30.0, now_ts=1, samples=6)
+
+    # Drive traffic for a different key; global recalc should run at window 3.
+    plugin._get_recalculated_allowed_rps(
+        key=seen_key,
+        avg_rps=5.0,
+        samples=5,
+        now=10.0,
+    )
+    plugin._get_recalculated_allowed_rps(
+        key=seen_key,
+        avg_rps=5.0,
+        samples=6,
+        now=20.0,
+    )
+    plugin._get_recalculated_allowed_rps(
+        key=seen_key,
+        avg_rps=5.0,
+        samples=7,
+        now=30.0,
+    )
+
+    unseen_burst_2, unseen_base_2 = plugin._get_recalculated_allowed_rps(
+        key=unseen_key,
+        avg_rps=10.0,
+        samples=6,
+        now=30.0,
+    )
+    assert unseen_burst_2 == pytest.approx(60.0)
+    assert unseen_base_2 == pytest.approx(30.0)
 
 
 def test_invalid_mode_defaults_to_per_client(tmp_path):
@@ -539,6 +665,39 @@ def test_increment_window_default_now_uses_time(monkeypatch, tmp_path):
     assert count == 1
 
 
+def test_get_http_snapshot_includes_current_rps(tmp_path, monkeypatch):
+    """Brief: get_http_snapshot includes active current_rps in settings.
+
+    Inputs:
+      - tmp_path: pytest temporary path for sqlite DB.
+      - monkeypatch: fixture used to pin time to one active request window.
+
+    Outputs:
+      - None: asserts settings.current_rps reflects the in-progress global window.
+    """
+
+    db = tmp_path / "rl-snapshot-current-rps.db"
+    plugin = RateLimit(
+        db_path=str(db),
+        window_seconds=10,
+        warmup_windows=0,
+    )
+    plugin.setup()
+
+    ctx = PluginContext(client_ip="1.2.3.4", listener="tcp")
+
+    with closing(plugin._conn):
+        _set_time(monkeypatch, 0.0)
+        for _ in range(25):
+            assert plugin.pre_resolve("example.com", QTYPE.A, b"", ctx) is None
+
+        snapshot = plugin.get_http_snapshot()
+
+    settings = snapshot.get("settings")
+    assert isinstance(settings, dict)
+    assert float(settings.get("current_rps", -1.0)) == pytest.approx(2.5)
+
+
 def test_increment_window_is_atomic_under_concurrency(tmp_path):
     """Brief: Concurrent window increments for a key are not lost.
 
@@ -611,6 +770,30 @@ def test_build_deny_decision_status_codes(tmp_path):
     noerror = DNSRecord.parse(decision3.response)
     assert noerror.header.rcode == 0  # NOERROR
     assert noerror.rr == []
+
+
+def test_build_deny_decision_drop_mode(tmp_path):
+    """Brief: deny_response='drop' returns a drop decision.
+
+    Inputs:
+      - tmp_path: pytest tmp path.
+
+    Outputs:
+      - None: asserts drop mode remains configured and emits action='drop'.
+    """
+
+    db = tmp_path / "rl-deny-drop.db"
+    plugin = RateLimit(db_path=str(db), deny_response="drop")
+    plugin.setup()
+    ctx = PluginContext(client_ip="1.2.3.4")
+
+    req = DNSRecord.question("example.com", "A")
+    wire = req.pack()
+    decision = plugin._build_deny_decision("example.com", QTYPE.A, wire, ctx)
+
+    assert plugin.deny_response == "drop"
+    assert decision.action == "drop"
+    assert decision.response is None
 
 
 def test_build_deny_decision_ip_mode_and_fallback(tmp_path):

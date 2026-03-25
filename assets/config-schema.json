@@ -994,7 +994,7 @@
         ],
         "config_schema": {
           "additionalProperties": true,
-          "description": "Brief: Typed configuration model for RateLimit.\n\nInputs:\n  - mode: 'per_client' (default), 'per_client_domain', or 'per_domain'\n    controlling how rate profiles are keyed.\n  - window_seconds: Measurement window size in seconds (>= 1).\n  - warmup_windows: Number of completed windows to observe before enforcing.\n  - alpha: EWMA smoothing factor when the new RPS is >= the learned average\n    (controls how quickly we ramp *up*).\n  - alpha_down: Optional EWMA factor when the new RPS is < the learned\n    average (controls how quickly we ramp *down*). Defaults to alpha when\n    omitted.\n  - burst_factor: Allowed multiplier over learned average RPS when enforcing.\n  - burst_windows: Number of consecutive burst windows allowed before the\n    burst factor is disabled (0 means unlimited).\n  - burst_reset_windows: Number of consecutive completed windows at or below\n    threshold required to reset burst state back to zero.\n  - min_enforce_rps: Minimum RPS threshold for enforcement.\n  - max_enforce_rps: Hard upper bound on allowed RPS per key (0 disables).\n  - global_max_rps: Optional hard upper bound on total RPS across all keys\n    (0 disables).\n  - db_path: Path to sqlite3 database storing learned profiles.\n\n  - max_profiles: Maximum number of rows permitted in rate_profiles (>= 1).\n  - profile_ttl_seconds: Best-effort TTL for profiles; rows older than this\n    are pruned during periodic maintenance (0 disables TTL pruning).\n  - prune_interval_seconds: Minimum seconds between prune passes (>= 0).\n\n  - udp_keying: Keying override applied when ctx.listener == 'udp' and the\n    request is not secure. Options:\n      - 'cidr' (default): bucket client IPs into /bucket_network_prefix_v4 or\n        /bucket_network_prefix_v6 to reduce spoofed-IP cardinality.\n      - 'domain': ignore client identity and key only by base domain.\n  - assume_udp_when_listener_missing: When True, treat missing/unknown\n    listener values on insecure transports as UDP for spoofing mitigation.\n  - bucket_network_prefix_v4: IPv4 prefix length used for udp_keying='cidr'.\n  - bucket_network_prefix_v6: IPv6 prefix length used for udp_keying='cidr'.\n  - warmup_max_rps: Optional hard RPS cap enforced during warmup\n    (0 disables).\n  - bootstrap_rps: Optional baseline RPS used to seed profiles when\n    no historical samples exist. When omitted, defaults to max_enforce_rps;\n    set to 0 to disable bootstrap seeding.\n\n  - deny_response: Policy for limited queries ('nxdomain', 'refused', 'servfail',\n    'noerror_empty'/'nodata', or 'ip'). Defaults to 'refused'.\n  - deny_response_ip4 / deny_response_ip6: Optional IPs used when deny_response=='ip'.\n  - ttl: Optional TTL used when synthesizing IP responses.\n  - stats_log_interval_seconds: Interval for periodic rate-limit summary logs\n    (0 disables).\n  - stats_window_seconds: Optional lookback window in seconds applied when\n    computing periodic summary avg/max values (0 uses all profiles).\n  - psl_strict: When True, fail startup if PSL extraction is unavailable\n    in domain-based modes.\n\nOutputs:\n  - RateLimitConfig instance with normalized field types.",
+          "description": "Brief: Typed configuration model for RateLimit.\n\nInputs:\n  - mode: 'per_client' (default), 'per_client_domain', or 'per_domain'\n    controlling how rate profiles are keyed.\n  - window_seconds: Measurement window size in seconds (>= 1).\n  - warmup_windows: Number of completed windows to observe before enforcing.\n  - alpha: EWMA smoothing factor when the new RPS is >= the learned average\n    (controls how quickly we ramp *up*).\n  - alpha_down: Optional EWMA factor when the new RPS is < the learned\n    average (controls how quickly we ramp *down*). Defaults to alpha when\n    omitted.\n  - burst_factor: Allowed multiplier over learned average RPS when enforcing.\n  - burst_windows: Number of consecutive burst windows allowed before the\n    burst factor is disabled (0 means unlimited).\n  - burst_reset_windows: Number of consecutive completed windows at or below\n    threshold required to reset burst state back to zero.\n  - min_enforce_rps: Minimum RPS threshold for enforcement.\n  - max_enforce_rps: Hard upper bound on allowed RPS per key (0 disables).\n  - global_max_rps: Optional hard upper bound on total RPS across all keys\n    (0 disables).\n  - db_path: Path to sqlite3 database storing learned profiles.\n\n  - max_profiles: Maximum number of rows permitted in rate_profiles (>= 1).\n  - profile_ttl_seconds: Best-effort TTL for profiles; rows older than this\n    are pruned during periodic maintenance (0 disables TTL pruning).\n  - prune_interval_seconds: Minimum seconds between prune passes (>= 0).\n\n  - assume_udp_when_listener_missing: When True, treat missing/unknown\n    listener values on insecure transports as UDP for spoofing mitigation.\n  - bucket_network_prefix_v4: IPv4 prefix length used for UDP client-IP\n    bucketing on insecure transports.\n  - bucket_network_prefix_v6: IPv6 prefix length used for UDP client-IP\n    bucketing on insecure transports.\n  - limit_recalc_windows: Number of completed windows between per-bucket\n    allowed-RPS recalculations. Default 10 windows.\n  - warmup_max_rps: Optional hard RPS cap enforced during warmup\n    (0 disables).\n  - bootstrap_rps: Optional baseline RPS used to seed profiles when\n    no historical samples exist. When omitted, defaults to global_max_rps\n    when explicitly set; otherwise defaults to 50. Set to 0 to disable\n    bootstrap seeding.\n\n  - deny_response: Policy for limited queries ('nxdomain', 'refused', 'servfail',\n    'noerror_empty'/'nodata', 'ip', or 'drop'). Defaults to 'refused'.\n  - deny_response_ip4 / deny_response_ip6: Optional IPs used when deny_response=='ip'.\n  - ttl: Optional TTL used when synthesizing IP responses.\n  - stats_log_interval_seconds: Interval for periodic rate-limit summary logs\n    (0 disables).\n  - stats_window_seconds: Optional lookback window in seconds applied when\n    computing periodic summary avg/max values (0 uses all profiles).\n  - deny_log_interval_seconds: Minimum seconds between per-key deny log\n    messages (0 logs every deny; default 10).  Suppressed denies are\n    counted and the total is included in the next emitted message.\n  - psl_strict: When True, fail startup if PSL extraction is unavailable\n    in domain-based modes.\n\nOutputs:\n  - RateLimitConfig instance with normalized field types.",
           "properties": {
             "alpha": {
               "default": 0.2,
@@ -1028,8 +1028,8 @@
               "type": "boolean"
             },
             "bootstrap_rps": {
-              "default": 5000.0,
-              "description": "Type: number. Default: 5000.0.",
+              "default": 50.0,
+              "description": "Type: number. Default: 50.0.",
               "minimum": 0.0,
               "title": "Bootstrap Rps",
               "type": "number"
@@ -1077,6 +1077,13 @@
               "title": "Db Path",
               "type": "string"
             },
+            "deny_log_interval_seconds": {
+              "default": 10,
+              "description": "Type: integer. Default: 10.",
+              "minimum": 0,
+              "title": "Deny Log Interval Seconds",
+              "type": "integer"
+            },
             "deny_response": {
               "default": "refused",
               "description": "Type: string. Default: \"refused\".",
@@ -1117,6 +1124,13 @@
               "minimum": 0.0,
               "title": "Global Max Rps",
               "type": "number"
+            },
+            "limit_recalc_windows": {
+              "default": 10,
+              "description": "Type: integer. Default: 10.",
+              "minimum": 1,
+              "title": "Limit Recalc Windows",
+              "type": "integer"
             },
             "max_enforce_rps": {
               "default": 5000.0,
@@ -1185,12 +1199,6 @@
               "minimum": 0,
               "title": "Ttl",
               "type": "integer"
-            },
-            "udp_keying": {
-              "default": "cidr",
-              "description": "Type: string. Default: \"cidr\".",
-              "title": "Udp Keying",
-              "type": "string"
             },
             "warmup_max_rps": {
               "default": 0.0,
@@ -3937,7 +3945,7 @@
         ],
         "config_schema": {
           "additionalProperties": true,
-          "description": "Brief: Typed configuration model for RateLimit.\n\nInputs:\n  - mode: 'per_client' (default), 'per_client_domain', or 'per_domain'\n    controlling how rate profiles are keyed.\n  - window_seconds: Measurement window size in seconds (>= 1).\n  - warmup_windows: Number of completed windows to observe before enforcing.\n  - alpha: EWMA smoothing factor when the new RPS is >= the learned average\n    (controls how quickly we ramp *up*).\n  - alpha_down: Optional EWMA factor when the new RPS is < the learned\n    average (controls how quickly we ramp *down*). Defaults to alpha when\n    omitted.\n  - burst_factor: Allowed multiplier over learned average RPS when enforcing.\n  - burst_windows: Number of consecutive burst windows allowed before the\n    burst factor is disabled (0 means unlimited).\n  - burst_reset_windows: Number of consecutive completed windows at or below\n    threshold required to reset burst state back to zero.\n  - min_enforce_rps: Minimum RPS threshold for enforcement.\n  - max_enforce_rps: Hard upper bound on allowed RPS per key (0 disables).\n  - global_max_rps: Optional hard upper bound on total RPS across all keys\n    (0 disables).\n  - db_path: Path to sqlite3 database storing learned profiles.\n\n  - max_profiles: Maximum number of rows permitted in rate_profiles (>= 1).\n  - profile_ttl_seconds: Best-effort TTL for profiles; rows older than this\n    are pruned during periodic maintenance (0 disables TTL pruning).\n  - prune_interval_seconds: Minimum seconds between prune passes (>= 0).\n\n  - udp_keying: Keying override applied when ctx.listener == 'udp' and the\n    request is not secure. Options:\n      - 'cidr' (default): bucket client IPs into /bucket_network_prefix_v4 or\n        /bucket_network_prefix_v6 to reduce spoofed-IP cardinality.\n      - 'domain': ignore client identity and key only by base domain.\n  - assume_udp_when_listener_missing: When True, treat missing/unknown\n    listener values on insecure transports as UDP for spoofing mitigation.\n  - bucket_network_prefix_v4: IPv4 prefix length used for udp_keying='cidr'.\n  - bucket_network_prefix_v6: IPv6 prefix length used for udp_keying='cidr'.\n  - warmup_max_rps: Optional hard RPS cap enforced during warmup\n    (0 disables).\n  - bootstrap_rps: Optional baseline RPS used to seed profiles when\n    no historical samples exist. When omitted, defaults to max_enforce_rps;\n    set to 0 to disable bootstrap seeding.\n\n  - deny_response: Policy for limited queries ('nxdomain', 'refused', 'servfail',\n    'noerror_empty'/'nodata', or 'ip'). Defaults to 'refused'.\n  - deny_response_ip4 / deny_response_ip6: Optional IPs used when deny_response=='ip'.\n  - ttl: Optional TTL used when synthesizing IP responses.\n  - stats_log_interval_seconds: Interval for periodic rate-limit summary logs\n    (0 disables).\n  - stats_window_seconds: Optional lookback window in seconds applied when\n    computing periodic summary avg/max values (0 uses all profiles).\n  - psl_strict: When True, fail startup if PSL extraction is unavailable\n    in domain-based modes.\n\nOutputs:\n  - RateLimitConfig instance with normalized field types.",
+          "description": "Brief: Typed configuration model for RateLimit.\n\nInputs:\n  - mode: 'per_client' (default), 'per_client_domain', or 'per_domain'\n    controlling how rate profiles are keyed.\n  - window_seconds: Measurement window size in seconds (>= 1).\n  - warmup_windows: Number of completed windows to observe before enforcing.\n  - alpha: EWMA smoothing factor when the new RPS is >= the learned average\n    (controls how quickly we ramp *up*).\n  - alpha_down: Optional EWMA factor when the new RPS is < the learned\n    average (controls how quickly we ramp *down*). Defaults to alpha when\n    omitted.\n  - burst_factor: Allowed multiplier over learned average RPS when enforcing.\n  - burst_windows: Number of consecutive burst windows allowed before the\n    burst factor is disabled (0 means unlimited).\n  - burst_reset_windows: Number of consecutive completed windows at or below\n    threshold required to reset burst state back to zero.\n  - min_enforce_rps: Minimum RPS threshold for enforcement.\n  - max_enforce_rps: Hard upper bound on allowed RPS per key (0 disables).\n  - global_max_rps: Optional hard upper bound on total RPS across all keys\n    (0 disables).\n  - db_path: Path to sqlite3 database storing learned profiles.\n\n  - max_profiles: Maximum number of rows permitted in rate_profiles (>= 1).\n  - profile_ttl_seconds: Best-effort TTL for profiles; rows older than this\n    are pruned during periodic maintenance (0 disables TTL pruning).\n  - prune_interval_seconds: Minimum seconds between prune passes (>= 0).\n\n  - assume_udp_when_listener_missing: When True, treat missing/unknown\n    listener values on insecure transports as UDP for spoofing mitigation.\n  - bucket_network_prefix_v4: IPv4 prefix length used for UDP client-IP\n    bucketing on insecure transports.\n  - bucket_network_prefix_v6: IPv6 prefix length used for UDP client-IP\n    bucketing on insecure transports.\n  - limit_recalc_windows: Number of completed windows between per-bucket\n    allowed-RPS recalculations. Default 10 windows.\n  - warmup_max_rps: Optional hard RPS cap enforced during warmup\n    (0 disables).\n  - bootstrap_rps: Optional baseline RPS used to seed profiles when\n    no historical samples exist. When omitted, defaults to global_max_rps\n    when explicitly set; otherwise defaults to 50. Set to 0 to disable\n    bootstrap seeding.\n\n  - deny_response: Policy for limited queries ('nxdomain', 'refused', 'servfail',\n    'noerror_empty'/'nodata', 'ip', or 'drop'). Defaults to 'refused'.\n  - deny_response_ip4 / deny_response_ip6: Optional IPs used when deny_response=='ip'.\n  - ttl: Optional TTL used when synthesizing IP responses.\n  - stats_log_interval_seconds: Interval for periodic rate-limit summary logs\n    (0 disables).\n  - stats_window_seconds: Optional lookback window in seconds applied when\n    computing periodic summary avg/max values (0 uses all profiles).\n  - deny_log_interval_seconds: Minimum seconds between per-key deny log\n    messages (0 logs every deny; default 10).  Suppressed denies are\n    counted and the total is included in the next emitted message.\n  - psl_strict: When True, fail startup if PSL extraction is unavailable\n    in domain-based modes.\n\nOutputs:\n  - RateLimitConfig instance with normalized field types.",
           "properties": {
             "alpha": {
               "default": 0.2,
@@ -3971,8 +3979,8 @@
               "type": "boolean"
             },
             "bootstrap_rps": {
-              "default": 5000.0,
-              "description": "Type: number. Default: 5000.0.",
+              "default": 50.0,
+              "description": "Type: number. Default: 50.0.",
               "minimum": 0.0,
               "title": "Bootstrap Rps",
               "type": "number"
@@ -4020,6 +4028,13 @@
               "title": "Db Path",
               "type": "string"
             },
+            "deny_log_interval_seconds": {
+              "default": 10,
+              "description": "Type: integer. Default: 10.",
+              "minimum": 0,
+              "title": "Deny Log Interval Seconds",
+              "type": "integer"
+            },
             "deny_response": {
               "default": "refused",
               "description": "Type: string. Default: \"refused\".",
@@ -4060,6 +4075,13 @@
               "minimum": 0.0,
               "title": "Global Max Rps",
               "type": "number"
+            },
+            "limit_recalc_windows": {
+              "default": 10,
+              "description": "Type: integer. Default: 10.",
+              "minimum": 1,
+              "title": "Limit Recalc Windows",
+              "type": "integer"
             },
             "max_enforce_rps": {
               "default": 5000.0,
@@ -4128,12 +4150,6 @@
               "minimum": 0,
               "title": "Ttl",
               "type": "integer"
-            },
-            "udp_keying": {
-              "default": "cidr",
-              "description": "Type: string. Default: \"cidr\".",
-              "title": "Udp Keying",
-              "type": "string"
             },
             "warmup_max_rps": {
               "default": 0.0,

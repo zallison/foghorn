@@ -79,6 +79,7 @@ plugins:
       burst_factor: 3.0              # allow up to 3x learned average
       burst_windows: 6               # consecutive burst windows before disabling
       burst_reset_windows: 20        # consecutive below-threshold windows before reset
+      limit_recalc_windows: 10       # recalculate per-bucket limits every N windows
       min_enforce_rps: 50.0          # do not enforce on low-traffic keys
       max_enforce_rps: 5000.0         # hard ceiling per key (0 => disabled)
 
@@ -90,7 +91,9 @@ plugins:
       deny_response_ip4: 0.0.0.0
       deny_response_ip6: ::1
       ttl: 60                        # TTL for synthetic IP answers when using 'ip'
-      assume_udp_when_listener_missing: true  # apply UDP spoofing fallback when listener is unknown
+      assume_udp_when_listener_missing: true  # apply UDP prefix bucketing when listener is unknown
+      bucket_network_prefix_v4: 24   # CIDR prefix used for insecure UDP client buckets
+      bucket_network_prefix_v6: 56   # CIDR prefix used for insecure UDP client buckets
       psl_strict: false              # fail startup if PSL extraction is unavailable
       stats_log_interval_seconds: 900  # periodic summary logging fallback when stats_window_seconds is 0
       stats_window_seconds: 3600       # logs every 3600s and summarizes only the last 3600s
@@ -127,6 +130,9 @@ plugins:
 - `burst_reset_windows: int`
   - Number of consecutive completed windows at or below the burst threshold
     required before burst state resets back to zero (default `20`).
+- `limit_recalc_windows: int`
+  - Number of completed windows between recalculations of per-bucket allowed
+    RPS thresholds derived from the learned average (default `10`).
 - `bootstrap_rps: float`
   - Optional baseline RPS used to seed a profile when no historical data exists.
     When set, enforcement can occur immediately instead of waiting for warmup.
@@ -144,7 +150,7 @@ plugins:
   - Replacement IPs used when `deny_response == 'ip'` for A/AAAA queries.
 - `assume_udp_when_listener_missing: bool`
   - When `true`, missing/unknown listener metadata on insecure transports
-    uses the UDP spoofing fallback (CIDR bucketing or domain-only keying).
+    uses UDP CIDR prefix bucketing as a spoofing fallback.
 - `ttl: int`
   - TTL for synthetic IP answers when `deny_response == 'ip'`.
 - `stats_log_interval_seconds: int`
@@ -168,7 +174,8 @@ plugins:
   per-key window counter in an in-memory cache plus a sqlite-backed profile.
 - Once a key has at least `warmup_windows` completed windows and a baseline
   above `min_enforce_rps`, new windows are evaluated against:
-  - `burst_factor * baseline`, and
+  - a recalculated burst threshold (`burst_factor * baseline`) refreshed every
+    `limit_recalc_windows` windows, and
   - `max_enforce_rps` (if non-zero).
 - When `warmup_max_rps` is set, the plugin enforces that cap even during warmup
   or before any profile exists.
