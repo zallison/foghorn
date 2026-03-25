@@ -305,6 +305,7 @@ def _expand_server_limits_defaults(server_cfg: Dict[str, Any]) -> None:
 
     limits_cfg.setdefault("resolver_executor_workers", None)
     limits_cfg.setdefault("bg_executor_workers", 4)
+    limits_cfg.setdefault("bg_executor_max_pending", None)
     limits_cfg.setdefault("allow_unsafe_threaded_listeners", False)
 
 
@@ -400,6 +401,33 @@ def _expand_server_feature_flags(server_cfg: Dict[str, Any]) -> None:
     if not isinstance(allow_clients, list):
         allow_clients = []
         axfr_cfg["allow_clients"] = allow_clients
+    axfr_cfg.setdefault("max_zone_rrs", None)
+    try:
+        max_concurrent = int(axfr_cfg.get("max_concurrent_transfers", 4))
+    except Exception:
+        max_concurrent = 4
+    axfr_cfg["max_concurrent_transfers"] = max(1, int(max_concurrent))
+    try:
+        rate_per_sec = float(axfr_cfg.get("rate_limit_per_client_per_second", 0.0))
+    except Exception:
+        rate_per_sec = 0.0
+    axfr_cfg["rate_limit_per_client_per_second"] = max(0.0, float(rate_per_sec))
+    try:
+        burst = float(axfr_cfg.get("rate_limit_burst", 2.0))
+    except Exception:
+        burst = 2.0
+    axfr_cfg["rate_limit_burst"] = max(1.0, float(burst))
+    axfr_cfg.setdefault("max_transfer_rate_bytes_per_second", None)
+    try:
+        message_max = int(axfr_cfg.get("message_max_bytes", 64000))
+    except Exception:
+        message_max = 64000
+    axfr_cfg["message_max_bytes"] = max(512, min(65535, int(message_max)))
+    axfr_cfg.setdefault("require_tsig", False)
+    tsig_keys = axfr_cfg.get("tsig_keys")
+    if not isinstance(tsig_keys, list):
+        tsig_keys = []
+    axfr_cfg["tsig_keys"] = tsig_keys
 
 
 def _expand_upstreams_defaults(out: Dict[str, Any]) -> None:
