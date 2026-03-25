@@ -3090,7 +3090,8 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         elif path == "/api/v1/ratelimit":
             # Rate-limit statistics are derived from config and sqlite profile DBs.
             cfg = getattr(self._server(), "config", None)
-            data = _collect_rate_limit_stats(cfg)
+            plugins_list = getattr(self._server(), "plugins", None)
+            data = _collect_rate_limit_stats(cfg, plugins=plugins_list)
             data["server_time"] = _utc_now_iso()
             self._send_json(200, data)
         elif path == "/api/v1/plugin_pages":
