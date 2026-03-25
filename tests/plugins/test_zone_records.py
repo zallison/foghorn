@@ -3677,8 +3677,9 @@ def test_iter_zone_rrs_for_transfer_exports_zone_rrs(tmp_path: pathlib.Path) -> 
 
     rrs = plugin.iter_zone_rrs_for_transfer("example.com")
     assert rrs is not None
-    owners = {str(rr.rname).rstrip(".").lower() for rr in rrs}
-    types = {rr.rtype for rr in rrs}
+    rr_list = list(rrs)
+    owners = {str(rr.rname).rstrip(".").lower() for rr in rr_list}
+    types = {rr.rtype for rr in rr_list}
 
     # Only in-zone owners should be present.
     assert "example.com" in owners
