@@ -31,7 +31,7 @@ import dns.rdataclass
 import dns.rdatatype
 import dns.tsig
 import dns.tsigkeyring
-from dnslib import DNSRecord, QTYPE, RCODE, RR
+from dnslib import DNSRecord, QTYPE, RR
 from foghorn.utils.register_caches import registered_cached
 
 logger = logging.getLogger(__name__)
@@ -969,6 +969,7 @@ def verify_client_authorization(
       - Tuple of (authorized, error_message).
     """
     from foghorn.plugins.resolve.zone_records import update_helpers as uh
+    from foghorn.utils import ip_networks
 
     allow_clients = zone_config.get("allow_clients", [])
     allow_clients_files = zone_config.get("allow_clients_files", [])
@@ -985,7 +986,7 @@ def verify_client_authorization(
     if not clients_list:
         return True, None
 
-    if not uh.is_ip_in_cidr_list(ctx.client_ip, clients_list):
+    if not ip_networks.ip_string_in_cidrs(ctx.client_ip, clients_list):
         return False, "Client IP not in allow_clients"
 
     return True, None
@@ -1059,6 +1060,7 @@ def verify_value_authorization(
         return True
 
     from foghorn.plugins.resolve.zone_records import update_helpers as uh
+    from foghorn.utils import ip_networks
 
     scopes = [s for s in (zone_config, auth_scope_config) if isinstance(s, dict)]
 
@@ -1069,7 +1071,7 @@ def verify_value_authorization(
             scope.get("block_update_ips_files", []),
             uh.load_cidr_list_from_file,
         )
-        if blocked_list and uh.is_ip_in_cidr_list(value, blocked_list):
+        if blocked_list and ip_networks.ip_string_in_cidrs(value, blocked_list):
             return False
 
     # If a scope defines allow_update_ips, the value must match that scope.
@@ -1082,7 +1084,7 @@ def verify_value_authorization(
                 allow_ips_files,
                 uh.load_cidr_list_from_file,
             )
-            if allowed_list and not uh.is_ip_in_cidr_list(value, allowed_list):
+            if allowed_list and not ip_networks.ip_string_in_cidrs(value, allowed_list):
                 return False
 
     return True
@@ -1719,7 +1721,6 @@ def build_update_response(
     Notes:
       - EDE option attachment is scaffolded and currently not implemented.
     """
-    import struct
 
     reply = request.reply()
     reply.header.rcode = rcode

@@ -10,14 +10,12 @@ import base64
 import fnmatch
 import hashlib
 import hmac
-import ipaddress
 import logging
 import os
-import struct
-import threading
 import time
-from typing import Callable, Dict, List, Optional, Set, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 from foghorn.utils import dns_names
+from foghorn.utils.register_caches import registered_lru_cached
 
 logger = logging.getLogger(__name__)
 TsigKeySourceLoader = Callable[[dict], List[dict]]
@@ -254,22 +252,6 @@ def resolve_tsig_key_configs(
     return resolved
 
 
-def normalize_cidr(
-    cidr: str,
-) -> Optional[ipaddress.IPv4Network | ipaddress.IPv6Network]:
-    """Brief: Normalize CIDR string to network object.
-
-    Inputs:
-      - cidr: CIDR notation string.
-
-    Outputs:
-      - Network object or None if invalid.
-    """
-    from foghorn.utils import ip_networks
-
-    return ip_networks.parse_network(cidr, strict=False)
-
-
 def collect_update_file_paths(dns_update_config: dict) -> List[str]:
     """Brief: Collect all file paths referenced in DNS UPDATE configuration.
 
@@ -401,21 +383,6 @@ def reload_update_lists(plugin: object) -> None:
                         cache[cache_key] = new_list
 
 
-def is_ip_in_cidr_list(ip_str: str, cidr_list: List[str]) -> bool:
-    """Brief: Check if IP is in any CIDR in list.
-
-    Inputs:
-      - ip_str: IP address string.
-      - cidr_list: List of CIDR strings.
-
-    Outputs:
-      - bool: True if IP is in any CIDR.
-    """
-    from foghorn.utils import ip_networks
-
-    return ip_networks.ip_string_in_cidrs(ip_str, cidr_list)
-
-
 def matches_name_pattern(name: str, patterns: List[str]) -> bool:
     """Brief: Check if name matches any pattern (supports wildcards).
 
@@ -502,6 +469,7 @@ def tsig_hmac_verify(
         return False
 
 
+@registered_lru_cached(maxsize=4096)
 def parse_domain_name_wire(data: bytes, offset: int) -> Tuple[Optional[str], int]:
     """Brief: Parse DNS wire-format domain name.
 

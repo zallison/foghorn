@@ -90,13 +90,12 @@ markers = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-# Ignore a lot of "import not at top!" and "import not used", for objects that
-# re-exports them
+# Ignore "import not at top!"
 "*" = ["E402"]
-"src/foghorn/plugins/resolve/*" = ["E402", "F401"]
 "__init__.py" = ["E402"]
 "**/{tests,docs,tools}/*" = ["E402"]
-"src/foghorn/servers/webserver/*.py" = ["F401", "F811"]
+# Imports and rexports "unused" functions
+"src/foghorn/servers/webserver/*.py" = ["F401"]
 
 [tool.isort]
 profile = "black"
