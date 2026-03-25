@@ -328,6 +328,16 @@ class AccessControl(BasePlugin):
         layout: Dict[str, object] = {
             "sections": [
                 {
+                    "id": "config",
+                    "title": "Config",
+                    "type": "table",
+                    "path": "config_items",
+                    "columns": [
+                        {"key": "key", "label": "Key"},
+                        {"key": "value", "label": "Value"},
+                    ],
+                },
+                {
                     "id": "policy",
                     "title": "Policy",
                     "type": "kv",
@@ -337,16 +347,6 @@ class AccessControl(BasePlugin):
                         {"key": "deny_response", "label": "Deny response"},
                         {"key": "allow_rules", "label": "Allow rules"},
                         {"key": "deny_rules", "label": "Deny rules"},
-                    ],
-                },
-                {
-                    "id": "config",
-                    "title": "Config",
-                    "type": "table",
-                    "path": "config_items",
-                    "columns": [
-                        {"key": "key", "label": "Key"},
-                        {"key": "value", "label": "Value"},
                     ],
                 },
             ]

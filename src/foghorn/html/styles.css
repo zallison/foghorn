@@ -273,12 +273,17 @@ a:visited {
     font-size: 1rem;
 }
 
-.fh-stats-group-title-link {
+.fh-stats-group-title-link,
+.fh-stats-group-title-link:link,
+.fh-stats-group-title-link:visited {
     cursor: pointer;
+    text-decoration: none !important;
 }
 
-.fh-stats-group-title-link:hover {
-    text-decoration: underline;
+.fh-stats-group-title-link:hover,
+
+.fh-stats-group-title-link:focus-visible {
+    text-decoration: underline !important;
 }
 
 .fh-kv-list {
@@ -522,11 +527,69 @@ table {
 .fh-query-log-entry-link {
     cursor: pointer;
     color: var(--accent);
-    text-decoration: underline;
+    text-decoration: none;
 }
 
 .fh-query-log-entry-link:hover {
+    text-decoration: underline;
     opacity: 0.9;
+}
+
+.fh-query-log-entry-link:focus-visible {
+    text-decoration: underline;
+}
+
+.fh-query-log-filter-main:focus-visible {
+    text-decoration: underline;
+    text-underline-offset: 2px;
+}
+
+.fh-query-log-filter-control {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.2rem;
+    max-width: 100%;
+}
+
+.fh-query-log-filter-main {
+    border: none;
+    background: transparent;
+    padding: 0;
+    margin: 0;
+    color: inherit;
+    font: inherit;
+    text-decoration: none;
+    text-underline-offset: 2px;
+    cursor: pointer;
+}
+
+.fh-query-log-filter-main:hover {
+    text-decoration: underline;
+    text-underline-offset: 2px;
+    opacity: 0.9;
+}
+
+.fh-query-log-filter-add {
+    border: none;
+    background: transparent;
+    padding: 0 0.1rem;
+    margin: 0;
+    color: var(--accent);
+    font: inherit;
+    font-size: 0.75rem;
+    line-height: 1;
+    cursor: pointer;
+    opacity: 0;
+    pointer-events: none;
+    transform: translateX(-2px);
+    transition: opacity 120ms ease, transform 120ms ease;
+}
+
+td:hover .fh-query-log-filter-add,
+.fh-query-log-filter-control:focus-within .fh-query-log-filter-add {
+    opacity: 1;
+    pointer-events: auto;
+    transform: translateX(0);
 }
 .fh-query-log-timestamp {
     white-space: nowrap;
