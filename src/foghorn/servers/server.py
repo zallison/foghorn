@@ -187,7 +187,7 @@ def _bg_submit(key: object, fn) -> None:
         _ = key
         submit_bg_executor_task(fn)
     except Exception:
-        pass
+        logger.debug("Failed to submit background task", exc_info=True)
 
 
 def _schedule_notify_axfr_refresh(zone_name: str, upstream: Dict) -> None:
@@ -656,6 +656,7 @@ def _resolve_core(
                             # Track the EDE info-code used for this synthetic
                             # NXDOMAIN so metrics and warm-loaded aggregates can
                             # expose EDE volumes alongside rcodes.
+                            deny_source = "pre_plugin"
                             try:
                                 if hasattr(stats, "record_ede_code"):
                                     stats.record_ede_code(ede_code)
@@ -694,6 +695,8 @@ def _resolve_core(
                                 label = (
                                     f"pre_deny_{short}" if short else "pre_deny_plugin"
                                 )
+                                if short:
+                                    deny_source = short
                                 stats.record_cache_pre_plugin(label)
                             except Exception:  # pragma: no cover - defensive
                                 pass
@@ -706,11 +709,13 @@ def _resolve_core(
                             )
                             if not _suppress_qlog:
                                 result_ctx = {
-                                    "source": "pre_plugin",
+                                    "source": deny_source,
                                     "action": "deny",
                                     "ede_code": int(ede_code),
                                     "ede_text": str(ede_text),
                                 }
+                                if deny_source != "pre_plugin":
+                                    result_ctx["plugin"] = deny_source
                                 if listener is not None:
                                     result_ctx["listener"] = listener
                                 if secure is not None:
@@ -1760,6 +1765,13 @@ def _resolve_core(
             rcode_name=rcode_name,
         )
     except Exception as e:
+        logger.exception(
+            "Unhandled resolver exception (client_ip=%s listener=%s secure=%s query_size=%s)",
+            client_ip,
+            listener,
+            secure,
+            len(data) if isinstance(data, (bytes, bytearray)) else "unknown",
+        )
         # Outer exception handler: synthesize SERVFAIL and record stats.
         try:
             req = DNSRecord.parse(data)

@@ -1,9 +1,12 @@
 import asyncio
+import logging
 import socketserver
 from concurrent.futures import Executor
 from typing import Callable
 
 from foghorn.security_limits import MAX_DNS_TCP_MESSAGE_BYTES
+
+logger = logging.getLogger("foghorn.servers.tcp_server")
 
 
 class _TCPHandler(socketserver.BaseRequestHandler):
@@ -23,6 +26,11 @@ class _TCPHandler(socketserver.BaseRequestHandler):
     resolver: Callable[[bytes, str], bytes] = lambda b, ip: b
 
     def handle(self) -> None:
+        peer_ip = (
+            self.client_address[0]
+            if isinstance(self.client_address, tuple)
+            else "0.0.0.0"
+        )
         try:
             from dnslib import QTYPE, DNSRecord
 
@@ -31,11 +39,6 @@ class _TCPHandler(socketserver.BaseRequestHandler):
             sock = self.request  # type: ignore
             # Set a modest timeout to avoid permanent hangs
             sock.settimeout(15)
-            peer_ip = (
-                self.client_address[0]
-                if isinstance(self.client_address, tuple)
-                else "0.0.0.0"
-            )
             while True:
                 hdr = _recv_exact(sock, 2)
                 if not hdr or len(hdr) != 2:
@@ -87,10 +90,13 @@ class _TCPHandler(socketserver.BaseRequestHandler):
                 if not resp:
                     break
                 sock.sendall(len(resp).to_bytes(2, "big") + resp)
-        except (
-            Exception
-        ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-            pass
+        except (ConnectionError, OSError, TimeoutError):
+            return
+        except Exception:  # pragma: no cover - defensive: unexpected transport failure
+            logger.exception(
+                "Unhandled error in threaded TCP handler for client %s",
+                peer_ip,
+            )
 
 
 def serve_tcp_threaded(
@@ -342,14 +348,15 @@ async def _handle_conn(
             # Write back
             writer.write(len(response).to_bytes(2, "big") + response)
             await writer.drain()
-    except (
-        asyncio.TimeoutError
-    ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-        pass  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-    except (
-        Exception
-    ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-        pass  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+    except asyncio.TimeoutError:
+        pass  # pragma: no cover - defensive: idle timeout closes connection
+    except (ConnectionError, OSError):
+        pass  # pragma: no cover - defensive: expected network disconnect path
+    except Exception:  # pragma: no cover - defensive: unexpected transport failure
+        logger.exception(
+            "Unhandled error in asyncio TCP handler for client %s",
+            client_ip,
+        )
     finally:
         try:
             writer.close()

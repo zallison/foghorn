@@ -284,7 +284,11 @@ class _UDPProtocol(asyncio.DatagramProtocol):
                 try:
                     self._transport.sendto(resp, addr)
                 except Exception:
-                    pass
+                    logger.debug(
+                        "Failed to send UDP overload response to %s",
+                        client_ip,
+                        exc_info=True,
+                    )
             return
 
         self._inflight_total += 1
@@ -330,7 +334,11 @@ class _UDPProtocol(asyncio.DatagramProtocol):
                 if resp and self._transport is not None:
                     self._transport.sendto(resp, addr)
             except Exception:
-                pass
+                logger.debug(
+                    "Failed to send UDP fallback response to %s",
+                    client_ip,
+                    exc_info=True,
+                )
         finally:
             try:
                 self._inflight_total = max(0, int(self._inflight_total) - 1)

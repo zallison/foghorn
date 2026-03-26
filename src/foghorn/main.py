@@ -1238,10 +1238,16 @@ def main(argv: List[str] | None = None) -> int:
 
             try:
                 return not t.is_alive()
-            except Exception:
+            except AttributeError:
                 # Test doubles used in unit tests may not implement is_alive();
                 # treat them as already exited so the keepalive loop can
                 # terminate promptly.
+                return True
+            except Exception:
+                logger.debug(
+                    "Failed to check listener thread liveness; treating thread as dead",
+                    exc_info=True,
+                )
                 return True
 
         while not shutdown_event.is_set():
