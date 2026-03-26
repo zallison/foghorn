@@ -11,6 +11,7 @@ Outputs:
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 
 import pytest
@@ -243,3 +244,37 @@ def test_insert_query_log_returns_early_when_unhealthy(
     # No additional publishes should have been recorded beyond the initial
     # construction-time log_start marker.
     assert getattr(client, "publishes", []) == initial_publishes
+
+
+def test_mqtt_logging_retention_settings_are_skipped_with_debug_log(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Brief: MQTT backend logs and ignores unsupported retention settings.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+      - caplog: pytest log capture fixture.
+
+    Outputs:
+      - None; asserts a debug message is emitted and backend still initializes.
+    """
+
+    import foghorn.plugins.querylog.mqtt_logging as mqtt_logging_mod
+
+    monkeypatch.setitem(
+        __import__("sys").modules, "paho.mqtt.client", _FakeMqttModule()
+    )
+
+    with caplog.at_level(logging.DEBUG, logger=mqtt_logging_mod.__name__):
+        backend = MqttLogging(
+            topic="foghorn/query_log",
+            retention_max_records=100,
+            retention_days=7.0,
+        )
+
+    assert any(
+        "does not support retention pruning" in rec.message for rec in caplog.records
+    )
+    assert backend.health_check() is True
+    backend.close()
