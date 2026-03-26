@@ -712,6 +712,10 @@ class DNSUDPHandler(DNSRuntimeState, socketserver.BaseRequestHandler):
             if not wire:
                 return
         except Exception:  # pragma: no cover - defensive: outermost guard
+            logger.exception(
+                "Unexpected UDP handler resolver failure for client %s",
+                client_ip,
+            )
             try:
                 # Best-effort SERVFAIL synthesis if the shared resolver fails
                 # unexpectedly.
@@ -793,16 +797,21 @@ class _UDPHandler(socketserver.BaseRequestHandler):
 
     def handle(self) -> None:
         data, sock = self.request  # type: ignore
+        peer_ip = (
+            self.client_address[0]
+            if isinstance(self.client_address, tuple)
+            else "0.0.0.0"
+        )
         try:
-            peer_ip = (
-                self.client_address[0]
-                if isinstance(self.client_address, tuple)
-                else "0.0.0.0"
-            )
             resp = self.resolver(data, peer_ip)
             sock.sendto(resp, self.client_address)
-        except Exception:
-            pass  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+        except (ConnectionError, OSError, TimeoutError):
+            return
+        except Exception:  # pragma: no cover - defensive: unexpected transport failure
+            logger.exception(
+                "Unhandled exception in UDP request handler for client %s",
+                peer_ip,
+            )
 
 
 def serve_udp(host: str, port: int, resolver: Callable[[bytes, str], bytes]) -> None:

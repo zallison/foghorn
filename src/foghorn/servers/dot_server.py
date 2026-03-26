@@ -1,7 +1,10 @@
 import asyncio
+import logging
 import ssl
 from concurrent.futures import Executor
 from typing import Callable, Optional
+
+logger = logging.getLogger("foghorn.servers.dot_server")
 
 
 async def _read_exact(reader: asyncio.StreamReader, n: int) -> bytes:
@@ -184,14 +187,15 @@ async def _handle_conn(
             query_count += 1
             writer.write(len(response).to_bytes(2, "big") + response)
             await writer.drain()
-    except (
-        asyncio.TimeoutError
-    ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-        pass  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-    except (
-        Exception
-    ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-        pass  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+    except asyncio.TimeoutError:
+        pass  # pragma: no cover - defensive: idle timeout closes connection
+    except (ConnectionError, OSError, ssl.SSLError):
+        pass  # pragma: no cover - defensive: expected transport disconnect path
+    except Exception:  # pragma: no cover - defensive: unexpected transport failure
+        logger.exception(
+            "Unhandled DoT handler exception for client %s",
+            client_ip,
+        )
     finally:
         try:
             writer.close()
@@ -288,7 +292,12 @@ async def serve_dot(
         try:
             on_listen(int(listen_port))
         except Exception:
-            pass
+            logger.debug(
+                "DoT on_listen callback failed for %s:%d",
+                host,
+                int(listen_port),
+                exc_info=True,
+            )
 
     async with server:
         await server.serve_forever()
