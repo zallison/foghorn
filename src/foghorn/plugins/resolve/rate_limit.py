@@ -153,6 +153,12 @@ class RateLimitConfig(BaseModel):
       - deny_log_interval_seconds: Minimum seconds between per-key deny log
         messages (0 logs every deny; default 10).  Suppressed denies are
         counted and the total is included in the next emitted message.
+      - deny_log_first_n: Number of denied queries to write a persistent
+        query-log row for at the start of each blocked episode per key.
+        After this many logged denies the query-log row is suppressed for the
+        remainder of the episode; counting resets when the key's rate drops
+        back below the allowed threshold.  0 suppresses all query-log rows
+        for rate-limited queries (previous behavior).  Default 3.
       - psl_strict: When True, fail startup if PSL extraction is unavailable
         in domain-based modes.
 
@@ -190,7 +196,8 @@ class RateLimitConfig(BaseModel):
     ttl: int = Field(default=60, ge=0)
     stats_log_interval_seconds: int = Field(default=3600, ge=0)
     stats_window_seconds: int = Field(default=0, ge=0)
-    deny_log_interval_seconds: int = Field(default=10, ge=0)
+    deny_log_interval_seconds: int = Field(default=60, ge=0)
+    deny_log_first_n: int = Field(default=3, ge=0)
     psl_strict: bool = Field(default=False)
 
     @model_validator(mode="before")
@@ -464,11 +471,18 @@ class RateLimit(BasePlugin):
         # Deny-log throttle: per-key last-logged timestamp and suppressed count
         # to prevent per-deny logging from becoming a DoS vector itself.
         self.deny_log_interval_seconds = self._parse_int_config(
-            "deny_log_interval_seconds", 10, minimum=0
+            "deny_log_interval_seconds", 60, minimum=0
         )
         self._deny_log_ts: dict[str, float] = {}
         self._deny_log_suppressed: dict[str, int] = {}
         self._deny_log_lock = threading.Lock()
+
+        # Per-key blocked-episode query-log counter.  Tracks how many deny
+        # decisions have been given a visible query-log row in the current
+        # blocked episode.  Resets when the key's rate drops below threshold.
+        self.deny_log_first_n = self._parse_int_config("deny_log_first_n", 3, minimum=0)
+        self._deny_episode_count: dict[str, int] = {}
+        self._deny_episode_lock = threading.Lock()
 
         # Deny policy configuration
         deny_resp = str(
@@ -1843,7 +1857,7 @@ class RateLimit(BasePlugin):
             Suppressed entries are counted and included in the next message.
         """
 
-        interval = int(getattr(self, "deny_log_interval_seconds", 10) or 10)
+        interval = int(getattr(self, "deny_log_interval_seconds", 60) or 60)
         if interval <= 0:
             logger.info(msg, *args)
             return
@@ -1869,12 +1883,57 @@ class RateLimit(BasePlugin):
         else:
             logger.info(msg, *args)
 
+    def _episode_suppress(self, key: str) -> bool:
+        """Brief: Track a denied query for key; return whether to suppress query log.
+
+        Inputs:
+          - key: Rate-limit bucket key for this request.
+
+        Outputs:
+          - bool: True when the persistent query-log row should be suppressed.
+            Returns False for the first deny_log_first_n denies in an episode
+            so those queries are visible in the log, then True for the rest.
+            When deny_log_first_n is 0, always returns True (suppress all).
+
+        Notes:
+          - The episode counter resets via _episode_reset() when the key's rate
+            drops below the allowed threshold, so the next blocked episode
+            starts fresh with another deny_log_first_n visible rows.
+        """
+
+        first_n = int(getattr(self, "deny_log_first_n", 3) or 0)
+        if first_n == 0:
+            return True
+        with self._deny_episode_lock:
+            count = self._deny_episode_count.get(key, 0) + 1
+            self._deny_episode_count[key] = count
+        return count > first_n
+
+    def _episode_reset(self, key: str) -> None:
+        """Brief: Reset the deny-episode counter for key.
+
+        Inputs:
+          - key: Rate-limit bucket key.
+
+        Outputs:
+          - None; removes the key from the episode counter so the next blocked
+            episode starts fresh with deny_log_first_n visible query-log rows.
+
+        Notes:
+          - Called from pre_resolve whenever a request is NOT denied, signalling
+            that the key's rate has returned to an acceptable level.
+        """
+
+        with self._deny_episode_lock:
+            self._deny_episode_count.pop(key, None)
+
     def _build_deny_decision(
         self,
         qname: str,
         qtype: int,
         raw_req: bytes,
         ctx: PluginContext,
+        suppress_query_log: bool = True,
     ) -> PluginDecision:
         """Brief: Build a PluginDecision for a rate-limited query.
 
@@ -1883,21 +1942,28 @@ class RateLimit(BasePlugin):
           - qtype: DNS query type integer.
           - raw_req: Raw DNS request wire bytes.
           - ctx: PluginContext for the request.
+          - suppress_query_log: When True (default), instructs the core resolver
+            to skip the persistent query-log row for this deny.  Callers
+            should pass False for the first deny_log_first_n denies per episode
+            so that the offending client is visible in query logs.
 
         Outputs:
           - PluginDecision with action 'deny' or 'override' based on
-            configuration.  All decisions carry suppress_query_log=True so the
-            server skips per-row persistent logging for high-volume denies.
+            configuration.  The suppress_query_log value is forwarded to all
+            returned decisions.
         """
 
         mode = (getattr(self, "deny_response", "refused") or "refused").lower()
         if mode == "drop":
+            # Drop responses are never logged (no response is sent to the client).
             return self._decision(
                 action="drop", stat="rate_limit", suppress_query_log=True
             )
         if mode == "nxdomain":
             return self._decision(
-                action="deny", stat="rate_limit", suppress_query_log=True
+                action="deny",
+                stat="rate_limit",
+                suppress_query_log=suppress_query_log,
             )
 
         if mode in {"refused", "servfail", "noerror_empty", "nodata"}:
@@ -1947,13 +2013,15 @@ class RateLimit(BasePlugin):
                 action="override",
                 response=reply.pack(),
                 stat="rate_limit",
-                suppress_query_log=True,
+                suppress_query_log=suppress_query_log,
             )
 
         if mode == "ip":
             if qtype not in {QTYPE.A, QTYPE.AAAA}:
                 return self._decision(
-                    action="deny", stat="rate_limit", suppress_query_log=True
+                    action="deny",
+                    stat="rate_limit",
+                    suppress_query_log=suppress_query_log,
                 )
             ipaddr: Optional[str] = None
             if qtype == QTYPE.A and self.deny_response_ip4:
@@ -1968,11 +2036,15 @@ class RateLimit(BasePlugin):
                         action="override",
                         response=wire,
                         stat="rate_limit",
-                        suppress_query_log=True,
+                        suppress_query_log=suppress_query_log,
                     )
 
         # Fallback: simple deny (refused by default)
-        return self._decision(action="deny", stat="rate_limit", suppress_query_log=True)
+        return self._decision(
+            action="deny",
+            stat="rate_limit",
+            suppress_query_log=suppress_query_log,
+        )
 
     def pre_resolve(
         self, qname: str, qtype: int, req: bytes, ctx: PluginContext
@@ -2020,7 +2092,10 @@ class RateLimit(BasePlugin):
                     global_rps,
                     global_allowed_rps,
                 )
-                return self._build_deny_decision(qname, qtype, req, ctx)
+                _suppress = self._episode_suppress(key)
+                return self._build_deny_decision(
+                    qname, qtype, req, ctx, suppress_query_log=_suppress
+                )
 
         profile = None
         profile_is_bootstrap = False
@@ -2052,8 +2127,12 @@ class RateLimit(BasePlugin):
                     if self.max_enforce_rps > 0.0:
                         allowed_rps = min(allowed_rps, float(self.max_enforce_rps))
                     if current_rps > allowed_rps:
-                        return self._build_deny_decision(qname, qtype, req, ctx)
+                        _suppress = self._episode_suppress(key)
+                        return self._build_deny_decision(
+                            qname, qtype, req, ctx, suppress_query_log=_suppress
+                        )
                 # No baseline yet; learning-only phase.
+                self._episode_reset(key)
                 return None
 
         avg_rps, _max_rps, samples = profile
@@ -2066,7 +2145,11 @@ class RateLimit(BasePlugin):
                 if self.max_enforce_rps > 0.0:
                     allowed_rps = min(allowed_rps, float(self.max_enforce_rps))
                 if current_rps > allowed_rps:
-                    return self._build_deny_decision(qname, qtype, req, ctx)
+                    _suppress = self._episode_suppress(key)
+                    return self._build_deny_decision(
+                        qname, qtype, req, ctx, suppress_query_log=_suppress
+                    )
+            self._episode_reset(key)
             return None
         if float(avg_rps) < float(self.min_enforce_rps):
             hard_cap_rps = float(getattr(self, "max_enforce_rps", 0.0) or 0.0)
@@ -2081,7 +2164,11 @@ class RateLimit(BasePlugin):
                     hard_cap_rps,
                     float(self.min_enforce_rps),
                 )
-                return self._build_deny_decision(qname, qtype, req, ctx)
+                _suppress = self._episode_suppress(key)
+                return self._build_deny_decision(
+                    qname, qtype, req, ctx, suppress_query_log=_suppress
+                )
+            self._episode_reset(key)
             return None
 
         # Derive allowed RPS from learned average and refresh thresholds at the
@@ -2110,6 +2197,7 @@ class RateLimit(BasePlugin):
             allowed_rps = burst_allowed_rps
 
         if current_rps <= allowed_rps:
+            self._episode_reset(key)
             return None
 
         self._throttled_deny_log(
@@ -2120,7 +2208,10 @@ class RateLimit(BasePlugin):
             avg_rps,
             allowed_rps,
         )
-        return self._build_deny_decision(qname, qtype, req, ctx)
+        _suppress = self._episode_suppress(key)
+        return self._build_deny_decision(
+            qname, qtype, req, ctx, suppress_query_log=_suppress
+        )
 
     def get_admin_pages(self) -> list[AdminPageSpec]:
         """Brief: Describe the RateLimit admin page for the web UI.
