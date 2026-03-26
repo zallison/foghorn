@@ -528,8 +528,43 @@ def _resolve_core(
             )
 
         q = req.questions[0]
-        qname = str(q.qname).rstrip(".")
+        # Preserve the raw qname (with trailing dot if present) to detect
+        # absolute (FQDN) queries before stripping.
+        _qname_raw = str(q.qname)
+        qname = _qname_raw.rstrip(".")
         qtype = q.qtype
+
+        # Search-domain qualification: when a search domain is configured and
+        # the qname matches one of the configured gates, append the suffix.
+        # Applied before cache key, stats, plugins, and forwarding so everything
+        # downstream sees the effective (qualified) name consistently.
+        try:
+            if snap is not None:
+                _search = str(getattr(snap, "search_domain", "") or "")
+                if _search:
+                    from foghorn.utils.dns_names import should_qualify, qualify_name
+
+                    _qual = should_qualify(
+                        _qname_raw,
+                        qualify_single_label=bool(
+                            getattr(snap, "qualify_single_label", True)
+                        ),
+                        qualify_non_proper_tld=getattr(
+                            snap, "qualify_non_proper_tld", False
+                        ),
+                        non_proper_tld_mode=str(
+                            getattr(snap, "non_proper_tld_mode", "suffix") or "suffix"
+                        ),
+                    )
+                    if _qual:
+                        _qualified = qualify_name(qname, _search)
+                        if _qualified is not None:
+                            qname = _qualified
+        except (
+            Exception
+        ):  # pragma: no cover - defensive: qualification failure is non-fatal
+            pass
+
         cache_key = (qname.lower(), qtype)
 
         # Record query stats (mirrors DNSUDPHandler.handle)
