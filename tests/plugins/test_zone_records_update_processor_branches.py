@@ -1196,6 +1196,72 @@ def test_apply_update_operations_branch_matrix(monkeypatch: pytest.MonkeyPatch) 
     assert err_qtype_fallback is None
 
 
+def test_apply_update_operations_detects_conflict_without_mutating_live_records() -> (
+    None
+):
+    """Brief: Stale commit is rejected when records change after UPDATE snapshot.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - Asserts conflict rcode and that live records were not partially mutated.
+    """
+
+    class _ConcurrentMutatingLock:
+        """Brief: Simulate an interleaving write before commit lock acquisition."""
+
+        def __init__(self, plugin_ref: SimpleNamespace) -> None:
+            self._plugin_ref = plugin_ref
+            self._enter_count = 0
+
+        def __enter__(self) -> "_ConcurrentMutatingLock":
+            self._enter_count += 1
+            if self._enter_count == 2:
+                self._plugin_ref.records[("race.example.com", int(dns.rdatatype.A))] = (
+                    300,
+                    ["198.51.100.200"],
+                    ["src"],
+                )
+            return self
+
+        def __exit__(self, _exc_type, _exc, _tb) -> bool:
+            return False
+
+    plugin = SimpleNamespace(
+        records={
+            ("del.example.com", int(dns.rdatatype.A)): (
+                300,
+                ["192.0.2.10", "192.0.2.11"],
+                ["src"],
+            )
+        },
+        _update_managed_owners=set(),
+    )
+    plugin._records_lock = _ConcurrentMutatingLock(plugin)
+
+    rcode, err = up.apply_update_operations(
+        [
+            _RRset(
+                name="del.example.com",
+                rdtype=int(dns.rdatatype.A),
+                rdclass=int(dns.rdataclass.ANY),
+                values=["192.0.2.10"],
+            )
+        ],
+        plugin=plugin,
+        zone_apex="example.com",
+    )
+
+    assert rcode == 2
+    assert err == "Concurrent update conflict detected"
+    assert plugin.records[("del.example.com", int(dns.rdatatype.A))][1] == [
+        "192.0.2.10",
+        "192.0.2.11",
+    ]
+    assert ("race.example.com", int(dns.rdatatype.A)) in plugin.records
+
+
 def test_apply_update_operations_add_and_single_value_delete_paths() -> None:
     """Brief: apply_update_operations covers CLASS NONE add and CLASS ANY single-value delete branches."""
     plugin = SimpleNamespace(

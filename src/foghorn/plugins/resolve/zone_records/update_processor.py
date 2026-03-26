@@ -240,6 +240,61 @@ class UpdateContext:
         self.psk_token_config: Optional[dict] = None
 
 
+def _clone_records_for_update_processing(
+    records: Dict[Tuple[str, int], Tuple[int, List[str], List[str]]],
+) -> Dict[Tuple[str, int], Tuple[int, List[str], List[str]]]:
+    """Brief: Build an isolated, mutable clone of a records mapping.
+
+    Inputs:
+      - records: Mapping of (owner, qtype) -> (ttl, values[, sources]).
+
+    Outputs:
+      - Detached mapping with copied values/sources lists for safe mutation.
+    """
+    cloned: Dict[Tuple[str, int], Tuple[int, List[str], List[str]]] = {}
+    for key, entry in (records or {}).items():
+        try:
+            owner, qtype = key
+        except (TypeError, ValueError):
+            continue
+
+        try:
+            ttl, values, sources = entry
+        except (TypeError, ValueError):
+            try:
+                ttl, values = entry
+                sources = []
+            except (TypeError, ValueError):
+                continue
+
+        try:
+            qtype_int = int(qtype)
+            ttl_int = int(ttl)
+        except (TypeError, ValueError):
+            continue
+
+        if isinstance(values, set):
+            values_list = sorted((str(value) for value in values), key=str)
+        elif isinstance(values, (list, tuple)):
+            values_list = list(values)
+        elif values is None:
+            values_list = []
+        else:
+            values_list = [str(values)]
+
+        if isinstance(sources, set):
+            sources_list = sorted((str(source) for source in sources), key=str)
+        elif isinstance(sources, (list, tuple)):
+            sources_list = list(sources)
+        elif sources is None:
+            sources_list = []
+        else:
+            sources_list = [str(sources)]
+
+        cloned[(str(owner), qtype_int)] = (ttl_int, values_list, sources_list)
+    return cloned
+
+
 def process_update_message(
     request_data: bytes,
     zone_apex: str,
@@ -758,7 +813,16 @@ def process_update_message(
         pass
 
     # Get current records
-    current_records = dict(getattr(plugin, "records", {}))
+    records_lock = getattr(plugin, "_records_lock", None)
+    if records_lock is None:
+        current_records = _clone_records_for_update_processing(
+            getattr(plugin, "records", {}) or {}
+        )
+    else:
+        with records_lock:
+            current_records = _clone_records_for_update_processing(
+                getattr(plugin, "records", {}) or {}
+            )
 
     # Check prerequisites
     if prereqs:
@@ -1300,12 +1364,16 @@ def apply_update_operations(
     # Snapshot current records
     lock = getattr(plugin, "_records_lock", None)
     if lock is None:
-        snapshot = dict(getattr(plugin, "records", {}))
+        snapshot = _clone_records_for_update_processing(
+            getattr(plugin, "records", {}) or {}
+        )
     else:
         with lock:
-            snapshot = dict(getattr(plugin, "records", {}))
+            snapshot = _clone_records_for_update_processing(
+                getattr(plugin, "records", {}) or {}
+            )
 
-    new_records = dict(snapshot)
+    new_records = _clone_records_for_update_processing(snapshot)
     default_ttl = 300  # Default TTL for updates without explicit TTL
 
     def _bump_soa_serial_for_zone(
@@ -1353,6 +1421,7 @@ def apply_update_operations(
 
     # Build normalized actions for journaling
     actions: List[Dict[str, Any]] = []
+    update_managed_owner_additions: set[str] = set()
 
     for update_rrset in updates:
         # Get owner name from the RRset
@@ -1418,9 +1487,7 @@ def apply_update_operations(
                 for k in keys_to_delete:
                     del new_records[k]
                 # Mark this owner as update-managed
-                update_managed_owners = getattr(plugin, "_update_managed_owners", None)
-                if isinstance(update_managed_owners, set):
-                    update_managed_owners.add(owner_norm)
+                update_managed_owner_additions.add(owner_norm)
                 actions.append(
                     {
                         "type": "name_delete_all",
@@ -1480,6 +1547,7 @@ def apply_update_operations(
             return 1, f"Unsupported update class {qclass}"
 
     journal_entry = None
+    journal_append_kwargs: Optional[Dict[str, Any]] = None
 
     # Write journal entry if enabled (fail-closed: if journal write fails, don't commit)
     if journal_writer is not None and actor is not None:
@@ -1502,21 +1570,18 @@ def apply_update_operations(
         max_rdata_length = int(security_cfg.get("max_rdata_length", 0) or 0)
         max_transaction_bytes = int(security_cfg.get("max_transaction_bytes", 0) or 0)
         max_actions = int(security_cfg.get("max_updates_per_message", 0) or 0)
-
-        journal_entry = journal_writer.append_entry(
-            actions=actions,
-            actor=actor,
-            origin_node_id=str(getattr(plugin, "_dns_update_node_id", "unknown")),
-            fsync_mode=fsync_mode,
-            fsync_interval_ms=fsync_interval,
-            max_actions=max_actions,
-            max_owner_length=max_owner_length,
-            max_rdata_length=max_rdata_length,
-            max_transaction_bytes=max_transaction_bytes,
-            max_journal_bytes=max_journal_bytes,
-        )
-        if journal_entry is None:
-            return 2, "Journal write failed"
+        journal_append_kwargs = {
+            "actions": actions,
+            "actor": actor,
+            "origin_node_id": str(getattr(plugin, "_dns_update_node_id", "unknown")),
+            "fsync_mode": fsync_mode,
+            "fsync_interval_ms": fsync_interval,
+            "max_actions": max_actions,
+            "max_owner_length": max_owner_length,
+            "max_rdata_length": max_rdata_length,
+            "max_transaction_bytes": max_transaction_bytes,
+            "max_journal_bytes": max_journal_bytes,
+        }
 
     # Commit under lock
     def _rebuild_name_index_from_records(
@@ -1589,19 +1654,52 @@ def apply_update_operations(
             exc_info=True,
         )
 
+    conflict_error = "Concurrent update conflict detected"
     if lock is None:
+        current_records = _clone_records_for_update_processing(
+            getattr(plugin, "records", {}) or {}
+        )
+        if current_records != snapshot:
+            logger.warning(
+                "Concurrent DNS UPDATE conflict detected for zone %s; stale commit rejected",
+                apex_norm,
+            )
+            return 2, conflict_error
+        if journal_writer is not None and journal_append_kwargs is not None:
+            journal_entry = journal_writer.append_entry(**journal_append_kwargs)
+            if journal_entry is None:
+                return 2, "Journal write failed"
         plugin.records = new_records
         if rebuilt_name_index is not None:
             plugin._name_index = rebuilt_name_index
         if rebuilt_wildcard_owners is not None:
             plugin._wildcard_owners = rebuilt_wildcard_owners
+        update_managed_owners = getattr(plugin, "_update_managed_owners", None)
+        if isinstance(update_managed_owners, set):
+            update_managed_owners.update(update_managed_owner_additions)
     else:
         with lock:
+            current_records = _clone_records_for_update_processing(
+                getattr(plugin, "records", {}) or {}
+            )
+            if current_records != snapshot:
+                logger.warning(
+                    "Concurrent DNS UPDATE conflict detected for zone %s; stale commit rejected",
+                    apex_norm,
+                )
+                return 2, conflict_error
+            if journal_writer is not None and journal_append_kwargs is not None:
+                journal_entry = journal_writer.append_entry(**journal_append_kwargs)
+                if journal_entry is None:
+                    return 2, "Journal write failed"
             plugin.records = new_records
             if rebuilt_name_index is not None:
                 plugin._name_index = rebuilt_name_index
             if rebuilt_wildcard_owners is not None:
                 plugin._wildcard_owners = rebuilt_wildcard_owners
+            update_managed_owners = getattr(plugin, "_update_managed_owners", None)
+            if isinstance(update_managed_owners, set):
+                update_managed_owners.update(update_managed_owner_additions)
 
     if journal_writer is not None and journal_entry is not None:
         try:
