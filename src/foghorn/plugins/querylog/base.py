@@ -17,6 +17,7 @@ scripts) can remain backend-agnostic.
 from __future__ import annotations
 
 import logging
+import math
 import queue
 import threading
 import time
@@ -805,3 +806,73 @@ class BaseStatsStore:
             interval_i = 0
 
         return start_f, end_f, interval_i
+
+    @staticmethod
+    def _normalize_retention_max_records(raw: object) -> int | None:
+        """Brief: Normalize a max-records retention setting.
+
+        Inputs:
+          - raw: Raw configured max-records value.
+
+        Outputs:
+          - int | None: Positive integer max-records limit when valid, else None.
+        """
+
+        if raw is None:
+            return None
+
+        try:
+            value = int(raw)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return None
+
+        if value <= 0:
+            return None
+        return value
+
+    @staticmethod
+    def _normalize_retention_days(raw: object) -> float | None:
+        """Brief: Normalize a day-based retention setting.
+
+        Inputs:
+          - raw: Raw configured retention window in days.
+
+        Outputs:
+          - float | None: Positive finite days value when valid, else None.
+        """
+
+        if raw is None:
+            return None
+
+        try:
+            value = float(raw)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return None
+
+        if not math.isfinite(value) or value <= 0.0:
+            return None
+        return value
+
+    @staticmethod
+    def _retention_cutoff_ts(
+        retention_days: float | None,
+        *,
+        now_ts: float | None = None,
+    ) -> float | None:
+        """Brief: Compute an absolute cutoff timestamp from a days-based policy.
+
+        Inputs:
+          - retention_days: Positive number of days to retain, or None.
+          - now_ts: Optional current Unix timestamp override.
+
+        Outputs:
+          - float | None: Inclusive cutoff timestamp (keep records >= cutoff),
+            or None when no day-based retention is configured.
+        """
+
+        if retention_days is None:
+            return None
+
+        if now_ts is None:
+            now_ts = time.time()
+        return float(now_ts) - (float(retention_days) * 86400.0)

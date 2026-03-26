@@ -152,6 +152,8 @@ class InfluxLogging(BaseStatsStore):
         session_kwargs: Optional[Dict[str, Any]] = None,
         async_logging: bool = True,
         max_logging_queue: int = 4096,
+        retention_max_records: Optional[int] = None,
+        retention_days: Optional[float] = None,
         **_: Any,
     ) -> None:
         self._write_url = str(write_url)
@@ -178,6 +180,12 @@ class InfluxLogging(BaseStatsStore):
             self._max_logging_queue = int(max_logging_queue)
         except Exception:
             self._max_logging_queue = 4096
+        if retention_max_records is not None or retention_days is not None:
+            logger.debug(
+                "InfluxLogging does not support retention pruning; ignoring retention_max_records=%r retention_days=%r",
+                retention_max_records,
+                retention_days,
+            )
 
         self._params: Dict[str, str] = {"precision": self._precision}
         if self._org is not None:

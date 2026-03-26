@@ -25,6 +25,8 @@ import json
 import logging
 import os
 import socket
+import threading
+import time
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
@@ -58,9 +60,12 @@ class JsonLogging(BaseStatsStore):
         file_path: str,
         async_logging: bool = False,
         max_logging_queue: int = 4096,
+        retention_max_records: Optional[int] = None,
+        retention_days: Optional[float] = None,
         **_: Any,
     ) -> None:
         self._healthy = False
+        self._io_lock = threading.RLock()
 
         # Normalize and create the target directory if needed.
         path = os.path.abspath(os.path.expanduser(str(file_path)))
@@ -91,6 +96,12 @@ class JsonLogging(BaseStatsStore):
             self._max_logging_queue = int(max_logging_queue)
         except Exception:
             self._max_logging_queue = 4096
+        self._query_log_retention_max_records = (
+            BaseStatsStore._normalize_retention_max_records(retention_max_records)
+        )
+        self._query_log_retention_days = BaseStatsStore._normalize_retention_days(
+            retention_days
+        )
 
         # Emit a header line that marks the start of a logging session. Downstream
         # tools can treat this as a lightweight metadata record preceding the
@@ -142,16 +153,18 @@ class JsonLogging(BaseStatsStore):
         """
 
         try:
-            fh = getattr(self, "_fh", None)
-            if fh is not None:
-                try:
-                    fh.flush()
-                except Exception:  # pragma: no cover - defensive
-                    logger.exception("Failed to flush JsonLogging file on close")
-                try:
-                    fh.close()
-                except Exception:  # pragma: no cover - defensive
-                    logger.exception("Failed to close JsonLogging file handle")
+            with self._io_lock:
+                fh = getattr(self, "_fh", None)
+                if fh is not None:
+                    try:
+                        fh.flush()
+                    except Exception:  # pragma: no cover - defensive
+                        logger.exception("Failed to flush JsonLogging file on close")
+                    try:
+                        fh.close()
+                    except Exception:  # pragma: no cover - defensive
+                        logger.exception("Failed to close JsonLogging file handle")
+                self._fh = None
         finally:
             self._healthy = False
 
@@ -230,9 +243,106 @@ class JsonLogging(BaseStatsStore):
             return
 
         try:
-            fh = self._fh
-            fh.write(line + "\n")
-            fh.flush()
+            with self._io_lock:
+                fh = self._fh
+                if fh is None:
+                    return
+                fh.write(line + "\n")
+                fh.flush()
+                self._apply_query_log_retention_locked()
         except Exception:  # pragma: no cover - defensive
             logger.exception("Failed to append JSON query_log entry to file")
+            self._healthy = False
+
+    def _apply_query_log_retention_locked(self) -> None:
+        """Brief: Enforce configured retention by compacting the JSON log file.
+
+        Inputs:
+            None. Caller must hold ``self._io_lock``.
+
+        Outputs:
+            None; rewrites the JSONL file when retention requires dropping old
+            records.
+        """
+
+        cutoff_ts = BaseStatsStore._retention_cutoff_ts(
+            self._query_log_retention_days,
+            now_ts=time.time(),
+        )
+        max_records = self._query_log_retention_max_records
+        if cutoff_ts is None and max_records is None:
+            return
+
+        fh = getattr(self, "_fh", None)
+        if fh is None:
+            return
+
+        try:
+            fh.flush()
+        except Exception:  # pragma: no cover - defensive
+            logger.exception("Failed to flush JsonLogging file before retention prune")
+            return
+
+        try:
+            with open(self._file_path, "r", encoding="utf-8") as read_fh:
+                raw_lines = read_fh.read().splitlines()
+        except Exception:  # pragma: no cover - defensive
+            logger.exception("Failed to read JsonLogging file for retention prune")
+            return
+
+        if not raw_lines:
+            return
+
+        header_line: Optional[str] = None
+        record_lines = raw_lines
+        try:
+            first_obj = json.loads(raw_lines[0])
+            if isinstance(first_obj, dict) and "log_start" in first_obj:
+                header_line = raw_lines[0]
+                record_lines = raw_lines[1:]
+        except Exception:
+            header_line = None
+            record_lines = raw_lines
+
+        filtered_records: list[str] = []
+        for raw in record_lines:
+            if not raw:
+                continue
+            if cutoff_ts is not None:
+                try:
+                    obj = json.loads(raw)
+                    ts_val = obj.get("ts") if isinstance(obj, dict) else None
+                    if ts_val is not None and float(ts_val) < float(cutoff_ts):
+                        continue
+                except Exception:
+                    # Keep malformed lines so retention compaction does not
+                    # silently discard data unexpectedly.
+                    pass
+            filtered_records.append(raw)
+
+        if max_records is not None and len(filtered_records) > int(max_records):
+            filtered_records = filtered_records[-int(max_records) :]
+
+        rewritten_lines: list[str] = []
+        if header_line is not None:
+            rewritten_lines.append(header_line)
+        rewritten_lines.extend(filtered_records)
+
+        if rewritten_lines == raw_lines:
+            return
+
+        try:
+            fh.close()
+        except Exception:  # pragma: no cover - defensive
+            logger.exception("Failed to close JsonLogging file before rewrite")
+
+        try:
+            with open(self._file_path, "w", encoding="utf-8") as out_fh:
+                for item in rewritten_lines:
+                    out_fh.write(item + "\n")
+            self._fh = open(self._file_path, "a", encoding="utf-8")
+        except Exception:  # pragma: no cover - defensive
+            logger.exception(
+                "Failed to rewrite JsonLogging file during retention prune"
+            )
             self._healthy = False
