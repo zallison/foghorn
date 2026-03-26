@@ -1264,3 +1264,192 @@ def test_db_prunes_by_profile_ttl_seconds(tmp_path):
 
     assert plugin._db_get_profile("new") is not None
     assert plugin._db_get_profile("old") is None
+
+
+def test_episode_suppress_counts_first_n_then_suppresses(tmp_path):
+    """Brief: _episode_suppress returns False for first N denies, True thereafter.
+
+    Inputs:
+      - tmp_path: pytest temp path for sqlite DB.
+
+    Outputs:
+      - None: asserts episode counter increments and suppresses after first_n.
+    """
+
+    db = tmp_path / "rl-ep-count.db"
+    plugin = RateLimit(db_path=str(db), deny_log_first_n=3)
+    plugin.setup()
+    key = "test-ep-key"
+
+    # First 3 calls: not suppressed (count <= 3)
+    assert plugin._episode_suppress(key) is False  # count=1
+    assert plugin._episode_suppress(key) is False  # count=2
+    assert plugin._episode_suppress(key) is False  # count=3
+    # After 3: suppressed
+    assert plugin._episode_suppress(key) is True  # count=4
+    assert plugin._episode_suppress(key) is True  # count=5
+
+
+def test_episode_reset_clears_count(tmp_path):
+    """Brief: _episode_reset removes the key so the next episode starts fresh.
+
+    Inputs:
+      - tmp_path: pytest temp path for sqlite DB.
+
+    Outputs:
+      - None: asserts counter resets and next episode begins with count=1.
+    """
+
+    db = tmp_path / "rl-ep-reset.db"
+    plugin = RateLimit(db_path=str(db), deny_log_first_n=2)
+    plugin.setup()
+    key = "test-reset-key"
+
+    # Exhaust the first-N budget.
+    plugin._episode_suppress(key)  # count=1 -> False
+    plugin._episode_suppress(key)  # count=2 -> False
+    assert plugin._episode_suppress(key) is True  # count=3 -> suppressed
+
+    # Reset simulates key dropping below threshold.
+    plugin._episode_reset(key)
+
+    # New episode: back to visible for first N.
+    assert plugin._episode_suppress(key) is False  # count=1 again
+    assert plugin._episode_suppress(key) is False  # count=2
+    assert plugin._episode_suppress(key) is True  # count=3 -> suppressed again
+
+
+def test_deny_log_first_n_zero_suppresses_all(tmp_path):
+    """Brief: deny_log_first_n=0 suppresses all query-log rows immediately.
+
+    Inputs:
+      - tmp_path: pytest temp path for sqlite DB.
+
+    Outputs:
+      - None: asserts suppress is always True when first_n is zero.
+    """
+
+    db = tmp_path / "rl-ep-zero.db"
+    plugin = RateLimit(db_path=str(db), deny_log_first_n=0)
+    plugin.setup()
+    key = "any-key"
+
+    for _ in range(5):
+        assert plugin._episode_suppress(key) is True
+
+
+def test_deny_log_first_n_decisions_carry_correct_suppress(tmp_path, monkeypatch):
+    """Brief: pre_resolve deny decisions carry suppress_query_log=False for first N.
+
+    Checks that the deny_log_first_n mechanism propagates through
+    _build_deny_decision so the resolver can write visible query-log rows
+    for the first N denied queries in an episode.
+
+    Inputs:
+      - tmp_path: pytest temp path for sqlite DB.
+      - monkeypatch: pytest monkeypatch fixture to control time.
+
+    Outputs:
+      - None: asserts first 3 denies unsuppressed, subsequent suppressed.
+    """
+
+    db = tmp_path / "rl-ep-decisions.db"
+    plugin = RateLimit(
+        db_path=str(db),
+        window_seconds=10,
+        warmup_windows=0,
+        min_enforce_rps=0.0,
+        # global_max_rps=1.0: current_rps = count/10, so the 11th query in the
+        # window gives rps=1.1 > 1.0 and is denied.  Sending 20 gives 9 denies.
+        global_max_rps=1.0,
+        deny_log_first_n=3,
+        deny_response="nxdomain",
+    )
+    plugin.setup()
+    ctx = PluginContext(client_ip="10.0.0.1", listener="tcp")
+
+    _set_time(monkeypatch, 0.0)
+
+    suppress_values: list[bool] = []
+    with __import__("contextlib").closing(plugin._conn):
+        # Send 20 queries; the first ~10 are allowed, remaining are denied.
+        for _ in range(20):
+            dec = plugin.pre_resolve("example.com", QTYPE.A, b"", ctx)
+            if dec is not None:
+                suppress_values.append(bool(dec.suppress_query_log))
+
+    assert len(suppress_values) >= 4, "Expected at least 4 denied decisions"
+    # First 3 denies in the episode must not be suppressed.
+    assert suppress_values[0] is False
+    assert suppress_values[1] is False
+    assert suppress_values[2] is False
+    # After the first 3, remaining denies should be suppressed.
+    for sv in suppress_values[3:]:
+        assert sv is True
+
+
+def test_deny_episode_resets_on_unblock(tmp_path, monkeypatch):
+    """Brief: Episode counter resets when key rate drops below threshold.
+
+    Simulates a host that briefly exceeds the limit, then settles, then
+    bursts again.  The second burst should produce another 3 visible
+    query-log rows before suppression kicks in again.
+
+    Inputs:
+      - tmp_path: pytest temp path for sqlite DB.
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None: asserts suppress sequence False*3, True+, reset, False*3, True+.
+    """
+
+    db = tmp_path / "rl-ep-unblock.db"
+    plugin = RateLimit(
+        db_path=str(db),
+        window_seconds=10,
+        warmup_windows=0,
+        min_enforce_rps=0.0,
+        global_max_rps=1.0,  # 11+ queries/10s window triggers denial
+        deny_log_first_n=2,
+        deny_response="nxdomain",
+    )
+    plugin.setup()
+    ctx = PluginContext(client_ip="10.0.0.2", listener="tcp")
+
+    with __import__("contextlib").closing(plugin._conn):
+        # --- First episode: burst in window 0 ---
+        _set_time(monkeypatch, 0.0)
+        first_ep: list[bool] = []
+        for _ in range(20):
+            dec = plugin.pre_resolve("example.com", QTYPE.A, b"", ctx)
+            if dec is not None:
+                first_ep.append(bool(dec.suppress_query_log))
+
+        assert len(first_ep) >= 3
+        # First 2 unsuppressed, rest suppressed.
+        assert first_ep[0] is False
+        assert first_ep[1] is False
+        for sv in first_ep[2:]:
+            assert sv is True
+
+        # --- Rate drops: move to a new window with low traffic ---
+        _set_time(monkeypatch, 10.0)
+        # A single query that stays under global_max_rps -> returns None
+        # and triggers episode reset.
+        dec = plugin.pre_resolve("example.com", QTYPE.A, b"", ctx)
+        assert dec is None  # Not limited; episode reset.
+
+        # --- Second episode: burst again in window 2 ---
+        _set_time(monkeypatch, 20.0)
+        second_ep: list[bool] = []
+        for _ in range(20):
+            dec = plugin.pre_resolve("example.com", QTYPE.A, b"", ctx)
+            if dec is not None:
+                second_ep.append(bool(dec.suppress_query_log))
+
+        assert len(second_ep) >= 3
+        # Fresh episode: first 2 unsuppressed again.
+        assert second_ep[0] is False
+        assert second_ep[1] is False
+        for sv in second_ep[2:]:
+            assert sv is True
