@@ -1,7 +1,7 @@
 import base64
 import logging
 import time
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Final
 
 try:  # Ensure required crypto backend is present before enabling DNSSEC logic.
     import importlib.util as _importlib_util
@@ -71,8 +71,8 @@ logger = logging.getLogger("foghorn.dnssec")
 #
 # When configured via an empty list ("[]"), validation lookups are performed
 # using Foghorn's own RecursiveResolver instead of any external resolvers.
-_VALIDATION_NAMESERVERS: list[str] | None = None
-_VALIDATION_VIA_RECURSIVE: bool = False
+_VALIDATION_NAMESERVERS: Final[list[str] | None] = None
+_VALIDATION_VIA_RECURSIVE: Final[bool] = False
 
 
 def configure_dnssec_resolver(nameservers: Optional[list[str]]) -> None:
@@ -111,10 +111,10 @@ def configure_dnssec_resolver(nameservers: Optional[list[str]]) -> None:
 
 # RFC 5011-style trust anchor configuration (wired in by the application
 # config loader). Defaults keep existing static behavior.
-_TRUST_ANCHOR_MODE: str = "rfc5011"  # "static" or "rfc5011"
+_TRUST_ANCHOR_MODE: Final[str] = "rfc5011"  # "static" or "rfc5011"
 _TRUST_ANCHOR_STORE_PATH: Optional[str] = None
-_TRUST_ANCHOR_HOLD_ADD_DAYS: int = 2
-_TRUST_ANCHOR_HOLD_REMOVE_DAYS: int = 2
+_TRUST_ANCHOR_HOLD_ADD_DAYS: Final[int] = 2
+_TRUST_ANCHOR_HOLD_REMOVE_DAYS: Final[int] = 2
 
 
 def configure_trust_anchors(
