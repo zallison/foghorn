@@ -118,6 +118,10 @@ class _StatsCollectorSnapshotMixin:
                     "clients": len(self._unique_clients),
                     "domains": len(self._unique_domains),
                 }
+                if self._unique_clients_dropped > 0:
+                    totals["unique_clients_dropped"] = self._unique_clients_dropped
+                if self._unique_domains_dropped > 0:
+                    totals["unique_domains_dropped"] = self._unique_domains_dropped
 
             # Top lists
             top_clients = None
@@ -498,6 +502,8 @@ class _StatsCollectorSnapshotMixin:
                     self._unique_clients.clear()
                 if self._unique_domains is not None:
                     self._unique_domains.clear()
+                self._unique_clients_dropped = 0
+                self._unique_domains_dropped = 0
 
                 if self._top_clients is not None:
                     self._top_clients.counts.clear()
