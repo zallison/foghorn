@@ -8,9 +8,10 @@ import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Set, Tuple
-from cachetools import Cache, LRUCache
+from typing import Dict, List, Optional, Set, Tuple, Final
 from pydantic import BaseModel, Field, validator, ConfigDict
+from foghorn.utils.register_caches import registered_lru_cached
+
 from dnslib import (
     AAAA,
     PTR,
@@ -32,10 +33,6 @@ from foghorn.plugins.resolve.base import (
     plugin_aliases,
 )
 
-from foghorn.utils.register_caches import (
-    registered_cached,
-    registered_lru_cached,
-)
 from foghorn.utils import dns_names
 
 logger = logging.getLogger(__name__)
@@ -145,13 +142,7 @@ DEFAULT_MDNS_SERVICE_TYPES: List[str] = [
 # host A/AAAA glue records. When a PTR response has more than this many
 # targets, the answer will contain only PTRs to avoid overly large
 # responses and surprising behavior.
-PTR_ADDITIONAL_HOST_LIMIT = 2
-
-# Short-lived caches for hot, pure-ish helper methods. These are strictly
-# internal to the plugin and do not affect resolver statistics semantics.
-_MDNS_NORMALIZE_OWNER_CACHE: Cache = LRUCache(maxsize=4096)
-_MDNS_MIRROR_SUFFIXES_CACHE: Cache = LRUCache(maxsize=4096)
-_MDNS_SANITIZE_QNAME_CACHE: Cache = LRUCache(maxsize=2048)
+PTR_ADDITIONAL_HOST_LIMIT: Final[int] = 2
 
 
 class MdnsBridgeConfig(BaseModel):
@@ -622,7 +613,7 @@ class MdnsBridge(BasePlugin):
                     exc_info=True,
                 )
 
-    @registered_cached(cache=_MDNS_NORMALIZE_OWNER_CACHE)
+    @registered_lru_cached(maxsize=4096)
     def _normalize_owner(
         self, name: str
     ) -> str:  # pragma: nocover defensive normalization
@@ -661,7 +652,7 @@ class MdnsBridge(BasePlugin):
             return base[: -len(self._mdns_domain)] + self._dns_domain
         return base
 
-    @registered_cached(cache=_MDNS_MIRROR_SUFFIXES_CACHE)
+    @registered_lru_cached(maxsize=496)
     def _mirror_suffixes(
         self, fqdn: str
     ) -> List[str]:  # pragma: nocover suffix mapping helper
@@ -1141,7 +1132,7 @@ class MdnsBridge(BasePlugin):
                 exc_info=True,
             )
 
-    @registered_cached(cache=_MDNS_SANITIZE_QNAME_CACHE)
+    @registered_lru_cached(maxsize=65535)
     def _sanitize_qname(
         self, name: str
     ) -> str:  # pragma: nocover string sanitization helper

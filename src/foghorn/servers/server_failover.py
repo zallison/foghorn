@@ -10,7 +10,7 @@ import logging
 import threading
 from collections import OrderedDict
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple, Final
 
 from dnslib import QTYPE, RCODE, DNSRecord
 
@@ -32,7 +32,7 @@ _UPSTREAM_SKIP_LOCK = threading.Lock()
 # concurrent mode. This avoids per-query thread pool creation/destruction.
 _FAILOVER_EXECUTOR: ThreadPoolExecutor | None = None
 _FAILOVER_EXECUTOR_LOCK = threading.Lock()
-_FAILOVER_EXECUTOR_MAX_WORKERS: int | None = 8
+_FAILOVER_EXECUTOR_MAX_WORKERS: Final[int | None] = 8
 
 
 def shutdown_failover_executor(wait: bool = True) -> None:

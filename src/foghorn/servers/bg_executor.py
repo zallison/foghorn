@@ -16,11 +16,11 @@ Outputs:
 
 import threading
 from concurrent.futures import Future, ThreadPoolExecutor
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Final
 
 _BG_EXECUTOR: ThreadPoolExecutor | None = None
 _BG_EXECUTOR_LOCK = threading.Lock()
-_BG_EXECUTOR_MAX_WORKERS: int | None = 4
+_BG_EXECUTOR_MAX_WORKERS: Final[int | None] = 4
 _BG_EXECUTOR_MAX_PENDING: int | None = None
 _BG_EXECUTOR_CAPACITY_SEM: threading.Semaphore | None = None
 
