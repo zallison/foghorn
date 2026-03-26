@@ -12,7 +12,7 @@ from typing import Iterable, List
 from foghorn.utils.register_caches import registered_lru_cached
 
 
-@registered_lru_cached(maxsize=16384)
+@registered_lru_cached(maxsize=65_536)
 def _normalize_name_text(
     text: str,
     *,
@@ -109,7 +109,7 @@ def is_suffix_match(name: str, suffix: str) -> bool:
     return name_norm == suffix_norm or name_norm.endswith("." + suffix_norm)
 
 
-@registered_lru_cached(maxsize=65536)
+@registered_lru_cached(maxsize=655_360)
 def is_plain_domain_token(token: str) -> bool:
     """Brief: Validate a plain domain token (Filter list semantics).
 
