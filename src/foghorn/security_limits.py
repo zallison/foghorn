@@ -16,6 +16,7 @@ Notes:
 from __future__ import annotations
 
 import ipaddress
+import math
 from typing import Optional
 
 # DNS-over-TCP maximum message size.
@@ -35,6 +36,9 @@ MAX_DOH_QUERY_PARAM_BYTES: int = 65535
 
 # AXFR is length-prefixed DNS over TCP. Keep protocol max by default.
 MAX_AXFR_FRAME_BYTES: int = 65535
+# Maximum number of buckets allowed for query-log aggregate APIs.
+# This bounds memory and CPU used by dense zero-filled bucket responses.
+MAX_QUERY_LOG_AGG_BUCKETS: int = 20000
 
 
 def is_loopback_host(host: str) -> bool:
@@ -109,3 +113,82 @@ def maybe_parse_content_length(value: Optional[str]) -> int:
     except Exception:
         return 0
     return ln if ln > 0 else 0
+
+
+def compute_query_log_aggregate_bucket_count(
+    start_ts: object,
+    end_ts: object,
+    interval_seconds: object,
+) -> int:
+    """Brief: Compute the expected number of aggregate buckets for query-log APIs.
+
+    Inputs:
+      - start_ts: Inclusive window start timestamp (float-like Unix seconds).
+      - end_ts: Exclusive window end timestamp (float-like Unix seconds).
+      - interval_seconds: Bucket size in seconds (int-like).
+
+    Outputs:
+      - int: Non-negative bucket count. Returns 0 for invalid inputs or
+        non-positive/empty windows.
+    """
+
+    try:
+        start_f = float(start_ts)  # type: ignore[arg-type]
+        end_f = float(end_ts)  # type: ignore[arg-type]
+    except Exception:
+        return 0
+
+    try:
+        interval_i = int(interval_seconds)  # type: ignore[arg-type]
+    except Exception:
+        return 0
+
+    if interval_i <= 0 or end_f <= start_f:
+        return 0
+
+    try:
+        count = int(math.ceil((end_f - start_f) / float(interval_i)))
+    except Exception:
+        return 0
+
+    return count if count > 0 else 0
+
+
+def enforce_query_log_aggregate_bucket_limit(
+    start_ts: object,
+    end_ts: object,
+    interval_seconds: object,
+    *,
+    max_buckets: int = MAX_QUERY_LOG_AGG_BUCKETS,
+) -> int:
+    """Brief: Validate and cap aggregate bucket requests to prevent DoS.
+
+    Inputs:
+      - start_ts: Inclusive window start timestamp (float-like Unix seconds).
+      - end_ts: Exclusive window end timestamp (float-like Unix seconds).
+      - interval_seconds: Bucket size in seconds (int-like).
+      - max_buckets: Maximum allowed bucket count.
+
+    Outputs:
+      - int: Computed bucket count (0 for invalid/empty windows).
+
+    Raises:
+      - ValueError: When computed bucket count exceeds max_buckets.
+    """
+
+    count = compute_query_log_aggregate_bucket_count(start_ts, end_ts, interval_seconds)
+
+    try:
+        max_i = int(max_buckets)
+    except Exception:
+        max_i = int(MAX_QUERY_LOG_AGG_BUCKETS)
+    if max_i < 1:
+        max_i = int(MAX_QUERY_LOG_AGG_BUCKETS)
+
+    if count > max_i:
+        raise ValueError(
+            f"requested bucket count ({count}) exceeds maximum allowed ({max_i}); "
+            "reduce the time range or increase interval"
+        )
+
+    return count

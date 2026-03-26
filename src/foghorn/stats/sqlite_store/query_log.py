@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import logging
 from typing import Any, Dict, List, Optional, Tuple
+
+from foghorn.security_limits import enforce_query_log_aggregate_bucket_limit
 from foghorn.utils import dns_names
 
 logger = logging.getLogger("foghorn.stats")
@@ -362,11 +364,20 @@ class _QueryLogMixin:
 
         # Dense fill for the common single-series case.
         if not group_col:
-            import math
-
-            num = int(math.ceil((end_f - start_f) / float(interval_i)))
-            if num < 0:
-                num = 0
+            try:
+                num = enforce_query_log_aggregate_bucket_limit(
+                    start_f, end_f, interval_i
+                )
+            except ValueError as exc:
+                logger.warning(
+                    "StatsSQLiteStore aggregate_query_log_counts rejected: %s", exc
+                )
+                return {
+                    "start_ts": start_f,
+                    "end_ts": end_f,
+                    "interval_seconds": interval_i,
+                    "items": [],
+                }
 
             by_bucket = {b: c for (b, _g, c) in rows}
             items: List[Dict[str, Any]] = []
