@@ -17,7 +17,7 @@ import re
 import threading
 import time
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Tuple, Final
 
 import yaml
 
@@ -31,6 +31,12 @@ _CONFIG_TEXT_CACHE_LOCK = threading.Lock()
 _last_config_text_key: tuple[str, tuple[str, ...]] | None = None
 _last_config_text: str | None = None
 _last_config_text_ts: float = 0.0
+
+# Precompiled regexes for lightweight YAML redaction that preserves layout/comments.
+_YAML_KEY_LINE_RE: Final[re] = re.compile(r"^(\s*)([^:\s][^:]*)\s*:(.*)$")
+# List item that is itself a mapping entry, e.g. "  - suffix: example.com".
+_YAML_LIST_KEY_LINE_RE: Final[re] = re.compile(r"^(\s*)-\s*([^:\s][^:]*)\s*:(.*)$")
+_YAML_LIST_LINE_RE: Final[re] = re.compile(r"^(\s*)-\s*(.*)$")
 
 
 def _get_web_cfg(config: Dict[str, Any] | None) -> Dict[str, Any]:
@@ -182,13 +188,6 @@ def _get_sanitized_config_yaml_cached(
         _last_config_text = body
         _last_config_text_ts = time.time()
     return body
-
-
-# Precompiled regexes for lightweight YAML redaction that preserves layout/comments.
-_YAML_KEY_LINE_RE = re.compile(r"^(\s*)([^:\s][^:]*)\s*:(.*)$")
-# List item that is itself a mapping entry, e.g. "  - suffix: example.com".
-_YAML_LIST_KEY_LINE_RE = re.compile(r"^(\s*)-\s*([^:\s][^:]*)\s*:(.*)$")
-_YAML_LIST_LINE_RE = re.compile(r"^(\s*)-\s*(.*)$")
 
 
 def _split_yaml_value_and_comment(rest: str) -> Tuple[str, str]:
