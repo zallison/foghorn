@@ -22,6 +22,14 @@ All notable changes to this project will be documented in this file.
 - Expanded admin/API RateLimit observability to include current per-bucket RPS snapshots, burst thresholds, and enforcement-active state in both runtime stats payloads and the web UI tables.
 - Extended PTR-domain targeting for resolve plugins so `EtcHosts` and `ZoneRecords` can evaluate reverse PTR owners against configured domain targets before applying plugin decisions.
 - Added `PluginDecision.suppress_query_log` support in server decision handling and removed the legacy minimal DoH server module/tests that are no longer used by the current server stack.
+- Added shared query-log aggregate bucket enforcement (`MAX_QUERY_LOG_AGG_BUCKETS=20000`) and wired it through admin logic, API routes, and all query-log store backends to reject oversized dense aggregate requests safely.
+- Added capped unique-client/unique-domain tracking in StatsCollector (`max_unique_clients`, `max_unique_domains`), including warm-load truncation handling and dropped-count visibility in snapshot totals.
+- Hardened threaded admin request body handling with strict Content-Length parsing/caps for config save and diagram upload paths, and aligned aggregate/query snapshot handlers to surface AdminLogic HTTP errors consistently.
+- Added config backup retention helpers and pruning in webserver config persistence so timestamped config backups are automatically bounded (`DEFAULT_CONFIG_BACKUP_RETENTION_COUNT=20`).
+- Improved DNS UPDATE safety by cloning record maps for isolated mutation, adding stale-snapshot conflict detection on commit, and expanding branch coverage for concurrent conflict handling.
+- Improved transport resilience/observability across DoT/TCP/UDP paths with explicit expected-disconnect handling and richer exception logging context in resolver/server code.
+- Expanded use of registered cache decorators and cache sizes in hot paths (AccessControl, RateLimit, ZoneRecords DNSSEC/name normalization helpers) to improve throughput under load.
+- Updated admin UI dark-theme button visibility so button controls render with clearer accent outlines, and refreshed README coverage badges from 87% to 85%.
 
 ### Breaking Changes
 
