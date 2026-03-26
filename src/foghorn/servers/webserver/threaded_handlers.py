@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Any, Dict, Optional
 
 import yaml
 from ...config.config_schema import get_default_schema_path
+from ...security_limits import maybe_parse_content_length
 
 from ...stats import StatsCollector, StatsSnapshot, get_process_uptime_seconds
 from ...utils.config_diagram import (
@@ -369,6 +370,45 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
                 getattr(self, "path", ""),
             )
             return
+
+    def _read_request_body_limited(
+        self, *, max_bytes: int, too_large_detail: str
+    ) -> bytes | None:
+        """Brief: Read request body after enforcing a strict Content-Length cap.
+
+        Inputs:
+          - max_bytes: Maximum accepted Content-Length in bytes.
+          - too_large_detail: Error detail text for 413 responses.
+
+        Outputs:
+          - bytes when body is accepted (possibly empty).
+          - None when an error response was sent.
+        """
+
+        max_allowed = int(max_bytes)
+        length = maybe_parse_content_length(self.headers.get("Content-Length"))
+        if length > max_allowed:
+            self._send_json(
+                413,
+                {
+                    "detail": str(too_large_detail),
+                    "server_time": _utc_now_iso(),
+                },
+            )
+            return None
+        if length <= 0:
+            return b""
+        try:
+            return self.rfile.read(length)
+        except Exception:
+            self._send_json(
+                400,
+                {
+                    "detail": "failed to read request body",
+                    "server_time": _utc_now_iso(),
+                },
+            )
+            return None
 
     def _get_openapi_schema_cached(self) -> Dict[str, Any] | None:
         """Brief: Return OpenAPI schema for the admin API, caching it on the server.
@@ -1683,17 +1723,24 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         rcode = (params.get("rcode") or [None])[0]
         group_by = (params.get("group_by") or [None])[0]
 
-        payload = _admin_logic.build_query_log_aggregate_payload(
-            store,
-            start_dt=start_dt,
-            end_dt=end_dt,
-            interval_seconds=int(interval_seconds),
-            client_ip=str(client_ip) if client_ip is not None else None,
-            qtype=str(qtype) if qtype is not None else None,
-            qname=str(qname) if qname is not None else None,
-            rcode=str(rcode) if rcode is not None else None,
-            group_by=str(group_by) if group_by is not None else None,
-        )
+        try:
+            payload = _admin_logic.build_query_log_aggregate_payload(
+                store,
+                start_dt=start_dt,
+                end_dt=end_dt,
+                interval_seconds=int(interval_seconds),
+                client_ip=str(client_ip) if client_ip is not None else None,
+                qtype=str(qtype) if qtype is not None else None,
+                qname=str(qname) if qname is not None else None,
+                rcode=str(rcode) if rcode is not None else None,
+                group_by=str(group_by) if group_by is not None else None,
+            )
+        except _admin_logic.AdminLogicHttpError as exc:
+            self._send_json(
+                exc.status_code,
+                {"detail": exc.detail, "server_time": _utc_now_iso()},
+            )
+            return
         payload["server_time"] = _utc_now_iso()
         self._send_json(200, payload)
 
@@ -3142,8 +3189,14 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         if path in {"/stats/reset", "/api/v1/stats/reset"}:
             self._handle_stats_reset()
         elif path in {"/api/v1/config/diagram.png", "/config/diagram.png"}:
-            length = int(self.headers.get("Content-Length", "0") or "0")
-            raw_body = self.rfile.read(length) if length > 0 else b""
+            if not self._require_auth():
+                return
+            raw_body = self._read_request_body_limited(
+                max_bytes=1_001_024,
+                too_large_detail="file too large (max 1,000,000 bytes)",
+            )
+            if raw_body is None:
+                return
             self._handle_config_diagram_png_upload(raw_body)
         elif path in {
             "/config/save",
@@ -3153,8 +3206,14 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             "/config/save_and_restart",
             "/api/v1/config/save_and_restart",
         }:
-            length = int(self.headers.get("Content-Length", "0") or "0")
-            raw_body = self.rfile.read(length) if length > 0 else b""
+            if not self._require_auth():
+                return
+            raw_body = self._read_request_body_limited(
+                max_bytes=5_000_000,
+                too_large_detail="request body too large (max 5,000,000 bytes)",
+            )
+            if raw_body is None:
+                return
             try:
                 body = json.loads(raw_body.decode("utf-8") or "{}")
             except Exception:
