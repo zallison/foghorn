@@ -1203,17 +1203,20 @@ def _register_query_log_routes(app: FastAPI, auth_dep: Any) -> None:
                 detail="interval_seconds must be > 0",
             )
 
-        payload = _admin_logic.build_query_log_aggregate_payload(
-            store,
-            start_dt=start_dt,
-            end_dt=end_dt,
-            interval_seconds=int(interval_seconds),
-            client_ip=client_ip,
-            qtype=qtype,
-            qname=qname,
-            rcode=rcode,
-            group_by=group_by,
-        )
+        try:
+            payload = _admin_logic.build_query_log_aggregate_payload(
+                store,
+                start_dt=start_dt,
+                end_dt=end_dt,
+                interval_seconds=int(interval_seconds),
+                client_ip=client_ip,
+                qtype=qtype,
+                qname=qname,
+                rcode=rcode,
+                group_by=group_by,
+            )
+        except _admin_logic.AdminLogicHttpError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
         payload["server_time"] = _utc_now_iso()
         return payload
 
