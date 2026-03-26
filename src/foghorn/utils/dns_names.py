@@ -17,7 +17,7 @@ _DNS_MAX_NAME_LEN: Final[int] = 253
 _DNS_MAX_LABEL_LEN: Final[int] = 63
 
 
-@registered_lru_cached(maxsize=65_536)
+@registered_lru_cached(maxsize=16_384)
 def _normalize_name_text(
     text: str,
     *,
