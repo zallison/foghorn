@@ -22,6 +22,7 @@ Notes:
 import json
 import logging
 import re
+import time
 from typing import Any, Dict, List, Optional, Tuple
 from foghorn.security_limits import enforce_query_log_aggregate_bucket_limit
 
@@ -89,6 +90,8 @@ class MongoStatsStore(BaseStatsStore):
         connect_kwargs: Optional[Dict[str, Any]] = None,
         async_logging: bool = False,
         max_logging_queue: int = 4096,
+        retention_max_records: Optional[int] = None,
+        retention_days: Optional[float] = None,
         **_: Any,
     ) -> None:
         mongo_mod = _import_mongo_driver()
@@ -115,6 +118,12 @@ class MongoStatsStore(BaseStatsStore):
             self._max_logging_queue = int(max_logging_queue)
         except Exception:
             self._max_logging_queue = 4096
+        self._query_log_retention_max_records = (
+            BaseStatsStore._normalize_retention_max_records(retention_max_records)
+        )
+        self._query_log_retention_days = BaseStatsStore._normalize_retention_days(
+            retention_days
+        )
 
         self._db = self._client[database]
         self._counts = self._db["counts"]
@@ -329,9 +338,59 @@ class MongoStatsStore(BaseStatsStore):
                 "result_json": result_json,
             }
             self._query_log.insert_one(doc)
+            self._apply_query_log_retention()
         except Exception as exc:  # pragma: no cover - defensive
             logger.error(
                 "MongoStatsStore insert_query_log error: %s", exc, exc_info=True
+            )
+
+    def _apply_query_log_retention(self) -> None:
+        """Brief: Enforce configured query-log retention limits.
+
+        Inputs:
+            None.
+
+        Outputs:
+            None; removes old rows and/or over-limit rows when retention is
+            configured.
+        """
+
+        cutoff_ts = BaseStatsStore._retention_cutoff_ts(
+            self._query_log_retention_days,
+            now_ts=time.time(),
+        )
+        max_records = self._query_log_retention_max_records
+
+        if cutoff_ts is None and max_records is None:
+            return
+
+        try:
+            if cutoff_ts is not None:
+                self._query_log.delete_many({"ts": {"$lt": float(cutoff_ts)}})
+
+            if max_records is not None:
+                total = int(self._query_log.count_documents({}))
+                if total <= int(max_records):
+                    return
+
+                keep_ids: list[object] = []
+                cursor = (
+                    self._query_log.find({}, {"_id": 1})
+                    .sort([("ts", -1), ("_id", -1)])
+                    .limit(int(max_records))
+                )
+                for doc in cursor:
+                    doc_id = doc.get("_id")
+                    if doc_id is not None:
+                        keep_ids.append(doc_id)
+
+                if keep_ids:
+                    self._query_log.delete_many({"_id": {"$nin": keep_ids}})
+                else:
+                    self._query_log.delete_many({})
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.error(
+                "MongoStatsStore retention prune failed: %s", exc, exc_info=True
             )
 
     def has_query_log(self) -> bool:

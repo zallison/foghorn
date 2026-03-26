@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from .base import BaseStatsStore
@@ -245,6 +246,8 @@ class MySqlStatsStore(BaseStatsStore):
         connect_kwargs: Optional[Dict[str, Any]] = None,
         async_logging: bool = False,
         max_logging_queue: int = 4096,
+        retention_max_records: Optional[int] = None,
+        retention_days: Optional[float] = None,
         driver: Optional[str] = None,
         driver_fallback: object = None,
         **_: Any,
@@ -276,6 +279,12 @@ class MySqlStatsStore(BaseStatsStore):
             self._max_logging_queue = int(max_logging_queue)
         except Exception:
             self._max_logging_queue = 4096
+        self._query_log_retention_max_records = (
+            BaseStatsStore._normalize_retention_max_records(retention_max_records)
+        )
+        self._query_log_retention_days = BaseStatsStore._normalize_retention_days(
+            retention_days
+        )
 
         self._ensure_schema()
 
@@ -585,6 +594,55 @@ class MySqlStatsStore(BaseStatsStore):
             ),
         )
         self._conn.commit()
+        self._apply_query_log_retention()
+
+    def _apply_query_log_retention(self) -> None:
+        """Brief: Enforce configured query-log retention limits.
+
+        Inputs:
+            None.
+
+        Outputs:
+            None; deletes rows older than the cutoff and/or rows beyond the
+            configured max-record count.
+        """
+
+        cutoff_ts = BaseStatsStore._retention_cutoff_ts(
+            self._query_log_retention_days,
+            now_ts=time.time(),
+        )
+        max_records = self._query_log_retention_max_records
+
+        if cutoff_ts is None and max_records is None:
+            return
+
+        ph = self._placeholder
+        cur = self._conn.cursor()
+
+        try:
+            if cutoff_ts is not None:
+                cur.execute(
+                    f"DELETE FROM query_log WHERE ts < {ph}",
+                    (float(cutoff_ts),),
+                )
+
+            if max_records is not None:
+                cur.execute(
+                    (
+                        "DELETE FROM query_log WHERE id NOT IN ("
+                        "SELECT id FROM ("
+                        f"SELECT id FROM query_log ORDER BY ts DESC, id DESC LIMIT {ph}"
+                        ") AS retained"
+                        ")"
+                    ),
+                    (int(max_records),),
+                )
+
+            self._conn.commit()
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.error(
+                "MySqlStatsStore retention prune failed: %s", exc, exc_info=True
+            )
 
     def has_query_log(self) -> bool:
         """Return True if the query_log table contains at least one row.

@@ -101,6 +101,8 @@ class SqliteStatsStore(BaseStatsStore):
         batch_max_size: int = 1000,
         async_logging: bool = False,
         max_logging_queue: int = 4096,
+        retention_max_records: Optional[int] = None,
+        retention_days: Optional[float] = None,
         **_: Any,
     ) -> None:
         """Initialize SQLite backend and ensure schema exists.
@@ -125,6 +127,12 @@ class SqliteStatsStore(BaseStatsStore):
             self._max_logging_queue = int(max_logging_queue)
         except Exception:
             self._max_logging_queue = 4096
+        self._query_log_retention_max_records = (
+            BaseStatsStore._normalize_retention_max_records(retention_max_records)
+        )
+        self._query_log_retention_days = BaseStatsStore._normalize_retention_days(
+            retention_days
+        )
 
         # Batching configuration
         self._batch_writes = bool(batch_writes)
@@ -361,9 +369,44 @@ class SqliteStatsStore(BaseStatsStore):
                 result_json,
             )
             self._execute(sql, params)
+            self._apply_query_log_retention()
         except Exception as exc:  # pragma: no cover - defensive
             logger.error(
                 "SqliteStatsStore insert_query_log error: %s", exc, exc_info=True
+            )
+
+    def _apply_query_log_retention(self) -> None:
+        """Brief: Enforce configured query-log retention limits.
+
+        Inputs:
+            None.
+
+        Outputs:
+            None; schedules prune statements through ``_execute`` so retention
+            is applied in both immediate and batched write modes.
+        """
+
+        cutoff_ts = BaseStatsStore._retention_cutoff_ts(
+            self._query_log_retention_days,
+            now_ts=time.time(),
+        )
+        max_records = self._query_log_retention_max_records
+
+        if cutoff_ts is None and max_records is None:
+            return
+
+        try:
+            if cutoff_ts is not None:
+                self._execute("DELETE FROM query_log WHERE ts < ?", (float(cutoff_ts),))
+
+            if max_records is not None:
+                self._execute(
+                    "DELETE FROM query_log WHERE id NOT IN (SELECT id FROM query_log ORDER BY ts DESC, id DESC LIMIT ?)",
+                    (int(max_records),),
+                )
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.error(
+                "SqliteStatsStore retention prune failed: %s", exc, exc_info=True
             )
 
     def select_query_log(

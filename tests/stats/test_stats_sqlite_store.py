@@ -682,3 +682,183 @@ def test_sqlite_backend_batching_execute_flush_and_close(tmp_path) -> None:
 
     # Close with batch_writes=True should call _flush_locked and then close connection.
     backend.close()
+
+
+def test_sqlite_backend_query_log_retention_max_records() -> None:
+    """Brief: SQLite backend keeps only newest N records when configured.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts retention_max_records trims older query_log rows.
+    """
+
+    backend = SqliteStatsStore(":memory:", retention_max_records=2)
+
+    backend._insert_query_log(
+        ts=1.0,
+        client_ip="192.0.2.1",
+        name="first.example",
+        qtype="A",
+        upstream_id=None,
+        rcode="NOERROR",
+        status="ok",
+        error=None,
+        first=None,
+        result_json="{}",
+    )
+    backend._insert_query_log(
+        ts=2.0,
+        client_ip="192.0.2.2",
+        name="second.example",
+        qtype="A",
+        upstream_id=None,
+        rcode="NOERROR",
+        status="ok",
+        error=None,
+        first=None,
+        result_json="{}",
+    )
+    backend._insert_query_log(
+        ts=3.0,
+        client_ip="192.0.2.3",
+        name="third.example",
+        qtype="A",
+        upstream_id=None,
+        rcode="NOERROR",
+        status="ok",
+        error=None,
+        first=None,
+        result_json="{}",
+    )
+
+    res = backend.select_query_log(page=1, page_size=20)
+    assert res["total"] == 2
+    assert [item["qname"] for item in res["items"]] == [
+        "third.example",
+        "second.example",
+    ]
+
+
+def test_sqlite_backend_query_log_retention_days(monkeypatch) -> None:
+    """Brief: SQLite backend prunes rows older than retention_days cutoff.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts old query_log rows are removed by days-based retention.
+    """
+
+    import foghorn.plugins.querylog.sqlite as sqlite_mod
+
+    now_ts = 10.0 * 86400.0
+    monkeypatch.setattr(sqlite_mod.time, "time", lambda: now_ts)
+
+    backend = SqliteStatsStore(":memory:", retention_days=2.0)
+    backend._insert_query_log(
+        ts=now_ts - (3.0 * 86400.0),
+        client_ip="198.51.100.10",
+        name="old.example",
+        qtype="A",
+        upstream_id=None,
+        rcode="NOERROR",
+        status="ok",
+        error=None,
+        first=None,
+        result_json="{}",
+    )
+    backend._insert_query_log(
+        ts=now_ts - 86400.0,
+        client_ip="198.51.100.11",
+        name="fresh.example",
+        qtype="A",
+        upstream_id=None,
+        rcode="NOERROR",
+        status="ok",
+        error=None,
+        first=None,
+        result_json="{}",
+    )
+
+    res = backend.select_query_log(page=1, page_size=20)
+    assert res["total"] == 1
+    assert res["items"][0]["qname"] == "fresh.example"
+
+
+def test_sqlite_backend_query_log_retention_days_and_max_records(monkeypatch) -> None:
+    """Brief: SQLite backend applies days and max-record retention together.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts the combined policy keeps only recent newest rows.
+    """
+
+    import foghorn.plugins.querylog.sqlite as sqlite_mod
+
+    now_ts = 20.0 * 86400.0
+    monkeypatch.setattr(sqlite_mod.time, "time", lambda: now_ts)
+
+    backend = SqliteStatsStore(
+        ":memory:",
+        retention_days=4.0,
+        retention_max_records=2,
+    )
+    backend._insert_query_log(
+        ts=now_ts - (10.0 * 86400.0),
+        client_ip="203.0.113.1",
+        name="expired.example",
+        qtype="A",
+        upstream_id=None,
+        rcode="NOERROR",
+        status="ok",
+        error=None,
+        first=None,
+        result_json="{}",
+    )
+    backend._insert_query_log(
+        ts=now_ts - (3.0 * 86400.0),
+        client_ip="203.0.113.2",
+        name="older.example",
+        qtype="A",
+        upstream_id=None,
+        rcode="NOERROR",
+        status="ok",
+        error=None,
+        first=None,
+        result_json="{}",
+    )
+    backend._insert_query_log(
+        ts=now_ts - (2.0 * 86400.0),
+        client_ip="203.0.113.3",
+        name="newer.example",
+        qtype="A",
+        upstream_id=None,
+        rcode="NOERROR",
+        status="ok",
+        error=None,
+        first=None,
+        result_json="{}",
+    )
+    backend._insert_query_log(
+        ts=now_ts - 86400.0,
+        client_ip="203.0.113.4",
+        name="newest.example",
+        qtype="A",
+        upstream_id=None,
+        rcode="NOERROR",
+        status="ok",
+        error=None,
+        first=None,
+        result_json="{}",
+    )
+
+    res = backend.select_query_log(page=1, page_size=20)
+    assert res["total"] == 2
+    assert [item["qname"] for item in res["items"]] == [
+        "newest.example",
+        "newer.example",
+    ]

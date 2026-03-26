@@ -109,6 +109,8 @@ class MqttLogging(BaseStatsStore):
         connect_kwargs: Optional[Dict[str, Any]] = None,
         async_logging: bool = False,
         max_logging_queue: int = 4096,
+        retention_max_records: Optional[int] = None,
+        retention_days: Optional[float] = None,
         **_: Any,
     ) -> None:
         mqtt = _import_mqtt_driver()
@@ -129,6 +131,12 @@ class MqttLogging(BaseStatsStore):
             self._max_logging_queue = int(max_logging_queue)
         except Exception:
             self._max_logging_queue = 4096
+        if retention_max_records is not None or retention_days is not None:
+            logger.debug(
+                "MqttLogging does not support retention pruning; ignoring retention_max_records=%r retention_days=%r",
+                retention_max_records,
+                retention_days,
+            )
 
         self._client = mqtt.Client(client_id=client_id or "foghorn_mqtt_logger")
         if username is not None:
