@@ -1410,6 +1410,44 @@ def _build_v2_root_schema(
                 ),
                 "default": False,
             },
+            "query_log_retention": {
+                "type": "object",
+                "additionalProperties": False,
+                "description": (
+                    "Optional global retention policy for query-log backends. "
+                    "Per-backend config values override these defaults."
+                ),
+                "properties": {
+                    "max_records": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": (
+                            "Maximum number of query_log records to retain per "
+                            "supported backend."
+                        ),
+                    },
+                    "days": {
+                        "type": "number",
+                        "exclusiveMinimum": 0,
+                        "description": (
+                            "Maximum age in days for query_log records retained "
+                            "by supported backends."
+                        ),
+                    },
+                },
+            },
+            "query_log_retention_max_records": {
+                "type": "integer",
+                "minimum": 1,
+                "description": (
+                    "Legacy alias for logging.query_log_retention.max_records."
+                ),
+            },
+            "query_log_retention_days": {
+                "type": "number",
+                "exclusiveMinimum": 0,
+                "description": "Legacy alias for logging.query_log_retention.days.",
+            },
             # Backends used for statistics and query logging; each entry maps to
             # a BaseStatsStore implementation (for example, sqlite, mysql,
             # mqtt_logging).
