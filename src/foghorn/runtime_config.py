@@ -37,7 +37,7 @@ import logging
 import threading
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, List, Sequence, Tuple
+from typing import Any, Dict, List, Sequence, Tuple, Final
 
 from .config.config_parser import (
     load_plugins,
@@ -238,6 +238,11 @@ class RuntimeSnapshot:
     # Optional explicit UDP response size ceiling (bytes). When None, the
     # effective ceiling is derived from client EDNS(0) and edns_udp_payload.
     udp_max_response_bytes: int | None
+    # Resolver search-domain qualification settings.
+    search_domain: str  # suffix to append, e.g. 'mylan' or 'mycorp.com'
+    qualify_single_label: bool  # qualify single-label qnames (default True)
+    qualify_non_proper_tld: object  # bool | list[str]
+    non_proper_tld_mode: str  # 'suffix' (default) | 'exact'
     # AXFR/IXFR policy for TCP/DoT listeners.
     axfr_enabled: bool
     axfr_allow_clients: List[str]
@@ -275,7 +280,7 @@ _LOCK = threading.Lock()
 _ACTIVE: RuntimeSnapshot | None = None
 _CONFIG_PATH: str | None = None
 _CLI_VARS: List[str] = []
-_UNKNOWN_KEYS_POLICY: str = "warn"
+_UNKNOWN_KEYS_POLICY: Final[str] = "warn"
 
 # Background teardown tracking for old plugin instances.
 _OLD_PLUGINS_LOCK = threading.Lock()
@@ -747,6 +752,27 @@ def _build_snapshot(
     enable_ede = bool(server_cfg.get("enable_ede", False))
     forward_local = bool(server_cfg.get("forward_local", False))
 
+    # Resolver search-domain qualification settings.
+    search_cfg = resolver_cfg.get("search") or {}
+    if not isinstance(search_cfg, dict):
+        search_cfg = {}
+    search_domain = str(search_cfg.get("domain", "") or "").strip().rstrip(".")
+    qualify_single_label = bool(search_cfg.get("qualify_single_label", True))
+    _raw_non_proper_tld = search_cfg.get("qualify_non_proper_tld", False)
+    if isinstance(_raw_non_proper_tld, list):
+        qualify_non_proper_tld: object = [
+            str(e).strip().rstrip(".") for e in _raw_non_proper_tld if str(e).strip()
+        ]
+    elif isinstance(_raw_non_proper_tld, str):
+        _s = _raw_non_proper_tld.strip().lower()
+        qualify_non_proper_tld = True if _s in ("true", "yes", "1") else False
+    else:
+        qualify_non_proper_tld = bool(_raw_non_proper_tld)
+    _raw_tld_mode = search_cfg.get("non_proper_tld_mode", "suffix")
+    non_proper_tld_mode = str(_raw_tld_mode or "suffix").strip().lower()
+    if non_proper_tld_mode not in {"suffix", "exact"}:
+        non_proper_tld_mode = "suffix"
+
     # UDP listener-adjacent knobs.
     udp_max_response_bytes = None
     try:
@@ -874,6 +900,10 @@ def _build_snapshot(
             if udp_max_response_bytes is not None
             else None
         ),
+        search_domain=str(search_domain),
+        qualify_single_label=bool(qualify_single_label),
+        qualify_non_proper_tld=qualify_non_proper_tld,
+        non_proper_tld_mode=str(non_proper_tld_mode),
         axfr_enabled=bool(axfr_enabled),
         axfr_allow_clients=list(axfr_allow_clients or []),
         axfr_max_zone_rrs=(
@@ -1058,6 +1088,10 @@ def _default_snapshot() -> RuntimeSnapshot:
         stats_collector=None,
         cache_plugin=cache_plugin,
         udp_max_response_bytes=None,
+        search_domain="",
+        qualify_single_label=True,
+        qualify_non_proper_tld=False,
+        non_proper_tld_mode="suffix",
         axfr_enabled=False,
         axfr_allow_clients=[],
         axfr_max_zone_rrs=None,
