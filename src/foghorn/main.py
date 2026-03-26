@@ -563,6 +563,29 @@ def main(argv: List[str] | None = None) -> int:
     # forwarded to upstream resolvers and return NXDOMAIN instead.
     forward_local = bool(server_cfg.get("forward_local", False))
 
+    # Resolver search-domain qualification settings.
+    _search_cfg_main = resolver_cfg.get("search") or {}
+    if not isinstance(_search_cfg_main, dict):
+        _search_cfg_main = {}
+    search_domain_main = (
+        str(_search_cfg_main.get("domain", "") or "").strip().rstrip(".")
+    )
+    qualify_single_label_main = bool(_search_cfg_main.get("qualify_single_label", True))
+    _raw_npt_main = _search_cfg_main.get("qualify_non_proper_tld", False)
+    if isinstance(_raw_npt_main, list):
+        qualify_non_proper_tld_main: object = [
+            str(e).strip().rstrip(".") for e in _raw_npt_main if str(e).strip()
+        ]
+    elif isinstance(_raw_npt_main, str):
+        _s_main = _raw_npt_main.strip().lower()
+        qualify_non_proper_tld_main = True if _s_main in ("true", "yes", "1") else False
+    else:
+        qualify_non_proper_tld_main = bool(_raw_npt_main)
+    _raw_tld_mode_main = _search_cfg_main.get("non_proper_tld_mode", "suffix")
+    non_proper_tld_mode_main = str(_raw_tld_mode_main or "suffix").strip().lower()
+    if non_proper_tld_mode_main not in {"suffix", "exact"}:
+        non_proper_tld_mode_main = "suffix"
+
     # AXFR/IXFR transfer policy (applies to TCP/DoT listeners).
     axfr_cfg = server_cfg.get("axfr") or {}
     if not isinstance(axfr_cfg, dict):
@@ -665,6 +688,10 @@ def main(argv: List[str] | None = None) -> int:
             edns_payload=edns_payload,
             enable_ede=enable_ede,
             forward_local=forward_local,
+            search_domain=search_domain_main,
+            qualify_single_label=qualify_single_label_main,
+            qualify_non_proper_tld=qualify_non_proper_tld_main,
+            non_proper_tld_mode=non_proper_tld_mode_main,
             min_cache_ttl=min_cache_ttl,
             stats_collector=stats_collector,
             cache_plugin=cache_plugin,
@@ -1691,6 +1718,16 @@ def _build_effective_persistence_cfg(
         return {}
 
     async_default = bool(logging_block.get("async", True))
+    retention_cfg = logging_block.get("query_log_retention")
+    retention_max_records = None
+    retention_days = None
+    if isinstance(retention_cfg, dict):
+        retention_max_records = retention_cfg.get("max_records")
+        retention_days = retention_cfg.get("days")
+    if retention_max_records is None:
+        retention_max_records = logging_block.get("query_log_retention_max_records")
+    if retention_days is None:
+        retention_days = logging_block.get("query_log_retention_days")
 
     primary_hint = stats_cfg.get("source_backend")
     primary_backend = str(primary_hint).strip() if isinstance(primary_hint, str) else ""
@@ -1720,6 +1757,10 @@ def _build_effective_persistence_cfg(
         # Propagate the global logging.async flag to backends that do
         # not opt out explicitly via async_logging.
         conf.setdefault("async_logging", async_default)
+        if retention_max_records is not None:
+            conf.setdefault("retention_max_records", retention_max_records)
+        if retention_days is not None:
+            conf.setdefault("retention_days", retention_days)
 
         backend_entry: dict[str, object] = {
             "backend": backend_name,
@@ -1956,11 +1997,15 @@ def _initialize_runtime_snapshot(
     edns_payload: int,
     enable_ede: bool,
     forward_local: bool,
-    min_cache_ttl: int,
-    stats_collector: Optional[StatsCollector],
-    cache_plugin: object | None,
-    udp_cfg: dict,
-    axfr_enabled: bool,
+    search_domain: str = "",
+    qualify_single_label: bool = True,
+    qualify_non_proper_tld: object = False,
+    non_proper_tld_mode: str = "suffix",
+    min_cache_ttl: int = 0,
+    stats_collector: Optional[StatsCollector] = None,
+    cache_plugin: object | None = None,
+    udp_cfg: dict = None,  # type: ignore[assignment]
+    axfr_enabled: bool = False,
     axfr_allow_clients: list[str],
     axfr_max_zone_rrs: int | None,
     axfr_max_concurrent_transfers: int,
@@ -2073,6 +2118,10 @@ def _initialize_runtime_snapshot(
             stats_collector=stats_collector,
             cache_plugin=cache_plugin,
             udp_max_response_bytes=udp_max_response_bytes,
+            search_domain=str(search_domain),
+            qualify_single_label=bool(qualify_single_label),
+            qualify_non_proper_tld=qualify_non_proper_tld,
+            non_proper_tld_mode=str(non_proper_tld_mode),
             axfr_enabled=bool(axfr_enabled),
             axfr_allow_clients=list(axfr_allow_clients or []),
             axfr_max_zone_rrs=(
