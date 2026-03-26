@@ -15,6 +15,8 @@ from ..histogram import LatencyHistogram
 from ..topk import TOPK_CAPACITY_FACTOR, TOPK_MIN_CAPACITY, TopK
 
 logger = logging.getLogger("foghorn.stats")
+DEFAULT_MAX_UNIQUE_CLIENTS = 50000
+DEFAULT_MAX_UNIQUE_DOMAINS = 50000
 
 
 @registered_lru_cached(maxsize=4096)
@@ -59,6 +61,8 @@ class _StatsCollectorInitMixin:
         include_ignored_in_stats: bool = True,
         logging_only: bool = False,
         query_log_only: bool = False,
+        max_unique_clients: int = DEFAULT_MAX_UNIQUE_CLIENTS,
+        max_unique_domains: int = DEFAULT_MAX_UNIQUE_DOMAINS,
     ) -> None:
         """Initialize statistics collector with configuration flags.
 
@@ -90,6 +94,10 @@ class _StatsCollectorInitMixin:
             query_log_only: When True, only the raw query_log is written to the
                 persistent store; aggregate counters are kept in-memory only and
                 are not mirrored into the counts table.
+            max_unique_clients: Maximum number of unique client IP values
+                retained in memory when unique tracking is enabled.
+            max_unique_domains: Maximum number of unique domain values retained
+                in memory when unique tracking is enabled.
 
         Outputs:
             None
@@ -114,6 +122,16 @@ class _StatsCollectorInitMixin:
         # When query_log_only is true, only query_log appends are written to
         # the persistent store; aggregate counters remain in-memory only.
         self.query_log_only = bool(query_log_only)
+        try:
+            parsed_max_unique_clients = int(max_unique_clients)
+        except (TypeError, ValueError):
+            parsed_max_unique_clients = DEFAULT_MAX_UNIQUE_CLIENTS
+        try:
+            parsed_max_unique_domains = int(max_unique_domains)
+        except (TypeError, ValueError):
+            parsed_max_unique_domains = DEFAULT_MAX_UNIQUE_DOMAINS
+        self.max_unique_clients = max(0, parsed_max_unique_clients)
+        self.max_unique_domains = max(0, parsed_max_unique_domains)
 
         # Optional persistent store for long-lived aggregates and query logs.
         # This can be any BaseStatsStore implementation, including
@@ -145,6 +163,10 @@ class _StatsCollectorInitMixin:
         # Optional: unique tracking
         self._unique_clients = set() if track_uniques else None
         self._unique_domains = set() if track_uniques else None
+        self._unique_clients_dropped = 0
+        self._unique_domains_dropped = 0
+        self._unique_clients_limit_warned = False
+        self._unique_domains_limit_warned = False
 
         # Optional: top-K trackers. Use a larger internal capacity so that
         # display-only filters and downstream consumers (such as prefetching
@@ -204,6 +226,62 @@ class _StatsCollectorInitMixin:
             ignore_top_domains or [],
             ignore_top_subdomains or [],
         )
+
+    def _track_unique_client_locked(self, client_ip: str) -> None:
+        """Brief: Add a unique client IP while enforcing a maximum set size.
+
+        Inputs:
+          - client_ip: Client IP value to track.
+
+        Outputs:
+          - None. Updates in-memory unique-client tracking state.
+        """
+        if self._unique_clients is None:
+            return
+        value = str(client_ip or "")
+        if not value:
+            return
+        if value in self._unique_clients:
+            return
+        if len(self._unique_clients) >= self.max_unique_clients:
+            self._unique_clients_dropped += 1
+            if not self._unique_clients_limit_warned:
+                logger.warning(
+                    "StatsCollector unique client tracking reached max_unique_clients=%d; "
+                    "new unseen client values will be dropped",
+                    self.max_unique_clients,
+                )
+                self._unique_clients_limit_warned = True
+            return
+        self._unique_clients.add(value)
+
+    def _track_unique_domain_locked(self, domain: str) -> None:
+        """Brief: Add a unique domain while enforcing a maximum set size.
+
+        Inputs:
+          - domain: Normalized domain value to track.
+
+        Outputs:
+          - None. Updates in-memory unique-domain tracking state.
+        """
+        if self._unique_domains is None:
+            return
+        value = str(domain or "")
+        if not value:
+            return
+        if value in self._unique_domains:
+            return
+        if len(self._unique_domains) >= self.max_unique_domains:
+            self._unique_domains_dropped += 1
+            if not self._unique_domains_limit_warned:
+                logger.warning(
+                    "StatsCollector unique domain tracking reached max_unique_domains=%d; "
+                    "new unseen domain values will be dropped",
+                    self.max_unique_domains,
+                )
+                self._unique_domains_limit_warned = True
+            return
+        self._unique_domains.add(value)
 
     def _client_is_ignored_locked(self, client_ip: str) -> bool:
         """Brief: Return True if the client IP matches ignore_top_clients.

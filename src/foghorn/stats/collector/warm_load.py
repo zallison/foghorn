@@ -272,10 +272,47 @@ class _StatsCollectorWarmLoadMixin:
             cache_miss_subdomain_counts = counts.get("cache_miss_subdomains", {})
 
             if self._unique_clients is not None:
-                self._unique_clients = set(str(c) for c in client_counts.keys())
+                self._unique_clients.clear()
+                dropped_clients = 0
+                for raw_client in client_counts.keys():
+                    client_key = str(raw_client)
+                    if not client_key or client_key in self._unique_clients:
+                        continue
+                    if len(self._unique_clients) >= self.max_unique_clients:
+                        dropped_clients += 1
+                        continue
+                    self._unique_clients.add(client_key)
+                self._unique_clients_dropped = dropped_clients
+                if dropped_clients > 0 and not self._unique_clients_limit_warned:
+                    logger.warning(
+                        "StatsCollector warm-load client uniques exceeded max_unique_clients=%d; "
+                        "loaded subset and dropped %d values",
+                        self.max_unique_clients,
+                        dropped_clients,
+                    )
+                    self._unique_clients_limit_warned = True
+
             if self._unique_domains is not None:
+                self._unique_domains.clear()
+                dropped_domains = 0
                 src = subdomain_counts or domain_counts
-                self._unique_domains = set(str(d) for d in src.keys())
+                for raw_domain in src.keys():
+                    domain_key = str(raw_domain)
+                    if not domain_key or domain_key in self._unique_domains:
+                        continue
+                    if len(self._unique_domains) >= self.max_unique_domains:
+                        dropped_domains += 1
+                        continue
+                    self._unique_domains.add(domain_key)
+                self._unique_domains_dropped = dropped_domains
+                if dropped_domains > 0 and not self._unique_domains_limit_warned:
+                    logger.warning(
+                        "StatsCollector warm-load domain uniques exceeded max_unique_domains=%d; "
+                        "loaded subset and dropped %d values",
+                        self.max_unique_domains,
+                        dropped_domains,
+                    )
+                    self._unique_domains_limit_warned = True
 
             if self._top_clients is not None and client_counts:
                 items = sorted(

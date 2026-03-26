@@ -24,6 +24,10 @@ class StatsCollector(
         include_top_domains: Track top domains by request count (default False)
         top_n: Number of top items to track (default 10)
         track_latency: Enable latency histogram (default False)
+        max_unique_clients: Maximum unique clients retained in-memory when
+            track_uniques is enabled (default 50000).
+        max_unique_domains: Maximum unique domains retained in-memory when
+            track_uniques is enabled (default 50000).
         ignore_top_clients: Optional list of client IPs/CIDRs to hide from top_clients
         ignore_top_domains: Optional list of base domains to hide from top_domains
         ignore_top_subdomains: Optional list of full qnames to hide from top_subdomains

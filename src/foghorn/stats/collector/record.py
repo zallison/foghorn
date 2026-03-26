@@ -48,10 +48,10 @@ class _StatsCollectorRecordMixin:
                 self._qtypes[qtype] += 1
 
             if self._unique_clients is not None:
-                self._unique_clients.add(client_ip)
+                self._track_unique_client_locked(client_ip)
 
             if self._unique_domains is not None:
-                self._unique_domains.add(domain)
+                self._track_unique_domain_locked(domain)
 
             if self._top_clients is not None:
                 self._top_clients.add(client_ip)
