@@ -515,6 +515,7 @@ def pre_resolve(
                         dnssec.add_nsec3_denial_of_existence(
                             reply,
                             name,
+                            qtype_int,
                             matched_zone,
                             records,
                             name_index,
