@@ -5,7 +5,6 @@ import os
 import sqlite3
 import threading
 import time
-from functools import lru_cache
 from typing import Mapping, Optional, Tuple
 
 from dnslib import QTYPE, RCODE, DNSRecord
@@ -21,12 +20,13 @@ from foghorn.plugins.resolve.base import (
 )
 from foghorn.utils.current_cache import get_current_namespaced_cache, module_namespace
 from foghorn.utils import dns_names, ip_networks
+from foghorn.utils.register_caches import registered_lru_cached
 
 logger = logging.getLogger(__name__)
 _GLOBAL_RPS_DB_KEY = "global"
 
 
-@lru_cache(maxsize=16384)
+@registered_lru_cached(maxsize=16384)
 def _psl_registrable_domain(qname: str) -> str | None:
     """Brief: Return the PSL registrable domain (a.k.a. eTLD+1) for qname.
 
@@ -265,7 +265,7 @@ class RateLimitConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
 
 
-@lru_cache(maxsize=16384)
+@registered_lru_cached(maxsize=16384)
 def _to_base_domain(qname: str, base_labels: int = 2) -> str:
     """Brief: Extract a stable base domain for qname (PSL-aware when available).
 
