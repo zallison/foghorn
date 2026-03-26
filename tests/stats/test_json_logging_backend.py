@@ -174,3 +174,202 @@ def test_insert_query_log_handles_invalid_result_json(tmp_path: Path) -> None:
     record = json.loads(lines[1])
     assert record["client_ip"] == "203.0.113.1"
     assert "result" not in record
+
+
+def test_json_logging_retention_max_records(tmp_path: Path) -> None:
+    """Brief: JsonLogging keeps only newest N records when configured.
+
+    Inputs:
+        tmp_path: pytest-provided temporary directory path.
+
+    Outputs:
+        None; asserts retention_max_records trims older JSONL records.
+    """
+
+    log_file = tmp_path / "queries.jsonl"
+    backend = JsonLogging(
+        file_path=str(log_file),
+        async_logging=False,
+        retention_max_records=2,
+    )
+
+    backend._insert_query_log(  # type: ignore[attr-defined]
+        ts=1.0,
+        client_ip="192.0.2.1",
+        name="first.example",
+        qtype="A",
+        upstream_id=None,
+        rcode="NOERROR",
+        status="ok",
+        error=None,
+        first=None,
+        result_json="{}",
+    )
+    backend._insert_query_log(  # type: ignore[attr-defined]
+        ts=2.0,
+        client_ip="192.0.2.2",
+        name="second.example",
+        qtype="A",
+        upstream_id=None,
+        rcode="NOERROR",
+        status="ok",
+        error=None,
+        first=None,
+        result_json="{}",
+    )
+    backend._insert_query_log(  # type: ignore[attr-defined]
+        ts=3.0,
+        client_ip="192.0.2.3",
+        name="third.example",
+        qtype="A",
+        upstream_id=None,
+        rcode="NOERROR",
+        status="ok",
+        error=None,
+        first=None,
+        result_json="{}",
+    )
+    backend.close()
+
+    lines = log_file.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 3
+    meta = json.loads(lines[0])
+    assert "log_start" in meta
+    kept_names = [json.loads(line)["name"] for line in lines[1:]]
+    assert kept_names == ["second.example", "third.example"]
+
+
+def test_json_logging_retention_days(monkeypatch, tmp_path: Path) -> None:
+    """Brief: JsonLogging prunes records older than the retention_days cutoff.
+
+    Inputs:
+        monkeypatch: pytest monkeypatch fixture.
+        tmp_path: pytest-provided temporary directory path.
+
+    Outputs:
+        None; asserts old JSONL records are removed by days-based retention.
+    """
+
+    import foghorn.plugins.querylog.json_logging as json_logging_mod
+
+    now_ts = 15.0 * 86400.0
+    monkeypatch.setattr(json_logging_mod.time, "time", lambda: now_ts)
+
+    log_file = tmp_path / "queries.jsonl"
+    backend = JsonLogging(
+        file_path=str(log_file),
+        async_logging=False,
+        retention_days=2.0,
+    )
+    backend._insert_query_log(  # type: ignore[attr-defined]
+        ts=now_ts - (3.0 * 86400.0),
+        client_ip="198.51.100.1",
+        name="old.example",
+        qtype="A",
+        upstream_id=None,
+        rcode="NOERROR",
+        status="ok",
+        error=None,
+        first=None,
+        result_json="{}",
+    )
+    backend._insert_query_log(  # type: ignore[attr-defined]
+        ts=now_ts - 86400.0,
+        client_ip="198.51.100.2",
+        name="fresh.example",
+        qtype="A",
+        upstream_id=None,
+        rcode="NOERROR",
+        status="ok",
+        error=None,
+        first=None,
+        result_json="{}",
+    )
+    backend.close()
+
+    lines = log_file.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 2
+    kept = json.loads(lines[1])
+    assert kept["name"] == "fresh.example"
+
+
+def test_json_logging_retention_days_and_max_records(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """Brief: JsonLogging applies days and max-record retention together.
+
+    Inputs:
+        monkeypatch: pytest monkeypatch fixture.
+        tmp_path: pytest-provided temporary directory path.
+
+    Outputs:
+        None; asserts combined retention keeps only recent newest records.
+    """
+
+    import foghorn.plugins.querylog.json_logging as json_logging_mod
+
+    now_ts = 30.0 * 86400.0
+    monkeypatch.setattr(json_logging_mod.time, "time", lambda: now_ts)
+
+    log_file = tmp_path / "queries.jsonl"
+    backend = JsonLogging(
+        file_path=str(log_file),
+        async_logging=False,
+        retention_days=4.0,
+        retention_max_records=2,
+    )
+    backend._insert_query_log(  # type: ignore[attr-defined]
+        ts=now_ts - (10.0 * 86400.0),
+        client_ip="203.0.113.1",
+        name="expired.example",
+        qtype="A",
+        upstream_id=None,
+        rcode="NOERROR",
+        status="ok",
+        error=None,
+        first=None,
+        result_json="{}",
+    )
+    backend._insert_query_log(  # type: ignore[attr-defined]
+        ts=now_ts - (3.0 * 86400.0),
+        client_ip="203.0.113.2",
+        name="older.example",
+        qtype="A",
+        upstream_id=None,
+        rcode="NOERROR",
+        status="ok",
+        error=None,
+        first=None,
+        result_json="{}",
+    )
+    backend._insert_query_log(  # type: ignore[attr-defined]
+        ts=now_ts - (2.0 * 86400.0),
+        client_ip="203.0.113.3",
+        name="newer.example",
+        qtype="A",
+        upstream_id=None,
+        rcode="NOERROR",
+        status="ok",
+        error=None,
+        first=None,
+        result_json="{}",
+    )
+    backend._insert_query_log(  # type: ignore[attr-defined]
+        ts=now_ts - 86400.0,
+        client_ip="203.0.113.4",
+        name="newest.example",
+        qtype="A",
+        upstream_id=None,
+        rcode="NOERROR",
+        status="ok",
+        error=None,
+        first=None,
+        result_json="{}",
+    )
+    backend.close()
+
+    lines = log_file.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 3
+    kept_names = [json.loads(line)["name"] for line in lines[1:]]
+    assert kept_names == ["newer.example", "newest.example"]
