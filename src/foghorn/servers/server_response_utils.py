@@ -12,6 +12,8 @@ from dnslib import QTYPE, RCODE, DNSRecord, EDNSOption
 from foghorn.utils.register_caches import registered_cached
 
 logger = logging.getLogger("foghorn.server")
+_EDNS_COOKIE_OPTION_CODE = 10
+_DNS_COOKIE_CLIENT_BYTES = 8
 
 
 def _compute_effective_ttl_cache_key(resp: object, min_cache_ttl: int) -> tuple:
@@ -228,6 +230,166 @@ def _set_response_id(wire: bytes, req_id: int) -> bytes:
         logger.error("Failed to set response id: %s", e)
         # Fall back to returning the original value when rewriting fails.
         return wire
+
+
+def _extract_client_cookie_from_request(req: DNSRecord) -> Optional[bytes]:
+    """Brief: Extract normalized client-cookie bytes from request EDNS options.
+
+    Inputs:
+      - req: Parsed DNS query DNSRecord.
+
+    Outputs:
+      - Optional[bytes]: 8-byte client-cookie when present and valid, else None.
+
+    Notes:
+      - DNS COOKIE uses EDNS option-code 10.
+      - This helper returns only the client-cookie portion (first 8 bytes).
+    """
+
+    try:
+        for rr in getattr(req, "ar", None) or []:
+            if getattr(rr, "rtype", None) != QTYPE.OPT:
+                continue
+            for opt in getattr(rr, "rdata", None) or []:
+                if not isinstance(opt, EDNSOption):
+                    continue
+                try:
+                    if int(getattr(opt, "code", -1)) != _EDNS_COOKIE_OPTION_CODE:
+                        continue
+                except Exception:
+                    continue
+                try:
+                    raw = bytes(getattr(opt, "data", b"") or b"")
+                except Exception:
+                    raw = b""
+                if len(raw) < _DNS_COOKIE_CLIENT_BYTES:
+                    return None
+                return raw[:_DNS_COOKIE_CLIENT_BYTES]
+    except Exception:
+        return None
+    return None
+
+
+def _strip_cookie_options_from_response_record(resp: DNSRecord) -> bool:
+    """Brief: Remove COOKIE options from response OPT records.
+
+    Inputs:
+      - resp: Parsed DNS response DNSRecord (mutated in-place).
+
+    Outputs:
+      - bool: True when at least one COOKIE option was removed.
+    """
+
+    changed = False
+    for rr in getattr(resp, "ar", None) or []:
+        if getattr(rr, "rtype", None) != QTYPE.OPT:
+            continue
+        rdata_list = getattr(rr, "rdata", None)
+        if not isinstance(rdata_list, list):
+            continue
+        filtered = []
+        removed = False
+        for opt in rdata_list:
+            if isinstance(opt, EDNSOption) and int(getattr(opt, "code", -1)) == int(
+                _EDNS_COOKIE_OPTION_CODE
+            ):
+                removed = True
+                continue
+            filtered.append(opt)
+        if removed:
+            rr.rdata = filtered
+            changed = True
+    return changed
+
+
+def _strip_response_cookie_options(response_wire: bytes) -> bytes:
+    """Brief: Strip COOKIE options from a packed DNS response.
+
+    Inputs:
+      - response_wire: Wire-format DNS response bytes.
+
+    Outputs:
+      - bytes: Response bytes with COOKIE options removed.
+    """
+
+    if not isinstance(response_wire, (bytes, bytearray, memoryview)):
+        return response_wire
+    try:
+        msg = DNSRecord.parse(bytes(response_wire))
+        changed = _strip_cookie_options_from_response_record(msg)
+        if not changed:
+            return bytes(response_wire)
+        return msg.pack()
+    except Exception:
+        return response_wire
+
+
+def _bind_response_cookie_to_request(req: DNSRecord, response_wire: bytes) -> bytes:
+    """Brief: Rebind response COOKIE to the active request client-cookie.
+
+    Inputs:
+      - req: Parsed DNS query DNSRecord.
+      - response_wire: Wire-format DNS response bytes.
+
+    Outputs:
+      - bytes: Response bytes with stale COOKIE removed and request cookie bound.
+
+    Notes:
+      - When the request has no COOKIE option, this removes response COOKIE.
+      - Non-COOKIE EDNS options are preserved.
+    """
+
+    if not isinstance(response_wire, (bytes, bytearray, memoryview)):
+        return response_wire
+    try:
+        msg = DNSRecord.parse(bytes(response_wire))
+        changed = _strip_cookie_options_from_response_record(msg)
+
+        client_cookie = _extract_client_cookie_from_request(req)
+        if client_cookie is None:
+            if changed:
+                return msg.pack()
+            return bytes(response_wire)
+
+        opt_rr = None
+        for rr in getattr(msg, "ar", None) or []:
+            if getattr(rr, "rtype", None) == QTYPE.OPT:
+                opt_rr = rr
+                break
+
+        if opt_rr is None:
+            client_opts = [
+                rr
+                for rr in (getattr(req, "ar", None) or [])
+                if getattr(rr, "rtype", None) == QTYPE.OPT
+            ]
+            if not client_opts:
+                if changed:
+                    return msg.pack()
+                return bytes(response_wire)
+            msg.add_ar(copy.deepcopy(client_opts[0]))
+            changed = True
+            for rr in getattr(msg, "ar", None) or []:
+                if getattr(rr, "rtype", None) == QTYPE.OPT:
+                    opt_rr = rr
+                    break
+            if opt_rr is None:
+                if changed:
+                    return msg.pack()
+                return bytes(response_wire)
+
+        rdata_list = getattr(opt_rr, "rdata", None)
+        if not isinstance(rdata_list, list):
+            opt_rr.rdata = []
+            rdata_list = opt_rr.rdata
+        rdata_list.append(EDNSOption(_EDNS_COOKIE_OPTION_CODE, bytes(client_cookie)))
+        changed = True
+
+        if changed:
+            return msg.pack()
+        return bytes(response_wire)
+    except Exception:
+        return response_wire
 
 
 _EDNS_PAYLOAD_CLAMP_WARNED: set[int] = set()
