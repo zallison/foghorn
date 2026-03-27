@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import sqlite3
 import threading
@@ -103,6 +104,12 @@ class SqliteStatsStore(BaseStatsStore):
         max_logging_queue: int = 4096,
         retention_max_records: Optional[int] = None,
         retention_days: Optional[float] = None,
+        retention_max_bytes: Optional[int] = None,
+        retention_prune_interval_seconds: Optional[float] = None,
+        retention_prune_every_n_inserts: Optional[int] = None,
+        retention_vacuum_on_prune: bool = False,
+        retention_vacuum_interval_seconds: Optional[float] = None,
+        sqlite_auto_vacuum: Optional[str] = None,
         **_: Any,
     ) -> None:
         """Initialize SQLite backend and ensure schema exists.
@@ -118,6 +125,9 @@ class SqliteStatsStore(BaseStatsStore):
         """
 
         self._db_path = db_path
+        self._sqlite_auto_vacuum = self._normalize_sqlite_auto_vacuum(
+            sqlite_auto_vacuum
+        )
         self._conn = self._init_connection()
 
         # Logging/queuing behaviour
@@ -133,6 +143,28 @@ class SqliteStatsStore(BaseStatsStore):
         self._query_log_retention_days = BaseStatsStore._normalize_retention_days(
             retention_days
         )
+        self._query_log_retention_max_bytes = (
+            BaseStatsStore._normalize_retention_max_bytes(retention_max_bytes)
+        )
+        self._query_log_retention_prune_interval_seconds = (
+            BaseStatsStore._normalize_retention_prune_interval_seconds(
+                retention_prune_interval_seconds
+            )
+        )
+        self._query_log_retention_prune_every_n_inserts = (
+            BaseStatsStore._normalize_retention_prune_every_n_inserts(
+                retention_prune_every_n_inserts
+            )
+        )
+        self._query_log_retention_seen_inserts = 0
+        self._query_log_retention_last_prune_ts = 0.0
+        self._retention_vacuum_on_prune = bool(retention_vacuum_on_prune)
+        self._retention_vacuum_interval_seconds = (
+            BaseStatsStore._normalize_retention_prune_interval_seconds(
+                retention_vacuum_interval_seconds
+            )
+        )
+        self._retention_last_vacuum_ts = 0.0
 
         # Batching configuration
         self._batch_writes = bool(batch_writes)
@@ -143,6 +175,45 @@ class SqliteStatsStore(BaseStatsStore):
         self._lock = threading.RLock()
         self._pending_ops: List[Tuple[str, Tuple[Any, ...]]] = []
         self._last_flush: float = time.time()
+
+    @staticmethod
+    def _normalize_sqlite_auto_vacuum(raw: object) -> int | None:
+        """Brief: Normalize sqlite auto_vacuum mode configuration.
+
+        Inputs:
+            raw: Raw mode string/number from backend config.
+
+        Outputs:
+            int | None: SQLite PRAGMA auto_vacuum mode:
+                - 0 (none), 1 (full), or 2 (incremental)
+                Returns None when the value is missing or invalid.
+        """
+
+        if raw is None:
+            return None
+
+        if isinstance(raw, str):
+            text = raw.strip().lower()
+            mapping = {
+                "none": 0,
+                "off": 0,
+                "0": 0,
+                "full": 1,
+                "on": 1,
+                "1": 1,
+                "incremental": 2,
+                "2": 2,
+            }
+            return mapping.get(text)
+
+        try:
+            value = int(raw)  # type: ignore[arg-type]
+        except Exception:
+            return None
+
+        if value in {0, 1, 2}:
+            return int(value)
+        return None
 
     def _init_connection(self) -> sqlite3.Connection:
         """Create SQLite connection and ensure schema exists.
@@ -181,6 +252,17 @@ class SqliteStatsStore(BaseStatsStore):
             conn.execute("PRAGMA journal_mode=WAL")
         except Exception:  # pragma: no cover - environment specific
             pass
+        try:
+            auto_vacuum_mode = getattr(self, "_sqlite_auto_vacuum", None)
+            if auto_vacuum_mode is not None:
+                conn.execute(f"PRAGMA auto_vacuum={int(auto_vacuum_mode)}")
+                # Apply auto_vacuum mode change immediately when possible.
+                conn.execute("VACUUM")
+        except Exception:  # pragma: no cover - environment specific
+            logger.debug(
+                "SqliteStatsStore failed to apply auto_vacuum mode",
+                exc_info=True,
+            )
 
         # Aggregate counters table
         conn.execute(
@@ -382,32 +464,145 @@ class SqliteStatsStore(BaseStatsStore):
             None.
 
         Outputs:
-            None; schedules prune statements through ``_execute`` so retention
-            is applied in both immediate and batched write modes.
+            None; applies age, record-count, and optional byte-cap pruning.
         """
+        now_ts = time.time()
 
         cutoff_ts = BaseStatsStore._retention_cutoff_ts(
             self._query_log_retention_days,
-            now_ts=time.time(),
+            now_ts=now_ts,
         )
         max_records = self._query_log_retention_max_records
+        max_bytes = self._query_log_retention_max_bytes
 
-        if cutoff_ts is None and max_records is None:
+        if cutoff_ts is None and max_records is None and max_bytes is None:
+            return
+        if not self._should_run_query_log_retention_prune(now_ts=now_ts):
             return
 
         try:
-            if cutoff_ts is not None:
-                self._execute("DELETE FROM query_log WHERE ts < ?", (float(cutoff_ts),))
+            changed = False
+            with self._lock:
+                # Retention needs to operate on committed rows. Flush any pending
+                # batched writes first so prune decisions see current state.
+                if self._batch_writes:
+                    self._flush_locked()
 
-            if max_records is not None:
-                self._execute(
-                    "DELETE FROM query_log WHERE id NOT IN (SELECT id FROM query_log ORDER BY ts DESC, id DESC LIMIT ?)",
-                    (int(max_records),),
-                )
+                with self._conn:
+                    if cutoff_ts is not None:
+                        cur = self._conn.execute(
+                            "DELETE FROM query_log WHERE ts < ?",
+                            (float(cutoff_ts),),
+                        )
+                        changed = changed or bool(getattr(cur, "rowcount", 0))
+
+                    if max_records is not None:
+                        cur = self._conn.execute(
+                            "DELETE FROM query_log WHERE id NOT IN (SELECT id FROM query_log ORDER BY ts DESC, id DESC LIMIT ?)",
+                            (int(max_records),),
+                        )
+                        changed = changed or bool(getattr(cur, "rowcount", 0))
+
+                if max_bytes is not None:
+                    changed = (
+                        self._prune_query_log_to_max_bytes_locked(int(max_bytes))
+                        or changed
+                    )
+
+                if changed:
+                    self._maybe_run_retention_vacuum_locked(now_ts=now_ts)
         except Exception as exc:  # pragma: no cover - defensive
             logger.error(
                 "SqliteStatsStore retention prune failed: %s", exc, exc_info=True
             )
+
+    def _prune_query_log_to_max_bytes_locked(self, max_bytes: int) -> bool:
+        """Brief: Remove oldest query-log rows until estimated bytes fit a cap.
+
+        Inputs:
+            max_bytes: Maximum estimated bytes to retain in query_log.
+
+        Outputs:
+            bool: True when one or more rows were deleted.
+        """
+
+        if max_bytes <= 0:
+            return False
+
+        changed = False
+        max_passes = 32
+        for _ in range(max_passes):
+            row = self._conn.execute(
+                """
+                SELECT
+                    COALESCE(
+                        SUM(
+                            LENGTH(client_ip)
+                            + LENGTH(name)
+                            + LENGTH(qtype)
+                            + LENGTH(COALESCE(upstream_id, ''))
+                            + LENGTH(COALESCE(rcode, ''))
+                            + LENGTH(COALESCE(status, ''))
+                            + LENGTH(COALESCE(error, ''))
+                            + LENGTH(COALESCE(first, ''))
+                            + LENGTH(result_json)
+                            + 64
+                        ),
+                        0
+                    ),
+                    COUNT(1)
+                FROM query_log
+                """
+            ).fetchone()
+            total_bytes = int(row[0] or 0) if row else 0
+            total_rows = int(row[1] or 0) if row else 0
+            if total_bytes <= max_bytes or total_rows <= 0:
+                break
+
+            over = max(1, total_bytes - int(max_bytes))
+            ratio = float(over) / float(max(total_bytes, 1))
+            rows_to_delete = max(1, min(total_rows, int(math.ceil(ratio * total_rows))))
+            with self._conn:
+                cur = self._conn.execute(
+                    "DELETE FROM query_log WHERE id IN (SELECT id FROM query_log ORDER BY ts ASC, id ASC LIMIT ?)",
+                    (int(rows_to_delete),),
+                )
+            if not bool(getattr(cur, "rowcount", 0)):
+                break
+            changed = True
+
+        return changed
+
+    def _maybe_run_retention_vacuum_locked(self, *, now_ts: float) -> None:
+        """Brief: Run optional SQLite vacuum maintenance after retention prune.
+
+        Inputs:
+            now_ts: Current Unix timestamp used for interval gating.
+
+        Outputs:
+            None.
+        """
+
+        if not self._retention_vacuum_on_prune:
+            return
+
+        interval = self._retention_vacuum_interval_seconds
+        if interval is not None:
+            try:
+                last = float(getattr(self, "_retention_last_vacuum_ts", 0.0) or 0.0)
+            except Exception:
+                last = 0.0
+            if last > 0.0 and (float(now_ts) - last) < float(interval):
+                return
+
+        try:
+            if getattr(self, "_sqlite_auto_vacuum", None) == 2:
+                self._conn.execute("PRAGMA incremental_vacuum")
+            else:
+                self._conn.execute("VACUUM")
+            self._retention_last_vacuum_ts = float(now_ts)
+        except Exception:  # pragma: no cover - defensive
+            logger.exception("SqliteStatsStore retention vacuum failed")
 
     def select_query_log(
         self,

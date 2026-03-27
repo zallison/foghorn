@@ -741,6 +741,129 @@ def test_sqlite_backend_query_log_retention_max_records() -> None:
     ]
 
 
+def test_sqlite_backend_query_log_retention_max_bytes() -> None:
+    """Brief: SQLite backend byte-cap retention drops oldest rows.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts retention_max_bytes keeps only the newest row at cap.
+    """
+
+    backend = SqliteStatsStore(":memory:", retention_max_bytes=10_000_000)
+
+    backend._insert_query_log(
+        ts=1.0,
+        client_ip="192.0.2.1",
+        name="alpha.example",
+        qtype="A",
+        upstream_id=None,
+        rcode="NOERROR",
+        status="ok",
+        error=None,
+        first=None,
+        result_json="{}",
+    )
+    row = backend._conn.execute(  # type: ignore[attr-defined]
+        """
+        SELECT
+            LENGTH(client_ip)
+            + LENGTH(name)
+            + LENGTH(qtype)
+            + LENGTH(COALESCE(upstream_id, ''))
+            + LENGTH(COALESCE(rcode, ''))
+            + LENGTH(COALESCE(status, ''))
+            + LENGTH(COALESCE(error, ''))
+            + LENGTH(COALESCE(first, ''))
+            + LENGTH(result_json)
+            + 64
+        FROM query_log
+        ORDER BY id DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    assert row is not None
+    backend._query_log_retention_max_bytes = int(row[0])  # type: ignore[attr-defined]
+
+    backend._insert_query_log(
+        ts=2.0,
+        client_ip="192.0.2.2",
+        name="bravo.example",
+        qtype="A",
+        upstream_id=None,
+        rcode="NOERROR",
+        status="ok",
+        error=None,
+        first=None,
+        result_json="{}",
+    )
+
+    res = backend.select_query_log(page=1, page_size=20)
+    assert res["total"] == 1
+    assert res["items"][0]["qname"] == "bravo.example"
+
+
+def test_sqlite_backend_query_log_retention_prune_every_n_inserts() -> None:
+    """Brief: SQLite retention can be deferred to an insert cadence.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts max-record pruning runs on the configured cadence.
+    """
+
+    backend = SqliteStatsStore(
+        ":memory:",
+        retention_max_records=1,
+        retention_prune_every_n_inserts=3,
+    )
+
+    backend._insert_query_log(
+        ts=1.0,
+        client_ip="192.0.2.1",
+        name="first.example",
+        qtype="A",
+        upstream_id=None,
+        rcode="NOERROR",
+        status="ok",
+        error=None,
+        first=None,
+        result_json="{}",
+    )
+    backend._insert_query_log(
+        ts=2.0,
+        client_ip="192.0.2.2",
+        name="second.example",
+        qtype="A",
+        upstream_id=None,
+        rcode="NOERROR",
+        status="ok",
+        error=None,
+        first=None,
+        result_json="{}",
+    )
+    mid = backend.select_query_log(page=1, page_size=20)
+    assert mid["total"] == 2
+
+    backend._insert_query_log(
+        ts=3.0,
+        client_ip="192.0.2.3",
+        name="third.example",
+        qtype="A",
+        upstream_id=None,
+        rcode="NOERROR",
+        status="ok",
+        error=None,
+        first=None,
+        result_json="{}",
+    )
+    final = backend.select_query_log(page=1, page_size=20)
+    assert final["total"] == 1
+    assert final["items"][0]["qname"] == "third.example"
+
+
 def test_sqlite_backend_query_log_retention_days(monkeypatch) -> None:
     """Brief: SQLite backend prunes rows older than retention_days cutoff.
 
