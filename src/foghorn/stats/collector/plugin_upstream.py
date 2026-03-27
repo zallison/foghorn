@@ -9,7 +9,7 @@ from ..topk import TOPK_CAPACITY_FACTOR, TopK
 logger = logging.getLogger("foghorn.stats")
 
 
-class _StatsCollectorPluginUpstreamMixin:
+class _StatsCollectorPluginUpstreamUtils:
     def record_plugin_decision(
         self,
         plugin_name: str,

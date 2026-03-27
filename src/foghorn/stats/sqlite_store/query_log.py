@@ -10,7 +10,7 @@ from foghorn.utils import dns_names
 logger = logging.getLogger("foghorn.stats")
 
 
-class _QueryLogMixin:
+class _QueryLogUtils:
     def select_query_log(
         self,
         client_ip: Optional[str] = None,

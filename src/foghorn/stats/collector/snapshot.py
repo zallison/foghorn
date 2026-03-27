@@ -11,7 +11,7 @@ from ..snapshot import StatsSnapshot
 logger = logging.getLogger("foghorn.stats")
 
 
-class _StatsCollectorSnapshotMixin:
+class _StatsCollectorSnapshotUtils:
     def snapshot(self, reset: bool = False) -> StatsSnapshot:
         """Create immutable snapshot of current statistics.
 
