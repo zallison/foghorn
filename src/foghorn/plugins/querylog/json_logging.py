@@ -51,6 +51,12 @@ class JsonLogging(BaseStatsStore):
             compaction keeps only the newest N query-log records.
         retention_days: Optional day-window retention limit. When set,
             compaction drops records older than the computed cutoff.
+        retention_max_bytes: Optional byte-cap retention limit. When set,
+            compaction drops oldest records until retained bytes are within cap.
+        retention_prune_interval_seconds: Optional minimum seconds between
+            compaction passes.
+        retention_prune_every_n_inserts: Optional insertion cadence for
+            compaction passes.
 
     Outputs:
         Initialized JsonLogging instance ready to append JSON lines to the
@@ -67,6 +73,9 @@ class JsonLogging(BaseStatsStore):
         max_logging_queue: int = 4096,
         retention_max_records: Optional[int] = None,
         retention_days: Optional[float] = None,
+        retention_max_bytes: Optional[int] = None,
+        retention_prune_interval_seconds: Optional[float] = None,
+        retention_prune_every_n_inserts: Optional[int] = None,
         **_: Any,
     ) -> None:
         self._healthy = False
@@ -108,6 +117,21 @@ class JsonLogging(BaseStatsStore):
         self._query_log_retention_days = BaseStatsStore._normalize_retention_days(
             retention_days
         )
+        self._query_log_retention_max_bytes = (
+            BaseStatsStore._normalize_retention_max_bytes(retention_max_bytes)
+        )
+        self._query_log_retention_prune_interval_seconds = (
+            BaseStatsStore._normalize_retention_prune_interval_seconds(
+                retention_prune_interval_seconds
+            )
+        )
+        self._query_log_retention_prune_every_n_inserts = (
+            BaseStatsStore._normalize_retention_prune_every_n_inserts(
+                retention_prune_every_n_inserts
+            )
+        )
+        self._query_log_retention_seen_inserts = 0
+        self._query_log_retention_last_prune_ts = 0.0
 
         # Emit a header line that marks the start of a logging session. Downstream
         # tools can treat this as a lightweight metadata record preceding the
@@ -277,7 +301,11 @@ class JsonLogging(BaseStatsStore):
             now_ts=time.time(),
         )
         max_records = self._query_log_retention_max_records
-        if cutoff_ts is None and max_records is None:
+        max_bytes = self._query_log_retention_max_bytes
+        if cutoff_ts is None and max_records is None and max_bytes is None:
+            return
+
+        if not self._should_run_query_log_retention_prune(now_ts=time.time()):
             return
 
         fh = getattr(self, "_fh", None)
@@ -330,6 +358,20 @@ class JsonLogging(BaseStatsStore):
 
         if max_records is not None and len(filtered_records) > int(max_records):
             filtered_records = filtered_records[-int(max_records) :]
+
+        if max_bytes is not None:
+            byte_cap = int(max_bytes)
+
+            def _line_bytes(line: str) -> int:
+                return len(line.encode("utf-8")) + 1
+
+            header_bytes = _line_bytes(header_line) if header_line is not None else 0
+            retained_bytes = header_bytes + sum(
+                _line_bytes(item) for item in filtered_records
+            )
+            while filtered_records and retained_bytes > byte_cap:
+                removed = filtered_records.pop(0)
+                retained_bytes -= _line_bytes(removed)
 
         rewritten_lines: list[str] = []
         if header_line is not None:

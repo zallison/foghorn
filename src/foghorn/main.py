@@ -1721,13 +1721,30 @@ def _build_effective_persistence_cfg(
     retention_cfg = logging_block.get("query_log_retention")
     retention_max_records = None
     retention_days = None
+    retention_max_bytes = None
+    retention_prune_interval_seconds = None
+    retention_prune_every_n_inserts = None
     if isinstance(retention_cfg, dict):
         retention_max_records = retention_cfg.get("max_records")
         retention_days = retention_cfg.get("days")
+        retention_max_bytes = retention_cfg.get("max_bytes")
+        retention_prune_interval_seconds = retention_cfg.get("prune_interval_seconds")
+        retention_prune_every_n_inserts = retention_cfg.get("prune_every_n_inserts")
     if retention_max_records is None:
         retention_max_records = logging_block.get("query_log_retention_max_records")
     if retention_days is None:
         retention_days = logging_block.get("query_log_retention_days")
+    if retention_max_bytes is None:
+        retention_max_bytes = logging_block.get("query_log_retention_max_bytes")
+    if retention_prune_interval_seconds is None:
+        retention_prune_interval_seconds = logging_block.get(
+            "query_log_retention_prune_interval_seconds"
+        )
+    if retention_prune_every_n_inserts is None:
+        retention_prune_every_n_inserts = logging_block.get(
+            "query_log_retention_prune_every_n_inserts"
+        )
+    global_max_logging_queue = logging_block.get("max_logging_queue")
 
     primary_hint = stats_cfg.get("source_backend")
     primary_backend = str(primary_hint).strip() if isinstance(primary_hint, str) else ""
@@ -1757,10 +1774,24 @@ def _build_effective_persistence_cfg(
         # Propagate the global logging.async flag to backends that do
         # not opt out explicitly via async_logging.
         conf.setdefault("async_logging", async_default)
+        if global_max_logging_queue is not None:
+            conf.setdefault("max_logging_queue", global_max_logging_queue)
         if retention_max_records is not None:
             conf.setdefault("retention_max_records", retention_max_records)
         if retention_days is not None:
             conf.setdefault("retention_days", retention_days)
+        if retention_max_bytes is not None:
+            conf.setdefault("retention_max_bytes", retention_max_bytes)
+        if retention_prune_interval_seconds is not None:
+            conf.setdefault(
+                "retention_prune_interval_seconds",
+                retention_prune_interval_seconds,
+            )
+        if retention_prune_every_n_inserts is not None:
+            conf.setdefault(
+                "retention_prune_every_n_inserts",
+                retention_prune_every_n_inserts,
+            )
 
         backend_entry: dict[str, object] = {
             "backend": backend_name,
@@ -1833,6 +1864,33 @@ def _initialize_statistics_subsystem(
     # Global toggle to keep only the raw query_log in persistence and avoid
     # mirroring aggregate counters into the backend.
     logging_query_log_only = bool(logging_cfg.get("query_log_only", False))
+    query_log_sample_rate: object = logging_cfg.get("query_log_sample_rate", 1.0)
+    query_log_sampling_cfg = logging_cfg.get("query_log_sampling")
+    if isinstance(query_log_sampling_cfg, dict):
+        if query_log_sampling_cfg.get("enabled") is False:
+            query_log_sample_rate = 0.0
+        sample_rate_obj = query_log_sampling_cfg.get("sample_rate")
+        if sample_rate_obj is None:
+            sample_rate_obj = query_log_sampling_cfg.get("rate")
+        if sample_rate_obj is not None:
+            query_log_sample_rate = sample_rate_obj
+
+    query_log_dedupe_window_seconds: object = logging_cfg.get(
+        "query_log_dedupe_window_seconds",
+        0.0,
+    )
+    query_log_dedupe_max_entries: object = logging_cfg.get(
+        "query_log_dedupe_max_entries",
+        50000,
+    )
+    query_log_dedupe_cfg = logging_cfg.get("query_log_dedupe")
+    if isinstance(query_log_dedupe_cfg, dict):
+        window_obj = query_log_dedupe_cfg.get("window_seconds")
+        if window_obj is not None:
+            query_log_dedupe_window_seconds = window_obj
+        max_entries_obj = query_log_dedupe_cfg.get("max_entries")
+        if max_entries_obj is not None:
+            query_log_dedupe_max_entries = max_entries_obj
 
     stats_collector = None
     stats_reporter = None
@@ -1944,6 +2002,9 @@ def _initialize_statistics_subsystem(
             include_ignored_in_stats=include_in_stats,
             logging_only=logging_only_effective,
             query_log_only=logging_query_log_only,
+            query_log_sample_rate=query_log_sample_rate,
+            query_log_dedupe_window_seconds=query_log_dedupe_window_seconds,
+            query_log_dedupe_max_entries=query_log_dedupe_max_entries,
         )
 
         # Best-effort warm-load of persisted aggregate counters on startup.
