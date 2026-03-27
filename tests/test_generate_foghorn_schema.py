@@ -55,3 +55,31 @@ def test_generate_foghorn_schema_main_writes_json(tmp_path) -> None:
     # Ensure the file contains syntactically valid JSON and a top-level object.
     data = json.loads(out_path.read_text(encoding="utf-8"))
     assert isinstance(data, dict)
+
+
+def test_generated_schema_includes_query_log_hardening_fields(tmp_path) -> None:
+    """Brief: Generated v2 schema exposes new query-log hardening keys.
+
+    Inputs:
+      - tmp_path: pytest temporary directory for schema output.
+
+    Outputs:
+      - None; asserts key logging.* properties exist in the generated schema.
+    """
+
+    out_path = tmp_path / "schema.json"
+    ns = _load_schema_module()
+    main_fn = ns.get("main")
+    assert callable(main_fn)
+
+    rc = main_fn(["-o", str(out_path)])
+    assert rc == 0
+    data = json.loads(out_path.read_text(encoding="utf-8"))
+
+    props = data["properties"]["logging"]["properties"]
+    assert "max_logging_queue" in props
+    assert "query_log_sampling" in props
+    assert "query_log_dedupe" in props
+    assert "query_log_retention_max_bytes" in props
+    assert "query_log_retention_prune_interval_seconds" in props
+    assert "query_log_retention_prune_every_n_inserts" in props
