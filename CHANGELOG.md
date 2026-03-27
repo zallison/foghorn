@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 ### Recent incremental updates
+- Server response handling now strips upstream DNS COOKIE options before caching and rebinds COOKIE on each response to the active client request (removing stale COOKIE data when the request has no cookie).
+- Resolver DNSSEC handling now classifies pre-plugin override and forwarded responses consistently, applies AD-bit updates in validate mode, and treats signed authoritative local responses as zone-secure when classification would otherwise be unsigned/bogus.
+- Search-domain qualification now excludes DNSSEC RR types, and ZoneRecords now synthesizes search-alias CNAME responses (plus target RRsets when present) for qualified positive and NODATA authoritative answers.
+- SSHFP scan tooling now supports reverse PTR hostname expansion for IP targets (enabled by default, configurable via `--reverse-ptr` / `--no-reverse-ptr`) and emits PTR-derived SSHFP owners in both standard and zone-record output modes.
+- ZoneRecords NOTIFY sender resolution/rate-limit helper state now uses bounded TTL caches to prevent unbounded in-memory growth under long-running traffic.
 - Added shared DNS/IP helper modules (`dns_names`, `ip_networks`) and adopted them across resolver, server, querylog, stats, and ZoneRecords paths to standardize normalization and network parsing.
 - Added resolver search-domain qualification controls (`server.resolver.search`) and applied qualification before cache keys, plugin dispatch, stats recording, and upstream forwarding.
 - Expanded DNS-name helper coverage with qualification heuristics (`is_single_label`, `has_proper_tld`, `qualify_name`, `should_qualify`) and focused tests for suffix/exact non-proper-TLD modes.
