@@ -36,7 +36,7 @@ def test_load_builtin_profiles_rate_limit_returns_yaml_profiles() -> None:
     assert "smb" in profiles
     assert "enterprise" in profiles
     assert "localhost" in profiles
-    assert profiles["home"]["min_enforce_rps"] == 2
+    assert profiles["home"]["min_enforce_rps"] == 5
     assert profiles["lan"]["global_max_rps"] == 50
 
 
@@ -114,7 +114,7 @@ def test_resolve_plugin_profile_lan_profile_correct_values() -> None:
         profiles_files=[],
     )
 
-    assert merged["min_enforce_rps"] == 2
+    assert merged["min_enforce_rps"] == 5
     assert merged["global_max_rps"] == 50
     assert merged["burst_factor"] == 10.0
 
@@ -184,7 +184,7 @@ def test_resolve_plugin_profile_unknown_profile_warns_without_abort() -> None:
     )
 
     # Should fall back to default profile
-    assert merged["min_enforce_rps"] == 2
+    assert merged["min_enforce_rps"] == 5
     assert merged["global_max_rps"] == 50
 
 
