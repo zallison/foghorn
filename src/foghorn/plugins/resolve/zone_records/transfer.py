@@ -24,6 +24,23 @@ logger = logging.getLogger(__name__)
 _AXFR_LIMIT_LOCK = threading.Lock()
 _AXFR_ACTIVE_TRANSFERS = 0
 _AXFR_CLIENT_RATE_STATE: dict[str, tuple[float, float]] = {}
+_AXFR_RATE_STATE_LAST_SWEEP = 0.0
+
+
+def _axfr_rate_state_idle_ttl_seconds(rate: float, burst: float) -> float:
+    """Brief: Compute idle TTL used to evict stale AXFR client buckets.
+
+    Inputs:
+      - rate: Refill rate in tokens per second.
+      - burst: Bucket capacity in tokens.
+
+    Outputs:
+      - float: Idle duration in seconds after which a client bucket expires.
+    """
+    if rate <= 0.0:
+        return 0.0
+    refill_window = max(1.0, burst / rate)
+    return max(60.0, refill_window * 4.0)
 
 
 def iter_zone_rrs_for_transfer(
@@ -382,6 +399,7 @@ def _axfr_rate_limited(client_ip: str | None, policy: dict) -> bool:
     """
     rate = float(policy.get("rate_limit_per_client_per_second", 0.0) or 0.0)
     burst = float(policy.get("rate_limit_burst", 1.0) or 1.0)
+    idle_ttl = _axfr_rate_state_idle_ttl_seconds(rate, burst)
     if rate <= 0.0:
         return False
     if not client_ip:
@@ -391,6 +409,19 @@ def _axfr_rate_limited(client_ip: str | None, policy: dict) -> bool:
         return True
     now = time.monotonic()
     with _AXFR_LIMIT_LOCK:
+        global _AXFR_RATE_STATE_LAST_SWEEP
+        if idle_ttl > 0.0 and (now - _AXFR_RATE_STATE_LAST_SWEEP) >= min(
+            max(5.0, idle_ttl / 2.0), 60.0
+        ):
+            stale_before = now - idle_ttl
+            stale_keys = [
+                client
+                for client, (last_seen, _tokens) in _AXFR_CLIENT_RATE_STATE.items()
+                if float(last_seen) < stale_before
+            ]
+            for stale_key in stale_keys:
+                _AXFR_CLIENT_RATE_STATE.pop(stale_key, None)
+            _AXFR_RATE_STATE_LAST_SWEEP = now
         last_ts, tokens = _AXFR_CLIENT_RATE_STATE.get(key, (now, burst))
         elapsed = max(0.0, now - float(last_ts))
         tokens = min(burst, float(tokens) + elapsed * rate)
