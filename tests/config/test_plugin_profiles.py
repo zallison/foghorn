@@ -95,7 +95,7 @@ def test_resolve_plugin_profile_applies_default_with_explicit_overrides() -> Non
 
     assert merged["min_enforce_rps"] == 100
     assert merged["global_max_rps"] == 50  # from default profile
-    assert merged["burst_factor"] == 5.0  # from default profile
+    assert merged["burst_factor"] == 10.0  # from default profile
 
 
 def test_resolve_plugin_profile_lan_profile_correct_values() -> None:
@@ -116,7 +116,7 @@ def test_resolve_plugin_profile_lan_profile_correct_values() -> None:
 
     assert merged["min_enforce_rps"] == 2
     assert merged["global_max_rps"] == 50
-    assert merged["burst_factor"] == 5.0
+    assert merged["burst_factor"] == 10.0
 
 
 def test_resolve_plugin_profile_explicit_config_overrides_profile() -> None:
@@ -137,7 +137,7 @@ def test_resolve_plugin_profile_explicit_config_overrides_profile() -> None:
 
     # Profile values
     assert merged["global_max_rps"] == 50
-    assert merged["burst_factor"] == 5.0
+    assert merged["burst_factor"] == 10.0
     # Explicit overrides
     assert merged["min_enforce_rps"] == 999
     assert merged["custom_key"] == "value"
