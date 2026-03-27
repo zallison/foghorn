@@ -1399,6 +1399,16 @@ def _build_v2_root_schema(
                 ),
                 "default": True,
             },
+            "max_logging_queue": {
+                "type": "integer",
+                "minimum": 0,
+                "description": (
+                    "Optional global default for backend async queue capacity. "
+                    "Applied to logging.backends entries that do not set "
+                    "config.max_logging_queue explicitly. Values <= 0 use an "
+                    "unbounded queue."
+                ),
+            },
             # Global toggle for keeping only the raw query_log in persistence
             # and avoiding mirroring aggregate counters into the backend.
             "query_log_only": {
@@ -1434,6 +1444,29 @@ def _build_v2_root_schema(
                             "by supported backends."
                         ),
                     },
+                    "max_bytes": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": (
+                            "Maximum estimated query_log bytes retained per "
+                            "supported backend."
+                        ),
+                    },
+                    "prune_interval_seconds": {
+                        "type": "number",
+                        "exclusiveMinimum": 0,
+                        "description": (
+                            "Minimum seconds between retention prune passes."
+                        ),
+                    },
+                    "prune_every_n_inserts": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": (
+                            "Run retention prune after every N inserted "
+                            "query_log rows."
+                        ),
+                    },
                 },
             },
             "query_log_retention_max_records": {
@@ -1447,6 +1480,113 @@ def _build_v2_root_schema(
                 "type": "number",
                 "exclusiveMinimum": 0,
                 "description": "Legacy alias for logging.query_log_retention.days.",
+            },
+            "query_log_retention_max_bytes": {
+                "type": "integer",
+                "minimum": 1,
+                "description": (
+                    "Legacy alias for logging.query_log_retention.max_bytes."
+                ),
+            },
+            "query_log_retention_prune_interval_seconds": {
+                "type": "number",
+                "exclusiveMinimum": 0,
+                "description": (
+                    "Legacy alias for "
+                    "logging.query_log_retention.prune_interval_seconds."
+                ),
+            },
+            "query_log_retention_prune_every_n_inserts": {
+                "type": "integer",
+                "minimum": 1,
+                "description": (
+                    "Legacy alias for "
+                    "logging.query_log_retention.prune_every_n_inserts."
+                ),
+            },
+            "query_log_sampling": {
+                "type": "object",
+                "additionalProperties": False,
+                "description": (
+                    "Optional sampling policy applied before persistent "
+                    "query_log writes."
+                ),
+                "properties": {
+                    "enabled": {
+                        "type": "boolean",
+                        "description": (
+                            "When false, suppresses all persistent query_log "
+                            "writes from the stats collector."
+                        ),
+                        "default": True,
+                    },
+                    "sample_rate": {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 1,
+                        "description": (
+                            "Fraction of query_log rows to persist "
+                            "(0 disables writes, 1 logs all rows)."
+                        ),
+                        "default": 1,
+                    },
+                    "rate": {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 1,
+                        "description": ("Alias of sample_rate for compatibility."),
+                    },
+                },
+            },
+            "query_log_sample_rate": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1,
+                "description": (
+                    "Legacy alias for logging.query_log_sampling.sample_rate."
+                ),
+            },
+            "query_log_dedupe": {
+                "type": "object",
+                "additionalProperties": False,
+                "description": (
+                    "Optional dedupe policy applied before persistent query_log "
+                    "writes."
+                ),
+                "properties": {
+                    "window_seconds": {
+                        "type": "number",
+                        "minimum": 0,
+                        "description": (
+                            "Suppress repeated query_log rows with the same key "
+                            "inside this window. 0 disables dedupe."
+                        ),
+                        "default": 0,
+                    },
+                    "max_entries": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": (
+                            "Maximum in-memory dedupe keys retained by the "
+                            "stats collector."
+                        ),
+                        "default": 50000,
+                    },
+                },
+            },
+            "query_log_dedupe_window_seconds": {
+                "type": "number",
+                "minimum": 0,
+                "description": (
+                    "Legacy alias for logging.query_log_dedupe.window_seconds."
+                ),
+            },
+            "query_log_dedupe_max_entries": {
+                "type": "integer",
+                "minimum": 1,
+                "description": (
+                    "Legacy alias for logging.query_log_dedupe.max_entries."
+                ),
             },
             # Backends used for statistics and query logging; each entry maps to
             # a BaseStatsStore implementation (for example, sqlite, mysql,
