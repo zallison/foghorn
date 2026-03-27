@@ -244,7 +244,8 @@ def _compute_current_limit_rps(
           * current_limit_rps: Active numeric limit when enforceable, else None.
           * current_limit_source: Origin label describing how limit was derived.
           * burst_threshold_rps: Unclamped avg_rps * burst_factor value.
-          * enforcement_active: True when current_rps exceeds active limit.
+          * enforcement_active: True when current_rps exceeds the active limit
+            (or the hard max_enforce_rps cap in below-min-enforce mode).
 
     Notes:
       - During warmup, warmup_max_rps is used when configured (>0).

@@ -8,6 +8,7 @@ Outputs:
   - None (pytest assertions)
 """
 
+import builtins
 import threading
 from contextlib import closing
 
@@ -32,6 +33,25 @@ def _set_time(monkeypatch, value: float) -> None:
     """
 
     monkeypatch.setattr(rate_limit_module.time, "time", lambda: float(value))
+
+
+def _clear_rate_limit_caches() -> None:
+    """Brief: Clear LRU-cached helper functions used across tests.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None.
+    """
+
+    for fn in (
+        rate_limit_module._psl_registrable_domain,
+        rate_limit_module._to_base_domain,
+    ):
+        cache_clear = getattr(fn, "cache_clear", None)
+        if callable(cache_clear):
+            cache_clear()
 
 
 def test_warmup_phase_does_not_enforce(tmp_path, monkeypatch):
@@ -1453,3 +1473,994 @@ def test_deny_episode_resets_on_unblock(tmp_path, monkeypatch):
         assert second_ep[1] is False
         for sv in second_ep[2:]:
             assert sv is True
+
+
+def test_psl_helpers_cover_empty_and_import_error_paths(monkeypatch):
+    """Brief: PSL helper functions safely handle empty names and import failures.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None: asserts safe None/False fallbacks on edge cases.
+    """
+
+    _clear_rate_limit_caches()
+    monkeypatch.setattr(
+        rate_limit_module.dns_names,
+        "normalize_name",
+        lambda _name: "",
+    )
+    assert rate_limit_module._psl_registrable_domain("ignored.example") is None
+
+    _clear_rate_limit_caches()
+    original_import = builtins.__import__
+
+    def _import_with_publicsuffix_failure(name, *args, **kwargs):
+        if name == "publicsuffix2":
+            raise ImportError("simulated missing dependency")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(
+        builtins,
+        "__import__",
+        _import_with_publicsuffix_failure,
+    )
+    assert rate_limit_module._psl_registrable_domain("example.com") is None
+    assert rate_limit_module._psl_is_available() is False
+
+
+def test_prefix_normalization_and_validator_passthrough_branches():
+    """Brief: Prefix normalization and config validators cover passthrough paths.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None: asserts slash stripping and non-mapping passthrough behavior.
+    """
+
+    assert rate_limit_module._normalize_prefix_length_value("/32") == "32"
+    assert rate_limit_module._normalize_prefix_length_value(" 24 ") == "24"
+    assert rate_limit_module._normalize_prefix_length_value(24) == 24
+
+    payload = {"other": 1}
+    assert rate_limit_module.RateLimitConfig._reject_client_prefix_keys("raw") == "raw"
+    assert (
+        rate_limit_module.RateLimitConfig._normalize_bucket_network_prefix_v4(payload)
+        is payload
+    )
+
+
+def test_rate_limit_config_defaults_bootstrap_to_explicit_global_max():
+    """Brief: Explicit global_max_rps drives bootstrap_rps when bootstrap is omitted.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None: asserts bootstrap_rps matches explicit global_max_rps.
+    """
+
+    cfg = rate_limit_module.RateLimitConfig(global_max_rps=123.5)
+    assert cfg.bootstrap_rps == pytest.approx(123.5)
+
+
+def test_to_base_domain_falls_back_when_psl_lookup_returns_none(monkeypatch):
+    """Brief: Base-domain extraction falls back to last labels without PSL output.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None: asserts fallback behavior for multi-label and single-label names.
+    """
+
+    _clear_rate_limit_caches()
+    monkeypatch.setattr(
+        rate_limit_module,
+        "_psl_registrable_domain",
+        lambda _qname: None,
+    )
+    assert rate_limit_module._to_base_domain("a.b.example.com.") == "example.com"
+    assert rate_limit_module._to_base_domain("localhost.") == "localhost"
+
+
+def test_setup_raises_when_psl_is_required_but_missing(tmp_path, monkeypatch):
+    """Brief: Domain mode with psl_strict=True fails when PSL support is absent.
+
+    Inputs:
+      - tmp_path: pytest temporary path.
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None: asserts setup raises RuntimeError in strict PSL mode.
+    """
+
+    monkeypatch.setattr(rate_limit_module, "_psl_is_available", lambda: False)
+    plugin = RateLimit(
+        db_path=str(tmp_path / "rl-psl-strict.db"),
+        mode="per_domain",
+        psl_strict=True,
+    )
+    with pytest.raises(RuntimeError):
+        plugin.setup()
+
+
+def test_bool_parsing_and_last_update_malformed_db_row_branches(tmp_path):
+    """Brief: Boolean parsing and malformed last_update conversion branches are safe.
+
+    Inputs:
+      - tmp_path: pytest temporary path.
+
+    Outputs:
+      - None: asserts bool parsing behavior and malformed timestamp fallback.
+    """
+
+    plugin = RateLimit(db_path=str(tmp_path / "rl-bool-last-update.db"))
+    plugin.setup()
+
+    plugin.config["flag"] = None
+    assert plugin._parse_bool_config("flag", True) is True
+    plugin.config["flag"] = "yes"
+    assert plugin._parse_bool_config("flag", False) is True
+    plugin.config["flag"] = "off"
+    assert plugin._parse_bool_config("flag", True) is False
+    plugin.config["flag"] = "not-bool"
+    assert plugin._parse_bool_config("flag", False) is False
+
+    plugin._conn.execute(
+        "INSERT OR REPLACE INTO rate_profiles (key, avg_rps, max_rps, samples, last_update) "
+        "VALUES (?, ?, ?, ?, ?)",
+        ("bad-ts", 1.0, 1.0, 1, "nan-epoch"),
+    )
+    plugin._conn.commit()
+    assert plugin._db_get_profile_last_update("bad-ts") is None
+
+
+def test_client_bucket_udp_and_window_lock_fallback_branches(tmp_path, monkeypatch):
+    """Brief: Client bucketing and UDP-keying helper branches cover fallback paths.
+
+    Inputs:
+      - tmp_path: pytest temporary path.
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None: asserts parse-failure fallbacks and listener-based policy decisions.
+    """
+
+    plugin = RateLimit(
+        db_path=str(tmp_path / "rl-client-bucket.db"),
+        bucket_network_prefix_v4=32,
+    )
+    plugin.setup()
+
+    assert plugin._client_ip_bucket("192.0.2.9") == "192.0.2.9"
+    monkeypatch.setattr(rate_limit_module.ip_networks, "parse_ip", lambda _ip: None)
+    assert plugin._client_ip_bucket("not-an-ip") == "not-an-ip"
+
+    def _raise_parse(_ip: str):
+        raise RuntimeError("parse failure")
+
+    monkeypatch.setattr(rate_limit_module.ip_networks, "parse_ip", _raise_parse)
+    assert plugin._client_ip_bucket("198.51.100.4") == "198.51.100.4"
+
+    assert plugin._should_apply_udp_bucketing("tcp", secure=False) is False
+    assert plugin._should_apply_udp_bucketing("udp", secure=True) is False
+    assert plugin._should_apply_udp_bucketing("weird", secure=True) is False
+    assert plugin._should_apply_udp_bucketing("", secure=False) is True
+    plugin.assume_udp_when_listener_missing = False
+    assert plugin._should_apply_udp_bucketing("", secure=False) is False
+
+    plugin._window_locks = []
+    lock = plugin._window_lock_for_key("any-key")
+    assert hasattr(lock, "acquire")
+
+
+def test_current_window_rps_helpers_cover_malformed_stale_and_limit_paths(
+    tmp_path,
+    monkeypatch,
+):
+    """Brief: Current-window helpers handle malformed payloads, stale data, and limits.
+
+    Inputs:
+      - tmp_path: pytest temporary path.
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None: asserts stale/malformed counters resolve to safe zero values.
+    """
+
+    plugin = RateLimit(db_path=str(tmp_path / "rl-current-rps.db"), window_seconds=10)
+    plugin.setup()
+
+    plugin.window_seconds = -1
+    assert plugin._get_current_window_rps("key") == 0.0
+    assert plugin._get_current_window_rps_snapshot(limit=10) == {}
+
+    plugin.window_seconds = 10
+    plugin._window_cache.set(("key", 0), 20, b"bad-payload")
+    assert plugin._get_current_window_rps("key") == 0.0
+
+    plugin._window_cache.set(("key", 0), 20, b"0:0")
+    assert plugin._get_current_window_rps("key") == 0.0
+
+    monkeypatch.setattr(rate_limit_module.time, "time", lambda: 20.0)
+    plugin._window_cache.set(("key", 0), 20, b"0:3")
+    assert plugin._get_current_window_rps("key") == 0.0
+
+    plugin._active_window_id = 1
+    plugin._active_window_counts = {
+        "stale": (1, 2),
+        "hot": (2, 5),
+        "cool": (2, 3),
+    }
+    snapshot = plugin._get_current_window_rps_snapshot(limit=1)
+    assert snapshot == {"hot": pytest.approx(0.5)}
+    assert "stale" not in plugin._active_window_counts
+
+    plugin._active_window_id = 2
+    plugin._active_window_counts = {"steady": (2, 2)}
+    steady_snapshot = plugin._get_current_window_rps_snapshot(limit=10)
+    assert steady_snapshot == {"steady": pytest.approx(0.2)}
+
+
+def test_burst_counter_helpers_cover_parse_and_reset_paths(tmp_path):
+    """Brief: Burst helper branches handle malformed values and reset edge cases.
+
+    Inputs:
+      - tmp_path: pytest temporary path.
+
+    Outputs:
+      - None: asserts no-op, malformed, and reset-window branches.
+    """
+
+    plugin = RateLimit(
+        db_path=str(tmp_path / "rl-burst-branches.db"),
+        burst_windows=0,
+    )
+    plugin.setup()
+
+    plugin._set_burst_count("k", 5)
+    plugin._set_burst_reset_count("k", 7)
+    assert plugin._window_cache.get(("k", 1)) is None
+    assert plugin._window_cache.get(("k", 2)) is None
+
+    plugin.burst_windows = 2
+    plugin._window_cache.set(("k", 1), 20, b"bad")
+    plugin._window_cache.set(("k", 2), 20, b"bad")
+    assert plugin._get_burst_count("k") == 0
+    assert plugin._get_burst_reset_count("k") == 0
+
+    plugin._set_burst_count("k", 1)
+    plugin.burst_reset_windows = 1
+    plugin._advance_burst_reset_counter("k", "not-int")
+    assert plugin._get_burst_count("k") == 1
+    plugin._advance_burst_reset_counter("k", 1)
+    assert plugin._get_burst_count("k") == 0
+
+
+def test_throttled_deny_log_zero_interval_and_suppression_flush(tmp_path, monkeypatch):
+    """Brief: Deny-log throttling covers immediate and suppressed-flush logging paths.
+
+    Inputs:
+      - tmp_path: pytest temporary path.
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None: asserts both direct logging and delayed suppressed-count logging.
+    """
+
+    plugin = RateLimit(db_path=str(tmp_path / "rl-throttle-log.db"))
+    plugin.setup()
+
+    records: list[tuple[object, tuple[object, ...]]] = []
+    monkeypatch.setattr(
+        rate_limit_module.logger,
+        "info",
+        lambda msg, *args: records.append((msg, args)),
+    )
+
+    plugin.deny_log_interval_seconds = -1
+    plugin._throttled_deny_log("k", "direct %s", "log")
+    assert records
+
+    plugin.deny_log_interval_seconds = 5
+    times = iter([100.0, 101.0, 107.0])
+    monkeypatch.setattr(rate_limit_module.time, "time", lambda: next(times))
+    plugin._throttled_deny_log("k2", "burst %s", "event")
+    plugin._throttled_deny_log("k2", "burst %s", "event")
+    plugin._throttled_deny_log("k2", "burst %s", "event")
+
+    assert any("suppressed %d similar" in str(msg) for msg, _args in records)
+
+
+def test_build_deny_decision_ede_and_ip_fallback_paths(tmp_path, monkeypatch):
+    """Brief: Deny decision building covers EDE attach and IP-mode fallback deny.
+
+    Inputs:
+      - tmp_path: pytest temporary path.
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None: asserts EDE hooks fire and IP mode falls back when no wire exists.
+    """
+
+    plugin = RateLimit(db_path=str(tmp_path / "rl-ede.db"), deny_response="refused")
+    plugin.setup()
+
+    import foghorn.servers.server as server_mod
+    from foghorn.servers.dns_runtime_state import DNSRuntimeState
+
+    calls: dict[str, object] = {}
+    monkeypatch.setattr(DNSRuntimeState, "enable_ede", True, raising=False)
+    monkeypatch.setattr(
+        server_mod,
+        "_echo_client_edns",
+        lambda _req, _reply: calls.setdefault("echo", True),
+        raising=True,
+    )
+    monkeypatch.setattr(
+        server_mod,
+        "_attach_ede_option",
+        lambda _req, _reply, code, text: calls.setdefault("ede", (code, text)),
+        raising=True,
+    )
+
+    ctx = PluginContext(client_ip="1.2.3.4", listener="tcp")
+    wire = DNSRecord.question("example.com", "A").pack()
+    decision = plugin._build_deny_decision("example.com", QTYPE.A, wire, ctx)
+    assert decision.action == "override"
+    assert calls.get("echo") is True
+    assert calls.get("ede") == (17, "Rate-Limited")
+
+    plugin.deny_response = "ip"
+    plugin.deny_response_ip4 = "192.0.2.55"
+    monkeypatch.setattr(plugin, "_make_a_response", lambda *_args, **_kwargs: None)
+    fallback = plugin._build_deny_decision("example.com", QTYPE.A, wire, ctx)
+    assert fallback.action == "deny"
+
+
+def test_pre_resolve_warmup_cap_paths_without_bootstrap_and_during_warmup(
+    tmp_path,
+    monkeypatch,
+):
+    """Brief: Warmup-cap enforcement is applied with and without an existing profile.
+
+    Inputs:
+      - tmp_path: pytest temporary path.
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None: asserts both warmup-cap branches emit denies when limits are exceeded.
+    """
+
+    ctx = PluginContext(client_ip="9.9.9.9", listener="tcp")
+    _set_time(monkeypatch, 0.0)
+
+    plugin_no_profile = RateLimit(
+        db_path=str(tmp_path / "rl-warmup-no-profile.db"),
+        window_seconds=10,
+        warmup_windows=6,
+        warmup_max_rps=1.0,
+        bootstrap_rps=0.0,
+        deny_response="nxdomain",
+    )
+    plugin_no_profile.setup()
+
+    denied_no_profile = 0
+    for _ in range(25):
+        decision = plugin_no_profile.pre_resolve("example.com", QTYPE.A, b"", ctx)
+        if decision is not None:
+            denied_no_profile += 1
+    assert denied_no_profile > 0
+
+    plugin_warmup = RateLimit(
+        db_path=str(tmp_path / "rl-warmup-profile.db"),
+        window_seconds=10,
+        warmup_windows=5,
+        warmup_max_rps=10.0,
+        max_enforce_rps=1.0,
+        bootstrap_rps=0.0,
+        deny_response="nxdomain",
+    )
+    plugin_warmup.setup()
+    plugin_warmup._seed_profile("9.9.9.9", rps=0.5, now_ts=0, samples=0)
+
+    denied_during_warmup = 0
+    for _ in range(25):
+        decision = plugin_warmup.pre_resolve("example.com", QTYPE.A, b"", ctx)
+        if decision is not None:
+            denied_during_warmup += 1
+    assert denied_during_warmup > 0
+
+
+def test_admin_descriptor_snapshot_and_shutdown_branches(tmp_path):
+    """Brief: Admin metadata, snapshot stats, and shutdown branches execute cleanly.
+
+    Inputs:
+      - tmp_path: pytest temporary path.
+
+    Outputs:
+      - None: asserts admin outputs and connection cleanup behavior.
+    """
+
+    plugin = RateLimit(db_path=str(tmp_path / "rl-admin-shutdown.db"))
+    plugin.setup()
+
+    pages = plugin.get_admin_pages()
+    descriptor = plugin.get_admin_ui_descriptor()
+    snapshot_stats = plugin._get_snapshot_rps_stats()
+    assert pages
+    assert descriptor.get("name")
+    assert set(snapshot_stats.keys()) == {
+        "total_avg_rps",
+        "total_max_rps",
+        "window_avg_rps",
+        "window_max_rps",
+    }
+
+    plugin.shutdown()
+    assert getattr(plugin, "_conn", None) is None
+
+
+def test_db_apply_zero_windows_covers_validation_and_decay_branches(tmp_path):
+    """Brief: Zero-window decay handles invalid inputs and all alpha_down decay regimes.
+
+    Inputs:
+      - tmp_path: pytest temporary path.
+
+    Outputs:
+      - None: asserts no-op/return branches and each decay branch outcome.
+    """
+
+    plugin = RateLimit(db_path=str(tmp_path / "rl-zero-windows.db"))
+    plugin.setup()
+
+    plugin._seed_profile("keep", rps=10.0, now_ts=0, samples=2)
+    plugin.alpha_down = 0.0
+    plugin._db_apply_zero_windows("keep", windows="3", now_ts=100)
+    avg_keep, _max_keep, samples_keep = plugin._db_get_profile("keep")
+    assert avg_keep == pytest.approx(10.0)
+    assert samples_keep == 5
+
+    plugin._seed_profile("zero", rps=10.0, now_ts=0, samples=2)
+    plugin.alpha_down = 1.0
+    plugin._db_apply_zero_windows("zero", windows=2, now_ts=100)
+    avg_zero, _max_zero, samples_zero = plugin._db_get_profile("zero")
+    assert avg_zero == pytest.approx(0.0)
+    assert samples_zero == 4
+
+    plugin._seed_profile("decay", rps=8.0, now_ts=0, samples=2)
+    plugin.alpha_down = 0.5
+    plugin._db_apply_zero_windows("decay", windows=2, now_ts=100)
+    avg_decay, _max_decay, samples_decay = plugin._db_get_profile("decay")
+    assert avg_decay == pytest.approx(2.0)
+    assert samples_decay == 4
+
+    plugin._db_apply_zero_windows("decay", windows="bad", now_ts=120)
+    avg_after_bad, _max_after_bad, samples_after_bad = plugin._db_get_profile("decay")
+    assert avg_after_bad == pytest.approx(2.0)
+    assert samples_after_bad == 4
+
+    plugin._db_apply_zero_windows("decay", windows=0, now_ts=130)
+    avg_after_zero, _max_after_zero, samples_after_zero = plugin._db_get_profile(
+        "decay"
+    )
+    assert avg_after_zero == pytest.approx(2.0)
+    assert samples_after_zero == 4
+
+
+def test_increment_window_handles_missed_window_profile_branches(tmp_path, monkeypatch):
+    """Brief: Missed-window handling resets or advances burst state based on profile state.
+
+    Inputs:
+      - tmp_path: pytest temporary path.
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None: asserts missed-window branch decisions across profile variants.
+    """
+
+    plugin = RateLimit(
+        db_path=str(tmp_path / "rl-increment-missed.db"),
+        window_seconds=10,
+        warmup_windows=2,
+        min_enforce_rps=5.0,
+    )
+    plugin.setup()
+
+    monkeypatch.setattr(plugin, "_record_active_window_count", lambda *args: None)
+    monkeypatch.setattr(plugin, "_db_get_profile_last_update", lambda _key: 0)
+
+    def _run_case(key: str, profile):
+        calls: list[object] = []
+        monkeypatch.setattr(
+            plugin,
+            "_db_apply_zero_windows",
+            lambda *_args, **_kwargs: calls.append("apply"),
+        )
+        monkeypatch.setattr(plugin, "_db_get_profile", lambda _k: profile)
+        monkeypatch.setattr(
+            plugin,
+            "_reset_burst_state",
+            lambda _k: calls.append("reset"),
+        )
+        monkeypatch.setattr(
+            plugin,
+            "_advance_burst_reset_counter",
+            lambda _k, windows: calls.append(("advance", windows)),
+        )
+        plugin._increment_window(key, now=50.0)
+        return calls
+
+    calls_none = _run_case("case-none", None)
+    assert "apply" in calls_none
+    assert "reset" in calls_none
+
+    calls_warmup = _run_case("case-warmup", (10.0, 10.0, 1))
+    assert "apply" in calls_warmup
+    assert "reset" in calls_warmup
+
+    calls_below_min = _run_case("case-below-min", (4.0, 10.0, 10))
+    assert "apply" in calls_below_min
+    assert "reset" in calls_below_min
+
+    calls_advance = _run_case("case-advance", (10.0, 10.0, 10))
+    assert "apply" in calls_advance
+    assert ("advance", 4) in calls_advance
+
+
+def test_flush_completed_active_window_keys_filters_and_updates(tmp_path, monkeypatch):
+    """Brief: Active-window flush skips invalid entries and updates valid stale keys.
+
+    Inputs:
+      - tmp_path: pytest temporary path.
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None: asserts only actionable stale entries are persisted.
+    """
+
+    plugin = RateLimit(db_path=str(tmp_path / "rl-flush-active.db"), window_seconds=10)
+    plugin.setup()
+
+    calls: list[tuple[str, object, object]] = []
+    monkeypatch.setattr(
+        plugin,
+        "_db_update_profile",
+        lambda key, rps, _now_ts: calls.append(("update", key, rps)),
+    )
+    monkeypatch.setattr(
+        plugin,
+        "_update_burst_counter",
+        lambda key, rps: calls.append(("burst", key, rps)),
+    )
+
+    plugin._flush_completed_active_window_keys(
+        stale_entries=[("", 2), ("skip", 2), ("zero", 0), ("ok", 5)],
+        exclude_keys={"skip"},
+    )
+
+    assert ("update", "ok", pytest.approx(0.5)) in calls
+    assert ("burst", "ok", pytest.approx(0.5)) in calls
+    assert not any(call for call in calls if call[1] in {"", "skip", "zero"})
+
+
+def test_update_burst_counter_covers_reset_advance_and_cap_paths(tmp_path, monkeypatch):
+    """Brief: Burst-counter updates reset, advance, and cap count across profile states.
+
+    Inputs:
+      - tmp_path: pytest temporary path.
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None: asserts reset on warmup/below-min and cap behavior on bursts.
+    """
+
+    plugin = RateLimit(
+        db_path=str(tmp_path / "rl-update-burst.db"),
+        burst_windows=2,
+        warmup_windows=2,
+        min_enforce_rps=5.0,
+        burst_factor=2.0,
+        max_enforce_rps=0.0,
+    )
+    plugin.setup()
+
+    calls: list[tuple[str, object]] = []
+    monkeypatch.setattr(
+        plugin,
+        "_reset_burst_state",
+        lambda _key: calls.append(("reset", None)),
+    )
+    monkeypatch.setattr(
+        plugin,
+        "_advance_burst_reset_counter",
+        lambda _key, windows: calls.append(("advance", windows)),
+    )
+    monkeypatch.setattr(
+        plugin,
+        "_set_burst_count",
+        lambda _key, count: calls.append(("set_count", count)),
+    )
+    monkeypatch.setattr(
+        plugin,
+        "_set_burst_reset_count",
+        lambda _key, count: calls.append(("set_reset", count)),
+    )
+
+    monkeypatch.setattr(plugin, "_db_get_profile", lambda _key: (10.0, 10.0, 1))
+    plugin._update_burst_counter("k", rps=30.0)
+    assert ("reset", None) in calls
+
+    calls.clear()
+    monkeypatch.setattr(plugin, "_db_get_profile", lambda _key: (4.0, 10.0, 10))
+    plugin._update_burst_counter("k", rps=30.0)
+    assert ("reset", None) in calls
+
+    calls.clear()
+    monkeypatch.setattr(plugin, "_db_get_profile", lambda _key: (10.0, 10.0, 10))
+    plugin._update_burst_counter("k", rps=10.0)
+    assert ("advance", 1) in calls
+
+    calls.clear()
+    monkeypatch.setattr(plugin, "_get_burst_count", lambda _key: 5)
+    plugin._update_burst_counter("k", rps=30.0)
+    assert ("set_count", 2) in calls
+    assert ("set_reset", 0) in calls
+
+
+def test_maybe_log_stats_handles_disabled_interval_and_empty_probe_retry(tmp_path):
+    """Brief: Stats logging returns early when disabled and applies retry offset on empty probes.
+
+    Inputs:
+      - tmp_path: pytest temporary path.
+
+    Outputs:
+      - None: asserts disabled-cadence and empty-stats retry behavior.
+    """
+
+    plugin_disabled = RateLimit(
+        db_path=str(tmp_path / "rl-stats-disabled.db"),
+        stats_log_interval_seconds=0,
+        stats_window_seconds=0,
+    )
+    plugin_disabled.setup()
+    plugin_disabled._last_stats_log_ts = 123.0
+    plugin_disabled._maybe_log_stats(now=200.0)
+    assert plugin_disabled._last_stats_log_ts == pytest.approx(123.0)
+
+    plugin_retry = RateLimit(
+        db_path=str(tmp_path / "rl-stats-retry.db"),
+        stats_log_interval_seconds=60,
+        stats_window_seconds=0,
+        window_seconds=10,
+    )
+    plugin_retry.setup()
+    del plugin_retry._stats_log_lock
+    plugin_retry._last_stats_log_ts = 0.0
+    plugin_retry._maybe_log_stats(now=100.0)
+    assert plugin_retry._last_stats_log_ts == pytest.approx(50.0)
+
+
+def test_snapshot_stats_window_query_and_shutdown_no_conn_path(tmp_path, monkeypatch):
+    """Brief: Snapshot stats cover window-query success/fallback and repeated shutdown.
+
+    Inputs:
+      - tmp_path: pytest temporary path.
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None: asserts snapshot behavior with/without window table and closed DB.
+    """
+
+    plugin = RateLimit(
+        db_path=str(tmp_path / "rl-snapshot-window.db"),
+        stats_window_seconds=60,
+    )
+    plugin.setup()
+    plugin._db_update_profile("k1", 5.0, now_ts=100)
+    plugin._db_update_profile("k1", 7.0, now_ts=150)
+
+    monkeypatch.setattr(rate_limit_module.time, "time", lambda: 200.0)
+    stats = plugin._get_snapshot_rps_stats()
+    assert stats["total_avg_rps"] > 0.0
+    assert stats["window_avg_rps"] > 0.0
+
+    plugin._conn.execute("DROP TABLE rate_profile_windows")
+    plugin._conn.commit()
+    stats_after_drop = plugin._get_snapshot_rps_stats()
+    assert stats_after_drop["window_avg_rps"] == 0.0
+    assert stats_after_drop["window_max_rps"] == 0.0
+
+    plugin.shutdown()
+    plugin.shutdown()
+    assert plugin._get_snapshot_rps_stats() == {
+        "total_avg_rps": 0.0,
+        "total_max_rps": 0.0,
+        "window_avg_rps": 0.0,
+        "window_max_rps": 0.0,
+    }
+
+
+def test_psl_registrable_domain_handles_empty_get_sld_result(monkeypatch):
+    """Brief: PSL helper returns None when get_sld yields an empty result.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None: asserts empty get_sld output is treated as unavailable.
+    """
+
+    _clear_rate_limit_caches()
+    original_import = builtins.__import__
+
+    class _PublicSuffixModule:
+        """Brief: Minimal module shim exposing get_sld for import interception.
+
+        Inputs:
+          - name: normalized fqdn.
+
+        Outputs:
+          - str: empty string to trigger the falsy get_sld branch.
+        """
+
+        @staticmethod
+        def get_sld(_name: str) -> str:
+            return ""
+
+    def _import_with_empty_sld(name, *args, **kwargs):
+        if name == "publicsuffix2":
+            return _PublicSuffixModule
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", _import_with_empty_sld)
+    assert rate_limit_module._psl_registrable_domain("a.example.com") is None
+
+
+def test_rate_limit_config_validator_non_mapping_and_explicit_bootstrap_branches():
+    """Brief: Config validators cover non-mapping passthrough and explicit bootstrap preservation.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None: asserts non-mapping passthrough and explicit bootstrap precedence.
+    """
+
+    payload = ["not-a-mapping"]
+    assert (
+        rate_limit_module.RateLimitConfig._normalize_bucket_network_prefix_v4(payload)
+        is payload
+    )
+
+    cfg = rate_limit_module.RateLimitConfig(global_max_rps=123.0, bootstrap_rps=7.0)
+    assert cfg.bootstrap_rps == pytest.approx(7.0)
+
+
+def test_setup_without_db_directory_and_udp_listener_keying_branch(monkeypatch):
+    """Brief: setup() and _make_key cover no-dir db_path, IPv6 bucketing, and listener-present UDP path.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None: asserts setup works with db_path lacking a directory and UDP keying branch is used.
+    """
+
+    plugin = RateLimit(
+        db_path=":memory:",
+        bucket_network_prefix_v6=64,
+    )
+    plugin.setup()
+
+    assert plugin._client_ip_bucket("2001:db8::1234").endswith("/64")
+
+    monkeypatch.setattr(plugin, "_client_ip_bucket", lambda _ip: "2001:db8::/64")
+    key = plugin._make_key(
+        "example.com",
+        PluginContext(client_ip="2001:db8::1234", listener="udp"),
+    )
+    assert key == "2001:db8::/64"
+    plugin.shutdown()
+
+
+def test_increment_and_active_window_rollover_uncovered_branches(tmp_path, monkeypatch):
+    """Brief: Window increment/rollover logic covers zero-count rollover and stale mismatch filtering.
+
+    Inputs:
+      - tmp_path: pytest temporary path.
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None: asserts zero-count rollover skips profile writes and stale mismatches do not flush.
+    """
+
+    plugin = RateLimit(
+        db_path=str(tmp_path / "rl-increment-extra-branches.db"),
+        window_seconds=10,
+    )
+    plugin.setup()
+
+    plugin._window_cache.set(("k", 0), 20, b"0:0")
+    window_id, count = plugin._increment_window("k", now=10.0)
+    assert (window_id, count) == (1, 1)
+    assert plugin._db_get_profile("k") is None
+
+    captured_stale_entries: list[list[tuple[str, int]]] = []
+    monkeypatch.setattr(
+        plugin,
+        "_flush_completed_active_window_keys",
+        lambda *, stale_entries, exclude_keys: captured_stale_entries.append(
+            list(stale_entries)
+        ),
+    )
+    plugin._active_window_id = 3
+    plugin._active_window_counts = {"mismatch": (5, 2)}
+    plugin._record_active_window_count("new", window_id=4, count=1)
+    assert captured_stale_entries == [[]]
+
+    # Call the real method directly to exercise the empty stale_entries early-return branch.
+    RateLimit._flush_completed_active_window_keys(
+        plugin,
+        stale_entries=[],
+        exclude_keys=set(),
+    )
+    plugin.shutdown()
+
+
+def test_burst_and_recalc_helper_uncovered_branches(tmp_path, monkeypatch):
+    """Brief: Burst/recalc helpers cover remaining no-op and cache-clear paths.
+
+    Inputs:
+      - tmp_path: pytest temporary path.
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None: asserts helper early-returns and cache-bounding branch behavior.
+    """
+
+    plugin = RateLimit(
+        db_path=str(tmp_path / "rl-burst-recalc-extra.db"),
+        burst_windows=0,
+        window_seconds=10,
+    )
+    plugin.setup()
+
+    assert plugin._get_burst_count("missing-key") == 0
+    assert plugin._get_burst_reset_count("missing-key") == 0
+    plugin._advance_burst_reset_counter("k", 1)
+
+    plugin.burst_windows = 2
+    plugin._advance_burst_reset_counter("k", 0)
+
+    plugin.burst_windows = 0
+    plugin._update_burst_counter("k", rps=1.0)
+
+    plugin.burst_windows = 2
+    monkeypatch.setattr(plugin, "_db_get_profile", lambda _k: None)
+    plugin._update_burst_counter("k", rps=1.0)
+
+    plugin.window_seconds = -1
+    assert plugin._maybe_recalculate_all_bucket_limits(now=1.0) == 0
+
+    plugin.window_seconds = 10
+    monkeypatch.setattr(rate_limit_module.time, "time", lambda: 123.0)
+    monkeypatch.setattr(plugin, "_maybe_recalculate_all_bucket_limits", lambda _now: 0)
+    plugin.max_profiles = 1
+    plugin._cached_bucket_limits = {
+        "a": (0, 1.0, 1.0),
+        "b": (0, 1.0, 1.0),
+        "c": (0, 1.0, 1.0),
+    }
+    plugin._get_recalculated_allowed_rps(
+        key="new",
+        avg_rps=2.0,
+        samples=1,
+    )
+    assert plugin._cached_bucket_limits == {}
+    plugin.shutdown()
+
+
+def test_pre_resolve_uncovered_warmup_and_burst_selection_paths(tmp_path, monkeypatch):
+    """Brief: pre_resolve covers warmup fallback and burst-selection branches not previously exercised.
+
+    Inputs:
+      - tmp_path: pytest temporary path.
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None: asserts no-profile warmup/no-cap and burst-selection branches return safely.
+    """
+
+    _set_time(monkeypatch, 0.0)
+    ctx = PluginContext(client_ip="10.10.10.10", listener="tcp")
+
+    plugin_no_warmup_cap = RateLimit(
+        db_path=str(tmp_path / "rl-no-warmup-cap.db"),
+        warmup_windows=5,
+        warmup_max_rps=0.0,
+        bootstrap_rps=0.0,
+        max_enforce_rps=0.0,
+    )
+    plugin_no_warmup_cap.setup()
+    assert plugin_no_warmup_cap.pre_resolve("example.com", QTYPE.A, b"", ctx) is None
+
+    plugin_warmup_cap_no_max = RateLimit(
+        db_path=str(tmp_path / "rl-warmup-cap-no-max.db"),
+        warmup_windows=5,
+        warmup_max_rps=10.0,
+        bootstrap_rps=0.0,
+        max_enforce_rps=0.0,
+    )
+    plugin_warmup_cap_no_max.setup()
+    assert (
+        plugin_warmup_cap_no_max.pre_resolve("example.com", QTYPE.A, b"", ctx) is None
+    )
+
+    plugin_profile_warmup = RateLimit(
+        db_path=str(tmp_path / "rl-profile-warmup.db"),
+        warmup_windows=5,
+        warmup_max_rps=10.0,
+        bootstrap_rps=0.0,
+        max_enforce_rps=0.0,
+    )
+    plugin_profile_warmup.setup()
+    plugin_profile_warmup._seed_profile("10.10.10.10", rps=1.0, now_ts=0, samples=0)
+    assert plugin_profile_warmup.pre_resolve("example.com", QTYPE.A, b"", ctx) is None
+
+    plugin_no_burst = RateLimit(
+        db_path=str(tmp_path / "rl-no-burst.db"),
+        warmup_windows=0,
+        min_enforce_rps=0.0,
+        burst_windows=0,
+        bootstrap_rps=5.0,
+    )
+    plugin_no_burst.setup()
+    assert plugin_no_burst.pre_resolve("example.com", QTYPE.A, b"", ctx) is None
+
+    plugin_burst_exhausted = RateLimit(
+        db_path=str(tmp_path / "rl-burst-exhausted.db"),
+        warmup_windows=0,
+        min_enforce_rps=0.0,
+        burst_windows=2,
+        bootstrap_rps=5.0,
+    )
+    plugin_burst_exhausted.setup()
+    monkeypatch.setattr(plugin_burst_exhausted, "_get_burst_count", lambda _k: 2)
+    assert plugin_burst_exhausted.pre_resolve("example.com", QTYPE.A, b"", ctx) is None
+
+    for plugin in (
+        plugin_no_warmup_cap,
+        plugin_warmup_cap_no_max,
+        plugin_profile_warmup,
+        plugin_no_burst,
+        plugin_burst_exhausted,
+    ):
+        plugin.shutdown()
+
+
+def test_build_deny_decision_unknown_mode_falls_back_to_simple_deny(tmp_path):
+    """Brief: Unexpected deny_response values fall back to a simple deny decision.
+
+    Inputs:
+      - tmp_path: pytest temporary path.
+
+    Outputs:
+      - None: asserts unsupported mode reaches the fallback deny branch.
+    """
+
+    plugin = RateLimit(db_path=str(tmp_path / "rl-deny-fallback.db"))
+    plugin.setup()
+    plugin.deny_response = "unexpected-mode"
+
+    decision = plugin._build_deny_decision(
+        "example.com",
+        QTYPE.A,
+        b"",
+        PluginContext(client_ip="1.2.3.4", listener="tcp"),
+    )
+    assert decision.action == "deny"
+    plugin.shutdown()
