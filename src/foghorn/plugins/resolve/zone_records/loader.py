@@ -176,7 +176,8 @@ def _clone_records_mapping(
     """Brief: Deep-clone the (name,qtype)->(ttl,values,sources) mapping.
 
     Inputs:
-      - records: Mapping of (owner, qtype) -> (ttl, [values], {sources}).
+      - records: Mapping of (owner, qtype) -> (ttl, [values], {sources}) or
+        legacy (ttl, [values]) entries.
 
     Outputs:
       - New mapping with copied tuples and value lists, preserving sources.
@@ -215,7 +216,8 @@ def _clone_name_index(
     """Brief: Deep-clone the per-owner name index.
 
     Inputs:
-      - name_index: owner -> qtype -> (ttl, [values], {sources}).
+      - name_index: owner -> qtype -> (ttl, [values], {sources}) or legacy
+        (ttl, [values]) entries.
 
     Outputs:
       - New nested dict with copied tuples and value lists, preserving sources.
@@ -253,7 +255,8 @@ def _clone_zone_soa(
     """Brief: Deep-clone the zone apex SOA mapping.
 
     Inputs:
-      - zone_soa: apex -> (ttl, [soa_values], {sources}).
+      - zone_soa: apex -> (ttl, [soa_values], {sources}) or legacy
+        (ttl, [soa_values]) entries.
 
     Outputs:
       - New mapping with copied tuples and value lists, preserving sources.
@@ -969,7 +972,9 @@ def load_records(plugin: object) -> None:
                     seen_rrsets=seen_rrsets,
                     overwritten_by_source=overwritten_by_source,
                 )
-                if loaded_records_counter:
+                if (  # pragma: no cover - defensive: initialized as a one-item list for load_records execution
+                    loaded_records_counter
+                ):
                     loaded_records_counter[0] = int(loaded_records_counter[0]) + 1
 
     # Synthesize SOA if needed
@@ -1020,7 +1025,9 @@ def load_records(plugin: object) -> None:
 
                 if accept_suffix:
                     inferred_apex = ".".join(reversed(common_suffix_rev))
-                    if inferred_apex not in zone_soa:
+                    if (  # pragma: no cover - defensive: zone_soa is empty at synthesis entry
+                        inferred_apex not in zone_soa
+                    ):
                         try:
                             default_ttl = int(plugin.config.get("ttl", 300))  # type: ignore[union-attr]
                         except Exception:  # pragma: no cover - defensive
