@@ -43,10 +43,19 @@ _NOTIFY_BG_LOCK = threading.Lock()
 _NOTIFY_REFRESH_INFLIGHT: set[str] = set()
 _NOTIFY_REFRESH_STATE: Dict[str, Dict[str, object]] = {}
 _NOTIFY_RESOLVE_CACHE_LOCK = threading.Lock()
-_NOTIFY_RESOLVE_CACHE: Dict[tuple[str, str, str], tuple[float, Optional[Dict]]] = {}
 _NOTIFY_RESOLVE_CACHE_TTL_SECONDS = 30.0
+_NOTIFY_RESOLVE_CACHE_MAX_ENTRIES = 4096
+_NOTIFY_RESOLVE_CACHE: TTLCache = TTLCache(
+    maxsize=_NOTIFY_RESOLVE_CACHE_MAX_ENTRIES,
+    ttl=_NOTIFY_RESOLVE_CACHE_TTL_SECONDS,
+)
 _NOTIFY_RATE_LIMIT_LOCK = threading.Lock()
-_NOTIFY_RATE_LIMIT_STATE: Dict[str, Dict[str, float]] = {}
+_NOTIFY_RATE_LIMIT_STATE_IDLE_TTL_SECONDS = 300.0
+_NOTIFY_RATE_LIMIT_STATE_MAX_SENDERS = 8192
+_NOTIFY_RATE_LIMIT_STATE: TTLCache = TTLCache(
+    maxsize=_NOTIFY_RATE_LIMIT_STATE_MAX_SENDERS,
+    ttl=_NOTIFY_RATE_LIMIT_STATE_IDLE_TTL_SECONDS,
+)
 _NOTIFY_RATE_LIMIT_PER_SECOND = 1.0
 _NOTIFY_RATE_LIMIT_BURST = 20.0
 
@@ -1084,14 +1093,9 @@ def _resolve_notify_sender_upstream_from_candidates(
         return None
 
     cache_key = (sender, str(cache_scope), _upstream_fingerprint(candidates))
-    now = time.time()
     with _NOTIFY_RESOLVE_CACHE_LOCK:
-        cached = _NOTIFY_RESOLVE_CACHE.get(cache_key)
-        if cached is not None:
-            expires_at, result = cached
-            if now < float(expires_at):
-                return result
-            _NOTIFY_RESOLVE_CACHE.pop(cache_key, None)
+        if cache_key in _NOTIFY_RESOLVE_CACHE:
+            return _NOTIFY_RESOLVE_CACHE[cache_key]
 
     match: Optional[Dict] = None
     for upstream in candidates:
@@ -1100,10 +1104,7 @@ def _resolve_notify_sender_upstream_from_candidates(
             break
 
     with _NOTIFY_RESOLVE_CACHE_LOCK:
-        _NOTIFY_RESOLVE_CACHE[cache_key] = (
-            now + float(_NOTIFY_RESOLVE_CACHE_TTL_SECONDS),
-            match,
-        )
+        _NOTIFY_RESOLVE_CACHE[cache_key] = match
     return match
 
 
@@ -1250,10 +1251,12 @@ def _notify_sender_is_rate_limited(sender_ip: str) -> bool:
         if tokens < 1.0:
             state["tokens"] = tokens
             state["updated_at"] = now
+            _NOTIFY_RATE_LIMIT_STATE[key] = state
             return True
 
         state["tokens"] = tokens - 1.0
         state["updated_at"] = now
+        _NOTIFY_RATE_LIMIT_STATE[key] = state
         return False
 
 
