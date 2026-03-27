@@ -245,6 +245,147 @@ def test_handle_opcode_update_dispatches_processor_with_ctx_fallbacks(
     assert captured["listener"] is None
 
 
+@pytest.mark.parametrize(
+    ("rr_qtype", "rr_value"),
+    [
+        (int(QTYPE.A), "192.0.2.40"),
+        (int(QTYPE.AAAA), "2001:db8::40"),
+        (int(QTYPE.SSHFP), "1 1 1234567890ABCDEF1234567890ABCDEF12345678"),
+    ],
+)
+def test_pre_resolve_authoritative_search_alias_adds_cname_and_target_rrset(
+    _stub_dnssec_defaults: None,
+    monkeypatch: pytest.MonkeyPatch,
+    rr_qtype: int,
+    rr_value: str,
+) -> None:
+    """Brief: Qualified qtype lookups return search CNAME plus target RRset.
+
+    Inputs:
+      - _stub_dnssec_defaults: fixture for dnssec stubs.
+      - monkeypatch: pytest monkeypatch fixture.
+      - rr_qtype: Parametrized A or AAAA qtype code.
+      - rr_value: Parametrized address value for the RRset.
+
+    Outputs:
+      - None; asserts synthesized CNAME and target RRset owners.
+    """
+    plugin = _Plugin(
+        zone_soa={
+            "zaa": (
+                300,
+                ["ns1.zaa. hostmaster.zaa. 1 3600 600 604800 300"],
+                ["src"],
+            )
+        },
+        name_index={
+            "lemur.zaa": {
+                int(rr_qtype): (60, [rr_value], ["src"]),
+            }
+        },
+    )
+    ctx = PluginContext(client_ip="192.0.2.1")
+    req = _make_query("lemur", int(rr_qtype))
+    add_calls: list[tuple[str, int, list[str]]] = []
+
+    def _capture_add_rrset(
+        reply: DNSRecord,
+        owner_name: str,
+        rr_qtype_local: int,
+        ttl: int,
+        values: list[str],
+        include_dnssec: bool,
+        mapping_by_qtype: dict[int, dict[str, list[object]]] | None = None,
+        *,
+        section: str = "answer",
+    ) -> bool:
+        _ = reply
+        _ = ttl
+        _ = include_dnssec
+        _ = mapping_by_qtype
+        _ = section
+        add_calls.append((str(owner_name), int(rr_qtype_local), list(values)))
+        return True
+
+    monkeypatch.setattr(
+        resolver.dnssec,
+        "add_rrset_to_reply",
+        _capture_add_rrset,
+        raising=True,
+    )
+
+    decision = resolver.pre_resolve(plugin, "lemur.zaa", int(rr_qtype), req, ctx)
+    assert decision is not None
+    assert decision.action == "override"
+    assert len(add_calls) >= 2
+    assert add_calls[0] == ("lemur.", int(QTYPE.CNAME), ["lemur.zaa."])
+    assert add_calls[1] == ("lemur.zaa.", int(rr_qtype), [rr_value])
+
+
+def test_pre_resolve_authoritative_search_alias_nodata_adds_cname(
+    _stub_dnssec_defaults: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Brief: Search-qualified NODATA replies include a synthetic CNAME answer.
+
+    Inputs:
+      - _stub_dnssec_defaults: fixture for dnssec stubs.
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts CNAME synthesis for search-qualified NODATA.
+    """
+    plugin = _Plugin(
+        zone_soa={
+            "zaa": (
+                300,
+                ["ns1.zaa. hostmaster.zaa. 1 3600 600 604800 300"],
+                ["src"],
+            )
+        },
+        name_index={
+            "lemur.zaa": {
+                int(QTYPE.A): (60, ["192.0.2.99"], ["src"]),
+            }
+        },
+    )
+    ctx = PluginContext(client_ip="192.0.2.1")
+    req = _make_query("lemur", int(QTYPE.AAAA))
+    add_calls: list[tuple[str, int, list[str]]] = []
+
+    def _capture_add_rrset(
+        reply: DNSRecord,
+        owner_name: str,
+        rr_qtype_local: int,
+        ttl: int,
+        values: list[str],
+        include_dnssec: bool,
+        mapping_by_qtype: dict[int, dict[str, list[object]]] | None = None,
+        *,
+        section: str = "answer",
+    ) -> bool:
+        _ = reply
+        _ = ttl
+        _ = include_dnssec
+        _ = mapping_by_qtype
+        _ = section
+        add_calls.append((str(owner_name), int(rr_qtype_local), list(values)))
+        return True
+
+    monkeypatch.setattr(
+        resolver.dnssec,
+        "add_rrset_to_reply",
+        _capture_add_rrset,
+        raising=True,
+    )
+
+    decision = resolver.pre_resolve(plugin, "lemur.zaa", int(QTYPE.AAAA), req, ctx)
+    assert decision is not None
+    assert decision.action == "override"
+    assert add_calls
+    assert add_calls[0] == ("lemur.", int(QTYPE.CNAME), ["lemur.zaa."])
+
+
 def test_handle_opcode_notify_returns_override_when_server_import_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
