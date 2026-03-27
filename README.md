@@ -508,6 +508,76 @@ stats:
 	  - example.com
 ```
 
+#### Query-log flood hardening (no code changes)
+
+If query logging is enabled on an exposed resolver, set explicit limits so
+flood traffic cannot grow persistence usage without bounds.
+
+Recommended controls:
+
+- `logging.query_log_retention` global defaults:
+  - `max_records`: cap row count.
+  - `days`: cap age.
+  - `max_bytes`: cap estimated backend storage size.
+  - `prune_interval_seconds`: avoid pruning on every insert.
+  - `prune_every_n_inserts`: run prune on an insert cadence.
+- `logging.max_logging_queue`: keep async queue bounded (default is bounded; do
+  not set `<= 0` unless you explicitly want unbounded memory growth).
+- `logging.query_log_only`: when true, skip mirroring aggregate counters to the
+  persistence backend and keep only raw query-log rows.
+- `logging.query_log_sampling.sample_rate`: keep only a fraction of query-log
+  rows (for example `0.1` for ~10%).
+- `logging.query_log_dedupe.window_seconds`: suppress repeated identical
+  query-log rows inside a short window.
+
+Rate-limit integration:
+
+- `rate` plugin `deny_log_first_n` logs only the first N denies for each active
+  blocked episode.
+- Remaining deny events set `PluginDecision.suppress_query_log` and are skipped
+  in persistent query logs until the episode cools down.
+
+Example hardening profile:
+
+```yaml
+logging:
+  async: true
+  max_logging_queue: 4096
+  query_log_only: false
+  query_log_retention:
+	max_records: 500000
+	days: 7
+	max_bytes: 2147483648
+	prune_interval_seconds: 30
+	prune_every_n_inserts: 200
+  query_log_sampling:
+	sample_rate: 0.25
+  query_log_dedupe:
+	window_seconds: 2
+	max_entries: 50000
+  backends:
+	- id: local-log
+	  backend: sqlite
+	  config:
+		db_path: ./config/var/stats.db
+		# Per-backend overrides (optional):
+		# retention_max_records: 250000
+		# retention_days: 3
+		# retention_max_bytes: 1073741824
+		# retention_prune_interval_seconds: 15
+		# retention_prune_every_n_inserts: 100
+```
+
+Backend-specific optional maintenance controls:
+
+- SQLite: `retention_vacuum_on_prune`, `retention_vacuum_interval_seconds`,
+  `sqlite_auto_vacuum` (`none`, `full`, `incremental`).
+- MongoDB: `retention_native_ttl` (enables a TTL index when `retention_days`
+  is set).
+- MySQL/MariaDB: `retention_optimize_on_prune`,
+  `retention_optimize_interval_seconds`.
+- PostgreSQL: `retention_vacuum_on_prune`, `retention_vacuum_interval_seconds`.
+
 ### 2.6 Plugins
 
 In the `plugins` list each entry is a `PluginInstance`:

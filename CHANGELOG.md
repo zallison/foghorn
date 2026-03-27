@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 ### Recent incremental updates
+- Added query-log flood hardening controls across runtime/config/backends: global `logging.max_logging_queue`, retention byte caps (`max_bytes`), prune cadence controls (`prune_interval_seconds`, `prune_every_n_inserts`), pre-persistence sampling (`query_log_sampling`) and dedupe (`query_log_dedupe`) options, plus backend maintenance knobs (SQLite/PostgreSQL vacuum, MySQL optimize, MongoDB native TTL index support, SQLite auto-vacuum mode).
+- Runtime stats initialization now propagates global logging retention defaults into backend configs (with per-backend override precedence) and passes query-log sampling/dedupe settings into `StatsCollector` so persistent query-log writes can be throttled before backend insert.
+- Hardened ZoneRecords file/transfer behavior by keeping BIND path reads pinned to the validated resolved path (even if CWD changes mid-load) and pruning stale AXFR per-client rate-limit buckets after idle TTL expiry.
+- Retuned built-in RateLimit profile presets in `rate_limit_profiles.yaml` (`slow`, `medium`, `fast`, `localhost`, `home`/`lan`, `smb`, `enterprise`) and updated profile resolution tests to match the new defaults.
+- Refined internal naming in stats composition helpers from `*Mixin` to `*Utils` (collector and sqlite_store helper classes) while preserving runtime behavior.
+- Expanded README hardening guidance with a new query-log flood hardening section, including recommended logging controls and backend-specific maintenance options.
 - Server response handling now strips upstream DNS COOKIE options before caching and rebinds COOKIE on each response to the active client request (removing stale COOKIE data when the request has no cookie).
 - Resolver DNSSEC handling now classifies pre-plugin override and forwarded responses consistently, applies AD-bit updates in validate mode, and treats signed authoritative local responses as zone-secure when classification would otherwise be unsigned/bogus.
 - Search-domain qualification now excludes DNSSEC RR types, and ZoneRecords now synthesizes search-alias CNAME responses (plus target RRsets when present) for qualified positive and NODATA authoritative answers.
