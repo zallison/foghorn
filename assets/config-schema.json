@@ -994,7 +994,7 @@
         ],
         "config_schema": {
           "additionalProperties": true,
-          "description": "Brief: Typed configuration model for RateLimit.\n\nInputs:\n  - mode: 'per_client' (default), 'per_client_domain', or 'per_domain'\n    controlling how rate profiles are keyed.\n  - window_seconds: Measurement window size in seconds (>= 1).\n  - warmup_windows: Number of completed windows to observe before enforcing.\n  - alpha: EWMA smoothing factor when the new RPS is >= the learned average\n    (controls how quickly we ramp *up*).\n  - alpha_down: Optional EWMA factor when the new RPS is < the learned\n    average (controls how quickly we ramp *down*). Defaults to alpha when\n    omitted.\n  - burst_factor: Allowed multiplier over learned average RPS when enforcing.\n  - burst_windows: Number of consecutive burst windows allowed before the\n    burst factor is disabled (0 means unlimited).\n  - burst_reset_windows: Number of consecutive completed windows at or below\n    threshold required to reset burst state back to zero.\n  - min_enforce_rps: Minimum RPS threshold for enforcement.\n  - max_enforce_rps: Hard upper bound on allowed RPS per key (0 disables).\n  - global_max_rps: Optional hard upper bound on total RPS across all keys\n    (0 disables).\n  - db_path: Path to sqlite3 database storing learned profiles.\n\n  - max_profiles: Maximum number of rows permitted in rate_profiles (>= 1).\n  - profile_ttl_seconds: Best-effort TTL for profiles; rows older than this\n    are pruned during periodic maintenance (0 disables TTL pruning).\n  - prune_interval_seconds: Minimum seconds between prune passes (>= 0).\n\n  - assume_udp_when_listener_missing: When True, treat missing/unknown\n    listener values on insecure transports as UDP for spoofing mitigation.\n  - bucket_network_prefix_v4: IPv4 prefix length used for UDP client-IP\n    bucketing on insecure transports.\n  - bucket_network_prefix_v6: IPv6 prefix length used for UDP client-IP\n    bucketing on insecure transports.\n  - limit_recalc_windows: Number of completed windows between per-bucket\n    allowed-RPS recalculations. Default 10 windows.\n  - warmup_max_rps: Optional hard RPS cap enforced during warmup\n    (0 disables).\n  - bootstrap_rps: Optional baseline RPS used to seed profiles when\n    no historical samples exist. When omitted, defaults to global_max_rps\n    when explicitly set; otherwise defaults to 50. Set to 0 to disable\n    bootstrap seeding.\n\n  - deny_response: Policy for limited queries ('nxdomain', 'refused', 'servfail',\n    'noerror_empty'/'nodata', 'ip', or 'drop'). Defaults to 'refused'.\n  - deny_response_ip4 / deny_response_ip6: Optional IPs used when deny_response=='ip'.\n  - ttl: Optional TTL used when synthesizing IP responses.\n  - stats_log_interval_seconds: Interval for periodic rate-limit summary logs\n    (0 disables).\n  - stats_window_seconds: Optional lookback window in seconds applied when\n    computing periodic summary avg/max values (0 uses all profiles).\n  - deny_log_interval_seconds: Minimum seconds between per-key deny log\n    messages (0 logs every deny; default 10).  Suppressed denies are\n    counted and the total is included in the next emitted message.\n  - deny_log_first_n: Number of denied queries to write a persistent\n    query-log row for at the start of each blocked episode per key.\n    After this many logged denies the query-log row is suppressed for the\n    remainder of the episode; counting resets when the key's rate drops\n    back below the allowed threshold.  0 suppresses all query-log rows\n    for rate-limited queries (previous behavior).  Default 3.\n  - psl_strict: When True, fail startup if PSL extraction is unavailable\n    in domain-based modes.\n\nOutputs:\n  - RateLimitConfig instance with normalized field types.",
+          "description": "Brief: Typed configuration model for RateLimit.\n\nInputs:\n  - mode: 'per_client' (default), 'per_client_domain', or 'per_domain'\n    controlling how rate profiles are keyed.\n  - window_seconds: Measurement window size in seconds (>= 1).\n  - warmup_windows: Number of completed windows to observe before enforcing.\n  - alpha: EWMA smoothing factor when the new RPS is >= the learned average\n    (controls how quickly we ramp *up*).\n  - alpha_down: Optional EWMA factor when the new RPS is < the learned\n    average (controls how quickly we ramp *down*). Defaults to alpha when\n    omitted.\n  - burst_factor: Allowed multiplier over learned average RPS when enforcing.\n  - burst_windows: Number of consecutive burst windows allowed before the\n    burst factor is disabled (0 means unlimited).\n  - burst_reset_windows: Number of consecutive completed windows at or below\n    threshold required to reset burst state back to zero.\n  - min_enforce_rps: Minimum RPS threshold for enforcement.\n  - max_enforce_rps: Hard upper bound on allowed RPS per key (0 disables).\n  - global_max_rps: Optional hard upper bound on total RPS across all keys\n    (0 disables).\n  - db_path: Path to sqlite3 database storing learned profiles.\n\n  - max_profiles: Maximum number of rows permitted in rate_profiles (>= 1).\n  - profile_ttl_seconds: Best-effort TTL for profiles; rows older than this\n    are pruned during periodic maintenance (0 disables TTL pruning).\n  - prune_interval_seconds: Minimum seconds between prune passes (>= 0).\n\n  - assume_udp_when_listener_missing: When True, treat missing/unknown\n    listener values on insecure transports as UDP for spoofing mitigation.\n  - bucket_network_prefix_v4: IPv4 prefix length used for UDP client-IP\n    bucketing on insecure transports.\n  - bucket_network_prefix_v6: IPv6 prefix length used for UDP client-IP\n    bucketing on insecure transports.\n  - limit_recalc_windows: Number of completed windows between per-bucket\n    allowed-RPS recalculations. Default 10 windows.\n  - warmup_max_rps: Optional hard RPS cap enforced during warmup\n    (0 disables).\n  - bootstrap_rps: Optional baseline RPS used to seed profiles when\n    no historical samples exist. When omitted, defaults to global_max_rps\n    when explicitly set; otherwise defaults to 50. Set to 0 to disable\n    bootstrap seeding.\n\n  - deny_response: Policy for limited queries ('nxdomain', 'refused', 'servfail',\n    'noerror_empty'/'nodata', 'ip', or 'drop'). Defaults to 'refused'.\n  - deny_response_ip4 / deny_response_ip6: Optional IPs used when deny_response=='ip'.\n  - ttl: Optional TTL used when synthesizing IP responses.\n  - stats_log_interval_seconds: Interval for periodic rate-limit summary logs\n    (0 disables).\n  - stats_window_seconds: Optional lookback window in seconds applied when\n    computing periodic summary avg/max values (0 uses all profiles).\n  - deny_log_interval_seconds: Minimum seconds between per-key deny log\n    messages (0 logs every deny; default 60).  Suppressed denies are\n    counted and the total is included in the next emitted message.\n  - deny_log_first_n: Number of denied queries to write a persistent\n    query-log row for at the start of each blocked episode per key.\n    After this many logged denies the query-log row is suppressed for the\n    remainder of the episode; counting resets when the key's rate drops\n    back below the allowed threshold.  0 suppresses all query-log rows\n    for rate-limited queries (previous behavior).  Default 3.\n  - psl_strict: When True, fail startup if PSL extraction is unavailable\n    in domain-based modes.\n\nOutputs:\n  - RateLimitConfig instance with normalized field types.",
           "properties": {
             "alpha": {
               "default": 0.2,
@@ -3952,7 +3952,7 @@
         ],
         "config_schema": {
           "additionalProperties": true,
-          "description": "Brief: Typed configuration model for RateLimit.\n\nInputs:\n  - mode: 'per_client' (default), 'per_client_domain', or 'per_domain'\n    controlling how rate profiles are keyed.\n  - window_seconds: Measurement window size in seconds (>= 1).\n  - warmup_windows: Number of completed windows to observe before enforcing.\n  - alpha: EWMA smoothing factor when the new RPS is >= the learned average\n    (controls how quickly we ramp *up*).\n  - alpha_down: Optional EWMA factor when the new RPS is < the learned\n    average (controls how quickly we ramp *down*). Defaults to alpha when\n    omitted.\n  - burst_factor: Allowed multiplier over learned average RPS when enforcing.\n  - burst_windows: Number of consecutive burst windows allowed before the\n    burst factor is disabled (0 means unlimited).\n  - burst_reset_windows: Number of consecutive completed windows at or below\n    threshold required to reset burst state back to zero.\n  - min_enforce_rps: Minimum RPS threshold for enforcement.\n  - max_enforce_rps: Hard upper bound on allowed RPS per key (0 disables).\n  - global_max_rps: Optional hard upper bound on total RPS across all keys\n    (0 disables).\n  - db_path: Path to sqlite3 database storing learned profiles.\n\n  - max_profiles: Maximum number of rows permitted in rate_profiles (>= 1).\n  - profile_ttl_seconds: Best-effort TTL for profiles; rows older than this\n    are pruned during periodic maintenance (0 disables TTL pruning).\n  - prune_interval_seconds: Minimum seconds between prune passes (>= 0).\n\n  - assume_udp_when_listener_missing: When True, treat missing/unknown\n    listener values on insecure transports as UDP for spoofing mitigation.\n  - bucket_network_prefix_v4: IPv4 prefix length used for UDP client-IP\n    bucketing on insecure transports.\n  - bucket_network_prefix_v6: IPv6 prefix length used for UDP client-IP\n    bucketing on insecure transports.\n  - limit_recalc_windows: Number of completed windows between per-bucket\n    allowed-RPS recalculations. Default 10 windows.\n  - warmup_max_rps: Optional hard RPS cap enforced during warmup\n    (0 disables).\n  - bootstrap_rps: Optional baseline RPS used to seed profiles when\n    no historical samples exist. When omitted, defaults to global_max_rps\n    when explicitly set; otherwise defaults to 50. Set to 0 to disable\n    bootstrap seeding.\n\n  - deny_response: Policy for limited queries ('nxdomain', 'refused', 'servfail',\n    'noerror_empty'/'nodata', 'ip', or 'drop'). Defaults to 'refused'.\n  - deny_response_ip4 / deny_response_ip6: Optional IPs used when deny_response=='ip'.\n  - ttl: Optional TTL used when synthesizing IP responses.\n  - stats_log_interval_seconds: Interval for periodic rate-limit summary logs\n    (0 disables).\n  - stats_window_seconds: Optional lookback window in seconds applied when\n    computing periodic summary avg/max values (0 uses all profiles).\n  - deny_log_interval_seconds: Minimum seconds between per-key deny log\n    messages (0 logs every deny; default 10).  Suppressed denies are\n    counted and the total is included in the next emitted message.\n  - deny_log_first_n: Number of denied queries to write a persistent\n    query-log row for at the start of each blocked episode per key.\n    After this many logged denies the query-log row is suppressed for the\n    remainder of the episode; counting resets when the key's rate drops\n    back below the allowed threshold.  0 suppresses all query-log rows\n    for rate-limited queries (previous behavior).  Default 3.\n  - psl_strict: When True, fail startup if PSL extraction is unavailable\n    in domain-based modes.\n\nOutputs:\n  - RateLimitConfig instance with normalized field types.",
+          "description": "Brief: Typed configuration model for RateLimit.\n\nInputs:\n  - mode: 'per_client' (default), 'per_client_domain', or 'per_domain'\n    controlling how rate profiles are keyed.\n  - window_seconds: Measurement window size in seconds (>= 1).\n  - warmup_windows: Number of completed windows to observe before enforcing.\n  - alpha: EWMA smoothing factor when the new RPS is >= the learned average\n    (controls how quickly we ramp *up*).\n  - alpha_down: Optional EWMA factor when the new RPS is < the learned\n    average (controls how quickly we ramp *down*). Defaults to alpha when\n    omitted.\n  - burst_factor: Allowed multiplier over learned average RPS when enforcing.\n  - burst_windows: Number of consecutive burst windows allowed before the\n    burst factor is disabled (0 means unlimited).\n  - burst_reset_windows: Number of consecutive completed windows at or below\n    threshold required to reset burst state back to zero.\n  - min_enforce_rps: Minimum RPS threshold for enforcement.\n  - max_enforce_rps: Hard upper bound on allowed RPS per key (0 disables).\n  - global_max_rps: Optional hard upper bound on total RPS across all keys\n    (0 disables).\n  - db_path: Path to sqlite3 database storing learned profiles.\n\n  - max_profiles: Maximum number of rows permitted in rate_profiles (>= 1).\n  - profile_ttl_seconds: Best-effort TTL for profiles; rows older than this\n    are pruned during periodic maintenance (0 disables TTL pruning).\n  - prune_interval_seconds: Minimum seconds between prune passes (>= 0).\n\n  - assume_udp_when_listener_missing: When True, treat missing/unknown\n    listener values on insecure transports as UDP for spoofing mitigation.\n  - bucket_network_prefix_v4: IPv4 prefix length used for UDP client-IP\n    bucketing on insecure transports.\n  - bucket_network_prefix_v6: IPv6 prefix length used for UDP client-IP\n    bucketing on insecure transports.\n  - limit_recalc_windows: Number of completed windows between per-bucket\n    allowed-RPS recalculations. Default 10 windows.\n  - warmup_max_rps: Optional hard RPS cap enforced during warmup\n    (0 disables).\n  - bootstrap_rps: Optional baseline RPS used to seed profiles when\n    no historical samples exist. When omitted, defaults to global_max_rps\n    when explicitly set; otherwise defaults to 50. Set to 0 to disable\n    bootstrap seeding.\n\n  - deny_response: Policy for limited queries ('nxdomain', 'refused', 'servfail',\n    'noerror_empty'/'nodata', 'ip', or 'drop'). Defaults to 'refused'.\n  - deny_response_ip4 / deny_response_ip6: Optional IPs used when deny_response=='ip'.\n  - ttl: Optional TTL used when synthesizing IP responses.\n  - stats_log_interval_seconds: Interval for periodic rate-limit summary logs\n    (0 disables).\n  - stats_window_seconds: Optional lookback window in seconds applied when\n    computing periodic summary avg/max values (0 uses all profiles).\n  - deny_log_interval_seconds: Minimum seconds between per-key deny log\n    messages (0 logs every deny; default 60).  Suppressed denies are\n    counted and the total is included in the next emitted message.\n  - deny_log_first_n: Number of denied queries to write a persistent\n    query-log row for at the start of each blocked episode per key.\n    After this many logged denies the query-log row is suppressed for the\n    remainder of the episode; counting resets when the key's rate drops\n    back below the allowed threshold.  0 suppresses all query-log rows\n    for rate-limited queries (previous behavior).  Default 3.\n  - psl_strict: When True, fail startup if PSL extraction is unavailable\n    in domain-based modes.\n\nOutputs:\n  - RateLimitConfig instance with normalized field types.",
           "properties": {
             "alpha": {
               "default": 0.2,
@@ -6181,6 +6181,11 @@
           "maxLength": 254,
           "type": "string"
         },
+        "max_logging_queue": {
+          "description": "Optional global default for backend async queue capacity. Applied to logging.backends entries that do not set config.max_logging_queue explicitly. Values <= 0 use an unbounded queue.",
+          "minimum": 0,
+          "type": "integer"
+        },
         "python": {
           "additionalProperties": false,
           "properties": {
@@ -6242,6 +6247,45 @@
           },
           "type": "object"
         },
+        "query_log_dedupe": {
+          "additionalProperties": false,
+          "description": "Optional dedupe policy applied before persistent query_log writes.",
+          "properties": {
+            "comment": {
+              "description": "Optional human metadata string (max 254 characters).",
+              "maxLength": 254,
+              "type": "string"
+            },
+            "id": {
+              "description": "Optional human metadata string (max 254 characters).",
+              "maxLength": 254,
+              "type": "string"
+            },
+            "max_entries": {
+              "default": 50000,
+              "description": "Maximum in-memory dedupe keys retained by the stats collector.",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "window_seconds": {
+              "default": 0,
+              "description": "Suppress repeated query_log rows with the same key inside this window. 0 disables dedupe.",
+              "minimum": 0,
+              "type": "number"
+            }
+          },
+          "type": "object"
+        },
+        "query_log_dedupe_max_entries": {
+          "description": "Legacy alias for logging.query_log_dedupe.max_entries.",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "query_log_dedupe_window_seconds": {
+          "description": "Legacy alias for logging.query_log_dedupe.window_seconds.",
+          "minimum": 0,
+          "type": "number"
+        },
         "query_log_only": {
           "default": false,
           "description": "When true, only the raw query_log is written to the configured backends and aggregate counters are kept in-memory only.",
@@ -6266,10 +6310,25 @@
               "maxLength": 254,
               "type": "string"
             },
+            "max_bytes": {
+              "description": "Maximum estimated query_log bytes retained per supported backend.",
+              "minimum": 1,
+              "type": "integer"
+            },
             "max_records": {
               "description": "Maximum number of query_log records to retain per supported backend.",
               "minimum": 1,
               "type": "integer"
+            },
+            "prune_every_n_inserts": {
+              "description": "Run retention prune after every N inserted query_log rows.",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "prune_interval_seconds": {
+              "description": "Minimum seconds between retention prune passes.",
+              "exclusiveMinimum": 0,
+              "type": "number"
             }
           },
           "type": "object"
@@ -6279,10 +6338,66 @@
           "exclusiveMinimum": 0,
           "type": "number"
         },
+        "query_log_retention_max_bytes": {
+          "description": "Legacy alias for logging.query_log_retention.max_bytes.",
+          "minimum": 1,
+          "type": "integer"
+        },
         "query_log_retention_max_records": {
           "description": "Legacy alias for logging.query_log_retention.max_records.",
           "minimum": 1,
           "type": "integer"
+        },
+        "query_log_retention_prune_every_n_inserts": {
+          "description": "Legacy alias for logging.query_log_retention.prune_every_n_inserts.",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "query_log_retention_prune_interval_seconds": {
+          "description": "Legacy alias for logging.query_log_retention.prune_interval_seconds.",
+          "exclusiveMinimum": 0,
+          "type": "number"
+        },
+        "query_log_sample_rate": {
+          "description": "Legacy alias for logging.query_log_sampling.sample_rate.",
+          "maximum": 1,
+          "minimum": 0,
+          "type": "number"
+        },
+        "query_log_sampling": {
+          "additionalProperties": false,
+          "description": "Optional sampling policy applied before persistent query_log writes.",
+          "properties": {
+            "comment": {
+              "description": "Optional human metadata string (max 254 characters).",
+              "maxLength": 254,
+              "type": "string"
+            },
+            "enabled": {
+              "default": true,
+              "description": "When false, suppresses all persistent query_log writes from the stats collector.",
+              "type": "boolean"
+            },
+            "id": {
+              "description": "Optional human metadata string (max 254 characters).",
+              "maxLength": 254,
+              "type": "string"
+            },
+            "rate": {
+              "description": "Alias of sample_rate for compatibility.",
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            },
+            "sample_rate": {
+              "default": 1,
+              "description": "Fraction of query_log rows to persist (0 disables writes, 1 logs all rows).",
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            }
+          },
+          "type": "object"
         }
       },
       "type": "object"
