@@ -30,8 +30,8 @@ from pathlib import Path
 from typing import Any, Optional
 
 import yaml
-from foghorn.config.config_parser import parse_config_variables
 
+from foghorn.config.config_parser import parse_config_variables
 from foghorn.config.config_schema import get_default_schema_path, validate_config
 
 logger = logging.getLogger("foghorn.utils.config_diagram")
@@ -358,6 +358,9 @@ def _extract_class_text(text: str, class_name: str) -> str:
 
     Outputs:
       - str: Source text spanning the class definition, or empty string.
+
+    Notes:
+      - Only classes whose bases include ``BasePlugin`` are considered.
     """
 
     for m in _CLASS_RE.finditer(text):
@@ -815,7 +818,20 @@ def _deny_response_to_rcode_label(deny_response: str) -> Optional[str]:
 def _constrain_plugin_info_for_config(
     info: PluginInfo, *, entry_config: dict[str, Any]
 ) -> PluginInfo:
-    """Brief: Adjust inferred plugin phases/actions using config-specific hints."""
+    """Brief: Adjust inferred plugin phases/actions using config-specific hints.
+
+    Inputs:
+      - info: Plugin metadata inferred from source and config priority fields.
+      - entry_config: Plugin-specific ``config`` mapping from the user config.
+
+    Outputs:
+      - PluginInfo: Updated plugin metadata for diagram rendering.
+
+    Notes:
+      - Applies deny-response edge labeling and pre/post short-circuit shaping for
+        filter/access-control/rate-limit plugins.
+      - Leaves unrelated plugins unchanged.
+    """
 
     if info.cls_path in {
         "foghorn.plugins.resolve.filter.Filter",
@@ -892,25 +908,6 @@ def _constrain_plugin_info_for_config(
             post_actions=post_actions,
             pre_deny_rcode=pre_deny_rcode,
             post_deny_rcode=post_deny_rcode,
-        )
-
-    if info.cls_path == "foghorn.plugins.resolve.rate_limit.RateLimit":
-        deny_response = str(entry_config.get("deny_response", "nxdomain")).lower()
-        deny_label = _deny_response_to_rcode_label(deny_response)
-
-        pre_actions = set(info.pre_actions)
-        # Prefer a single deny edge with the effective RCODE label.
-        pre_actions.discard("override")
-        pre_actions.discard("drop")
-        pre_actions.add("deny")
-
-        return replace(
-            info,
-            pre_actions=pre_actions,
-            post_priority=None,
-            post_actions=set(),
-            pre_deny_rcode=deny_label,
-            post_deny_rcode=None,
         )
 
     return info
@@ -1489,13 +1486,14 @@ def render_dot(
         if has_pre_merge:
             # Place the merge node at the bottom of the pre-plugins box.
             lines.append('      PreMerge [shape=ellipse, label="Pre short-circuit"];')
-            if prev_pre is not None:
-                lines.append(f"      {prev_pre} -> PreMerge [style=invis, weight=10];")
+            assert prev_pre is not None
+            lines.append(f"      {prev_pre} -> PreMerge [style=invis, weight=10];")
 
         lines.append("    }")
-        if first_pre is not None and prev_pre is not None:
-            lines.append(f"    Q -> {first_pre};")
-            lines.append(f"    {prev_pre} -> Cache;")
+        assert first_pre is not None
+        assert prev_pre is not None
+        lines.append(f"    Q -> {first_pre};")
+        lines.append(f"    {prev_pre} -> Cache;")
 
         if has_pre_merge:
             lines.append("    PreMerge -> Resp;")
@@ -1523,7 +1521,7 @@ def render_dot(
             *,
             node_id: str,
             items: list[str],
-            security: str | None,
+            security: str,
         ) -> None:
             """Brief: Emit an upstream endpoint node with optional security styling.
 
@@ -1551,17 +1549,8 @@ def render_dot(
                     else _LISTENER_SECURE_FILL_LIGHT
                 )
                 font = "#111827" if theme == "dark" else "#ffffff"
-            elif security == "insecure":
-                title = "Upstreams (insecure)"
-                fill = (
-                    _LISTENER_INSECURE_FILL_DARK
-                    if theme == "dark"
-                    else _LISTENER_INSECURE_FILL_LIGHT
-                )
-                font = "#111827" if theme == "dark" else "#ffffff"
             else:
                 title = "Upstreams (insecure)"
-                # If we couldn't detect security, default to insecure styling
                 fill = (
                     _LISTENER_INSECURE_FILL_DARK
                     if theme == "dark"
@@ -1575,9 +1564,8 @@ def render_dot(
             )
 
             attrs = [f'label="{label}"', 'group="pipeline"']
-            if fill and font:
-                attrs.append(f'fillcolor="{fill}"')
-                attrs.append(f'fontcolor="{font}"')
+            attrs.append(f'fillcolor="{fill}"')
+            attrs.append(f'fontcolor="{font}"')
 
             lines.append(f"      {node_id} [{', '.join(attrs)}];")
 
@@ -1595,9 +1583,6 @@ def render_dot(
             upstream_tails = ["UpstreamsInsecure", "UpstreamsSecure"]
         else:
             items = items_insecure if has_insecure else items_secure
-            security = (
-                "insecure" if has_insecure else ("secure" if has_secure else None)
-            )
             security = (
                 "insecure" if has_insecure else ("secure" if has_secure else None)
             )
@@ -1681,11 +1666,8 @@ def render_dot(
             upstream_tails.append(rid)
 
             # Add dashed arrow from plugin to its routed upstreams
-            pre_nid = pre_node_ids.get(p.idx)
-            if pre_nid:
-                lines.append(
-                    f"    {pre_nid} -> {rid} [style=dashed, constraint=false];"
-                )
+            pre_nid = pre_node_ids[p.idx]
+            lines.append(f"    {pre_nid} -> {rid} [style=dashed, constraint=false];")
 
             # Upstream router plugins affect the cache by setting upstreams
             lines.append(f"    {pre_nid} -> Cache [style=solid, constraint=false];")
@@ -1747,20 +1729,19 @@ def render_dot(
         if has_post_merge:
             # Place the merge node at the bottom of the post-plugins box.
             lines.append('      PostMerge [shape=ellipse, label="Post short-circuit"];')
-            if prev_post is not None:
-                lines.append(
-                    f"      {prev_post} -> PostMerge [style=invis, weight=10];"
-                )
+            assert prev_post is not None
+            lines.append(f"      {prev_post} -> PostMerge [style=invis, weight=10];")
 
         lines.append("    }")
 
         if has_post_merge:
             lines.append("    PostMerge -> Resp;")
 
-        if first_post is not None and prev_post is not None:
-            for tail in upstream_tails:
-                lines.append(f"    {tail} -> {first_post};")
-            lines.append(f"    {prev_post} -> Resp;")
+        assert first_post is not None
+        assert prev_post is not None
+        for tail in upstream_tails:
+            lines.append(f"    {tail} -> {first_post};")
+        lines.append(f"    {prev_post} -> Resp;")
     else:
         for tail in upstream_tails:
             lines.append(f"    {tail} -> Resp;")
@@ -1866,7 +1847,7 @@ def diagram_dark_png_path_for_config(config_path: str) -> str:
       - config_path: Path to the YAML config.
 
     Outputs:
-      - str: Dark PNG path used by ensure_config_diagram_png().
+      - str: Legacy sibling dark PNG path (``<config>.dot-dark.png``).
     """
 
     return f"{config_path}.dot-dark.png"
@@ -1879,7 +1860,7 @@ def diagram_png_path_for_config(config_path: str) -> str:
       - config_path: Path to the YAML config.
 
     Outputs:
-      - str: PNG path used by ensure_config_diagram_png().
+      - str: Legacy sibling PNG path (``<config>.dot.png``).
     """
 
     return f"{config_path}.dot.png"
@@ -1892,7 +1873,7 @@ def diagram_dot_path_for_config(config_path: str) -> str:
       - config_path: Path to the YAML config.
 
     Outputs:
-      - str: dot source path used by ensure_config_diagram_png().
+      - str: Legacy sibling dot source path (``<config>.dot``).
     """
 
     return f"{config_path}.dot"

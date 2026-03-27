@@ -652,7 +652,7 @@ class MdnsBridge(BasePlugin):
             return base[: -len(self._mdns_domain)] + self._dns_domain
         return base
 
-    @registered_lru_cached(maxsize=496)
+    @registered_lru_cached(maxsize=1024)
     def _mirror_suffixes(
         self, fqdn: str
     ) -> List[str]:  # pragma: nocover suffix mapping helper
@@ -1132,7 +1132,7 @@ class MdnsBridge(BasePlugin):
                 exc_info=True,
             )
 
-    @registered_lru_cached(maxsize=65535)
+    @registered_lru_cached(maxsize=1024)
     def _sanitize_qname(
         self, name: str
     ) -> str:  # pragma: nocover string sanitization helper
