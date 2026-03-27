@@ -43,9 +43,14 @@ class JsonLogging(BaseStatsStore):
     Inputs (constructor):
         file_path: Path to the JSON log file. Parent directories are created
             if they do not already exist.
-        async_logging: When True, use the BaseStatsStore background worker
-            queue for insert_query_log calls; when False (default), writes are
-            performed synchronously in the calling thread.
+        async_logging: Accepted for API compatibility with other backends.
+            insert_query_log dispatch is handled by BaseStatsStore queue logic.
+        max_logging_queue: Best-effort queue size hint consumed by the shared
+            BaseStatsStore worker implementation.
+        retention_max_records: Optional max-record retention limit. When set,
+            compaction keeps only the newest N query-log records.
+        retention_days: Optional day-window retention limit. When set,
+            compaction drops records older than the computed cutoff.
 
     Outputs:
         Initialized JsonLogging instance ready to append JSON lines to the
@@ -70,7 +75,8 @@ class JsonLogging(BaseStatsStore):
         # Normalize and create the target directory if needed.
         path = os.path.abspath(os.path.expanduser(str(file_path)))
         dir_path = os.path.dirname(path)
-        if dir_path:
+        # pragma: nocover - os.path.abspath() yields a parent directory on supported paths.
+        if dir_path:  # pragma: no branch
             try:
                 os.makedirs(dir_path, exist_ok=True)
             except Exception:  # pragma: no cover - defensive
@@ -199,8 +205,8 @@ class JsonLogging(BaseStatsStore):
             result_json: JSON-encoded result payload from the resolver.
 
         Outputs:
-            None; best-effort append to the configured log file. Failures are
-            logged and cause the backend to be marked unhealthy.
+            None; best-effort append to the configured log file. Append/rewrite
+            I/O failures are logged and mark the backend unhealthy.
         """
 
         if not self.health_check():
@@ -245,7 +251,8 @@ class JsonLogging(BaseStatsStore):
         try:
             with self._io_lock:
                 fh = self._fh
-                if fh is None:
+                # pragma: nocover - concurrent close() can clear _fh after health_check().
+                if fh is None:  # pragma: no cover - defensive race
                     return
                 fh.write(line + "\n")
                 fh.flush()
@@ -261,8 +268,8 @@ class JsonLogging(BaseStatsStore):
             None. Caller must hold ``self._io_lock``.
 
         Outputs:
-            None; rewrites the JSONL file when retention requires dropping old
-            records.
+            None; rewrites the JSONL file when compaction changes the retained
+            record set.
         """
 
         cutoff_ts = BaseStatsStore._retention_cutoff_ts(
@@ -274,7 +281,8 @@ class JsonLogging(BaseStatsStore):
             return
 
         fh = getattr(self, "_fh", None)
-        if fh is None:
+        # pragma: nocover - _fh may be cleared if retention runs during/after close().
+        if fh is None:  # pragma: no cover - defensive race
             return
 
         try:
