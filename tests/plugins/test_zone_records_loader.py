@@ -350,6 +350,64 @@ def test_validate_input_path_relative_and_bind_entry_string_branches(
     }
 
 
+def test_load_records_bind_uses_validated_resolved_path_after_cwd_change(
+    tmp_path,
+    monkeypatch,
+):
+    """Brief: BIND loading keeps using the validated resolved path even if cwd changes mid-load.
+
+    Inputs:
+      - tmp_path: pytest temporary path.
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None: asserts BIND parsing reads the originally validated zone file path.
+    """
+
+    initial_dir = tmp_path / "initial"
+    moved_dir = tmp_path / "moved"
+    initial_dir.mkdir()
+    moved_dir.mkdir()
+
+    (initial_dir / "zone.db").write_text(
+        "$ORIGIN example.com.\n"
+        "@ 300 IN SOA ns1.example.com. hostmaster.example.com. 1 3600 600 604800 300\n"
+        "@ 300 IN A 192.0.2.10\n",
+        encoding="utf-8",
+    )
+    (moved_dir / "zone.db").write_text(
+        "$ORIGIN example.com.\n"
+        "@ 300 IN SOA ns1.example.com. hostmaster.example.com. 1 3600 600 604800 300\n"
+        "@ 300 IN A 198.51.100.20\n",
+        encoding="utf-8",
+    )
+
+    original_enforce_file_size_limit = loader._enforce_file_size_limit
+
+    def _enforce_file_size_limit_and_switch_cwd(*, path, max_file_size_bytes) -> None:
+        original_enforce_file_size_limit(
+            path=path,
+            max_file_size_bytes=max_file_size_bytes,
+        )
+        monkeypatch.chdir(moved_dir)
+
+    monkeypatch.setattr(
+        loader,
+        "_enforce_file_size_limit",
+        _enforce_file_size_limit_and_switch_cwd,
+    )
+    monkeypatch.chdir(initial_dir)
+
+    plugin = _make_zone_records(bind_paths=["zone.db"], load_mode="first")
+    plugin.setup()
+
+    a_key = ("example.com", int(QTYPE.A))
+    assert a_key in plugin.records
+    _ttl, values, _sources = plugin.records[a_key]
+    assert "192.0.2.10" in values
+    assert "198.51.100.20" not in values
+
+
 def test_strip_bind_directives_when_overridden_logs_for_both_directives(caplog):
     """Brief: Directive stripping logs warnings when config overrides $ORIGIN and $TTL.
 

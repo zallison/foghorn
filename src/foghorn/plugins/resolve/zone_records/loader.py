@@ -899,7 +899,6 @@ def load_records(plugin: object) -> None:
                 max_file_size_bytes=max_file_size_bytes,
             )
             logger.debug("reading bind zonefile: %s", zone_path)
-            zone_path = pathlib.Path(str(fp))
             try:
                 text = zone_path.read_text(encoding="utf-8")
             except Exception as exc:
