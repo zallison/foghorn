@@ -9,7 +9,7 @@ from ..domain import _base_domain, _is_subdomain, _normalize_domain
 logger = logging.getLogger("foghorn.stats")
 
 
-class _RebuildMixin:
+class _RebuildUtils:
     def rebuild_counts_from_query_log(
         self, logger_obj: Optional[logging.Logger] = None
     ) -> None:

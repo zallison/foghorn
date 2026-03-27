@@ -10,7 +10,7 @@ from ..domain import _base_domain, _is_subdomain, _normalize_domain
 logger = logging.getLogger("foghorn.stats")
 
 
-class _StatsCollectorRecordMixin:
+class _StatsCollectorRecordUtils:
     def record_query(self, client_ip: str, qname: str, qtype: str) -> None:
         """Record an incoming DNS query.
 
@@ -414,6 +414,21 @@ class _StatsCollectorRecordMixin:
             ts = round(time.time(), 3)
 
         name = _normalize_domain(qname)
+        should_persist = True
+        with self._lock:
+            should_persist = self._should_persist_query_log_row_locked(
+                ts=float(ts),
+                client_ip=client_ip,
+                qname=name,
+                qtype=qtype,
+                upstream_id=upstream_id,
+                rcode=rcode,
+                status=status,
+                error=error,
+                first=first,
+            )
+        if not should_persist:
+            return
         try:
             payload = json.dumps(result or {}, separators=(",", ":"))
         except Exception:  # pragma: no cover
