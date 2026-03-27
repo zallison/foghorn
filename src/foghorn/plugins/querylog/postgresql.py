@@ -21,6 +21,7 @@ Notes:
 
 import json
 import logging
+import math
 import time
 from typing import Any, Dict, List, Optional, Tuple
 from foghorn.security_limits import enforce_query_log_aggregate_bucket_limit
@@ -98,6 +99,11 @@ class PostgresStatsStore(BaseStatsStore):
         max_logging_queue: int = 4096,
         retention_max_records: Optional[int] = None,
         retention_days: Optional[float] = None,
+        retention_max_bytes: Optional[int] = None,
+        retention_prune_interval_seconds: Optional[float] = None,
+        retention_prune_every_n_inserts: Optional[int] = None,
+        retention_vacuum_on_prune: bool = False,
+        retention_vacuum_interval_seconds: Optional[float] = None,
         **_: Any,
     ) -> None:
         driver = _import_postgres_driver()
@@ -130,6 +136,28 @@ class PostgresStatsStore(BaseStatsStore):
         self._query_log_retention_days = BaseStatsStore._normalize_retention_days(
             retention_days
         )
+        self._query_log_retention_max_bytes = (
+            BaseStatsStore._normalize_retention_max_bytes(retention_max_bytes)
+        )
+        self._query_log_retention_prune_interval_seconds = (
+            BaseStatsStore._normalize_retention_prune_interval_seconds(
+                retention_prune_interval_seconds
+            )
+        )
+        self._query_log_retention_prune_every_n_inserts = (
+            BaseStatsStore._normalize_retention_prune_every_n_inserts(
+                retention_prune_every_n_inserts
+            )
+        )
+        self._query_log_retention_seen_inserts = 0
+        self._query_log_retention_last_prune_ts = 0.0
+        self._retention_vacuum_on_prune = bool(retention_vacuum_on_prune)
+        self._retention_vacuum_interval_seconds = (
+            BaseStatsStore._normalize_retention_prune_interval_seconds(
+                retention_vacuum_interval_seconds
+            )
+        )
+        self._retention_last_vacuum_ts = 0.0
 
         self._ensure_schema()
 
@@ -473,17 +501,22 @@ class PostgresStatsStore(BaseStatsStore):
             now_ts=time.time(),
         )
         max_records = self._query_log_retention_max_records
-
-        if cutoff_ts is None and max_records is None:
+        max_bytes = self._query_log_retention_max_bytes
+        now_ts = time.time()
+        if cutoff_ts is None and max_records is None and max_bytes is None:
+            return
+        if not self._should_run_query_log_retention_prune(now_ts=now_ts):
             return
 
         cur = self._conn.cursor()
         try:
+            changed = False
             if cutoff_ts is not None:
                 cur.execute(
                     "DELETE FROM query_log WHERE ts < %s",
                     (float(cutoff_ts),),
                 )
+                changed = changed or bool(getattr(cur, "rowcount", 0))
 
             if max_records is not None:
                 cur.execute(
@@ -495,14 +528,126 @@ class PostgresStatsStore(BaseStatsStore):
                     ),
                     (int(max_records),),
                 )
+                changed = changed or bool(getattr(cur, "rowcount", 0))
+
+            if max_bytes is not None:
+                changed = self._prune_query_log_to_max_bytes(int(max_bytes)) or changed
 
             self._conn.commit()
+            if changed:
+                self._maybe_vacuum_query_log_table(now_ts=now_ts)
         except Exception as exc:  # pragma: no cover - defensive
             logger.error(
                 "PostgresStatsStore retention prune failed: %s",
                 exc,
                 exc_info=True,
             )
+
+    def _prune_query_log_to_max_bytes(self, max_bytes: int) -> bool:
+        """Brief: Remove oldest rows until estimated query_log bytes fit a cap.
+
+        Inputs:
+            max_bytes: Maximum estimated bytes to retain in query_log.
+
+        Outputs:
+            bool: True when one or more rows were deleted.
+        """
+
+        if max_bytes <= 0:
+            return False
+
+        changed = False
+        max_passes = 32
+        for _ in range(max_passes):
+            cur = self._conn.cursor()
+            cur.execute(
+                """
+                SELECT
+                    COALESCE(
+                        SUM(
+                            OCTET_LENGTH(client_ip)
+                            + OCTET_LENGTH(name)
+                            + OCTET_LENGTH(qtype)
+                            + OCTET_LENGTH(COALESCE(upstream_id, ''))
+                            + OCTET_LENGTH(COALESCE(rcode, ''))
+                            + OCTET_LENGTH(COALESCE(status, ''))
+                            + OCTET_LENGTH(COALESCE(error, ''))
+                            + OCTET_LENGTH(COALESCE(first, ''))
+                            + OCTET_LENGTH(result_json)
+                            + 64
+                        ),
+                        0
+                    ),
+                    COUNT(1)
+                FROM query_log
+                """
+            )
+            row = cur.fetchone()
+            total_bytes = int(row[0] or 0) if row else 0
+            total_rows = int(row[1] or 0) if row else 0
+            if total_bytes <= max_bytes or total_rows <= 0:
+                break
+
+            over = max(1, total_bytes - int(max_bytes))
+            ratio = float(over) / float(max(total_bytes, 1))
+            rows_to_delete = max(1, min(total_rows, int(math.ceil(ratio * total_rows))))
+
+            cur_del = self._conn.cursor()
+            cur_del.execute(
+                (
+                    "WITH doomed AS ("
+                    "SELECT id FROM query_log ORDER BY ts ASC, id ASC LIMIT %s"
+                    ") "
+                    "DELETE FROM query_log q USING doomed d WHERE q.id = d.id"
+                ),
+                (int(rows_to_delete),),
+            )
+            if not bool(getattr(cur_del, "rowcount", 0)):
+                break
+            changed = True
+
+        return changed
+
+    def _maybe_vacuum_query_log_table(self, *, now_ts: float) -> None:
+        """Brief: Run optional PostgreSQL VACUUM after retention pruning.
+
+        Inputs:
+            now_ts: Current Unix timestamp used for interval gating.
+
+        Outputs:
+            None.
+        """
+
+        if not self._retention_vacuum_on_prune:
+            return
+
+        interval = self._retention_vacuum_interval_seconds
+        if interval is not None:
+            try:
+                last = float(getattr(self, "_retention_last_vacuum_ts", 0.0) or 0.0)
+            except Exception:
+                last = 0.0
+            if last > 0.0 and (float(now_ts) - last) < float(interval):
+                return
+
+        conn = self._conn
+        old_autocommit: object = None
+        autocommit_supported = hasattr(conn, "autocommit")
+        try:
+            if autocommit_supported:
+                old_autocommit = getattr(conn, "autocommit")
+                setattr(conn, "autocommit", True)
+            cur = conn.cursor()
+            cur.execute("VACUUM ANALYZE query_log")
+            self._retention_last_vacuum_ts = float(now_ts)
+        except Exception:  # pragma: no cover - defensive
+            logger.exception("PostgresStatsStore vacuum failed")
+        finally:
+            if autocommit_supported:
+                try:
+                    setattr(conn, "autocommit", old_autocommit)
+                except Exception:
+                    pass
 
     def has_query_log(self) -> bool:
         """Return True if the query_log table contains at least one row.

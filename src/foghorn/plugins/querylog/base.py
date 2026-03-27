@@ -854,6 +854,145 @@ class BaseStatsStore:
         return value
 
     @staticmethod
+    def _normalize_retention_max_bytes(raw: object) -> int | None:
+        """Brief: Normalize a max-bytes retention setting.
+
+        Inputs:
+          - raw: Raw configured max-bytes value.
+
+        Outputs:
+          - int | None: Positive integer byte limit when valid, else None.
+        """
+
+        if raw is None:
+            return None
+
+        try:
+            value = int(raw)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return None
+
+        if value <= 0:
+            return None
+        return value
+
+    @staticmethod
+    def _normalize_retention_prune_interval_seconds(raw: object) -> float | None:
+        """Brief: Normalize a retention prune interval setting.
+
+        Inputs:
+          - raw: Raw configured prune interval in seconds.
+
+        Outputs:
+          - float | None: Positive finite seconds value when valid, else None.
+        """
+
+        if raw is None:
+            return None
+
+        try:
+            value = float(raw)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return None
+
+        if not math.isfinite(value) or value <= 0.0:
+            return None
+        return value
+
+    @staticmethod
+    def _normalize_retention_prune_every_n_inserts(raw: object) -> int | None:
+        """Brief: Normalize a retention prune cadence in inserted rows.
+
+        Inputs:
+          - raw: Raw configured insertion cadence value.
+
+        Outputs:
+          - int | None: Positive integer cadence when valid, else None.
+        """
+
+        if raw is None:
+            return None
+
+        try:
+            value = int(raw)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return None
+
+        if value <= 0:
+            return None
+        return value
+
+    def _should_run_query_log_retention_prune(
+        self,
+        *,
+        now_ts: float | None = None,
+    ) -> bool:
+        """Brief: Return True when a configured retention prune should execute now.
+
+        Inputs:
+          - now_ts: Optional current Unix timestamp override.
+
+        Outputs:
+          - bool: True when retention is configured and cadence checks pass.
+
+        Notes:
+          - Uses backend attributes when present:
+            - _query_log_retention_max_records / _query_log_retention_days
+            - _query_log_retention_max_bytes
+            - _query_log_retention_prune_every_n_inserts
+            - _query_log_retention_prune_interval_seconds
+          - Maintains best-effort runtime counters:
+            - _query_log_retention_seen_inserts
+            - _query_log_retention_last_prune_ts
+        """
+
+        max_records = getattr(self, "_query_log_retention_max_records", None)
+        retention_days = getattr(self, "_query_log_retention_days", None)
+        max_bytes = getattr(self, "_query_log_retention_max_bytes", None)
+        if max_records is None and retention_days is None and max_bytes is None:
+            return False
+
+        if now_ts is None:
+            now_ts = time.time()
+        now_f = float(now_ts)
+
+        try:
+            insert_count = (
+                int(getattr(self, "_query_log_retention_seen_inserts", 0) or 0) + 1
+            )
+        except Exception:
+            insert_count = 1
+        self._query_log_retention_seen_inserts = int(insert_count)
+
+        every_n = getattr(self, "_query_log_retention_prune_every_n_inserts", None)
+        if every_n is not None:
+            try:
+                every_n_i = int(every_n)
+            except Exception:
+                every_n_i = 1
+            if every_n_i > 1 and (insert_count % every_n_i) != 0:
+                return False
+
+        interval = getattr(self, "_query_log_retention_prune_interval_seconds", None)
+        if interval is not None:
+            try:
+                interval_f = float(interval)
+            except Exception:
+                interval_f = 0.0
+            if interval_f > 0.0:
+                try:
+                    last_prune = float(
+                        getattr(self, "_query_log_retention_last_prune_ts", 0.0) or 0.0
+                    )
+                except Exception:
+                    last_prune = 0.0
+                if last_prune > 0.0 and (now_f - last_prune) < interval_f:
+                    return False
+
+        self._query_log_retention_last_prune_ts = now_f
+        return True
+
+    @staticmethod
     def _retention_cutoff_ts(
         retention_days: float | None,
         *,

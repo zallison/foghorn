@@ -313,6 +313,129 @@ def test_json_logging_retention_max_records(tmp_path: Path) -> None:
     assert kept_names == ["second.example", "third.example"]
 
 
+def test_json_logging_retention_max_bytes_keeps_latest_record(tmp_path: Path) -> None:
+    """Brief: Byte-cap retention drops oldest records to stay within the cap.
+
+    Inputs:
+        tmp_path: pytest-provided temporary directory path.
+
+    Outputs:
+        None; asserts byte-cap retention keeps the newest matching-size row.
+    """
+
+    log_file = tmp_path / "queries.jsonl"
+    backend = JsonLogging(
+        file_path=str(log_file),
+        async_logging=False,
+        retention_max_bytes=10_000_000,
+    )
+
+    backend._insert_query_log(  # type: ignore[attr-defined]
+        ts=1.0,
+        client_ip="192.0.2.1",
+        name="alpha.example",
+        qtype="A",
+        upstream_id=None,
+        rcode="NOERROR",
+        status="ok",
+        error=None,
+        first=None,
+        result_json="{}",
+    )
+
+    lines_after_first = log_file.read_text(encoding="utf-8").splitlines()
+    assert len(lines_after_first) == 2
+    header_line = lines_after_first[0]
+    first_row = lines_after_first[1]
+    # Cap header + exactly one similarly-sized row.
+    backend._query_log_retention_max_bytes = (  # type: ignore[attr-defined]
+        len(header_line.encode("utf-8")) + 1 + len(first_row.encode("utf-8")) + 1
+    )
+
+    backend._insert_query_log(  # type: ignore[attr-defined]
+        ts=2.0,
+        client_ip="192.0.2.2",
+        name="bravo.example",
+        qtype="A",
+        upstream_id=None,
+        rcode="NOERROR",
+        status="ok",
+        error=None,
+        first=None,
+        result_json="{}",
+    )
+    backend.close()
+
+    lines = log_file.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 2
+    assert json.loads(lines[1])["name"] == "bravo.example"
+
+
+def test_json_logging_retention_prune_every_n_inserts(tmp_path: Path) -> None:
+    """Brief: Prune cadence can defer retention until N inserts are observed.
+
+    Inputs:
+        tmp_path: pytest-provided temporary directory path.
+
+    Outputs:
+        None; asserts max-record prune runs only on configured insert cadence.
+    """
+
+    log_file = tmp_path / "queries.jsonl"
+    backend = JsonLogging(
+        file_path=str(log_file),
+        async_logging=False,
+        retention_max_records=1,
+        retention_prune_every_n_inserts=3,
+    )
+
+    backend._insert_query_log(  # type: ignore[attr-defined]
+        ts=1.0,
+        client_ip="192.0.2.1",
+        name="first.example",
+        qtype="A",
+        upstream_id=None,
+        rcode="NOERROR",
+        status="ok",
+        error=None,
+        first=None,
+        result_json="{}",
+    )
+    backend._insert_query_log(  # type: ignore[attr-defined]
+        ts=2.0,
+        client_ip="192.0.2.2",
+        name="second.example",
+        qtype="A",
+        upstream_id=None,
+        rcode="NOERROR",
+        status="ok",
+        error=None,
+        first=None,
+        result_json="{}",
+    )
+    # Not yet at insert #3, so retention should still be deferred.
+    mid_lines = log_file.read_text(encoding="utf-8").splitlines()
+    assert len(mid_lines) == 3
+
+    backend._insert_query_log(  # type: ignore[attr-defined]
+        ts=3.0,
+        client_ip="192.0.2.3",
+        name="third.example",
+        qtype="A",
+        upstream_id=None,
+        rcode="NOERROR",
+        status="ok",
+        error=None,
+        first=None,
+        result_json="{}",
+    )
+    backend.close()
+
+    lines = log_file.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 2
+    assert json.loads(lines[1])["name"] == "third.example"
+
+
 def test_json_logging_retention_days(monkeypatch, tmp_path: Path) -> None:
     """Brief: JsonLogging prunes records older than the retention_days cutoff.
 

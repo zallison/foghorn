@@ -23,6 +23,7 @@ import json
 import logging
 import re
 import time
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 from foghorn.security_limits import enforce_query_log_aggregate_bucket_limit
 
@@ -92,6 +93,10 @@ class MongoStatsStore(BaseStatsStore):
         max_logging_queue: int = 4096,
         retention_max_records: Optional[int] = None,
         retention_days: Optional[float] = None,
+        retention_max_bytes: Optional[int] = None,
+        retention_prune_interval_seconds: Optional[float] = None,
+        retention_prune_every_n_inserts: Optional[int] = None,
+        retention_native_ttl: bool = True,
         **_: Any,
     ) -> None:
         mongo_mod = _import_mongo_driver()
@@ -124,6 +129,22 @@ class MongoStatsStore(BaseStatsStore):
         self._query_log_retention_days = BaseStatsStore._normalize_retention_days(
             retention_days
         )
+        self._query_log_retention_max_bytes = (
+            BaseStatsStore._normalize_retention_max_bytes(retention_max_bytes)
+        )
+        self._query_log_retention_prune_interval_seconds = (
+            BaseStatsStore._normalize_retention_prune_interval_seconds(
+                retention_prune_interval_seconds
+            )
+        )
+        self._query_log_retention_prune_every_n_inserts = (
+            BaseStatsStore._normalize_retention_prune_every_n_inserts(
+                retention_prune_every_n_inserts
+            )
+        )
+        self._query_log_retention_seen_inserts = 0
+        self._query_log_retention_last_prune_ts = 0.0
+        self._retention_native_ttl = bool(retention_native_ttl)
 
         self._db = self._client[database]
         self._counts = self._db["counts"]
@@ -159,6 +180,19 @@ class MongoStatsStore(BaseStatsStore):
             self._query_log.create_index(
                 [("upstream_id", 1), ("ts", 1)], name="idx_query_log_upstream_ts"
             )
+            if (
+                self._retention_native_ttl
+                and self._query_log_retention_days is not None
+            ):
+                ttl_seconds = max(
+                    1,
+                    int(float(self._query_log_retention_days) * 86400.0),
+                )
+                self._query_log.create_index(
+                    [("ts_dt", 1)],
+                    name="idx_query_log_ts_ttl",
+                    expireAfterSeconds=int(ttl_seconds),
+                )
         except Exception as exc:  # pragma: no cover - defensive
             logger.error(
                 "MongoStatsStore _ensure_indexes error: %s", exc, exc_info=True
@@ -327,6 +361,7 @@ class MongoStatsStore(BaseStatsStore):
         try:
             doc = {
                 "ts": float(ts),
+                "ts_dt": datetime.fromtimestamp(float(ts), tz=timezone.utc),
                 "client_ip": client_ip,
                 "name": name,
                 "qtype": qtype,
@@ -360,8 +395,11 @@ class MongoStatsStore(BaseStatsStore):
             now_ts=time.time(),
         )
         max_records = self._query_log_retention_max_records
+        max_bytes = self._query_log_retention_max_bytes
 
-        if cutoff_ts is None and max_records is None:
+        if cutoff_ts is None and max_records is None and max_bytes is None:
+            return
+        if not self._should_run_query_log_retention_prune(now_ts=time.time()):
             return
 
         try:
@@ -370,28 +408,94 @@ class MongoStatsStore(BaseStatsStore):
 
             if max_records is not None:
                 total = int(self._query_log.count_documents({}))
-                if total <= int(max_records):
-                    return
+                if total > int(max_records):
+                    keep_ids: list[object] = []
+                    cursor = (
+                        self._query_log.find({}, {"_id": 1})
+                        .sort([("ts", -1), ("_id", -1)])
+                        .limit(int(max_records))
+                    )
+                    for doc in cursor:
+                        doc_id = doc.get("_id")
+                        if doc_id is not None:
+                            keep_ids.append(doc_id)
 
-                keep_ids: list[object] = []
-                cursor = (
-                    self._query_log.find({}, {"_id": 1})
-                    .sort([("ts", -1), ("_id", -1)])
-                    .limit(int(max_records))
-                )
+                    if keep_ids:
+                        self._query_log.delete_many({"_id": {"$nin": keep_ids}})
+                    else:
+                        self._query_log.delete_many({})
+
+            if max_bytes is not None:
+                keep_ids_by_size: list[object] = []
+                retained_bytes = 0
+                cursor = self._query_log.find(
+                    {},
+                    {
+                        "_id": 1,
+                        "client_ip": 1,
+                        "name": 1,
+                        "qtype": 1,
+                        "upstream_id": 1,
+                        "rcode": 1,
+                        "status": 1,
+                        "error": 1,
+                        "first": 1,
+                        "result_json": 1,
+                    },
+                ).sort([("ts", -1), ("_id", -1)])
                 for doc in cursor:
                     doc_id = doc.get("_id")
-                    if doc_id is not None:
-                        keep_ids.append(doc_id)
+                    if doc_id is None:
+                        continue
 
-                if keep_ids:
-                    self._query_log.delete_many({"_id": {"$nin": keep_ids}})
+                    doc_bytes = self._estimate_query_log_doc_bytes(doc)
+                    if keep_ids_by_size and (retained_bytes + doc_bytes) > int(
+                        max_bytes
+                    ):
+                        break
+                    keep_ids_by_size.append(doc_id)
+                    retained_bytes += int(doc_bytes)
+
+                if keep_ids_by_size:
+                    self._query_log.delete_many({"_id": {"$nin": keep_ids_by_size}})
                 else:
                     self._query_log.delete_many({})
         except Exception as exc:  # pragma: no cover - defensive
             logger.error(
                 "MongoStatsStore retention prune failed: %s", exc, exc_info=True
             )
+
+    @staticmethod
+    def _estimate_query_log_doc_bytes(doc: Dict[str, Any]) -> int:
+        """Brief: Estimate storage bytes for a query_log document.
+
+        Inputs:
+            doc: Mongo query_log document.
+
+        Outputs:
+            int: Approximate encoded byte size used for retention capping.
+        """
+
+        total = 64
+        for key in (
+            "client_ip",
+            "name",
+            "qtype",
+            "upstream_id",
+            "rcode",
+            "status",
+            "error",
+            "first",
+            "result_json",
+        ):
+            value = doc.get(key)
+            if value is None:
+                continue
+            if isinstance(value, str):
+                total += len(value.encode("utf-8"))
+            else:
+                total += len(str(value).encode("utf-8"))
+        return int(total)
 
     def has_query_log(self) -> bool:
         """Return True if the query_log collection contains at least one document.

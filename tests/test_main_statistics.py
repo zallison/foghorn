@@ -51,6 +51,12 @@ def test_main_statistics_enabled_initializes_and_starts_reporter(monkeypatch):
         "    mode: forward\n"
         "    timeout_ms: 2000\n"
         "    use_asyncio: true\n"
+        "logging:\n"
+        "  query_log_sampling:\n"
+        "    sample_rate: 0.25\n"
+        "  query_log_dedupe:\n"
+        "    window_seconds: 2\n"
+        "    max_entries: 1234\n"
         "stats:\n"
         "  enabled: true\n"
         "  interval_seconds: 1\n"
@@ -124,7 +130,9 @@ def test_main_statistics_enabled_initializes_and_starts_reporter(monkeypatch):
     # Patch dependencies in foghorn.main
     monkeypatch.setattr(main_mod, "StatsCollector", DummyCollector)
     monkeypatch.setattr(main_mod, "StatsReporter", DummyReporter)
-    monkeypatch.setattr(udp_asyncio_mod, "start_udp_asyncio_threaded", fake_start_udp_asyncio_threaded)
+    monkeypatch.setattr(
+        udp_asyncio_mod, "start_udp_asyncio_threaded", fake_start_udp_asyncio_threaded
+    )
     monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
     monkeypatch.setattr(main_mod, "start_webserver", lambda *a, **k: None)
 
@@ -144,3 +152,6 @@ def test_main_statistics_enabled_initializes_and_starts_reporter(monkeypatch):
     assert ck["include_top_domains"] is True
     assert ck["top_n"] == 5
     assert ck["track_latency"] is True
+    assert ck["query_log_sample_rate"] == 0.25
+    assert ck["query_log_dedupe_window_seconds"] == 2
+    assert ck["query_log_dedupe_max_entries"] == 1234

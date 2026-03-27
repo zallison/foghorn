@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -248,6 +249,11 @@ class MySqlStatsStore(BaseStatsStore):
         max_logging_queue: int = 4096,
         retention_max_records: Optional[int] = None,
         retention_days: Optional[float] = None,
+        retention_max_bytes: Optional[int] = None,
+        retention_prune_interval_seconds: Optional[float] = None,
+        retention_prune_every_n_inserts: Optional[int] = None,
+        retention_optimize_on_prune: bool = False,
+        retention_optimize_interval_seconds: Optional[float] = None,
         driver: Optional[str] = None,
         driver_fallback: object = None,
         **_: Any,
@@ -285,6 +291,28 @@ class MySqlStatsStore(BaseStatsStore):
         self._query_log_retention_days = BaseStatsStore._normalize_retention_days(
             retention_days
         )
+        self._query_log_retention_max_bytes = (
+            BaseStatsStore._normalize_retention_max_bytes(retention_max_bytes)
+        )
+        self._query_log_retention_prune_interval_seconds = (
+            BaseStatsStore._normalize_retention_prune_interval_seconds(
+                retention_prune_interval_seconds
+            )
+        )
+        self._query_log_retention_prune_every_n_inserts = (
+            BaseStatsStore._normalize_retention_prune_every_n_inserts(
+                retention_prune_every_n_inserts
+            )
+        )
+        self._query_log_retention_seen_inserts = 0
+        self._query_log_retention_last_prune_ts = 0.0
+        self._retention_optimize_on_prune = bool(retention_optimize_on_prune)
+        self._retention_optimize_interval_seconds = (
+            BaseStatsStore._normalize_retention_prune_interval_seconds(
+                retention_optimize_interval_seconds
+            )
+        )
+        self._retention_last_optimize_ts = 0.0
 
         self._ensure_schema()
 
@@ -612,19 +640,24 @@ class MySqlStatsStore(BaseStatsStore):
             now_ts=time.time(),
         )
         max_records = self._query_log_retention_max_records
-
-        if cutoff_ts is None and max_records is None:
+        max_bytes = self._query_log_retention_max_bytes
+        now_ts = time.time()
+        if cutoff_ts is None and max_records is None and max_bytes is None:
+            return
+        if not self._should_run_query_log_retention_prune(now_ts=now_ts):
             return
 
         ph = self._placeholder
         cur = self._conn.cursor()
 
         try:
+            changed = False
             if cutoff_ts is not None:
                 cur.execute(
                     f"DELETE FROM query_log WHERE ts < {ph}",
                     (float(cutoff_ts),),
                 )
+                changed = changed or bool(getattr(cur, "rowcount", 0))
 
             if max_records is not None:
                 cur.execute(
@@ -637,12 +670,115 @@ class MySqlStatsStore(BaseStatsStore):
                     ),
                     (int(max_records),),
                 )
+                changed = changed or bool(getattr(cur, "rowcount", 0))
+
+            if max_bytes is not None:
+                changed = self._prune_query_log_to_max_bytes(int(max_bytes)) or changed
 
             self._conn.commit()
+            if changed:
+                self._maybe_optimize_query_log_table(now_ts=now_ts)
         except Exception as exc:  # pragma: no cover - defensive
             logger.error(
                 "MySqlStatsStore retention prune failed: %s", exc, exc_info=True
             )
+
+    def _prune_query_log_to_max_bytes(self, max_bytes: int) -> bool:
+        """Brief: Remove oldest rows until estimated query_log bytes fit a cap.
+
+        Inputs:
+            max_bytes: Maximum estimated bytes to retain in query_log.
+
+        Outputs:
+            bool: True when one or more rows were deleted.
+        """
+
+        if max_bytes <= 0:
+            return False
+
+        ph = self._placeholder
+        changed = False
+        max_passes = 32
+        for _ in range(max_passes):
+            cur = self._conn.cursor()
+            cur.execute(
+                """
+                SELECT
+                    COALESCE(
+                        SUM(
+                            OCTET_LENGTH(client_ip)
+                            + OCTET_LENGTH(name)
+                            + OCTET_LENGTH(qtype)
+                            + OCTET_LENGTH(COALESCE(upstream_id, ''))
+                            + OCTET_LENGTH(COALESCE(rcode, ''))
+                            + OCTET_LENGTH(COALESCE(status, ''))
+                            + OCTET_LENGTH(COALESCE(error, ''))
+                            + OCTET_LENGTH(COALESCE(first, ''))
+                            + OCTET_LENGTH(result_json)
+                            + 64
+                        ),
+                        0
+                    ),
+                    COUNT(1)
+                FROM query_log
+                """
+            )
+            row = cur.fetchone()
+            total_bytes = int(row[0] or 0) if row else 0
+            total_rows = int(row[1] or 0) if row else 0
+            if total_bytes <= max_bytes or total_rows <= 0:
+                break
+
+            over = max(1, total_bytes - int(max_bytes))
+            ratio = float(over) / float(max(total_bytes, 1))
+            rows_to_delete = max(1, min(total_rows, int(math.ceil(ratio * total_rows))))
+
+            cur_del = self._conn.cursor()
+            cur_del.execute(
+                (
+                    "DELETE FROM query_log WHERE id IN ("
+                    "SELECT id FROM ("
+                    f"SELECT id FROM query_log ORDER BY ts ASC, id ASC LIMIT {ph}"
+                    ") AS doomed"
+                    ")"
+                ),
+                (int(rows_to_delete),),
+            )
+            if not bool(getattr(cur_del, "rowcount", 0)):
+                break
+            changed = True
+
+        return changed
+
+    def _maybe_optimize_query_log_table(self, *, now_ts: float) -> None:
+        """Brief: Run optional MySQL table optimization after retention pruning.
+
+        Inputs:
+            now_ts: Current Unix timestamp used for interval gating.
+
+        Outputs:
+            None.
+        """
+
+        if not self._retention_optimize_on_prune:
+            return
+
+        interval = self._retention_optimize_interval_seconds
+        if interval is not None:
+            try:
+                last = float(getattr(self, "_retention_last_optimize_ts", 0.0) or 0.0)
+            except Exception:
+                last = 0.0
+            if last > 0.0 and (float(now_ts) - last) < float(interval):
+                return
+
+        try:
+            cur = self._conn.cursor()
+            cur.execute("OPTIMIZE TABLE query_log")
+            self._conn.commit()
+            self._retention_last_optimize_ts = float(now_ts)
+        except Exception:  # pragma: no cover - defensive
+            logger.exception("MySqlStatsStore optimize table failed")
 
     def has_query_log(self) -> bool:
         """Return True if the query_log table contains at least one row.
