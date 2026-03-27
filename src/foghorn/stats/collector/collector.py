@@ -1,18 +1,18 @@
 from __future__ import annotations
 
-from .init import _StatsCollectorInitMixin
-from .plugin_upstream import _StatsCollectorPluginUpstreamMixin
-from .record import _StatsCollectorRecordMixin
-from .snapshot import _StatsCollectorSnapshotMixin
-from .warm_load import _StatsCollectorWarmLoadMixin
+from .init import _StatsCollectorInitUtils
+from .plugin_upstream import _StatsCollectorPluginUpstreamUtils
+from .record import _StatsCollectorRecordUtils
+from .snapshot import _StatsCollectorSnapshotUtils
+from .warm_load import _StatsCollectorWarmLoadUtils
 
 
 class StatsCollector(
-    _StatsCollectorInitMixin,
-    _StatsCollectorRecordMixin,
-    _StatsCollectorPluginUpstreamMixin,
-    _StatsCollectorSnapshotMixin,
-    _StatsCollectorWarmLoadMixin,
+    _StatsCollectorInitUtils,
+    _StatsCollectorRecordUtils,
+    _StatsCollectorPluginUpstreamUtils,
+    _StatsCollectorSnapshotUtils,
+    _StatsCollectorWarmLoadUtils,
 ):
     """
     Thread-safe statistics aggregator for DNS server metrics.

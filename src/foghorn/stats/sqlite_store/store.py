@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 from .core import _StatsSQLiteStoreCore
-from .query_log import _QueryLogMixin
-from .rebuild import _RebuildMixin
+from .query_log import _QueryLogUtils
+from .rebuild import _RebuildUtils
 
 
-class StatsSQLiteStore(_StatsSQLiteStoreCore, _QueryLogMixin, _RebuildMixin):
+class StatsSQLiteStore(_StatsSQLiteStoreCore, _QueryLogUtils, _RebuildUtils):
     """SQLite-backed persistent statistics store.
 
     Inputs (constructor):

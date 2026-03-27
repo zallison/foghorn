@@ -9,7 +9,7 @@ from ..topk import TOPK_CAPACITY_FACTOR, TopK
 logger = logging.getLogger("foghorn.stats")
 
 
-class _StatsCollectorWarmLoadMixin:
+class _StatsCollectorWarmLoadUtils:
     def load_from_snapshot(self, snapshot) -> None:
         """Initialize in-memory counters from a prior snapshot.
 

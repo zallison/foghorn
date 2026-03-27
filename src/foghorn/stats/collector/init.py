@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ipaddress
 import logging
+import math
 import threading
 from collections import defaultdict
 from typing import Dict, List, Optional, Set
@@ -42,7 +43,7 @@ def _parse_client_ip_for_ignore(
     return parsed
 
 
-class _StatsCollectorInitMixin:
+class _StatsCollectorInitUtils:
     def __init__(
         self,
         track_uniques: bool = True,
@@ -61,6 +62,9 @@ class _StatsCollectorInitMixin:
         include_ignored_in_stats: bool = True,
         logging_only: bool = False,
         query_log_only: bool = False,
+        query_log_sample_rate: float = 1.0,
+        query_log_dedupe_window_seconds: float = 0.0,
+        query_log_dedupe_max_entries: int = 50000,
         max_unique_clients: int = DEFAULT_MAX_UNIQUE_CLIENTS,
         max_unique_domains: int = DEFAULT_MAX_UNIQUE_DOMAINS,
     ) -> None:
@@ -94,6 +98,14 @@ class _StatsCollectorInitMixin:
             query_log_only: When True, only the raw query_log is written to the
                 persistent store; aggregate counters are kept in-memory only and
                 are not mirrored into the counts table.
+            query_log_sample_rate: Fraction of query-log rows to persist from
+                record_query_result calls. 1.0 logs all rows, 0.5 logs
+                approximately every other row, and 0 disables query-log writes.
+            query_log_dedupe_window_seconds: Optional dedupe window. When > 0,
+                repeated query-log rows with the same key fields inside this
+                window are suppressed.
+            query_log_dedupe_max_entries: Maximum dedupe-key entries retained
+                in memory for query-log suppression.
             max_unique_clients: Maximum number of unique client IP values
                 retained in memory when unique tracking is enabled.
             max_unique_domains: Maximum number of unique domain values retained
@@ -122,6 +134,23 @@ class _StatsCollectorInitMixin:
         # When query_log_only is true, only query_log appends are written to
         # the persistent store; aggregate counters remain in-memory only.
         self.query_log_only = bool(query_log_only)
+        self.query_log_sample_rate = self._normalize_query_log_sample_rate(
+            query_log_sample_rate
+        )
+        self._query_log_sample_every_n = self._sample_every_n_from_rate(
+            self.query_log_sample_rate
+        )
+        self._query_log_sample_seen = 0
+        self._query_log_dedupe_window_seconds = (
+            self._normalize_query_log_dedupe_window_seconds(
+                query_log_dedupe_window_seconds
+            )
+        )
+        self._query_log_dedupe_max_entries = (
+            self._normalize_query_log_dedupe_max_entries(query_log_dedupe_max_entries)
+        )
+        self._query_log_recent_seen: Dict[str, float] = {}
+        self._query_log_dedupe_seen = 0
         try:
             parsed_max_unique_clients = int(max_unique_clients)
         except (TypeError, ValueError):
@@ -455,3 +484,226 @@ class _StatsCollectorInitMixin:
                 self._ignore_domains_as_suffix = bool(domains_as_suffix)
             if subdomains_as_suffix is not None:
                 self._ignore_subdomains_as_suffix = bool(subdomains_as_suffix)
+
+    @staticmethod
+    def _normalize_query_log_sample_rate(raw: object) -> float:
+        """Brief: Normalize query-log sample-rate configuration.
+
+        Inputs:
+          - raw: Raw configured sample-rate value.
+
+        Outputs:
+          - float: Clamped finite value in [0.0, 1.0].
+        """
+
+        try:
+            value = float(raw)  # type: ignore[arg-type]
+        except Exception:
+            return 1.0
+        if not math.isfinite(value):
+            return 1.0
+        if value <= 0.0:
+            return 0.0
+        if value >= 1.0:
+            return 1.0
+        return float(value)
+
+    @staticmethod
+    def _sample_every_n_from_rate(rate: float) -> int:
+        """Brief: Convert sample-rate into a deterministic keep-every-N cadence.
+
+        Inputs:
+          - rate: Normalized sample rate in [0.0, 1.0].
+
+        Outputs:
+          - int: 0 to disable logging, 1 to keep every row, or N>1 to keep
+            every Nth row.
+        """
+
+        value = float(rate)
+        if value <= 0.0:
+            return 0
+        if value >= 1.0:
+            return 1
+        return max(2, int(round(1.0 / value)))
+
+    @staticmethod
+    def _normalize_query_log_dedupe_window_seconds(raw: object) -> float:
+        """Brief: Normalize query-log dedupe window configuration.
+
+        Inputs:
+          - raw: Raw configured dedupe window in seconds.
+
+        Outputs:
+          - float: Non-negative finite seconds value.
+        """
+
+        try:
+            value = float(raw)  # type: ignore[arg-type]
+        except Exception:
+            return 0.0
+        if not math.isfinite(value) or value <= 0.0:
+            return 0.0
+        return float(value)
+
+    @staticmethod
+    def _normalize_query_log_dedupe_max_entries(raw: object) -> int:
+        """Brief: Normalize query-log dedupe cache size configuration.
+
+        Inputs:
+          - raw: Raw configured maximum number of dedupe entries.
+
+        Outputs:
+          - int: Positive maximum entries value.
+        """
+
+        try:
+            value = int(raw)  # type: ignore[arg-type]
+        except Exception:
+            return 50000
+        if value <= 0:
+            return 50000
+        return int(value)
+
+    @staticmethod
+    def _build_query_log_dedupe_key(
+        *,
+        client_ip: str,
+        qname: str,
+        qtype: str,
+        upstream_id: Optional[str],
+        rcode: Optional[str],
+        status: Optional[str],
+        error: Optional[str],
+        first: Optional[str],
+    ) -> str:
+        """Brief: Build a stable dedupe key for query-log suppression.
+
+        Inputs:
+          - client_ip: Client IP string.
+          - qname: Normalized query name.
+          - qtype: Query type.
+          - upstream_id: Optional upstream identifier.
+          - rcode: Optional response code.
+          - status: Optional status string.
+          - error: Optional error string.
+          - first: Optional first-answer string.
+
+        Outputs:
+          - str: Composite dedupe key.
+        """
+
+        parts = (
+            str(client_ip or ""),
+            str(qname or ""),
+            str(qtype or ""),
+            str(upstream_id or ""),
+            str(rcode or ""),
+            str(status or ""),
+            str(error or ""),
+            str(first or ""),
+        )
+        return "\x1f".join(parts)
+
+    def _prune_query_log_dedupe_cache_locked(self, *, now_ts: float) -> None:
+        """Brief: Prune stale/overflow dedupe cache entries.
+
+        Inputs:
+          - now_ts: Current timestamp used for staleness checks.
+
+        Outputs:
+          - None; mutates the internal dedupe cache in place.
+        """
+
+        cache = self._query_log_recent_seen
+        if not cache:
+            return
+
+        window_seconds = float(getattr(self, "_query_log_dedupe_window_seconds", 0.0))
+        max_entries = int(getattr(self, "_query_log_dedupe_max_entries", 50000))
+
+        if window_seconds > 0.0:
+            cutoff = float(now_ts) - window_seconds
+            stale_keys = [k for k, ts_val in cache.items() if float(ts_val) < cutoff]
+            for key in stale_keys:
+                cache.pop(key, None)
+
+        if len(cache) <= max_entries:
+            return
+
+        overflow = len(cache) - max_entries
+        oldest = sorted(cache.items(), key=lambda kv: float(kv[1]))[:overflow]
+        for key, _ in oldest:
+            cache.pop(key, None)
+
+    def _should_persist_query_log_row_locked(
+        self,
+        *,
+        ts: float,
+        client_ip: str,
+        qname: str,
+        qtype: str,
+        upstream_id: Optional[str],
+        rcode: Optional[str],
+        status: Optional[str],
+        error: Optional[str],
+        first: Optional[str],
+    ) -> bool:
+        """Brief: Decide whether a query-log row should be persisted.
+
+        Inputs:
+          - ts: Query completion timestamp.
+          - client_ip: Client IP string.
+          - qname: Normalized query name.
+          - qtype: Query type.
+          - upstream_id: Optional upstream identifier.
+          - rcode: Optional response code.
+          - status: Optional status string.
+          - error: Optional error string.
+          - first: Optional first-answer string.
+
+        Outputs:
+          - bool: True when this row should be written to the persistent
+            query-log store.
+        """
+
+        sample_every_n = int(getattr(self, "_query_log_sample_every_n", 1))
+        if sample_every_n == 0:
+            return False
+        self._query_log_sample_seen = (
+            int(getattr(self, "_query_log_sample_seen", 0) or 0) + 1
+        )
+        if sample_every_n > 1 and (self._query_log_sample_seen % sample_every_n) != 1:
+            return False
+
+        window_seconds = float(getattr(self, "_query_log_dedupe_window_seconds", 0.0))
+        if window_seconds <= 0.0:
+            return True
+
+        dedupe_key = self._build_query_log_dedupe_key(
+            client_ip=client_ip,
+            qname=qname,
+            qtype=qtype,
+            upstream_id=upstream_id,
+            rcode=rcode,
+            status=status,
+            error=error,
+            first=first,
+        )
+        last_seen = self._query_log_recent_seen.get(dedupe_key)
+        ts_f = float(ts)
+        if last_seen is not None and (ts_f - float(last_seen)) <= window_seconds:
+            return False
+
+        self._query_log_recent_seen[dedupe_key] = ts_f
+        self._query_log_dedupe_seen = (
+            int(getattr(self, "_query_log_dedupe_seen", 0) or 0) + 1
+        )
+
+        prune_due = (self._query_log_dedupe_seen % 128) == 0 or len(
+            self._query_log_recent_seen
+        ) > int(getattr(self, "_query_log_dedupe_max_entries", 50000))
+        if prune_due:
+            self._prune_query_log_dedupe_cache_locked(now_ts=ts_f)
+
+        return True
