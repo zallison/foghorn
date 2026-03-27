@@ -3,7 +3,7 @@ from __future__ import annotations
 """SSH host key resolver plugin.
 
 Brief:
-  - Periodically or at startup, fetch SSH host keys for a configured set of
+  - During setup() (and optional lazy scans), fetch SSH host keys for a configured set of
     IPs, CIDR ranges, and hostnames using ``foghorn.utils.ssh_keys``.
   - Store discovered keys in a small sqlite database keyed by subject
     (hostname or IP).
@@ -576,7 +576,8 @@ class SshKeys(BasePlugin):
         Outputs:
           - Iterator of (kind, value) tuples where kind is "ip" or
             "hostname" and value is the concrete subject string. CIDR ranges
-            are expanded into one "ip" entry per host address.
+            are expanded into one "ip" entry per host address up to
+            ``max_cidr_hosts`` when that cap is configured.
         """
 
         for raw in entries:
