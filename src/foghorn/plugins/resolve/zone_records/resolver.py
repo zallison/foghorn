@@ -19,6 +19,7 @@ from . import dnssec, helpers, update_processor
 logger = logging.getLogger(__name__)
 _DEFAULT_ANY_ANSWER_RRSET_LIMIT = 16
 _DEFAULT_ANY_ANSWER_RECORD_LIMIT = 64
+_SEARCH_ALIAS_EXCLUDED_QTYPES = frozenset({int(QTYPE.ANY)})
 
 
 def _get_any_query_policy(plugin: object) -> Tuple[bool, int, int]:
@@ -71,6 +72,201 @@ def _entry_has_update_source(entry: object) -> bool:
     if not isinstance(sources, (list, set)):
         return False
     return "update" in sources
+
+
+def _owner_with_trailing_dot(name: str) -> str:
+    """Brief: Convert a normalized owner name into presentation form with root dot.
+
+    Inputs:
+      - name: Normalized owner name (no trailing dot).
+
+    Outputs:
+      - str: Owner text with trailing dot.
+    """
+    text = str(name or "").strip().rstrip(".")
+    return f"{text}." if text else "."
+
+
+def _search_alias_applies(
+    request_name_normalized: str,
+    lookup_name_normalized: str,
+    rr_qtype: int,
+) -> bool:
+    """Brief: Decide whether a qualified lookup should be returned with search CNAME.
+
+    Inputs:
+      - request_name_normalized: Normalized owner from the client question.
+      - lookup_name_normalized: Normalized lookup owner used by ZoneRecords.
+      - rr_qtype: Numeric RR type code for the positive answer.
+
+    Outputs:
+      - bool: True when search alias synthesis should be used.
+    """
+    try:
+        qtype_num = int(rr_qtype)
+    except Exception:  # pragma: no cover - defensive
+        return False
+    if qtype_num in _SEARCH_ALIAS_EXCLUDED_QTYPES:
+        return False
+    request_name = str(request_name_normalized or "").strip().rstrip(".")
+    lookup_name = str(lookup_name_normalized or "").strip().rstrip(".")
+    if not request_name or not lookup_name:
+        return False
+    return request_name != lookup_name
+
+
+def _min_rrset_ttl(
+    rrsets: dict[int, tuple[int, list[str], list[str]]],
+    default_ttl: int = 300,
+) -> int:
+    """Brief: Return the smallest positive TTL across owner RRsets.
+
+    Inputs:
+      - rrsets: Owner qtype->(ttl, values, sources) mapping.
+      - default_ttl: Fallback TTL when no valid positive TTL is present.
+
+    Outputs:
+      - int: Minimum positive TTL, or default_ttl when unavailable.
+    """
+    ttls: list[int] = []
+    for entry in (rrsets or {}).values():
+        try:
+            ttl_val = int(entry[0])
+        except Exception:
+            continue
+        if ttl_val > 0:
+            ttls.append(ttl_val)
+    if not ttls:
+        return int(default_ttl)
+    return int(min(ttls))
+
+
+def _add_search_alias_cname_only(
+    reply: DNSRecord,
+    request_name_normalized: str,
+    lookup_name_normalized: str,
+    rr_qtype: int,
+    ttl: int,
+) -> bool:
+    """Brief: Add only the synthetic search CNAME for a qualified query.
+
+    Inputs:
+      - reply: DNS reply record being constructed.
+      - request_name_normalized: Normalized owner from the client question.
+      - lookup_name_normalized: Normalized lookup owner used by ZoneRecords.
+      - rr_qtype: Numeric qtype from the original query.
+      - ttl: TTL for the synthesized CNAME.
+
+    Outputs:
+      - bool: True when a CNAME was added, else False.
+    """
+    if not _search_alias_applies(
+        request_name_normalized,
+        lookup_name_normalized,
+        rr_qtype,
+    ):
+        return True
+
+    request_owner = _owner_with_trailing_dot(request_name_normalized)
+    target_owner = _owner_with_trailing_dot(lookup_name_normalized)
+    return dnssec.add_rrset_to_reply(
+        reply,
+        request_owner,
+        int(QTYPE.CNAME),
+        int(ttl),
+        [target_owner],
+        include_dnssec=False,
+        mapping_by_qtype=None,
+    )
+
+
+def _response_owner_for_positive_rrset(
+    request_name_normalized: str,
+    lookup_name_normalized: str,
+    rr_qtype: int,
+) -> str:
+    """Brief: Choose owner name for positive RRset data in responses.
+
+    Inputs:
+      - request_name_normalized: Normalized owner from the client question.
+      - lookup_name_normalized: Normalized lookup owner used by ZoneRecords.
+      - rr_qtype: Numeric RR type code for the positive answer.
+
+    Outputs:
+      - str: Owner name in presentation form with trailing dot.
+    """
+    if _search_alias_applies(
+        request_name_normalized,
+        lookup_name_normalized,
+        rr_qtype,
+    ):
+        return _owner_with_trailing_dot(lookup_name_normalized)
+    return _owner_with_trailing_dot(request_name_normalized)
+
+
+def _add_positive_rrset_with_search_alias(
+    reply: DNSRecord,
+    request_name_normalized: str,
+    lookup_name_normalized: str,
+    rr_qtype: int,
+    ttl: int,
+    values: List[str],
+    include_dnssec: bool,
+    mapping_by_qtype: object = None,
+) -> bool:
+    """Brief: Add positive RRset data, synthesizing a search CNAME when needed.
+
+    Inputs:
+      - reply: DNS reply record being constructed.
+      - request_name_normalized: Normalized owner from the client question.
+      - lookup_name_normalized: Normalized lookup owner used by ZoneRecords.
+      - rr_qtype: Numeric RR type code for the positive answer.
+      - ttl: TTL for synthesized records.
+      - values: RRset rdata values for the positive answer.
+      - include_dnssec: Whether DNSSEC signatures should be included.
+      - mapping_by_qtype: Optional pre-built RR mapping used by dnssec helpers.
+
+    Outputs:
+      - bool: True when records were successfully added, else False.
+    """
+    request_owner = _owner_with_trailing_dot(request_name_normalized)
+    if not _search_alias_applies(
+        request_name_normalized,
+        lookup_name_normalized,
+        rr_qtype,
+    ):
+        return dnssec.add_rrset_to_reply(
+            reply,
+            request_owner,
+            int(rr_qtype),
+            int(ttl),
+            list(values),
+            include_dnssec=bool(include_dnssec),
+            mapping_by_qtype=mapping_by_qtype,
+        )
+
+    target_owner = _owner_with_trailing_dot(lookup_name_normalized)
+    added_cname = dnssec.add_rrset_to_reply(
+        reply,
+        request_owner,
+        int(QTYPE.CNAME),
+        int(ttl),
+        [target_owner],
+        include_dnssec=False,
+        mapping_by_qtype=None,
+    )
+    if not added_cname:
+        return False
+
+    return dnssec.add_rrset_to_reply(
+        reply,
+        target_owner,
+        int(rr_qtype),
+        int(ttl),
+        list(values),
+        include_dnssec=bool(include_dnssec),
+        mapping_by_qtype=mapping_by_qtype,
+    )
 
 
 def _get_reverse_ptr_values(
@@ -398,7 +594,8 @@ def pre_resolve(
                     DNSHeader(id=request.header.id, qr=1, aa=1, ra=1, ad=0),
                     q=request.q,
                 )
-                owner = f"{dns_names.normalize_name(request.q.qname)}."
+                request_name_normalized = dns_names.normalize_name(request.q.qname)
+                owner = f"{request_name_normalized}."
 
                 matched_owner_nx, rrsets = helpers.find_best_rrsets_for_name(
                     name, name_index, wildcard_patterns=wildcard_owners
@@ -484,20 +681,26 @@ def pre_resolve(
                         include_dnssec = want_dnssec_nx or dnssec.is_dnssec_rrtype(
                             qtype_int
                         )
-                        if not dnssec.add_rrset_to_reply(
+                        response_owner = _response_owner_for_positive_rrset(
+                            request_name_normalized,
+                            name,
+                            qtype_int,
+                        )
+                        if not _add_positive_rrset_with_search_alias(
                             reply,
-                            owner,
+                            request_name_normalized,
+                            name,
                             qtype_int,
                             ttl_rr,
                             list(values_rr),
-                            include_dnssec=include_dnssec,
-                            mapping_by_qtype=mapping_by_qtype,
+                            include_dnssec,
+                            mapping_by_qtype,
                         ):
                             return None
                         if want_dnssec_nx:
                             dnssec.add_dnssec_rrsets(
                                 reply,
-                                owner,
+                                response_owner,
                                 rrsets,
                                 matched_zone,
                                 name_index,
@@ -507,6 +710,15 @@ def pre_resolve(
 
                     # Name exists under the configured suffix, but requested type is absent.
                     reply.header.rcode = RCODE.NOERROR
+                    alias_ttl = _min_rrset_ttl(rrsets)
+                    if not _add_search_alias_cname_only(
+                        reply,
+                        request_name_normalized,
+                        name,
+                        qtype_int,
+                        alias_ttl,
+                    ):
+                        return None
 
                     # DNSSEC denial-of-existence for wildcard-expanded answers is tricky,
                     # and the NSEC3 proof logic assumes concrete owner names. Avoid
@@ -545,21 +757,21 @@ def pre_resolve(
             reply = DNSRecord(
                 DNSHeader(id=request.header.id, qr=1, aa=1, ra=1, ad=0), q=request.q
             )
-            owner = f"{dns_names.normalize_name(request.q.qname)}."
+            request_name_normalized = dns_names.normalize_name(request.q.qname)
             # For update-sourced entries, bypass precomputed mapping_by_qtype because
             # it may still contain stale RR objects from file-based loads.
             effective_mapping_by_qtype = (
                 None if _entry_has_update_source(entry) else mapping_by_qtype
             )
-
-            added = dnssec.add_rrset_to_reply(
+            added = _add_positive_rrset_with_search_alias(
                 reply,
-                owner,
+                request_name_normalized,
+                name,
                 qtype_int,
                 ttl,
                 list(values),
-                include_dnssec=want_dnssec_legacy or False,
-                mapping_by_qtype=effective_mapping_by_qtype,
+                want_dnssec_legacy or False,
+                effective_mapping_by_qtype,
             )
             if not added:
                 return None
@@ -575,8 +787,8 @@ def pre_resolve(
 
         # Detect whether the client wants DNSSEC records via EDNS(0) DO bit.
         want_dnssec = bool(dnssec.client_wants_dnssec(request))
-
-        owner = f"{dns_names.normalize_name(request.q.qname)}."
+        request_name_normalized = dns_names.normalize_name(request.q.qname)
+        owner = f"{request_name_normalized}."
         reply = DNSRecord(
             DNSHeader(id=request.header.id, qr=1, aa=1, ra=1, ad=0), q=request.q
         )
@@ -685,20 +897,26 @@ def pre_resolve(
                 ttl_rr, values_rr, _ = rrsets[qtype_int]
                 # For DNSSEC RR types queried directly, always allow signatures.
                 include_dnssec = want_dnssec or dnssec.is_dnssec_rrtype(qtype_int)
-                if not dnssec.add_rrset_to_reply(
+                response_owner = _response_owner_for_positive_rrset(
+                    request_name_normalized,
+                    name,
+                    qtype_int,
+                )
+                if not _add_positive_rrset_with_search_alias(
                     reply,
-                    owner,
+                    request_name_normalized,
+                    name,
                     qtype_int,
                     ttl_rr,
                     list(values_rr),
-                    include_dnssec=include_dnssec,
-                    mapping_by_qtype=effective_mapping_by_qtype,
+                    include_dnssec,
+                    effective_mapping_by_qtype,
                 ):
                     return None
                 if want_dnssec:
                     dnssec.add_dnssec_rrsets(
                         reply,
-                        owner,
+                        response_owner,
                         rrsets,
                         zone_apex,
                         name_index,
@@ -708,6 +926,15 @@ def pre_resolve(
 
             # NODATA: name exists in zone but requested type is absent.
             reply.header.rcode = RCODE.NOERROR
+            alias_ttl = _min_rrset_ttl(rrsets)
+            if not _add_search_alias_cname_only(
+                reply,
+                request_name_normalized,
+                name,
+                qtype_int,
+                alias_ttl,
+            ):
+                return None
             soa_entry = zone_soa.get(zone_apex)
             if soa_entry is not None:
                 soa_ttl, soa_values, _ = soa_entry
