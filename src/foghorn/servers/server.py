@@ -46,9 +46,11 @@ from .server_failover import (
 )
 from .server_response_utils import (
     _attach_ede_option,
+    _bind_response_cookie_to_request,
     _compute_negative_ttl,
     _echo_client_edns,
     _ensure_edns_request,  # noqa: F401
+    _strip_response_cookie_options,
     _set_response_id,
     compute_effective_ttl,  # noqa: F401
 )
@@ -70,6 +72,19 @@ _RFC1918_V4_NETWORKS: tuple[ipaddress.IPv4Network, ...] = (
     ipaddress.IPv4Network("10.0.0.0/8"),
     ipaddress.IPv4Network("172.16.0.0/12"),
     ipaddress.IPv4Network("192.168.0.0/16"),
+)
+_DNSSEC_SEARCH_QUALIFICATION_EXCLUDED_QTYPES: frozenset[int] = frozenset(
+    int(code)
+    for code in (
+        getattr(QTYPE, "DS", 43),
+        getattr(QTYPE, "DNSKEY", 48),
+        getattr(QTYPE, "RRSIG", 46),
+        getattr(QTYPE, "NSEC", 47),
+        getattr(QTYPE, "NSEC3", 50),
+        getattr(QTYPE, "NSEC3PARAM", 51),
+        getattr(QTYPE, "CDS", 59),
+        getattr(QTYPE, "CDNSKEY", 60),
+    )
 )
 
 
@@ -419,6 +434,106 @@ def _resolve_plugin_label(decision: object, plugin: object) -> str:
     return str(label_suffix).strip().lower() if label_suffix else ""
 
 
+def _classify_dnssec_status_for_response(
+    handler: object,
+    qname: str,
+    qtype: int,
+    response_wire: bytes,
+) -> Optional[str]:
+    """Brief: Classify DNSSEC status for a prepared response wire payload.
+
+    Inputs:
+      - handler: Runtime handler/snapshot-like object carrying DNSSEC settings.
+      - qname: Query owner name text without trailing dot.
+      - qtype: Numeric DNS QTYPE value.
+      - response_wire: Wire-format DNS response bytes to classify.
+
+    Outputs:
+      - Optional[str]: DNSSEC status label, or None on failure/disabled mode.
+    """
+
+    try:
+        from ..dnssec.dnssec_validate import classify_dnssec_status
+
+        mode = str(getattr(handler, "dnssec_mode", "ignore"))
+        validation = str(getattr(handler, "dnssec_validation", "upstream_ad"))
+        edns_udp_payload = int(getattr(handler, "edns_udp_payload", 1232))
+        return classify_dnssec_status(
+            dnssec_mode=mode,
+            dnssec_validation=validation,
+            qname_text=qname,
+            qtype_num=qtype,
+            response_wire=response_wire,
+            udp_payload_size=edns_udp_payload,
+        )
+    except Exception:
+        return None
+
+
+def _apply_dnssec_ad_bit(
+    handler: object,
+    dnssec_status: Optional[str],
+    response_wire: bytes,
+) -> bytes:
+    """Brief: Set/clear AD on a DNS response when dnssec.mode is validate.
+
+    Inputs:
+      - handler: Runtime handler/snapshot-like object carrying DNSSEC mode.
+      - dnssec_status: Classified DNSSEC status for the response.
+      - response_wire: Wire-format DNS response bytes.
+
+    Outputs:
+      - bytes: Response wire bytes with AD adjusted when applicable.
+    """
+
+    try:
+        mode = str(getattr(handler, "dnssec_mode", "ignore")).lower()
+    except Exception:
+        mode = "ignore"
+    if mode != "validate":
+        return response_wire
+
+    secure_statuses = {"dnssec_secure", "dnssec_zone_secure", "secure"}
+    desired_ad = 1 if str(dnssec_status or "") in secure_statuses else 0
+
+    try:
+        msg = DNSRecord.parse(response_wire)
+        if int(getattr(msg.header, "ad", 0)) == int(desired_ad):
+            return response_wire
+        msg.header.ad = int(desired_ad)
+        return msg.pack()
+    except Exception:
+        return response_wire
+
+
+def _is_signed_authoritative_response(response_wire: bytes) -> bool:
+    """Brief: Determine whether a response is authoritative and DNSSEC-signed.
+
+    Inputs:
+      - response_wire: Wire-format DNS response bytes.
+
+    Outputs:
+      - bool: True when AA=1 and the message carries RRSIG plus answer data.
+    """
+
+    try:
+        msg = DNSRecord.parse(response_wire)
+        if int(getattr(msg.header, "aa", 0)) != 1:
+            return False
+        rrsets = list(getattr(msg, "rr", []) or [])
+        auth_rrsets = list(getattr(msg, "auth", []) or [])
+        has_rrsig = any(
+            int(getattr(rr, "rtype", 0)) == int(QTYPE.RRSIG)
+            for rr in rrsets + auth_rrsets
+        )
+        has_answer_data = any(
+            int(getattr(rr, "rtype", 0)) != int(QTYPE.RRSIG) for rr in rrsets
+        )
+        return bool(has_rrsig and has_answer_data)
+    except Exception:
+        return False
+
+
 def _resolve_core(
     data: bytes,
     client_ip: str,
@@ -528,10 +643,11 @@ def _resolve_core(
             )
 
         q = req.questions[0]
-        # Preserve the raw qname (with trailing dot if present) to detect
-        # absolute (FQDN) queries before stripping.
-        _qname_raw = str(q.qname)
-        qname = _qname_raw.rstrip(".")
+        # Normalize the parsed qname by stripping the wire/root trailing dot.
+        # DNS wire format does not preserve whether the original client input
+        # included a textual trailing dot, so qualification decisions should be
+        # based on the normalized name.
+        qname = str(q.qname).rstrip(".")
         qtype = q.qtype
 
         # Search-domain qualification: when a search domain is configured and
@@ -542,10 +658,17 @@ def _resolve_core(
             if snap is not None:
                 _search = str(getattr(snap, "search_domain", "") or "")
                 if _search:
+                    try:
+                        _qtype_num = int(qtype)
+                    except Exception:
+                        _qtype_num = int(qtype or 0)
+                    if _qtype_num in _DNSSEC_SEARCH_QUALIFICATION_EXCLUDED_QTYPES:
+                        _search = ""
+                if _search:
                     from foghorn.utils.dns_names import should_qualify, qualify_name
 
                     _qual = should_qualify(
-                        _qname_raw,
+                        qname,
                         qualify_single_label=bool(
                             getattr(snap, "qualify_single_label", True)
                         ),
@@ -795,6 +918,36 @@ def _resolve_core(
                         resp_wire = override_msg.pack()
                     except Exception:  # pragma: no cover - defensive: parse failure
                         pass
+                    dnssec_status = _classify_dnssec_status_for_response(
+                        handler=handler,
+                        qname=qname,
+                        qtype=qtype,
+                        response_wire=resp_wire,
+                    )
+                    if stats is not None and dnssec_status is not None:
+                        try:
+                            stats.record_dnssec_status(dnssec_status)
+                        except (
+                            Exception
+                        ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+                            pass
+                    try:
+                        dnssec_mode = str(
+                            getattr(handler, "dnssec_mode", "ignore")
+                        ).lower()
+                    except Exception:
+                        dnssec_mode = "ignore"
+                    if (
+                        dnssec_mode == "validate"
+                        and dnssec_status in (None, "dnssec_unsigned", "dnssec_bogus")
+                        and _is_signed_authoritative_response(resp_wire)
+                    ):
+                        dnssec_status = "dnssec_zone_secure"
+                    resp_wire = _apply_dnssec_ad_bit(
+                        handler=handler,
+                        dnssec_status=dnssec_status,
+                        response_wire=resp_wire,
+                    )
                     wire = _set_response_id(resp_wire, req.header.id)
                     if stats is not None:
                         try:
@@ -892,7 +1045,7 @@ def _resolve_core(
                             pass
                     return _ResolveCoreResult(
                         wire=wire,
-                        dnssec_status=None,
+                        dnssec_status=dnssec_status,
                         upstream_id=None,
                         rcode_name=rcode_name,
                     )
@@ -1030,6 +1183,7 @@ def _resolve_core(
             ):  # pragma: no cover - defensive/metrics path excluded from coverage
                 _schedule_cache_refresh(data, client_ip)
 
+            cached = _bind_response_cookie_to_request(req, cached)
             wire = _set_response_id(cached, req.header.id)
             if stats is not None and t0 is not None:
                 try:
@@ -1608,44 +1762,43 @@ def _resolve_core(
         # delegations/referrals using TTLs derived from SOA/NS records where
         # possible, following RFC 2308 guidance.
 
-        # DNSSEC classification for non-UDfoghorn.servers.transports (TCP/DoT/DoH) now shares
-        # the same helper as UDP handlers so stats and query_log entries carry a
-        # consistent "secure"/"insecure" status when dnssec.mode is 'validate'.
-        dnssec_status = None
+        # DNSSEC classification for non-UDP transports (TCP/DoT/DoH) shares the
+        # same helper as UDP handlers so stats/query_log carry consistent status.
+        dnssec_status = _classify_dnssec_status_for_response(
+            handler=handler,
+            qname=qname,
+            qtype=qtype,
+            response_wire=out,
+        )
+        if stats is not None and dnssec_status is not None:
+            try:
+                stats.record_dnssec_status(dnssec_status)
+            except (
+                Exception
+            ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+                pass
+        # When DNSSEC validation classifies a response as bogus under
+        # dnssec_mode='validate', attach an RFC 8914 EDE code 6 (DNSSEC Bogus)
+        # so clients and metrics can distinguish these failures.
+        if dnssec_status == "dnssec_bogus":
+            ede_code_for_logs = 6
+            ede_text_for_logs = "DNSSEC validation failed (bogus)"
         try:
-            # Use the same DNSSEC classification helper as the UDP handler so
-            # non-UDP callers (TCP/DoT/DoH and tests using _resolve_core
-            # directly) see consistent dnssec_status values.
-            from ..dnssec.dnssec_validate import classify_dnssec_status
-
-            mode = str(getattr(handler, "dnssec_mode", "ignore"))
-            validation = str(getattr(handler, "dnssec_validation", "upstream_ad"))
-            edns_udp_payload = int(getattr(handler, "edns_udp_payload", 1232))
-            dnssec_status = classify_dnssec_status(
-                dnssec_mode=mode,
-                dnssec_validation=validation,
-                qname_text=qname,
-                qtype_num=qtype,
-                response_wire=out,
-                udp_payload_size=edns_udp_payload,
-            )
-            if stats is not None and dnssec_status is not None:
-                try:
-                    stats.record_dnssec_status(dnssec_status)
-                except (
-                    Exception
-                ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-                    pass
-            # When DNSSEC validation classifies a response as bogus under
-            # dnssec_mode='validate', attach an RFC 8914 EDE code 6 (DNSSEC
-            # Bogus) so clients and metrics can distinguish these failures.
-            if dnssec_status == "dnssec_bogus":
-                ede_code_for_logs = 6
-                ede_text_for_logs = "DNSSEC validation failed (bogus)"
-        except (
-            Exception
-        ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-            dnssec_status = None
+            dnssec_mode = str(getattr(handler, "dnssec_mode", "ignore")).lower()
+        except Exception:
+            dnssec_mode = "ignore"
+        if (
+            dnssec_mode == "validate"
+            and upstream_id is None
+            and dnssec_status in (None, "dnssec_unsigned", "dnssec_bogus")
+            and _is_signed_authoritative_response(out)
+        ):
+            dnssec_status = "dnssec_zone_secure"
+        out = _apply_dnssec_ad_bit(
+            handler=handler,
+            dnssec_status=dnssec_status,
+            response_wire=out,
+        )
 
         try:
             r = DNSRecord.parse(out)
@@ -1691,7 +1844,8 @@ def _resolve_core(
             if ttl is not None and ttl > 0:
                 cache = getattr(plugin_base, "DNS_CACHE", None)
                 if cache is not None:
-                    cache.set(cache_key, int(ttl), out)
+                    cache_payload = _strip_response_cookie_options(out)
+                    cache.set(cache_key, int(ttl), cache_payload)
 
             # Attach a DNSSEC-related EDE only for explicitly bogus
             # classifications. This is done after caching decisions so TTL
@@ -1712,6 +1866,7 @@ def _resolve_core(
         ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
             pass  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
 
+        out = _bind_response_cookie_to_request(req, out)
         wire = _set_response_id(out, req.header.id)
 
         # Record response rcode and append to persistent query_log when enabled.

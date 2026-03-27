@@ -532,3 +532,93 @@ def test_resolve_query_bytes_post_hooks(monkeypatch, set_runtime_snapshot):
     )
     out2 = srv.resolve_query_bytes(q.pack(), "127.0.0.1")
     assert DNSRecord.parse(out2).header.rcode == RCODE.NXDOMAIN
+
+
+def test_resolve_query_bytes_search_qualifies_single_label(
+    monkeypatch, set_runtime_snapshot
+):
+    """Brief: Single-label queries are search-qualified before upstream forwarding.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+      - set_runtime_snapshot: fixture that applies runtime snapshot overrides.
+
+    Outputs:
+      - None; asserts failover receives the qualified qname.
+    """
+    q = DNSRecord.question("lemur", "A")
+    seen = {"qname": None}
+
+    def fake_forward(
+        req,
+        upstreams,
+        timeout_ms,
+        qname,
+        qtype,
+        max_concurrent=None,
+        on_attempt_result=None,
+    ):
+        seen["qname"] = qname
+        return req.reply().pack(), {"host": "1.1.1.1", "port": 53}, "ok"
+
+    monkeypatch.setattr(srv, "send_query_with_failover", fake_forward)
+    plugin_base.DNS_CACHE = InMemoryTTLCache()
+    set_runtime_snapshot(
+        upstream_addrs=[{"host": "1.1.1.1", "port": 53}],
+        plugins=[],
+        resolver_mode="forward",
+        forward_local=False,
+        search_domain="zaa",
+        qualify_single_label=True,
+        qualify_non_proper_tld=False,
+        non_proper_tld_mode="suffix",
+    )
+
+    wire = srv.resolve_query_bytes(q.pack(), "127.0.0.1")
+    assert DNSRecord.parse(wire).header.rcode == RCODE.NOERROR
+    assert seen["qname"] == "lemur.zaa"
+
+
+def test_resolve_query_bytes_search_does_not_qualify_dnskey(
+    monkeypatch, set_runtime_snapshot
+):
+    """Brief: DNSSEC qtypes are excluded from search-domain qualification.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+      - set_runtime_snapshot: fixture that applies runtime snapshot overrides.
+
+    Outputs:
+      - None; asserts failover receives the original single-label DNSKEY qname.
+    """
+    q = DNSRecord.question("zaa", "DNSKEY")
+    seen = {"qname": None}
+
+    def fake_forward(
+        req,
+        upstreams,
+        timeout_ms,
+        qname,
+        qtype,
+        max_concurrent=None,
+        on_attempt_result=None,
+    ):
+        seen["qname"] = qname
+        return req.reply().pack(), {"host": "1.1.1.1", "port": 53}, "ok"
+
+    monkeypatch.setattr(srv, "send_query_with_failover", fake_forward)
+    plugin_base.DNS_CACHE = InMemoryTTLCache()
+    set_runtime_snapshot(
+        upstream_addrs=[{"host": "1.1.1.1", "port": 53}],
+        plugins=[],
+        resolver_mode="forward",
+        forward_local=False,
+        search_domain="home.arpa",
+        qualify_single_label=True,
+        qualify_non_proper_tld=False,
+        non_proper_tld_mode="suffix",
+    )
+
+    wire = srv.resolve_query_bytes(q.pack(), "127.0.0.1")
+    assert DNSRecord.parse(wire).header.rcode == RCODE.NOERROR
+    assert seen["qname"] == "zaa"

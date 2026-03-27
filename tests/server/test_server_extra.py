@@ -71,7 +71,13 @@ def test__ensure_edns_does_not_crash_in_all_modes(monkeypatch, set_runtime_snaps
     q = DNSRecord.question("example.com", "A")
 
     def fake_forward(
-        req, upstreams, timeout_ms, qname, qtype, max_concurrent=None, on_attempt_result=None
+        req,
+        upstreams,
+        timeout_ms,
+        qname,
+        qtype,
+        max_concurrent=None,
+        on_attempt_result=None,
     ):
         # Return a simple NOERROR reply
         rep = req.reply()
@@ -149,7 +155,13 @@ def test_resolve_query_bytes_cache_store_variants(monkeypatch, set_runtime_snaps
     )
 
     def fake_forward(
-        req, upstreams, timeout_ms, qname, qtype, max_concurrent=None, on_attempt_result=None
+        req,
+        upstreams,
+        timeout_ms,
+        qname,
+        qtype,
+        max_concurrent=None,
+        on_attempt_result=None,
     ):
         if qname == name_ok:
             return r_ok.pack(), upstreams[0], "ok"
@@ -205,6 +217,138 @@ def test__apply_pre_plugins_override_short_circuits(set_runtime_snapshot):
     assert last.header.rcode == RCODE.NXDOMAIN
 
 
+def test_pre_override_sets_ad_for_secure_dnssec_status(
+    monkeypatch, set_runtime_snapshot
+):
+    """
+    Brief: Pre-plugin override path sets AD=1 when DNSSEC classification is secure.
+
+    Inputs:
+      - monkeypatch: pytest fixture
+    Outputs:
+      - None; asserts AD is set on the override response.
+    """
+    q = DNSRecord.question("pre-ad.example", "A")
+
+    class _PreOverride:
+        pre_priority = 1
+
+        def pre_resolve(self, qname, qtype, data, ctx):
+            rep = DNSRecord.parse(data).reply()
+            return srv.PluginDecision(action="override", response=rep.pack())
+
+        def post_resolve(self, qname, qtype, data, ctx):
+            return None
+
+    import foghorn.dnssec.dnssec_validate as dval
+
+    monkeypatch.setattr(dval, "classify_dnssec_status", lambda *a, **k: "dnssec_secure")
+
+    set_runtime_snapshot(
+        plugins=[_PreOverride()],
+        upstream_addrs=[],
+        dnssec_mode="validate",
+        dnssec_validation="local",
+    )
+
+    out = srv.resolve_query_bytes(q.pack(), "127.0.0.1")
+    resp = DNSRecord.parse(out)
+    assert resp.header.ad == 1
+
+
+def test_pre_override_signed_authoritative_promotes_to_zone_secure(
+    monkeypatch, set_runtime_snapshot
+):
+    """
+    Brief: Signed authoritative pre-override responses are promoted to zone-secure.
+
+    Inputs:
+      - monkeypatch: pytest fixture
+    Outputs:
+      - None; asserts dnssec_status and AD are set for local signed authoritative replies.
+    """
+    q = DNSRecord.question("pre-zone-secure.example", "A")
+
+    class _PreOverride:
+        pre_priority = 1
+
+        def pre_resolve(self, qname, qtype, data, ctx):
+            rep = DNSRecord.parse(data).reply()
+            return srv.PluginDecision(action="override", response=rep.pack())
+
+        def post_resolve(self, qname, qtype, data, ctx):
+            return None
+
+    monkeypatch.setattr(
+        srv,
+        "_classify_dnssec_status_for_response",
+        lambda **_k: "dnssec_bogus",
+    )
+    monkeypatch.setattr(srv, "_is_signed_authoritative_response", lambda _wire: True)
+
+    set_runtime_snapshot(
+        plugins=[_PreOverride()],
+        upstream_addrs=[],
+        dnssec_mode="validate",
+        dnssec_validation="local",
+    )
+
+    result = srv._resolve_core(q.pack(), "127.0.0.1")
+    resp = DNSRecord.parse(result.wire)
+    assert result.dnssec_status == "dnssec_zone_secure"
+    assert resp.header.ad == 1
+
+
+def test_forward_path_clears_ad_for_unsigned_dnssec_status(
+    monkeypatch, set_runtime_snapshot
+):
+    """
+    Brief: Shared forwarding path clears AD when DNSSEC classification is unsigned.
+
+    Inputs:
+      - monkeypatch: pytest fixture
+    Outputs:
+      - None; asserts AD is cleared before returning the forwarded response.
+    """
+    q = DNSRecord.question("unsigned-ad.example", "A")
+    rep = q.reply()
+    rep.header.ad = 1
+
+    def fake_forward(
+        req,
+        upstreams,
+        timeout_ms,
+        qname,
+        qtype,
+        max_concurrent=None,
+        on_attempt_result=None,
+    ):
+        return rep.pack(), {"host": "1.1.1.1", "port": 53}, "ok"
+
+    monkeypatch.setattr(srv, "send_query_with_failover", fake_forward)
+
+    import foghorn.dnssec.dnssec_validate as dval
+
+    monkeypatch.setattr(
+        dval,
+        "classify_dnssec_status",
+        lambda *a, **k: "dnssec_unsigned",
+    )
+
+    set_runtime_snapshot(
+        upstream_addrs=[{"host": "1.1.1.1", "port": 53}],
+        plugins=[],
+        resolver_mode="forward",
+        forward_local=False,
+        dnssec_mode="validate",
+        dnssec_validation="local",
+    )
+
+    out = srv.resolve_query_bytes(q.pack(), "127.0.0.1")
+    resp = DNSRecord.parse(out)
+    assert resp.header.ad == 0
+
+
 def test__apply_post_plugins_override_path(monkeypatch, set_runtime_snapshot):
     """
     Brief: post plugin override path should replace reply.
@@ -218,7 +362,13 @@ def test__apply_post_plugins_override_path(monkeypatch, set_runtime_snapshot):
     ok = q.reply().pack()
 
     def fake_forward(
-        req, upstreams, timeout_ms, qname, qtype, max_concurrent=None, on_attempt_result=None
+        req,
+        upstreams,
+        timeout_ms,
+        qname,
+        qtype,
+        max_concurrent=None,
+        on_attempt_result=None,
     ):
         return ok, {"host": "8.8.8.8", "port": 53}, "ok"
 
@@ -302,7 +452,13 @@ def test_resolve_query_bytes_end_to_end_paths(monkeypatch, set_runtime_snapshot)
     r3.add_answer(RR("cachehit.example", rdata=A("1.2.3.4"), ttl=5))
 
     def fake_forward(
-        req, upstreams, timeout_ms, qname, qtype, max_concurrent=None, on_attempt_result=None
+        req,
+        upstreams,
+        timeout_ms,
+        qname,
+        qtype,
+        max_concurrent=None,
+        on_attempt_result=None,
     ):
         return r3.pack(), {"host": "1.1.1.1", "port": 53}, "ok"
 
