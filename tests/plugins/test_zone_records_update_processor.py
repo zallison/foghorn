@@ -22,6 +22,7 @@ import dns.update
 import pytest
 from dnslib import QTYPE, RCODE, DNSRecord
 
+from foghorn.plugins.resolve.zone_records import update_helpers as uh
 from foghorn.plugins.resolve.zone_records import update_processor as up
 
 
@@ -189,6 +190,90 @@ def test_verify_value_authorization_empty_allowlist_is_treated_as_allow_all() ->
         up.verify_value_authorization("203.0.113.1", QTYPE.A, {"allow_update_ips": []})
         is True
     )
+
+
+def test_verify_name_authorization_caches_file_lists_with_plugin(
+    tmp_path, monkeypatch
+) -> None:
+    blocked_file = tmp_path / "blocked_names.txt"
+    blocked_file.write_text("blocked.example.com\n", encoding="utf-8")
+    zone_cfg = {"block_names_files": [str(blocked_file)]}
+    plugin = SimpleNamespace(
+        _dns_update_cache_lock=threading.RLock(),
+        _dns_update_timestamps={},
+        _dns_update_lists_cache={},
+    )
+    load_count = {"calls": 0}
+    original_loader = uh.load_names_list_from_file
+
+    def _counting_loader(path: str) -> list[str]:
+        load_count["calls"] += 1
+        return original_loader(path)
+
+    monkeypatch.setattr(uh, "load_names_list_from_file", _counting_loader)
+
+    assert (
+        up.verify_name_authorization(
+            "allowed.example.com",
+            zone_cfg,
+            plugin=plugin,
+            zone_apex="example.com",
+        )
+        is True
+    )
+    assert (
+        up.verify_name_authorization(
+            "allowed.example.com",
+            zone_cfg,
+            plugin=plugin,
+            zone_apex="example.com",
+        )
+        is True
+    )
+    assert load_count["calls"] == 1
+
+
+def test_verify_value_authorization_caches_file_lists_with_plugin(
+    tmp_path, monkeypatch
+) -> None:
+    blocked_ips_file = tmp_path / "blocked_ips.txt"
+    blocked_ips_file.write_text("192.0.2.0/24\n", encoding="utf-8")
+    zone_cfg = {"block_update_ips_files": [str(blocked_ips_file)]}
+    plugin = SimpleNamespace(
+        _dns_update_cache_lock=threading.RLock(),
+        _dns_update_timestamps={},
+        _dns_update_lists_cache={},
+    )
+    load_count = {"calls": 0}
+    original_loader = uh.load_cidr_list_from_file
+
+    def _counting_loader(path: str) -> list[str]:
+        load_count["calls"] += 1
+        return original_loader(path)
+
+    monkeypatch.setattr(uh, "load_cidr_list_from_file", _counting_loader)
+
+    assert (
+        up.verify_value_authorization(
+            "198.51.100.1",
+            QTYPE.A,
+            zone_cfg,
+            plugin=plugin,
+            zone_apex="example.com",
+        )
+        is True
+    )
+    assert (
+        up.verify_value_authorization(
+            "198.51.100.1",
+            QTYPE.A,
+            zone_cfg,
+            plugin=plugin,
+            zone_apex="example.com",
+        )
+        is True
+    )
+    assert load_count["calls"] == 1
 
 
 def test_parse_update_message_returns_none_on_parse_error() -> None:
