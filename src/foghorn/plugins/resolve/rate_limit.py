@@ -231,7 +231,7 @@ class RateLimitConfig(BaseModel):
             if disallowed:
                 keys = ", ".join(f"'{key}'" for key in disallowed)
                 raise ValueError(
-                    f"RateLimit: unsupported config key(s) {keys}; "
+                    f"unsupported config key(s) {keys}; "
                     "use UDP prefix bucketing via "
                     "'bucket_network_prefix_v4' and/or "
                     "'bucket_network_prefix_v6'."
@@ -325,6 +325,10 @@ class RateLimit(BasePlugin):
     legitimate sustained high-volume traffic. The plugin learns a per-key
     baseline requests-per-second (RPS) and only enforces when the current
     window rate is a clear outlier relative to the learned average.
+
+    Notes:
+      - Listener-level transport limits (for example max_in_flight) are
+        enforced outside this plugin and can apply before RateLimit thresholds.
     """
 
     @classmethod
@@ -353,7 +357,7 @@ class RateLimit(BasePlugin):
         # Parse mode
         raw_mode = str(self.config.get("mode", "per_client")).strip().lower()
         if raw_mode not in {"per_client", "per_client_domain", "per_domain"}:
-            logger.warning("RateLimit: invalid mode %r; using 'per_client'", raw_mode)
+            logger.warning("invalid mode %r; using 'per_client'", raw_mode)
             raw_mode = "per_client"
         self.mode = raw_mode
         # PSL availability guard for domain-based modes.
@@ -361,7 +365,7 @@ class RateLimit(BasePlugin):
         if self.mode in {"per_client_domain", "per_domain"} and not self._psl_available:
             psl_strict = self._parse_bool_config("psl_strict", False)
             msg = (
-                "RateLimit: publicsuffix2 not available; domain-based mode "
+                "publicsuffix2 not available; domain-based mode "
                 f"{self.mode!r} is unsafe for multi-label public suffixes."
             )
             if psl_strict:
@@ -385,7 +389,7 @@ class RateLimit(BasePlugin):
         if disallowed_client_prefix:
             keys = ", ".join(f"'{key}'" for key in disallowed_client_prefix)
             raise ValueError(
-                f"RateLimit: unsupported config key(s) {keys}; "
+                f"unsupported config key(s) {keys}; "
                 "use UDP prefix bucketing via "
                 "'bucket_network_prefix_v4' and/or "
                 "'bucket_network_prefix_v6'."
@@ -424,7 +428,7 @@ class RateLimit(BasePlugin):
         )
         if int(self.active_window_max_keys) > int(self.max_profiles):
             logger.warning(
-                "RateLimit: active_window_max_keys (%d) exceeds max_profiles (%d); clamping",
+                "active_window_max_keys (%d) exceeds max_profiles (%d); clamping",
                 int(self.active_window_max_keys),
                 int(self.max_profiles),
             )
@@ -526,7 +530,7 @@ class RateLimit(BasePlugin):
         }
         if deny_resp not in valid_deny:
             logger.warning(
-                "RateLimit: unknown deny_response %r; defaulting to 'refused'",
+                "unknown deny_response %r; defaulting to 'refused'",
                 deny_resp,
             )
             deny_resp = "refused"
@@ -555,7 +559,7 @@ class RateLimit(BasePlugin):
         window_cache_backend = getattr(self._window_cache, "_backend", None)
         if isinstance(window_cache_backend, NullCache):
             logger.warning(
-                "RateLimit: cache backend %s disables stateful counters; "
+                "cache backend %s disables stateful counters; "
                 "using internal in-memory counter cache.",
                 type(window_cache_backend).__name__,
             )
@@ -575,12 +579,73 @@ class RateLimit(BasePlugin):
         self._cached_bucket_limits: dict[str, tuple[int, float, float]] = {}
         self._bucket_limit_lock = threading.Lock()
         self._last_limit_recalc_epoch: Optional[int] = None
+        self._warn_on_limit_precedence_conflicts()
 
         # SQLite-backed learned profiles
         cfg_db_path = self.config.get("db_path", "./config/var/dbs/rate_limit.db")
         self.db_path: str = str(cfg_db_path or "./config/var/dbs/rate_limit.db")
         self._db_lock = threading.Lock()
         self._db_init()
+
+    def _warn_on_limit_precedence_conflicts(self) -> None:
+        """Brief: Warn when configured limits are likely to trigger sooner than others.
+
+        Inputs:
+          - None (uses parsed setup() attributes).
+
+        Outputs:
+          - None (emits startup warning logs for potentially surprising precedence).
+        """
+
+        warmup_cap = float(getattr(self, "warmup_max_rps", 0.0) or 0.0)
+        hard_cap = float(getattr(self, "max_enforce_rps", 0.0) or 0.0)
+        bootstrap = float(getattr(self, "bootstrap_rps", 0.0) or 0.0)
+        burst_factor = float(getattr(self, "burst_factor", 1.0) or 1.0)
+        global_cap = float(getattr(self, "global_max_rps", 0.0) or 0.0)
+        min_enforce = float(getattr(self, "min_enforce_rps", 0.0) or 0.0)
+
+        if warmup_cap > 0.0 and hard_cap > 0.0 and warmup_cap > hard_cap:
+            logger.warning(
+                "warmup_max_rps=%.2f exceeds max_enforce_rps=%.2f; "
+                "warmup enforcement will be clamped by max_enforce_rps.",
+                warmup_cap,
+                hard_cap,
+            )
+
+        if bootstrap > 0.0 and hard_cap > 0.0:
+            bootstrap_burst = float(bootstrap) * float(max(burst_factor, 1.0))
+            if bootstrap_burst > hard_cap:
+                logger.warning(
+                    "bootstrap threshold %.2f (bootstrap_rps * burst_factor) "
+                    "exceeds max_enforce_rps=%.2f; bootstrap/burst behavior will clamp "
+                    "to max_enforce_rps.",
+                    bootstrap_burst,
+                    hard_cap,
+                )
+
+        if min_enforce > 0.0 and hard_cap > 0.0 and hard_cap < min_enforce:
+            logger.warning(
+                "max_enforce_rps=%.2f is below min_enforce_rps=%.2f; "
+                "hard-cap enforcement may trigger before learned-threshold enforcement.",
+                hard_cap,
+                min_enforce,
+            )
+
+        if global_cap > 0.0 and warmup_cap > 0.0 and global_cap < warmup_cap:
+            logger.warning(
+                "global_max_rps=%.2f is below warmup_max_rps=%.2f; "
+                "global limiting may trigger before warmup per-key limits.",
+                global_cap,
+                warmup_cap,
+            )
+
+        if global_cap > 0.0 and hard_cap > 0.0 and global_cap < hard_cap:
+            logger.warning(
+                "global_max_rps=%.2f is below max_enforce_rps=%.2f; "
+                "global limiting may trigger before per-key limits.",
+                global_cap,
+                hard_cap,
+            )
 
     def _parse_int_config(self, key: str, default: int, minimum: int = 0) -> int:
         """Brief: Parse integer configuration with clamping and logging.
@@ -600,11 +665,11 @@ class RateLimit(BasePlugin):
         try:
             value = int(raw)
         except (TypeError, ValueError):
-            logger.warning("RateLimit: %s non-integer %r; using %d", key, raw, default)
+            logger.warning("%s non-integer %r; using %d", key, raw, default)
             return default
         if value < minimum:
             logger.warning(
-                "RateLimit: %s below minimum %d (%d); clamping",
+                "%s below minimum %d (%d); clamping",
                 key,
                 minimum,
                 value,
@@ -635,11 +700,11 @@ class RateLimit(BasePlugin):
         try:
             value = float(raw)
         except (TypeError, ValueError):
-            logger.warning("RateLimit: %s non-float %r; using %s", key, raw, default)
+            logger.warning("%s non-float %r; using %s", key, raw, default)
             return default
         if value < minimum:
             logger.warning(
-                "RateLimit: %s below minimum %s (%s); clamping",
+                "%s below minimum %s (%s); clamping",
                 key,
                 minimum,
                 value,
@@ -647,7 +712,7 @@ class RateLimit(BasePlugin):
             value = minimum
         if maximum is not None and value > maximum:
             logger.warning(
-                "RateLimit: %s above maximum %s (%s); clamping",
+                "%s above maximum %s (%s); clamping",
                 key,
                 maximum,
                 value,
@@ -676,7 +741,7 @@ class RateLimit(BasePlugin):
             return True
         if text in {"0", "false", "no", "n", "off"}:
             return False
-        logger.warning("RateLimit: %s non-boolean %r; using %s", key, raw, default)
+        logger.warning("%s non-boolean %r; using %s", key, raw, default)
         return bool(default)
 
     def _db_init(self) -> None:
@@ -700,7 +765,7 @@ class RateLimit(BasePlugin):
                 os.makedirs(dir_path, exist_ok=True)
             except Exception as exc:  # pragma: no cover - defensive: log-only path
                 logger.warning(
-                    "RateLimit: failed to create directory for db_path %s: %s",
+                    "failed to create directory for db_path %s: %s",
                     self.db_path,
                     exc,
                 )
@@ -762,11 +827,11 @@ class RateLimit(BasePlugin):
             if (  # pragma: no cover - defensive: tolerate malformed/partially-null persisted rows
                 row[0] is None or row[1] is None or row[2] is None
             ):
-                raise TypeError("RateLimit: NULL fields in rate_profiles row")
+                raise TypeError("NULL fields in rate_profiles row")
             return float(row[0]), float(row[1]), int(row[2])
         except Exception as exc:  # pragma: no cover - defensive: malformed DB rows
             logger.warning(
-                "RateLimit: ignoring malformed rate_profiles row for %s: %s",
+                "ignoring malformed rate_profiles row for %s: %s",
                 key,
                 exc,
             )
@@ -1109,7 +1174,7 @@ class RateLimit(BasePlugin):
         if bool(getattr(self, "_missing_listener_warned", False)):
             return
         logger.warning(
-            "RateLimit: listener metadata missing; applying UDP prefix bucketing fallback."
+            "listener metadata missing; applying UDP prefix bucketing fallback."
         )
         self._missing_listener_warned = True
 
@@ -1225,7 +1290,7 @@ class RateLimit(BasePlugin):
                 payload = f"{window_id}:{count}".encode()
                 self._window_cache.set(cache_key, int(ttl), payload)
             except Exception:  # pragma: no cover - defensive logging only
-                logger.debug("RateLimit: failed updating window cache for %s", key)
+                logger.debug("failed updating window cache for %s", key)
         # If the cache entry expired for an existing profile, infer missed windows
         # from the profile timestamp and apply them as zero-RPS samples.
         if (
@@ -1253,7 +1318,7 @@ class RateLimit(BasePlugin):
                 except (
                     Exception
                 ):  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
-                    logger.warning("RateLimit: failed to update profile for %s", key)
+                    logger.warning("failed to update profile for %s", key)
         if missed_windows > 0:
             try:
                 self._db_apply_zero_windows(key, missed_windows, now_ts)
@@ -1275,7 +1340,7 @@ class RateLimit(BasePlugin):
                 Exception
             ):  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
                 logger.warning(
-                    "RateLimit: failed applying zero-RPS windows for %s",
+                    "failed applying zero-RPS windows for %s",
                     key,
                 )
         # Record a best-effort in-memory snapshot of active current-window
@@ -1406,7 +1471,7 @@ class RateLimit(BasePlugin):
                 Exception
             ):  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
                 logger.warning(
-                    "RateLimit: failed to flush completed active window for %s",
+                    "failed to flush completed active window for %s",
                     key_text,
                 )
 
@@ -1533,7 +1598,7 @@ class RateLimit(BasePlugin):
             payload = str(int(count)).encode()
             self._window_cache.set((key, 1), int(ttl), payload)
         except Exception:  # pragma: no cover - defensive
-            logger.debug("RateLimit: failed updating burst window cache for %s", key)
+            logger.debug("failed updating burst window cache for %s", key)
 
     def _get_burst_reset_count(self, key: str) -> int:
         """Brief: Return the in-progress burst reset cooldown window count.
@@ -1576,7 +1641,7 @@ class RateLimit(BasePlugin):
             payload = str(int(count)).encode()
             self._window_cache.set((key, 2), int(ttl), payload)
         except Exception:  # pragma: no cover - defensive
-            logger.debug("RateLimit: failed updating burst reset cache for %s", key)
+            logger.debug("failed updating burst reset cache for %s", key)
 
     def _reset_burst_state(self, key: str) -> None:
         """Brief: Reset burst counters for a key to a neutral state.
@@ -2108,7 +2173,7 @@ class RateLimit(BasePlugin):
                 Exception
             ) as exc:  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
                 logger.warning(
-                    "RateLimit: failed to parse request while building deny response: %s",
+                    "failed to parse request while building deny response: %s",
                     exc,
                 )
                 return self._decision(
@@ -2142,7 +2207,7 @@ class RateLimit(BasePlugin):
                         "Rate-Limited",
                     )
             except Exception as exc:
-                logger.debug("RateLimit: failed to attach EDE option: %s", exc)
+                logger.debug("failed to attach EDE option: %s", exc)
 
             return self._decision(
                 action="override",
@@ -2195,6 +2260,11 @@ class RateLimit(BasePlugin):
         Outputs:
           - PluginDecision when current RPS is a clear outlier above the learned
             baseline and exceeds global thresholds; otherwise None.
+
+        Notes:
+          - Listener/transport concurrency controls (for example max_in_flight)
+            are checked elsewhere and may reduce traffic before these RPS
+            thresholds are reached.
         """
 
         if not self.targets(ctx):
@@ -2220,7 +2290,7 @@ class RateLimit(BasePlugin):
             if global_rps > global_allowed_rps:
                 self._throttled_deny_log(
                     key,
-                    "RateLimit: limiting key=%s current_rps=%.2f global_rps=%.2f "
+                    "limiting key=%s current_rps=%.2f global_rps=%.2f "
                     "global_allowed_rps=%.2f",
                     key,
                     current_rps,
@@ -2240,7 +2310,7 @@ class RateLimit(BasePlugin):
             Exception
         ) as exc:  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
             logger.warning(
-                "RateLimit: failed to load profile for %s: %s",
+                "failed to load profile for %s: %s",
                 key,
                 exc,
                 exc_info=True,
@@ -2291,7 +2361,7 @@ class RateLimit(BasePlugin):
             if hard_cap_rps > 0.0 and current_rps > hard_cap_rps:
                 self._throttled_deny_log(
                     key,
-                    "RateLimit: limiting key=%s current_rps=%.2f avg_rps=%.2f "
+                    "limiting key=%s current_rps=%.2f avg_rps=%.2f "
                     "hard_cap_rps=%.2f min_enforce_rps=%.2f",
                     key,
                     current_rps,
@@ -2337,7 +2407,7 @@ class RateLimit(BasePlugin):
 
         self._throttled_deny_log(
             key,
-            "RateLimit: limiting key=%s current_rps=%.2f avg_rps=%.2f allowed_rps=%.2f",
+            "limiting key=%s current_rps=%.2f avg_rps=%.2f allowed_rps=%.2f",
             key,
             current_rps,
             avg_rps,
