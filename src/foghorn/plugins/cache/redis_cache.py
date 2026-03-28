@@ -6,6 +6,12 @@ import pickle
 from typing import Any, Optional, Tuple
 
 from .base import CachePlugin, cache_aliases
+from .safe_codec import (
+    RAW_BYTES_FLAG,
+    SAFE_SERIALIZED_FLAG,
+    safe_deserialize,
+    safe_serialize,
+)
 
 
 def _import_redis() -> Any:
@@ -61,8 +67,8 @@ def _encode_value(value: Any) -> Tuple[bytes, int]:
     """
 
     if isinstance(value, (bytes, bytearray, memoryview)):
-        return bytes(value), 0
-    return pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL), 1
+        return bytes(value), RAW_BYTES_FLAG
+    return safe_serialize(value), SAFE_SERIALIZED_FLAG
 
 
 def _decode_value(payload: bytes, is_pickle: int) -> Any:
@@ -76,9 +82,11 @@ def _decode_value(payload: bytes, is_pickle: int) -> Any:
       - Any: Decoded object.
     """
 
-    if int(is_pickle) == 1:
-        return pickle.loads(payload)
-    return payload
+    if int(is_pickle) == RAW_BYTES_FLAG:
+        return bytes(payload)
+    if int(is_pickle) == SAFE_SERIALIZED_FLAG:
+        return safe_deserialize(payload)
+    raise ValueError("Unsupported cache payload encoding flag")
 
 
 @cache_aliases("redis", "valkey")
