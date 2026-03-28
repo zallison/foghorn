@@ -16,6 +16,51 @@ Typical use cases:
 - Throttling automated scanners, misconfigured services, or runaway scripts without hard per-IP limits.
 - Detecting and dampening sudden spikes for specific domains or clients while allowing normal bursts.
 
+## Important: protections that run before this plugin
+
+The `rate_limit` plugin runs in the resolver pipeline. Some listener/transport
+guardrails execute **before** a query reaches plugin hooks, so those requests
+will not be counted or denied by `rate_limit`.
+
+Key pre-plugin protections:
+
+- UDP listener inflight shedding (`server.listen.udp.max_inflight`,
+  `server.listen.udp.max_inflight_per_ip`, `server.listen.udp.max_inflight_by_cidr`)
+  can shed traffic before resolver/plugin execution.
+- UDP query-size gate (`server.listen.udp.max_query_bytes`) drops undersized or
+  oversized packets before plugin execution.
+- TCP/DoT connection limits (`server.listen.tcp.max_connections`,
+  `server.listen.tcp.max_connections_per_ip`, and DoT equivalents) can reject
+  connections before the query reaches the plugin.
+- TCP/DoT per-connection caps (`max_queries_per_connection`,
+  `idle_timeout_seconds`) can close connections before additional queries reach
+  plugin hooks.
+- TCP/DoT frame-size protections (oversized DNS-over-TCP frames) close/break
+  before resolver/plugin execution.
+- DoH request-size protections reject oversized DoH requests (HTTP 413) before
+  resolver/plugin execution.
+
+Overload response policy for listener-level shedding/rejection is controlled by:
+
+- Global default: `server.listen.overload_response`
+- Per-listener override:
+  - `server.listen.udp.overload_response`
+  - `server.listen.tcp.overload_response`
+  - `server.listen.dot.overload_response`
+
+Allowed values are `servfail`, `refused`, `drop`.
+
+If `server.listen.overload_response` is not set, backward-compatible defaults are:
+
+- UDP: `servfail`
+- TCP/DoT: `drop`
+
+DoH currently relies on HTTP-level protections (for example 413 size checks and
+timeout/close behavior) rather than the DNS overload-response policy above.
+
+Practical implication: under heavy load you may observe transport-level
+SERVFAIL/REFUSED/drop behavior that occurs before `rate_limit` policy evaluation.
+
 ## Basic configuration
 
 ```yaml path=null start=null
