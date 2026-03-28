@@ -22,6 +22,11 @@ import logging
 import threading
 from concurrent.futures import Executor
 from typing import Callable
+
+from foghorn.servers.overload_response import (
+    build_overload_dns_response,
+    normalize_overload_response,
+)
 from foghorn.utils import ip_networks
 
 logger = logging.getLogger("foghorn.udp_asyncio")
@@ -56,11 +61,7 @@ def _make_overloaded_response(query_wire: bytes) -> bytes | None:
           - QDCOUNT=1, ANCOUNT=NSCOUNT=ARCOUNT=0
     """
 
-    if len(query_wire) < 2:
-        return None
-
-    txid = query_wire[0:2]
-    return txid + b"\x80\x02" + b"\x00\x01" + b"\x00\x00" + b"\x00\x00" + b"\x00\x00"
+    return build_overload_dns_response(query_wire, "servfail")
 
 
 class _UDPProtocol(asyncio.DatagramProtocol):
@@ -85,6 +86,7 @@ class _UDPProtocol(asyncio.DatagramProtocol):
         max_inflight: int,
         max_inflight_per_ip: int,
         max_query_bytes: int,
+        overload_response: str = "servfail",
         max_inflight_by_cidr: list[dict[str, object]] | None = None,
     ) -> None:
         """Brief: Initialize protocol state.
@@ -95,6 +97,7 @@ class _UDPProtocol(asyncio.DatagramProtocol):
           - max_inflight: Global cap on concurrent resolver calls (min 1).
           - max_inflight_per_ip: Per-client cap on concurrent resolver calls (min 1).
           - max_query_bytes: Max UDP payload bytes accepted for a DNS query.
+          - overload_response: Overload handling policy ('servfail'|'refused'|'drop').
           - max_inflight_by_cidr: Optional list of dicts with keys:
               - cidr: CIDR string
               - max_inflight: positive integer limit for this CIDR bucket
@@ -107,6 +110,7 @@ class _UDPProtocol(asyncio.DatagramProtocol):
         self._max_inflight = max(1, int(max_inflight))
         self._max_inflight_per_ip = max(1, int(max_inflight_per_ip))
         self._max_query_bytes = max(_DNS_HEADER_BYTES, int(max_query_bytes))
+        self._overload_response = normalize_overload_response(overload_response)
 
         # Optional CIDR bucket limits: partitioned IPv4/IPv6 lists of
         # (network, max_inflight, prefixlen).
@@ -279,7 +283,7 @@ class _UDPProtocol(asyncio.DatagramProtocol):
             limited = False
 
         if limited:
-            resp = _make_overloaded_response(data)
+            resp = build_overload_dns_response(data, self._overload_response)
             if resp and self._transport is not None:
                 try:
                     self._transport.sendto(resp, addr)
@@ -378,6 +382,7 @@ async def serve_udp_asyncio(
     max_inflight: int = 1024,
     max_inflight_per_ip: int = 64,
     max_query_bytes: int = DEFAULT_MAX_UDP_QUERY_BYTES,
+    overload_response: str = "servfail",
     max_inflight_by_cidr: list[dict[str, object]] | None = None,
     executor: Executor | None = None,
     stop_event: asyncio.Event | None = None,
@@ -393,6 +398,7 @@ async def serve_udp_asyncio(
       - max_inflight: Global cap on concurrent in-flight resolver calls.
       - max_inflight_per_ip: Per-client-IP cap on in-flight resolver calls.
       - max_query_bytes: Max UDP payload bytes accepted for a DNS query.
+      - overload_response: Overload handling policy ('servfail'|'refused'|'drop').
       - max_inflight_by_cidr: Optional list of CIDR bucket limits.
       - executor: Optional executor used to run the synchronous resolver.
       - stop_event: Optional asyncio.Event used to request shutdown.
@@ -411,6 +417,7 @@ async def serve_udp_asyncio(
             max_inflight=max_inflight,
             max_inflight_per_ip=max_inflight_per_ip,
             max_query_bytes=max_query_bytes,
+            overload_response=overload_response,
             max_inflight_by_cidr=max_inflight_by_cidr,
         ),
         local_addr=(host, int(port)),
@@ -510,6 +517,7 @@ def start_udp_asyncio_threaded(
     max_inflight: int = 1024,
     max_inflight_per_ip: int = 64,
     max_query_bytes: int = DEFAULT_MAX_UDP_QUERY_BYTES,
+    overload_response: str = "servfail",
     max_inflight_by_cidr: list[dict[str, object]] | None = None,
     executor: Executor | None = None,
     startup_timeout_s: float = 2.0,
@@ -524,6 +532,7 @@ def start_udp_asyncio_threaded(
       - max_inflight: Global cap on in-flight resolver calls.
       - max_inflight_per_ip: Per-client-IP cap on in-flight resolver calls.
       - max_query_bytes: Max UDP payload bytes accepted for a DNS query.
+      - overload_response: Overload handling policy ('servfail'|'refused'|'drop').
       - max_inflight_by_cidr: Optional list of CIDR bucket limits.
       - executor: Optional executor used to run resolver.
       - startup_timeout_s: Max seconds to wait for the socket bind to complete.
@@ -556,6 +565,7 @@ def start_udp_asyncio_threaded(
                     max_inflight=max_inflight,
                     max_inflight_per_ip=max_inflight_per_ip,
                     max_query_bytes=max_query_bytes,
+                    overload_response=overload_response,
                     max_inflight_by_cidr=max_inflight_by_cidr,
                     executor=executor,
                     stop_event=stop_event,
