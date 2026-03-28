@@ -330,7 +330,7 @@ Key parts of `server`:
 	  `lfu`, `fifo`, `random`, or `almost_expired`).
   - `modify` / `decorated_overrides` / `func_caches`: optional overrides for
 	internal helper caches (functions decorated with `registered_cached`,
-	`registered_lru_cached`, `registered_foghorn_ttl`, or
+	`registered_lru_cache`, `registered_foghorn_ttl`, or
 	`registered_sqlite_ttl`). These let you tune TTL and maxsize for specific
 	helpers without code changes.
 	- Valid `backend` values for `func_caches` entries are:
@@ -912,6 +912,9 @@ When deploying Foghorn as an authoritative or recursive resolver on exposed inte
 ### 4.8 Rate limiting (`rate`)
 
 Adaptive rate limiting per client or per (client,domain).
+Note: listener/transport protections (for example UDP inflight shedding and
+TCP/DoT connection limits) can trigger before plugin hooks run, so under heavy
+load some traffic may be dropped/refused before the `rate` plugin evaluates it.
 
 ```yaml
 plugins:

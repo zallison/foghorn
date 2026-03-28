@@ -21,7 +21,7 @@ All notable changes to this project will be documented in this file.
 - Expanded DNS-name helper coverage with qualification heuristics (`is_single_label`, `has_proper_tld`, `qualify_name`, `should_qualify`) and focused tests for suffix/exact non-proper-TLD modes.
 - Extended RateLimit deny visibility controls with `deny_log_first_n` per blocked episode and updated `deny_log_interval_seconds` default to `60` seconds.
 - Updated RateLimit schema/docs examples to describe deny-episode query-log visibility behavior and the new deny logging defaults.
-- Migrated several hot-path/helper constants to `typing.Final` and refreshed selected helper caches (including MdnsBridge helper methods) to explicit `registered_lru_cached` sizing.
+- Migrated several hot-path/helper constants to `typing.Final` and refreshed selected helper caches (including MdnsBridge helper methods) to explicit `registered_lru_cache` sizing.
 - Hardened resolver plugins with stricter list/file parsing, safer validation, cache/pruning controls, and improved policy enforcement in Filter, FileDownloader, mDNS, SSH Keys, and related host-source/access-control paths.
 - Expanded RateLimit behavior and configuration with bootstrap/warmup controls and PSL strictness options, and improved built-in profile loading fallback behavior.
 - Updated plugin test coverage and plugin documentation/schema content to reflect the new parsing, normalization, and policy semantics.
@@ -47,6 +47,11 @@ All notable changes to this project will be documented in this file.
 - Improved transport resilience/observability across DoT/TCP/UDP paths with explicit expected-disconnect handling and richer exception logging context in resolver/server code.
 - Expanded use of registered cache decorators and cache sizes in hot paths (AccessControl, RateLimit, ZoneRecords DNSSEC/name normalization helpers) to improve throughput under load.
 - Updated admin UI dark-theme button visibility so button controls render with clearer accent outlines, and refreshed README coverage badges from 87% to 85%.
+- Standardized decorated helper cache naming from `registered_lru_cached` to `registered_lru_cache` across runtime modules, docs, examples, and generated schema text.
+- Added `registered_ttl_cache(maxsize, ttl)` as a registry-aware TTL decorator and migrated helper TTL call sites from `registered_cached(cache=TTLCache(...))` to the new helper in DNSSEC, ZoneRecords, runtime-state snapshots, and web/stats helper paths.
+- RateLimit now fails over to an internal stateful in-memory counter cache when the configured cache backend is `NullCache`, so per-window enforcement continues to work when response caching is disabled.
+- ZoneRecords DNS UPDATE authorization now uses file-signature-aware list caching plus per-zone/per-principal cache key prefixes for allow/block name/IP scope checks, and UPDATE writes now fail closed when persistence is enabled but a journal writer cannot be acquired.
+- Increased the `BaseStatsStore` default bounded async queue fallback size from `4096` to `65536` operations to reduce avoidable drops during short bursts when no explicit queue limit is configured.
 
 ### Breaking Changes
 
