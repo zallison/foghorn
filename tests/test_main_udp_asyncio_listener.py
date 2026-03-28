@@ -79,6 +79,7 @@ def test_main_udp_defaults_to_asyncio_and_stops_handle(monkeypatch: Any) -> None
         assert int(port) == 5354
         assert kw.get("thread_name") == "foghorn-udp"
         assert kw.get("max_query_bytes") == 1234
+        assert kw.get("overload_response") == "servfail"
         assert kw.get("max_inflight_by_cidr") == [
             {"cidr": "10.0.0.0/8", "max_inflight": 5},
             {"cidr": "10.1.0.0/16", "max_inflight": 2},
@@ -91,6 +92,80 @@ def test_main_udp_defaults_to_asyncio_and_stops_handle(monkeypatch: Any) -> None
         udp_mod, "start_udp_asyncio_threaded", fake_start_udp_asyncio_threaded
     )
 
+    monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
+    monkeypatch.setattr(main_mod, "start_webserver", lambda *a, **k: None)
+
+    with patch("builtins.open", mock_open(read_data=yaml_data)):
+        rc = main_mod.main(["--config", "cfg.yaml"])
+
+    assert rc == 0
+    assert called["start"] == 1
+    assert called["stop"] == 1
+
+
+def test_main_udp_listener_overload_response_honors_per_listener_override(
+    monkeypatch: Any,
+) -> None:
+    """Brief: UDP startup passes per-listener overload_response override to asyncio server.
+
+    Inputs:
+      - monkeypatch: patches start_udp_asyncio_threaded and DNSServer.
+
+    Outputs:
+      - None; asserts udp overload_response override is forwarded.
+    """
+
+    yaml_data = (
+        "server:\n"
+        "  listen:\n"
+        "    overload_response: refused\n"
+        "    udp:\n"
+        "      enabled: true\n"
+        "      host: 127.0.0.1\n"
+        "      port: 5354\n"
+        "      use_asyncio: true\n"
+        "      overload_response: drop\n"
+        "  resolver:\n"
+        "    mode: forward\n"
+        "    timeout_ms: 2000\n"
+        "    use_asyncio: true\n"
+        "upstreams:\n"
+        "  strategy: failover\n"
+        "  max_concurrent: 1\n"
+        "  endpoints:\n"
+        "    - host: 1.1.1.1\n"
+        "      port: 53\n"
+        "plugins: []\n"
+    )
+
+    called: dict[str, object] = {"start": 0, "stop": 0}
+
+    class DummyThread:
+        def is_alive(self) -> bool:
+            return False
+
+        def join(self, timeout: float | None = None) -> None:
+            return
+
+    class DummyHandle:
+        def __init__(self) -> None:
+            self.thread = DummyThread()
+
+        def stop(self) -> None:
+            called["stop"] = int(called["stop"]) + 1
+
+    def fake_start_udp_asyncio_threaded(host: str, port: int, resolver, **kw):  # type: ignore[no-untyped-def]
+        called["start"] = int(called["start"]) + 1
+        assert host == "127.0.0.1"
+        assert int(port) == 5354
+        assert kw.get("overload_response") == "drop"
+        return DummyHandle()
+
+    from foghorn.servers import udp_asyncio_server as udp_mod
+
+    monkeypatch.setattr(
+        udp_mod, "start_udp_asyncio_threaded", fake_start_udp_asyncio_threaded
+    )
     monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
     monkeypatch.setattr(main_mod, "start_webserver", lambda *a, **k: None)
 

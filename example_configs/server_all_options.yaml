@@ -25,6 +25,9 @@ server:
 
   # ----- Listener configuration -----
   listen:
+    # Global listener overload response policy. Applies to listeners unless
+    # a listener-specific overload_response override is provided.
+    overload_response: servfail # servfail | refused | drop
 
     # Legacy compatibility block. Prefer server.listen.{udp,tcp} instead.
     dns:
@@ -35,6 +38,8 @@ server:
       enabled: true
       host: 127.0.0.1
       port: 5335
+      # Overload policy used when max_inflight/max_inflight_per_ip limits shed load.
+      overload_response: servfail # servfail | refused | drop
 
       # UDP listener uses asyncio by default, except on localhost.
       # Set use_asyncio: false to force the legacy threaded implementation.
@@ -45,6 +50,8 @@ server:
       enabled: false
       host: 127.0.0.1
       port: 5335
+      # Overload policy used for connection-limit rejections.
+      overload_response: drop # servfail | refused | drop
 
       # Connection hardening (asyncio TCP listener only)
       max_connections: 1024
@@ -57,6 +64,8 @@ server:
       enabled: false
       host: 127.0.0.1
       port: 8853
+      # Overload policy used for connection-limit rejections.
+      overload_response: drop # servfail | refused | drop
 
       # Required when enabled: true
       cert_file: ./keys/foghorn_localhost.crt
@@ -72,7 +81,9 @@ server:
       # DNS-over-HTTPS (DoH) listener.
       enabled: false
       host: 127.0.0.1
-      port: 5380
+      port: 5443
+      # Listener-level override for DoH overload policy.
+      overload_response: drop # servfail | refused | drop
       cert_file: null
       key_file: null
 

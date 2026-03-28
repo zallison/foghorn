@@ -595,6 +595,19 @@ def _augment_server_limits_and_listen_schema(base: Dict[str, Any]) -> None:
         if listen_schema is not None:
             listen_props = listen_schema.get("properties")
             if isinstance(listen_props, dict):
+                listen_props.setdefault(
+                    "overload_response",
+                    {
+                        "type": "string",
+                        "enum": ["servfail", "refused", "drop"],
+                        "default": "servfail",
+                        "description": (
+                            "Global overload response policy for listeners. "
+                            "When set, this value is used by listeners unless "
+                            "overridden by server.listen.<listener>.overload_response."
+                        ),
+                    },
+                )
                 for key in ("tcp", "dot"):
                     child = listen_props.get(key)
                     if not isinstance(child, dict):
@@ -603,6 +616,19 @@ def _augment_server_limits_and_listen_schema(base: Dict[str, Any]) -> None:
                     child_schema = _ensure_obj_schema(child)
                     if child_schema is not None:
                         _ensure_limit_keys(child_schema)
+                        child_props = child_schema.get("properties")
+                        if isinstance(child_props, dict):
+                            child_props.setdefault(
+                                "overload_response",
+                                {
+                                    "type": "string",
+                                    "enum": ["servfail", "refused", "drop"],
+                                    "description": (
+                                        "Per-listener overload response policy "
+                                        "for connection-limit rejections."
+                                    ),
+                                },
+                            )
 
                 # UDP hardening knobs (asyncio UDP and response sizing).
                 udp_obj = listen_props.get("udp")
@@ -711,6 +737,17 @@ def _augment_server_limits_and_listen_schema(base: Dict[str, Any]) -> None:
                                 ),
                             },
                         )
+                        udp_props.setdefault(
+                            "overload_response",
+                            {
+                                "type": "string",
+                                "enum": ["servfail", "refused", "drop"],
+                                "description": (
+                                    "Per-listener overload response policy for "
+                                    "UDP in-flight limit shedding."
+                                ),
+                            },
+                        )
 
                 for key in ("doh",):
                     child = listen_props.get(key)
@@ -724,6 +761,17 @@ def _augment_server_limits_and_listen_schema(base: Dict[str, Any]) -> None:
                 if doh_schema is not None:
                     doh_props = doh_schema.get("properties")
                     if isinstance(doh_props, dict):
+                        doh_props.setdefault(
+                            "overload_response",
+                            {
+                                "type": "string",
+                                "enum": ["servfail", "refused", "drop"],
+                                "description": (
+                                    "Per-listener overload response policy for "
+                                    "DoH overload handling."
+                                ),
+                            },
+                        )
                         doh_props.setdefault(
                             "allow_threaded_fallback",
                             {
@@ -1030,6 +1078,19 @@ def _build_v2_root_schema(
         listen_schema["additionalProperties"] = False
         listen_props = listen_schema.setdefault("properties", {})
         if isinstance(listen_props, dict):
+            listen_props.setdefault(
+                "overload_response",
+                {
+                    "type": "string",
+                    "enum": ["servfail", "refused", "drop"],
+                    "default": "servfail",
+                    "description": (
+                        "Global overload response policy for listeners. "
+                        "When set, this value is used by listeners unless "
+                        "overridden by server.listen.<listener>.overload_response."
+                    ),
+                },
+            )
             # Obsolete root-level defaults under server.listen are intentionally
             # removed; listeners must now be configured under listen.dns and/or
             # per-listener blocks (udp/tcp/dot/doh).
@@ -1077,6 +1138,17 @@ def _build_v2_root_schema(
                 cprops = child.get("properties")
                 if not isinstance(cprops, dict):
                     return
+                cprops.setdefault(
+                    "overload_response",
+                    {
+                        "type": "string",
+                        "enum": ["servfail", "refused", "drop"],
+                        "description": (
+                            "Per-listener overload response policy for "
+                            "connection-limit rejections."
+                        ),
+                    },
+                )
                 cprops.setdefault(
                     "max_connections",
                     {
@@ -1221,10 +1293,32 @@ def _build_v2_root_schema(
                         ),
                     },
                 )
+                udp_props.setdefault(
+                    "overload_response",
+                    {
+                        "type": "string",
+                        "enum": ["servfail", "refused", "drop"],
+                        "description": (
+                            "Per-listener overload response policy for "
+                            "UDP in-flight limit shedding."
+                        ),
+                    },
+                )
 
             doh_child = _ensure_listener_child("doh")
             doh_props = doh_child.get("properties")
             if isinstance(doh_props, dict):
+                doh_props.setdefault(
+                    "overload_response",
+                    {
+                        "type": "string",
+                        "enum": ["servfail", "refused", "drop"],
+                        "description": (
+                            "Per-listener overload response policy for "
+                            "DoH overload handling."
+                        ),
+                    },
+                )
                 doh_props.setdefault(
                     "allow_threaded_fallback",
                     {
@@ -1910,7 +2004,7 @@ def _build_v2_root_schema(
             "type": "array",
             "description": (
                 "Optional list of overrides for decorated caches (functions "
-                "wrapped by registered_cached/registered_lru_cached). Each "
+                "wrapped by registered_cached/registered_lru_cache). Each "
                 "entry may target a specific module+name pair and override "
                 "backend-specific settings such as maxsize or TTL."
             ),
