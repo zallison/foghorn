@@ -315,6 +315,79 @@ def test_datagram_received_global_overload_sheds_with_servfail() -> None:
     assert (resp_wire[3] & 0x0F) == 2
 
 
+def test_datagram_received_global_overload_uses_refused_policy() -> None:
+    """Brief: Global inflight overload can return REFUSED when configured.
+
+    Inputs:
+      - inflight_total at max_inflight.
+      - overload_response set to 'refused'.
+
+    Outputs:
+      - None; asserts a REFUSED response is sent.
+    """
+
+    query = DNSRecord.question("example.com").pack()
+
+    sent: list[bytes] = []
+
+    class DummyTransport:
+        def sendto(self, data: bytes, addr: Any) -> None:  # noqa: ANN401
+            sent.append(data)
+
+    proto = udp_mod._UDPProtocol(
+        lambda _q, _ip: b"",
+        executor=None,
+        max_inflight=1,
+        max_inflight_per_ip=10,
+        max_query_bytes=4096,
+        overload_response="refused",
+    )
+    proto._transport = DummyTransport()  # type: ignore[assignment]
+    proto._inflight_total = 1
+
+    proto.datagram_received(query, ("127.0.0.1", 12345))
+    assert sent
+    resp_wire = sent[0]
+    assert len(resp_wire) == 12
+    assert resp_wire[0:2] == query[0:2]
+    assert resp_wire[2] == 0x80
+    assert (resp_wire[3] & 0x0F) == 5
+
+
+def test_datagram_received_global_overload_drop_policy_sends_nothing() -> None:
+    """Brief: Global inflight overload can drop silently when configured.
+
+    Inputs:
+      - inflight_total at max_inflight.
+      - overload_response set to 'drop'.
+
+    Outputs:
+      - None; asserts no response is sent.
+    """
+
+    query = DNSRecord.question("example.com").pack()
+
+    sent: list[bytes] = []
+
+    class DummyTransport:
+        def sendto(self, data: bytes, addr: Any) -> None:  # noqa: ANN401
+            sent.append(data)
+
+    proto = udp_mod._UDPProtocol(
+        lambda _q, _ip: b"",
+        executor=None,
+        max_inflight=1,
+        max_inflight_per_ip=10,
+        max_query_bytes=4096,
+        overload_response="drop",
+    )
+    proto._transport = DummyTransport()  # type: ignore[assignment]
+    proto._inflight_total = 1
+
+    proto.datagram_received(query, ("127.0.0.1", 12345))
+    assert sent == []
+
+
 def test_datagram_received_per_ip_overload_sheds_and_sendto_errors_are_swallowed() -> (
     None
 ):

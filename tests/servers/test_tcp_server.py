@@ -103,6 +103,208 @@ def _echo_resolver(q: bytes, client_ip: str) -> bytes:
     return q
 
 
+class _OverloadWriter:
+    """Brief: Minimal fake writer for overload-response tests.
+
+    Inputs:
+      - peer: Optional peer tuple returned for get_extra_info('peername').
+
+    Outputs:
+      - Instance that records framed writes and close state.
+    """
+
+    def __init__(self, peer: tuple[str, int] = ("1.2.3.4", 5300)) -> None:
+        self._peer = peer
+        self.written: list[bytes] = []
+        self.closed = False
+
+    def get_extra_info(self, key: str):
+        """Brief: Return peer info when requested.
+
+        Inputs:
+          - key: Extra-info lookup key.
+
+        Outputs:
+          - tuple for 'peername', else None.
+        """
+
+        if key == "peername":
+            return self._peer
+        return None
+
+    def write(self, data: bytes) -> None:
+        """Brief: Record bytes written by server code.
+
+        Inputs:
+          - data: Framed TCP payload.
+
+        Outputs:
+          - None.
+        """
+
+        self.written.append(data)
+
+    async def drain(self) -> None:
+        """Brief: Async no-op drain hook.
+
+        Inputs:
+          - None.
+
+        Outputs:
+          - None.
+        """
+
+        return None
+
+    def close(self) -> None:
+        """Brief: Mark writer as closed.
+
+        Inputs:
+          - None.
+
+        Outputs:
+          - None.
+        """
+
+        self.closed = True
+
+    async def wait_closed(self) -> None:
+        """Brief: Async no-op close wait hook.
+
+        Inputs:
+          - None.
+
+        Outputs:
+          - None.
+        """
+
+        return None
+
+
+def test_send_connection_overload_response_refused_policy() -> None:
+    """Brief: TCP overload helper emits one REFUSED frame when policy is refused.
+
+    Inputs:
+      - One framed DNS query on StreamReader.
+
+    Outputs:
+      - None; asserts exactly one framed REFUSED response is written.
+    """
+
+    async def _run() -> None:
+        from dnslib import DNSRecord
+
+        query = DNSRecord.question("example.com").pack()
+        reader = asyncio.StreamReader()
+        reader.feed_data(len(query).to_bytes(2, "big") + query)
+        reader.feed_eof()
+
+        writer = _OverloadWriter()
+
+        await tcp_server_mod._send_connection_overload_response(
+            reader,
+            writer,
+            overload_response="refused",
+            idle_timeout=1.0,
+        )
+
+        assert len(writer.written) == 1
+        frame = writer.written[0]
+        frame_len = int.from_bytes(frame[:2], "big")
+        body = frame[2:]
+        assert frame_len == len(body)
+        assert body[0:2] == query[0:2]
+        assert (body[3] & 0x0F) == 5
+
+    asyncio.run(_run())
+
+
+def test_send_connection_overload_response_drop_policy_sends_nothing() -> None:
+    """Brief: TCP overload helper emits no response when policy is drop.
+
+    Inputs:
+      - One framed DNS query on StreamReader.
+
+    Outputs:
+      - None; asserts no writes occur.
+    """
+
+    async def _run() -> None:
+        from dnslib import DNSRecord
+
+        query = DNSRecord.question("example.com").pack()
+        reader = asyncio.StreamReader()
+        reader.feed_data(len(query).to_bytes(2, "big") + query)
+        reader.feed_eof()
+
+        writer = _OverloadWriter()
+
+        await tcp_server_mod._send_connection_overload_response(
+            reader,
+            writer,
+            overload_response="drop",
+            idle_timeout=1.0,
+        )
+
+        assert writer.written == []
+
+    asyncio.run(_run())
+
+
+def test_handle_conn_rejected_by_limiter_sends_refused_when_configured() -> None:
+    """Brief: _handle_conn returns a REFUSED frame when limiter rejects and policy is refused.
+
+    Inputs:
+      - Limiter that always denies acquisition.
+      - One framed DNS query on StreamReader.
+
+    Outputs:
+      - None; asserts one REFUSED frame is written and writer is closed.
+    """
+
+    class _DenyLimiter:
+        def __init__(self) -> None:
+            self.acquire_calls: list[str] = []
+            self.release_calls: list[str] = []
+
+        async def acquire(self, client_ip: str) -> bool:
+            self.acquire_calls.append(client_ip)
+            return False
+
+        async def release(self, client_ip: str) -> None:
+            self.release_calls.append(client_ip)
+
+    async def _run() -> None:
+        from dnslib import DNSRecord
+
+        query = DNSRecord.question("example.com").pack()
+        reader = asyncio.StreamReader()
+        reader.feed_data(len(query).to_bytes(2, "big") + query)
+        reader.feed_eof()
+
+        writer = _OverloadWriter(peer=("9.9.9.9", 5300))
+        limiter = _DenyLimiter()
+
+        await tcp_server_mod._handle_conn(
+            reader=reader,
+            writer=writer,
+            resolver=lambda q, ip: q,
+            limiter=limiter,
+            overload_response="refused",
+        )
+
+        assert writer.closed is True
+        assert len(writer.written) == 1
+        frame = writer.written[0]
+        body = frame[2:]
+        assert body[0:2] == query[0:2]
+        assert (body[3] & 0x0F) == 5
+        assert limiter.acquire_calls == ["9.9.9.9"]
+        assert limiter.release_calls == []
+
+    asyncio.run(_run())
+
+
 @pytest.fixture
 def running_tcp_server():
     host = "127.0.0.1"

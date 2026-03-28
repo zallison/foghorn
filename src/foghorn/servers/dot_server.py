@@ -3,6 +3,12 @@ import logging
 import ssl
 from concurrent.futures import Executor
 from typing import Callable, Optional
+from foghorn.security_limits import MAX_DNS_TCP_MESSAGE_BYTES
+from foghorn.servers.overload_response import (
+    OVERLOAD_RESPONSE_DROP,
+    build_overload_dns_response,
+    normalize_overload_response,
+)
 
 logger = logging.getLogger("foghorn.servers.dot_server")
 
@@ -27,6 +33,53 @@ async def _read_exact(reader: asyncio.StreamReader, n: int) -> bytes:
             break
         data += chunk
     return data
+
+
+async def _send_connection_overload_response(
+    reader: asyncio.StreamReader,
+    writer: asyncio.StreamWriter,
+    *,
+    overload_response: str,
+    idle_timeout: float,
+) -> None:
+    """Brief: Attempt to send one framed DNS overload response on DoT reject.
+
+    Inputs:
+      - reader/writer: TLS stream objects for the rejected connection.
+      - overload_response: Policy ('servfail'|'refused'|'drop').
+      - idle_timeout: Idle timeout used to bound best-effort reads.
+
+    Outputs:
+      - None; writes at most one framed DNS response when policy permits.
+    """
+
+    policy = normalize_overload_response(
+        overload_response, default=OVERLOAD_RESPONSE_DROP
+    )
+    if policy == OVERLOAD_RESPONSE_DROP:
+        return
+
+    timeout = min(1.0, max(0.05, float(idle_timeout or 0.0)))
+    try:
+        hdr = await asyncio.wait_for(_read_exact(reader, 2), timeout=timeout)
+        if len(hdr) != 2:
+            return
+        ln = int.from_bytes(hdr, byteorder="big")
+        if ln <= 0 or ln > int(MAX_DNS_TCP_MESSAGE_BYTES):
+            return
+
+        query = await asyncio.wait_for(_read_exact(reader, ln), timeout=timeout)
+        if len(query) != ln:
+            return
+
+        response = build_overload_dns_response(query, policy)
+        if not response:
+            return
+
+        writer.write(len(response).to_bytes(2, "big") + response)
+        await writer.drain()
+    except Exception:
+        return
 
 
 class _ConnLimiter:
@@ -92,6 +145,7 @@ async def _handle_conn(
     max_queries: int = 100,
     limiter: _ConnLimiter | None = None,
     executor: Executor | None = None,
+    overload_response: str = OVERLOAD_RESPONSE_DROP,
 ) -> None:
     """
     Handle a single DNS-over-TLS connection (RFC 7858).
@@ -105,6 +159,7 @@ async def _handle_conn(
       - max_queries: Maximum DNS frames to process before closing.
       - limiter: Optional _ConnLimiter for global/per-IP concurrent limits.
       - executor: Optional executor used for resolver calls.
+      - overload_response: Overload handling policy for rejected connections.
     Outputs:
       - None; writes framed DNS responses and always closes the writer.
 
@@ -125,6 +180,12 @@ async def _handle_conn(
     if limiter is not None:
         acquired = await limiter.acquire(client_ip)
         if not acquired:
+            await _send_connection_overload_response(
+                reader,
+                writer,
+                overload_response=overload_response,
+                idle_timeout=float(idle_timeout),
+            )
             try:
                 writer.close()
                 await writer.wait_closed()
@@ -225,6 +286,7 @@ async def serve_dot(
     max_queries_per_connection: int = 100,
     idle_timeout_seconds: float = 15.0,
     executor: Executor | None = None,
+    overload_response: str = OVERLOAD_RESPONSE_DROP,
     on_listen: Callable[[int], None] | None = None,
 ) -> None:
     """Brief: Serve DNS-over-TLS on host:port with the given certificate.
@@ -242,6 +304,7 @@ async def serve_dot(
       - max_queries_per_connection: Close after this many queries.
       - idle_timeout_seconds: Close idle connections after this many seconds.
       - executor: Optional executor for resolver work.
+      - overload_response: Overload handling policy for rejected connections.
       - on_listen: Optional callback invoked with the bound port after the server
         starts listening.
 
@@ -276,6 +339,7 @@ async def serve_dot(
             max_queries=int(max_queries_per_connection),
             limiter=limiter,
             executor=executor,
+            overload_response=overload_response,
         ),
         host,
         port,
