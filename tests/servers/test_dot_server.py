@@ -254,6 +254,61 @@ def test_handle_conn_rejected_by_limiter_closes_writer() -> None:
     assert limiter.release_calls == []
 
 
+def test_handle_conn_rejected_by_limiter_sends_refused_when_configured() -> None:
+    """Brief: _handle_conn writes one REFUSED frame when limiter rejects and policy is refused.
+
+    Inputs:
+      - Limiter that always denies acquisition.
+      - One framed DNS query on StreamReader.
+
+    Outputs:
+      - None; asserts a REFUSED frame is written and writer is closed.
+    """
+
+    class _DenyLimiter:
+        def __init__(self) -> None:
+            self.acquire_calls: list[str] = []
+            self.release_calls: list[str] = []
+
+        async def acquire(self, client_ip: str) -> bool:
+            self.acquire_calls.append(client_ip)
+            return False
+
+        async def release(self, client_ip: str) -> None:
+            self.release_calls.append(client_ip)
+
+    writer = _FakeWriter()
+    limiter = _DenyLimiter()
+
+    async def _run() -> None:
+        from dnslib import DNSRecord
+
+        query = DNSRecord.question("example.com").pack()
+        reader = asyncio.StreamReader()
+        reader.feed_data(len(query).to_bytes(2, "big") + query)
+        reader.feed_eof()
+
+        await dot_server_mod._handle_conn(
+            reader=reader,
+            writer=writer,
+            resolver=lambda q, ip: q,
+            limiter=limiter,
+            overload_response="refused",
+        )
+
+    asyncio.run(_run())
+
+    assert writer.closed is True
+    assert len(writer.written) == 1
+    frame = writer.written[0]
+    frame_len = int.from_bytes(frame[:2], "big")
+    body = frame[2:]
+    assert frame_len == len(body)
+    assert (body[3] & 0x0F) == 5
+    assert limiter.acquire_calls == ["1.2.3.4"]
+    assert limiter.release_calls == []
+
+
 def test_handle_conn_breaks_on_short_header(monkeypatch: pytest.MonkeyPatch) -> None:
     """Brief: _handle_conn exits cleanly when the 2-byte header read is short.
 
