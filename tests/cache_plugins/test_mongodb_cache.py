@@ -326,8 +326,8 @@ def test_stable_digest_for_key_is_deterministic_and_hex() -> None:
     assert all(c in "0123456789abcdef" for c in digest1)
 
 
-def test_encode_decode_roundtrip_bytes_and_pickled() -> None:
-    """Brief: Helper encode/decode functions support bytes and arbitrary objects.
+def test_encode_decode_roundtrip_bytes_and_safe_serialized() -> None:
+    """Brief: Helper encode/decode functions support bytes and safe serialized objects.
 
     Inputs:
       - None.
@@ -344,7 +344,7 @@ def test_encode_decode_roundtrip_bytes_and_pickled() -> None:
 
     obj = {"name": "example.com", "qtype": 1}
     payload2, is_pickle2 = mongodb_cache_mod._encode_value(obj)
-    assert is_pickle2 == 1
+    assert is_pickle2 == 2
     assert mongodb_cache_mod._decode_value(payload2, is_pickle2) == obj
 
 
