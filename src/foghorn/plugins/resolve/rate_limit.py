@@ -10,6 +10,8 @@ from typing import Mapping, Optional, Tuple
 from dnslib import QTYPE, RCODE, DNSRecord
 from pydantic import BaseModel, Field, ConfigDict, model_validator
 from foghorn.plugins.resolve.admin_ui import config_to_items
+from foghorn.plugins.cache.backends.foghorn_ttl import FoghornTTLCache
+from foghorn.plugins.cache.none import NullCache
 
 from foghorn.plugins.resolve.base import (
     AdminPageSpec,
@@ -18,15 +20,19 @@ from foghorn.plugins.resolve.base import (
     PluginDecision,
     plugin_aliases,
 )
-from foghorn.utils.current_cache import get_current_namespaced_cache, module_namespace
+from foghorn.utils.current_cache import (
+    TTLCacheAdapter,
+    get_current_namespaced_cache,
+    module_namespace,
+)
 from foghorn.utils import dns_names, ip_networks
-from foghorn.utils.register_caches import registered_lru_cached
+from foghorn.utils.register_caches import registered_lru_cache
 
 logger = logging.getLogger(__name__)
 _GLOBAL_RPS_DB_KEY = "global"
 
 
-@registered_lru_cached(maxsize=16384)
+@registered_lru_cache(maxsize=16384)
 def _psl_registrable_domain(qname: str) -> str | None:
     """Brief: Return the PSL registrable domain (a.k.a. eTLD+1) for qname.
 
@@ -123,6 +129,9 @@ class RateLimitConfig(BaseModel):
       - db_path: Path to sqlite3 database storing learned profiles.
 
       - max_profiles: Maximum number of rows permitted in rate_profiles (>= 1).
+      - active_window_max_keys: Maximum number of keys tracked in-memory for the
+        currently active request window (>= 1). This bounds request-path memory
+        overhead for admin snapshot visibility and rollover flush handling.
       - profile_ttl_seconds: Best-effort TTL for profiles; rows older than this
         are pruned during periodic maintenance (0 disables TTL pruning).
       - prune_interval_seconds: Minimum seconds between prune passes (>= 0).
@@ -180,6 +189,7 @@ class RateLimitConfig(BaseModel):
     db_path: str = Field(default="./config/var/dbs/rate_limit.db")
 
     max_profiles: int = Field(default=10000, ge=1)
+    active_window_max_keys: int = Field(default=2048, ge=1)
     profile_ttl_seconds: int = Field(default=7 * 24 * 60 * 60, ge=0)
     prune_interval_seconds: int = Field(default=60, ge=0)
 
@@ -272,7 +282,7 @@ class RateLimitConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
 
 
-@registered_lru_cached(maxsize=16384)
+@registered_lru_cache(maxsize=16384)
 def _to_base_domain(qname: str, base_labels: int = 2) -> str:
     """Brief: Extract a stable base domain for qname (PSL-aware when available).
 
@@ -406,6 +416,23 @@ class RateLimit(BasePlugin):
 
         # sqlite bounds / pruning knobs.
         self.max_profiles = self._parse_int_config("max_profiles", 10000, minimum=1)
+        active_window_default = min(int(self.max_profiles), 2048)
+        self.active_window_max_keys = self._parse_int_config(
+            "active_window_max_keys",
+            int(active_window_default),
+            minimum=1,
+        )
+        if int(self.active_window_max_keys) > int(self.max_profiles):
+            logger.warning(
+                "RateLimit: active_window_max_keys (%d) exceeds max_profiles (%d); clamping",
+                int(self.active_window_max_keys),
+                int(self.max_profiles),
+            )
+        self._active_window_max_keys = max(
+            1,
+            min(int(self.active_window_max_keys), int(self.max_profiles)),
+        )
+        self.active_window_max_keys = int(self._active_window_max_keys)
         self.profile_ttl_seconds = self._parse_int_config(
             "profile_ttl_seconds",
             7 * 24 * 60 * 60,
@@ -516,16 +543,32 @@ class RateLimit(BasePlugin):
         ):  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
             self._ttl = 60
 
-        # Per-key rolling window counters (key -> "window_id:count")
+        # Per-key rolling window counters (key -> "window_id:count").
+        # Rate-limit counters must remain stateful even when DNS response cache
+        # is disabled (cache: none), otherwise each request appears as a
+        # first-in-window request and limits never trigger.
+        cache_namespace = module_namespace(__file__)
         self._window_cache = get_current_namespaced_cache(
-            namespace=module_namespace(__file__),
+            namespace=cache_namespace,
             cache_plugin=self.config.get("cache"),
         )
+        window_cache_backend = getattr(self._window_cache, "_backend", None)
+        if isinstance(window_cache_backend, NullCache):
+            logger.warning(
+                "RateLimit: cache backend %s disables stateful counters; "
+                "using internal in-memory counter cache.",
+                type(window_cache_backend).__name__,
+            )
+            self._window_cache = TTLCacheAdapter(
+                FoghornTTLCache(namespace=cache_namespace)
+            )
         self._window_locks = [threading.Lock() for _ in range(256)]
         # Best-effort in-memory snapshot of current-window key counters for
         # admin visibility. This is independent of sqlite profile persistence,
         # so keys that are active in the current window can be surfaced even
-        # before a completed window writes a rate_profiles row.
+        # before a completed window writes a rate_profiles row. Tracking is
+        # bounded by active_window_max_keys to avoid unbounded per-window
+        # memory growth under high-cardinality traffic.
         self._active_window_counts: dict[str, tuple[int, int]] = {}
         self._active_window_id: Optional[int] = None
         self._active_window_lock = threading.Lock()
@@ -1296,8 +1339,22 @@ class RateLimit(BasePlugin):
                         and int(stale_window_id) == int(previous_window_id)
                     ):
                         stale_entries.append((str(stale_key), int(stale_count)))
-
-            self._active_window_counts[key_text] = (int(window_i), int(count_i))
+            existing_entry = self._active_window_counts.get(key_text)
+            max_active_keys = max(
+                int(
+                    getattr(
+                        self,
+                        "_active_window_max_keys",
+                        getattr(self, "max_profiles", 10000),
+                    )
+                    or 1
+                ),
+                1,
+            )
+            if existing_entry is not None or len(self._active_window_counts) < int(
+                max_active_keys
+            ):
+                self._active_window_counts[key_text] = (int(window_i), int(count_i))
 
         if rollover_happened:
             self._flush_completed_active_window_keys(
@@ -1868,6 +1925,54 @@ class RateLimit(BasePlugin):
             stats_window_seconds,
         )
 
+    def _prune_deny_log_state(
+        self, now: float, interval: int, keep_key: Optional[str] = None
+    ) -> None:
+        """Brief: Prune deny-log throttle maps to bound in-memory key growth.
+
+        Inputs:
+          - now: Current epoch seconds used for staleness checks.
+          - interval: deny_log_interval_seconds throttle window.
+          - keep_key: Optional key to preserve during this prune pass so
+            throttled flush accounting can be emitted for the current key.
+
+        Outputs:
+          - None; removes stale and overflow keys from deny-log tracking maps.
+        """
+
+        cutoff = float(now) - float(interval)
+        stale_keys = [
+            stale_key
+            for stale_key, ts in self._deny_log_ts.items()
+            if float(ts) <= float(cutoff) and stale_key != keep_key
+        ]
+        for stale_key in stale_keys:
+            self._deny_log_ts.pop(stale_key, None)
+            self._deny_log_suppressed.pop(stale_key, None)
+        orphan_suppressed_keys = [
+            suppressed_key
+            for suppressed_key in self._deny_log_suppressed.keys()
+            if suppressed_key not in self._deny_log_ts
+        ]
+        for suppressed_key in orphan_suppressed_keys:
+            self._deny_log_suppressed.pop(suppressed_key, None)
+
+        try:
+            max_profiles = int(getattr(self, "max_profiles", 10000) or 10000)
+        except Exception:
+            max_profiles = 10000
+        max_keys = max(1, int(max_profiles)) * 2
+        overflow = len(self._deny_log_ts) - int(max_keys)
+        if overflow <= 0:
+            return
+        oldest_keys = sorted(
+            self._deny_log_ts.items(),
+            key=lambda key_ts: float(key_ts[1] or 0.0),
+        )[: int(overflow)]
+        for old_key, _old_ts in oldest_keys:
+            self._deny_log_ts.pop(old_key, None)
+            self._deny_log_suppressed.pop(old_key, None)
+
     def _throttled_deny_log(self, key: str, msg: str, *args: object) -> None:
         """Brief: Emit a rate-limited deny log message.
 
@@ -1888,6 +1993,9 @@ class RateLimit(BasePlugin):
 
         now = time.time()
         with self._deny_log_lock:
+            self._prune_deny_log_state(
+                now=float(now), interval=int(interval), keep_key=str(key)
+            )
             last = self._deny_log_ts.get(key, 0.0)
             if now - last < float(interval):
                 self._deny_log_suppressed[key] = (
@@ -1896,6 +2004,9 @@ class RateLimit(BasePlugin):
                 return
             suppressed = self._deny_log_suppressed.pop(key, 0)
             self._deny_log_ts[key] = now
+            self._prune_deny_log_state(
+                now=float(now), interval=int(interval), keep_key=str(key)
+            )
 
         if suppressed > 0:
             logger.info(
