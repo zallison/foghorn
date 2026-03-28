@@ -304,7 +304,7 @@ def test_ensure_worker_falls_back_to_default_capacity_on_bad_limit() -> None:
     store = _RuntimeStore()
     store.max_logging_queue = object()
     store._ensure_worker()
-    assert store._op_queue.maxsize == 4096
+    assert store._op_queue.maxsize == 65536
 
 
 def test_ensure_worker_treats_negative_limit_as_unbounded_queue() -> None:
@@ -335,7 +335,7 @@ def test_ensure_worker_uses_default_capacity_when_limit_attrs_missing() -> None:
 
     store = _RuntimeStore()
     store._ensure_worker()
-    assert store._op_queue.maxsize == 4096
+    assert store._op_queue.maxsize == 65536
 
 
 def test_worker_loop_returns_when_queue_missing() -> None:
