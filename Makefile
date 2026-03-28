@@ -204,7 +204,7 @@ clean:
 
 # ###############
 # ---------------
-# :OpenSSL|Keys:
+# :OpenSSL:Keys:
 #  - Generates CA
 #  - make ssl-cert
 # ---------------
@@ -243,7 +243,7 @@ $(CA_KEY): ssl-key-dir
 		echo "Skipping $(CA_KEY) - already exists"; \
 	fi
 
-# Generate ${SERVER} key, CSR, and sign with CA
+# :ssl:Server: Generate ${SERVER} key, CSR, and sign with CA
 ${SERVER}.crt: ${SERVER}.csr | $(CA_CERT)
 	@echo "== Generating ${SERVER}.crt"
 	openssl x509 -req -in ${SERVER}.csr -CA $(CA_CERT) -CAkey $(CA_KEY) -CAcreateserial -out ${SERVER}.crt -days 365 -sha256
@@ -256,13 +256,14 @@ ${SERVER}.key: ${CA_CERT}
 	@echo "== Generating ${SERVER}.key"
 	openssl genrsa -out ${SERVER}.key 2048
 
-$(CA_PEM): $(CA_CERT)
-	@echo "== Generating $(CA_PEM) from $(CA_CERT)"
-	openssl x509 -in "$(CA_CERT)" -out "$(CA_PEM)" -outform PEM
-
 $(SERVER_PEM): ${SERVER}.crt ${SERVER}.key
 	@echo "== Generating ${SERVER}.pem (cert + key)"
 	cat ${SERVER}.crt ${SERVER}.key > ${SERVER}.pem
+
+# :ssl:CA:
+$(CA_PEM): $(CA_CERT)
+	@echo "== Generating $(CA_PEM) from $(CA_CERT)"
+	openssl x509 -in "$(CA_CERT)" -out "$(CA_PEM)" -outform PEM
 
 # Clean up
 ssl-clean-keys:
