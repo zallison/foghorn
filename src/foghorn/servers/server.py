@@ -30,7 +30,7 @@ from foghorn.servers.transports.tcp import (
     get_tcp_pool,
     tcp_query,
 )  # noqa: F401
-from foghorn.utils.register_caches import registered_lru_cached
+from foghorn.utils.register_caches import registered_lru_cache
 from .dns_runtime_state import DNSRuntimeState
 
 from .server_opcode import _ResolveCoreResult, _handle_non_query_opcode
@@ -88,7 +88,7 @@ _DNSSEC_SEARCH_QUALIFICATION_EXCLUDED_QTYPES: frozenset[int] = frozenset(
 )
 
 
-@registered_lru_cached(maxsize=2048)
+@registered_lru_cache(maxsize=2048)
 def _is_rfc1918_ptr_query_name(qname: str) -> bool:
     """Brief: Determine whether qname is an IPv4 PTR under RFC1918 space.
 
@@ -121,7 +121,7 @@ def _is_rfc1918_ptr_query_name(qname: str) -> bool:
     return any(addr in network for network in _RFC1918_V4_NETWORKS)
 
 
-@registered_lru_cached(maxsize=4096)
+@registered_lru_cache(maxsize=4096)
 def _is_forward_local_blocked_query(qname: str, qtype: int) -> bool:
     """Brief: Determine whether forward_local gate should block this query.
 
@@ -269,7 +269,7 @@ def _schedule_cache_refresh(data: bytes, client_ip: str) -> None:
     # Periodic upstream health cleanup can be called via DNSUDPHandler._cleanup_upstream_health
 
 
-@registered_lru_cached(maxsize=1024)
+@registered_lru_cache(maxsize=1024)
 def _resolve_notify_sender_upstream(sender_ip: str) -> Optional[Dict]:
     """Backward-compat wrapper for ZoneRecords-owned NOTIFY sender lookup."""
     from foghorn.plugins.resolve.zone_records import (

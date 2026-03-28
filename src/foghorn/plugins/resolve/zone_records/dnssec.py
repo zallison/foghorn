@@ -12,7 +12,7 @@ from typing import Dict, List, Optional, Tuple
 
 from dnslib import QTYPE, RR, DNSRecord
 from foghorn.utils import dns_names
-from foghorn.utils.register_caches import registered_lru_cached
+from foghorn.utils.register_caches import registered_lru_cache
 
 try:  # pragma: no cover - optional dependency
     import dns.dnssec as _dns_dnssec
@@ -50,7 +50,7 @@ def _cap_nsec3_iterations(iterations: int, alg: int) -> tuple[int, bool]:
     return iterations, False
 
 
-@registered_lru_cached(maxsize=NSEC3_HASH_CACHE_SIZE)
+@registered_lru_cache(maxsize=NSEC3_HASH_CACHE_SIZE)
 def _nsec3_hash_cached(
     name_text: str,
     salt_value: object,

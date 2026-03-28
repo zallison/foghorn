@@ -15,12 +15,12 @@ from .base import (
     plugin_aliases,
 )
 from foghorn.utils import ip_networks
-from foghorn.utils.register_caches import registered_lru_cached
+from foghorn.utils.register_caches import registered_lru_cache
 
 logger = logging.getLogger(__name__)
 
 
-@registered_lru_cached(maxsize=16384)
+@registered_lru_cache(maxsize=16384)
 def _parse_client_ip(client_ip: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
     """Brief: Parse and cache client IPs for AccessControl hot-path lookups.
 

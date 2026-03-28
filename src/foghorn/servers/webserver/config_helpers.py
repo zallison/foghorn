@@ -21,7 +21,7 @@ from typing import Any, Dict, List, Tuple, Final
 
 import yaml
 
-from foghorn.utils.register_caches import registered_lru_cached
+from foghorn.utils.register_caches import registered_lru_cache
 
 # Short-lived cache for sanitized YAML configuration text returned by /config.
 # The underlying on-disk config rarely changes, so a small TTL avoids repeated
@@ -427,7 +427,7 @@ def _ts_to_utc_iso(ts: float) -> str:
     return dt.isoformat().replace("+00:00", "Z")
 
 
-@registered_lru_cached(maxsize=1024)
+@registered_lru_cache(maxsize=1024)
 def _parse_utc_datetime_cached(value: str, datetime_token: int) -> datetime:
     """Brief: Cached helper for _parse_utc_datetime.
 

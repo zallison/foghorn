@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field, ConfigDict
 from typing_extensions import Literal
 
 from foghorn.plugins.resolve.base import BasePlugin, PluginContext, PluginDecision
-from foghorn.utils.register_caches import registered_lru_cached
+from foghorn.utils.register_caches import registered_lru_cache
 
 logger = logging.getLogger(__name__)
 
@@ -72,7 +72,7 @@ class FileOverDnsConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
 
 
-@registered_lru_cached(maxsize=16_384)
+@registered_lru_cache(maxsize=16_384)
 def _parse_file_over_dns_qname(qname: str) -> Optional[Tuple[str, int, int]]:
     """Brief: Parse qname into (name, start, end) for FileOverDns queries.
 
@@ -118,7 +118,7 @@ def _parse_file_over_dns_qname(qname: str) -> Optional[Tuple[str, int, int]]:
     return name_label.lower(), start, end
 
 
-@registered_lru_cached(maxsize=16_384)
+@registered_lru_cache(maxsize=16_384)
 def _read_file_segment(
     file_path: str,
     start: int,

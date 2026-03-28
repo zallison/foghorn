@@ -43,7 +43,7 @@ from fastapi.responses import (
 )
 from pydantic import BaseModel
 
-from foghorn.utils.register_caches import registered_cached, registered_lru_cached
+from foghorn.utils.register_caches import registered_cached, registered_lru_cache
 
 # psutil is an optional dependency. stats_helpers.get_system_info() consults
 # foghorn.servers.webserver.psutil so tests can monkeypatch it.

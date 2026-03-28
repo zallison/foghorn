@@ -10,14 +10,14 @@ from __future__ import annotations
 
 from typing import Iterable, List, Optional, Set, Union, Final
 
-from foghorn.utils.register_caches import registered_lru_cached
+from foghorn.utils.register_caches import registered_lru_cache
 
 # DNS limits per RFC 1035
 _DNS_MAX_NAME_LEN: Final[int] = 253
 _DNS_MAX_LABEL_LEN: Final[int] = 63
 
 
-@registered_lru_cached(maxsize=16_384)
+@registered_lru_cache(maxsize=16_384)
 def _normalize_name_text(
     text: str,
     *,
@@ -96,7 +96,7 @@ def normalize_name_list(values: Iterable[object]) -> List[str]:
     return out
 
 
-@registered_lru_cached(maxsize=32768)
+@registered_lru_cache(maxsize=32768)
 def is_suffix_match(name: str, suffix: str) -> bool:
     """Brief: Check whether name matches suffix (exact or subdomain).
 
@@ -114,7 +114,6 @@ def is_suffix_match(name: str, suffix: str) -> bool:
     return name_norm == suffix_norm or name_norm.endswith("." + suffix_norm)
 
 
-@registered_lru_cached(maxsize=655_360)
 def is_plain_domain_token(token: str) -> bool:
     """Brief: Validate a plain domain token (Filter list semantics).
 

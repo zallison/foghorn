@@ -7,7 +7,7 @@ import tempfile
 import time
 from typing import Optional
 
-from foghorn.utils.register_caches import registered_lru_cached
+from foghorn.utils.register_caches import registered_lru_cache
 
 logger = logging.getLogger("foghorn.servers.transports.dot")
 
@@ -365,7 +365,7 @@ def _warn_ssl_error_details(
         pass
 
 
-@registered_lru_cached(maxsize=64)
+@registered_lru_cache(maxsize=64)
 def _build_ssl_context(
     server_hostname: Optional[str],
     verify: bool = True,
