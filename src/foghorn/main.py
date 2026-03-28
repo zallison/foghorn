@@ -112,7 +112,7 @@ def main(argv: List[str] | None = None) -> int:
     _log_startup_banner(logger, config_path=str(args.config))
 
     # Apply any configured overrides for decorated caches (registered_cached /
-    # registered_lru_cached) before listeners are started so that diagnostic
+    # registered_lru_cache) before listeners are started so that diagnostic
     # caches use operator-selected sizes/TTLs. This is best-effort and
     # silently ignores malformed entries.
     _apply_cache_overrides_from_config(logger=logger, server_cfg=server_cfg)
@@ -959,6 +959,7 @@ def main(argv: List[str] | None = None) -> int:
                     max_inflight=max_inflight,
                     max_inflight_per_ip=max_inflight_per_ip,
                     max_query_bytes=max_query_bytes,
+                    overload_response=str(udp_cfg.get("overload_response", "servfail")),
                     max_inflight_by_cidr=max_inflight_by_cidr,
                     executor=get_resolver_executor(),
                     thread_name="foghorn-udp",
@@ -1080,6 +1081,7 @@ def main(argv: List[str] | None = None) -> int:
                     idle_timeout_seconds=float(
                         tcp_cfg.get("idle_timeout_seconds", 15.0) or 15.0
                     ),
+                    overload_response=str(tcp_cfg.get("overload_response", "drop")),
                 ),
                 name="foghorn-tcp",
                 listener_key="tcp",
@@ -1145,6 +1147,7 @@ def main(argv: List[str] | None = None) -> int:
                     idle_timeout_seconds=float(
                         dot_cfg.get("idle_timeout_seconds", 15.0) or 15.0
                     ),
+                    overload_response=str(dot_cfg.get("overload_response", "drop")),
                 ),
                 name="foghorn-dot",
                 listener_key="dot",

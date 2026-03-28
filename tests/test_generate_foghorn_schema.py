@@ -83,3 +83,33 @@ def test_generated_schema_includes_query_log_hardening_fields(tmp_path) -> None:
     assert "query_log_retention_max_bytes" in props
     assert "query_log_retention_prune_interval_seconds" in props
     assert "query_log_retention_prune_every_n_inserts" in props
+
+
+def test_generated_schema_includes_listener_overload_response_fields(tmp_path) -> None:
+    """Brief: Generated v2 schema exposes overload_response on listen and per-listener blocks.
+
+    Inputs:
+      - tmp_path: pytest temporary directory for schema output.
+
+    Outputs:
+      - None; asserts global/per-listener overload_response schema fields exist.
+    """
+
+    out_path = tmp_path / "schema.json"
+    ns = _load_schema_module()
+    main_fn = ns.get("main")
+    assert callable(main_fn)
+
+    rc = main_fn(["-o", str(out_path)])
+    assert rc == 0
+    data = json.loads(out_path.read_text(encoding="utf-8"))
+
+    listen_props = data["properties"]["server"]["properties"]["listen"]["properties"]
+    expected_values = ["servfail", "refused", "drop"]
+
+    assert listen_props["overload_response"]["enum"] == expected_values
+    assert listen_props["overload_response"]["default"] == "servfail"
+
+    for listener in ("udp", "tcp", "dot", "doh"):
+        child_props = listen_props[listener]["properties"]
+        assert child_props["overload_response"]["enum"] == expected_values

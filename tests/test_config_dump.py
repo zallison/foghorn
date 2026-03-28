@@ -115,6 +115,59 @@ def test_expand_server_listen_defaults_dict_sections_use_enabled_values() -> Non
     assert bool(listen["tcp"]["enabled"]) is True
 
 
+def test_expand_server_listen_defaults_overload_response_backward_compatible_defaults() -> (
+    None
+):
+    """Brief: Effective config keeps transport-specific overload defaults when global value is absent.
+
+    Inputs:
+      - server_cfg with listener mappings and no global overload_response.
+
+    Outputs:
+      - None; asserts udp=servfail and tcp/dot/doh=drop.
+    """
+
+    server_cfg = {"listen": {"udp": {}, "tcp": {}, "dot": {}, "doh": {}}}
+    config_dump._expand_server_listen_defaults(server_cfg)
+
+    listen = server_cfg["listen"]
+    assert listen["overload_response"] == "servfail"
+    assert listen["udp"]["overload_response"] == "servfail"
+    assert listen["tcp"]["overload_response"] == "drop"
+    assert listen["dot"]["overload_response"] == "drop"
+    assert listen["doh"]["overload_response"] == "drop"
+
+
+def test_expand_server_listen_defaults_overload_response_global_and_override() -> None:
+    """Brief: Effective config applies global overload_response with per-listener override precedence.
+
+    Inputs:
+      - server_cfg with global overload_response and selected listener overrides.
+
+    Outputs:
+      - None; asserts expected precedence and invalid override normalization fallback.
+    """
+
+    server_cfg = {
+        "listen": {
+            "overload_response": "refused",
+            "udp": {"enabled": True},
+            "tcp": {"enabled": True, "overload_response": "drop"},
+            "dot": {"enabled": True, "overload_response": "invalid-value"},
+            "doh": {"enabled": True},
+        }
+    }
+    config_dump._expand_server_listen_defaults(server_cfg)
+
+    listen = server_cfg["listen"]
+    assert listen["overload_response"] == "refused"
+    assert listen["udp"]["overload_response"] == "refused"
+    assert listen["tcp"]["overload_response"] == "drop"
+    # Invalid per-listener values normalize back to global default.
+    assert listen["dot"]["overload_response"] == "refused"
+    assert listen["doh"]["overload_response"] == "refused"
+
+
 def test_expand_server_resolver_defaults_handles_invalid_ints_and_preserves_mode() -> (
     None
 ):

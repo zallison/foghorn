@@ -11,6 +11,7 @@ Outputs:
 from unittest.mock import mock_open, patch
 
 import foghorn.main as main_mod
+import foghorn.main_config_helpers as main_cfg_helpers
 
 
 def test_main_tcp_listener_uses_default_bind_host_and_starts(monkeypatch):
@@ -227,3 +228,60 @@ def test_listen_dns_populates_udp_and_tcp(monkeypatch):
     assert tcp_calls["count"] == 1
     assert tcp_calls["host"] == "0.0.0.0"
     assert tcp_calls["port"] == 5300
+
+
+def test_build_listener_configs_overload_response_backward_compatible_defaults() -> (
+    None
+):
+    """Brief: Listener overload_response defaults stay backward-compatible without global override.
+
+    Inputs:
+      - server_cfg with listener blocks but no global overload_response.
+
+    Outputs:
+      - None; asserts UDP defaults to servfail and TCP/DoT/DoH default to drop.
+    """
+
+    server_cfg = {"listen": {"udp": {}, "tcp": {}, "dot": {}, "doh": {}}}
+
+    _listen, udp_cfg, tcp_cfg, dot_cfg, doh_cfg, _host, _port = (
+        main_cfg_helpers._build_listener_configs(server_cfg=server_cfg)
+    )
+
+    assert udp_cfg["overload_response"] == "servfail"
+    assert tcp_cfg["overload_response"] == "drop"
+    assert dot_cfg["overload_response"] == "drop"
+    assert doh_cfg["overload_response"] == "drop"
+
+
+def test_build_listener_configs_overload_response_global_and_per_listener_override() -> (
+    None
+):
+    """Brief: Global overload_response applies to all listeners unless a listener override is set.
+
+    Inputs:
+      - server_cfg with global overload_response and selected listener overrides.
+
+    Outputs:
+      - None; asserts expected precedence and invalid override normalization fallback.
+    """
+
+    server_cfg = {
+        "listen": {
+            "overload_response": "refused",
+            "udp": {"enabled": True},
+            "tcp": {"enabled": True, "overload_response": "drop"},
+            "dot": {"enabled": True, "overload_response": "invalid-value"},
+            "doh": {"enabled": True},
+        }
+    }
+
+    _listen, udp_cfg, tcp_cfg, dot_cfg, doh_cfg, _host, _port = (
+        main_cfg_helpers._build_listener_configs(server_cfg=server_cfg)
+    )
+
+    assert udp_cfg["overload_response"] == "refused"
+    assert tcp_cfg["overload_response"] == "drop"
+    # Invalid per-listener values normalize back to the effective default.
+    assert dot_cfg["overload_response"] == "refused"
+    assert doh_cfg["overload_response"] == "refused"

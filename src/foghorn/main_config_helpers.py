@@ -11,6 +11,7 @@ from .config.config_parser import (
     normalize_upstream_backup_config,
     normalize_upstream_config,
 )
+from .servers.overload_response import normalize_overload_response
 from .servers.runtime_state import RuntimeState
 
 
@@ -167,6 +168,26 @@ def _merge_listen_subsection(
     return out
 
 
+def _resolve_listener_overload_response(
+    *,
+    section_cfg: dict,
+    default: str,
+) -> str:
+    """Brief: Resolve a listener overload_response with safe normalization.
+
+    Inputs:
+      - section_cfg: Listener subsection mapping (udp/tcp/dot/doh).
+      - default: Effective default policy for this listener.
+
+    Outputs:
+      - str: Normalized overload policy ('servfail'|'refused'|'drop').
+    """
+
+    return normalize_overload_response(
+        section_cfg.get("overload_response"), default=default
+    )
+
+
 def _build_listener_configs(
     *,
     server_cfg: dict,
@@ -215,6 +236,23 @@ def _build_listener_configs(
     except (TypeError, ValueError):
         default_port = 5335
 
+    global_overload_configured = "overload_response" in listen_cfg
+    global_overload_response = normalize_overload_response(
+        listen_cfg.get("overload_response"),
+        default="servfail",
+    )
+    if global_overload_configured:
+        udp_overload_default = global_overload_response
+        tcp_overload_default = global_overload_response
+        dot_overload_default = global_overload_response
+        doh_overload_default = global_overload_response
+    else:
+        # Backward-compatible transport defaults when no global override is set.
+        udp_overload_default = "servfail"
+        tcp_overload_default = "drop"
+        dot_overload_default = "drop"
+        doh_overload_default = "drop"
+
     udp_section = listen_cfg.get("udp")
     if isinstance(udp_section, dict):
         udp_default_enabled = bool(udp_section.get("enabled", True))
@@ -229,6 +267,10 @@ def _build_listener_configs(
             "host": default_host,
             "port": default_port or 5335,
         },
+    )
+    udp_cfg["overload_response"] = _resolve_listener_overload_response(
+        section_cfg=udp_cfg,
+        default=udp_overload_default,
     )
 
     tcp_section = listen_cfg.get("tcp")
@@ -246,6 +288,10 @@ def _build_listener_configs(
             "port": default_port or 5335,
         },
     )
+    tcp_cfg["overload_response"] = _resolve_listener_overload_response(
+        section_cfg=tcp_cfg,
+        default=tcp_overload_default,
+    )
 
     dot_section = listen_cfg.get("dot")
     if isinstance(dot_section, dict):
@@ -257,6 +303,10 @@ def _build_listener_configs(
         key="dot",
         defaults={"enabled": dot_default_enabled, "host": default_host, "port": 853},
     )
+    dot_cfg["overload_response"] = _resolve_listener_overload_response(
+        section_cfg=dot_cfg,
+        default=dot_overload_default,
+    )
 
     doh_section = listen_cfg.get("doh")
     if isinstance(doh_section, dict):
@@ -267,6 +317,10 @@ def _build_listener_configs(
         listen_cfg=listen_cfg,
         key="doh",
         defaults={"enabled": doh_default_enabled, "host": default_host, "port": 1443},
+    )
+    doh_cfg["overload_response"] = _resolve_listener_overload_response(
+        section_cfg=doh_cfg,
+        default=doh_overload_default,
     )
 
     return listen_cfg, udp_cfg, tcp_cfg, dot_cfg, doh_cfg, default_host, default_port
