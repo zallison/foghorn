@@ -23,10 +23,7 @@ from __future__ import annotations
 import threading
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
-
-from cachetools import TTLCache
-
-from foghorn.utils.register_caches import registered_cached
+from foghorn.utils.register_caches import registered_ttl_cache
 
 
 class RingBuffer:
@@ -74,7 +71,7 @@ class RingBuffer:
                 if overflow > 0:
                     self._items = self._items[overflow:]
 
-    @registered_cached(cache=TTLCache(maxsize=1, ttl=10))
+    @registered_ttl_cache(maxsize=1, ttl=10)
     def snapshot(self, limit: Optional[int] = None) -> List[Any]:
         """Brief: Return a copy of buffered items, optionally truncated to newest N.
 
@@ -227,7 +224,7 @@ class RuntimeState:
                 error=msg,
             )
 
-    @registered_cached(cache=TTLCache(maxsize=1, ttl=10))
+    @registered_ttl_cache(maxsize=1, ttl=10)
     def snapshot(self) -> Dict[str, Any]:
         """Brief: Return a JSON-safe snapshot of current runtime state.
 

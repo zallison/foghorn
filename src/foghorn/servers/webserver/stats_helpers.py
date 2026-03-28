@@ -7,10 +7,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from typing import Any, Dict
-
-from cachetools import TTLCache
-
-from foghorn.utils.register_caches import registered_cached
+from foghorn.utils.register_caches import registered_ttl_cache
 
 from ...stats import StatsCollector, StatsSnapshot
 
@@ -191,7 +188,7 @@ def _build_traffic_payload_from_snapshot(
     return payload
 
 
-@registered_cached(cache=TTLCache(maxsize=1, ttl=5))
+@registered_ttl_cache(maxsize=1, ttl=5)
 def _read_proc_meminfo(path: str = "/proc/meminfo") -> Dict[str, int]:
     """Brief: Parse a /proc/meminfo-style file into byte counts.
 

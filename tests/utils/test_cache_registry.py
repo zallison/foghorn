@@ -138,8 +138,8 @@ def test_registered_cached_with_rr_backend_records_backend_and_maxsize() -> None
     assert entry.get("maxsize") == 32
 
 
-def test_registered_lru_cached_records_hit_and_miss_counters() -> None:
-    """Brief: registered_lru_cached derives hit/miss counts from cache_info().
+def test_registered_lru_cache_records_hit_and_miss_counters() -> None:
+    """Brief: registered_lru_cache derives hit/miss counts from cache_info().
 
     Inputs:
       - None.
@@ -148,7 +148,7 @@ def test_registered_lru_cached_records_hit_and_miss_counters() -> None:
       - None; asserts lru_cache wrapper records calls, hits, and misses.
     """
 
-    @cache_reg.registered_lru_cached(maxsize=4)
+    @cache_reg.registered_lru_cache(maxsize=4)
     def fn_lru(x: int) -> int:
         return x * 3
 
@@ -169,6 +169,34 @@ def test_registered_lru_cached_records_hit_and_miss_counters() -> None:
     assert isinstance(entry.get("size_current"), int) and entry["size_current"] >= 0
 
 
+def test_registered_ttl_cache_records_hit_and_miss_counters() -> None:
+    """Brief: registered_ttl_cache records ttlcache metadata and counters.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts maxsize/ttl metadata and hit/miss counters are recorded.
+    """
+
+    @cache_reg.registered_ttl_cache(maxsize=8, ttl=30)
+    def fn_ttl_helper(x: int) -> int:
+        return x + 10
+
+    # One miss then one hit for the same key.
+    assert fn_ttl_helper(1) == 11
+    assert fn_ttl_helper(1) == 11
+
+    snapshot = cache_reg.get_registered_cached()
+    entry = _find_last_entry_by_backend(snapshot, "ttlcache")
+    assert entry.get("backend") == "ttlcache"
+    assert entry.get("maxsize") == 8
+    assert entry.get("ttl") == 30
+    assert isinstance(entry.get("calls_total"), int) and entry["calls_total"] >= 2
+    assert isinstance(entry.get("cache_hits"), int) and entry["cache_hits"] >= 0
+    assert isinstance(entry.get("cache_misses"), int) and entry["cache_misses"] >= 0
+
+
 def test_apply_decorated_cache_overrides_updates_lru_cache_maxsize() -> None:
     """Brief: apply_decorated_cache_overrides can shrink lru_cache maxsize.
 
@@ -179,7 +207,7 @@ def test_apply_decorated_cache_overrides_updates_lru_cache_maxsize() -> None:
       - None; asserts that cache_parameters().maxsize reflects the override.
     """
 
-    @cache_reg.registered_lru_cached(maxsize=4)
+    @cache_reg.registered_lru_cache(maxsize=4)
     def fn_lru_override(x: int) -> int:
         return x * 7
 
@@ -429,7 +457,7 @@ def test__apply_lru_override_for_entry_defensive_paths() -> None:
         name="fn_ttl_only",
     )
 
-    @cache_reg.registered_lru_cached(maxsize=4)
+    @cache_reg.registered_lru_cache(maxsize=4)
     def fn_lru_same(x: int) -> int:
         return x
 

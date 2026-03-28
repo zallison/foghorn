@@ -25,7 +25,7 @@ from foghorn.plugins.resolve.base import (
 )
 from foghorn.servers.dns_runtime_state import DNSRuntimeState
 from foghorn.utils import dns_names, ip_networks
-from foghorn.utils.register_caches import registered_cached
+from foghorn.utils.register_caches import registered_ttl_cache
 
 from . import (
     axfr_polling,
@@ -1172,7 +1172,7 @@ def _resolve_notify_sender_for_zone(
     return None
 
 
-@registered_cached(cache=TTLCache(maxsize=1024, ttl=10))
+@registered_ttl_cache(maxsize=1024, ttl=10)
 def _zone_has_axfr_config(plugin: "ZoneRecords", zone_name: str) -> bool:
     """Brief: Determine whether AXFR config exists for a zone.
 

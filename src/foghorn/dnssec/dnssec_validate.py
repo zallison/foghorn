@@ -26,9 +26,8 @@ import dns.message
 import dns.name
 import dns.rdatatype
 import dns.resolver
-from cachetools import TTLCache
 
-from foghorn.utils.register_caches import registered_cached
+from foghorn.utils.register_caches import registered_ttl_cache
 
 
 def _parse_resolv_conf_nameservers(path: str = "/etc/resolv.conf") -> list[str]:
@@ -281,7 +280,7 @@ def _fetch(r: dns.resolver.Resolver, name: dns.name.Name, rdtype: str):
     return r.resolve(name, rdtype, raise_on_no_answer=True)
 
 
-@registered_cached(cache=TTLCache(maxsize=16, ttl=86400))
+@registered_ttl_cache(maxsize=16, ttl=86400)
 def _root_dnskey_rrset() -> Optional[dns.rrset.RRset]:
     """Return the current root trust anchor DNSKEY RRset.
 
@@ -362,8 +361,48 @@ def _find_zone_apex(
 # DNSKEY/DS caches keyed by owner name with per-entry TTLs derived from RRset
 # TTLs, clamped to a maximum lifetime.
 _MAX_KEY_CACHE_TTL_SECONDS = 4 * 3600  # 4 hours
+_MAX_KEY_CACHE_ENTRIES = 4096
 _DNSKEY_CACHE: dict[str, Tuple[dns.rrset.RRset, float]] = {}
 _DS_CACHE: dict[str, Tuple[dns.rrset.RRset, float]] = {}
+
+
+def _evict_expired_cache_entries(
+    cache: dict[str, Tuple[dns.rrset.RRset, float]], now: float
+) -> None:
+    """Evict cache entries whose expiration timestamp has passed.
+
+    Inputs:
+      - cache: Mapping of owner-name key to (rrset, expires_at_epoch_seconds).
+      - now: Current epoch time to compare against entry expiry.
+
+    Outputs:
+      - None
+    """
+    expired_keys = [
+        key for key, (_rrset, expires_at) in cache.items() if now >= expires_at
+    ]
+    for key in expired_keys:
+        cache.pop(key, None)
+
+
+def _enforce_cache_entry_limit(
+    cache: dict[str, Tuple[dns.rrset.RRset, float]], max_entries: int
+) -> None:
+    """Ensure a cache dictionary does not exceed a configured maximum size.
+
+    Inputs:
+      - cache: Mapping of owner-name key to (rrset, expires_at_epoch_seconds).
+      - max_entries: Maximum number of entries to retain in the cache.
+
+    Outputs:
+      - None
+    """
+    overage = len(cache) - max_entries
+    if overage <= 0:
+        return
+    keys_by_expiry = sorted(cache.keys(), key=lambda cache_key: cache[cache_key][1])
+    for key in keys_by_expiry[:overage]:
+        cache.pop(key, None)
 
 
 def _fetch_dnskey_cached(
@@ -376,16 +415,19 @@ def _fetch_dnskey_cached(
     """
     key = name.to_text()
     now = time.time()
+    _evict_expired_cache_entries(_DNSKEY_CACHE, now)
     cached_entry = _DNSKEY_CACHE.get(key)
     if cached_entry is not None:
         rrset, expires_at = cached_entry
         if now < expires_at:
             return rrset
+        _DNSKEY_CACHE.pop(key, None)
         # Expired entry; fall through to refresh.
     rr = _fetch(r, name, "DNSKEY").rrset
     ttl = getattr(rr, "ttl", _MAX_KEY_CACHE_TTL_SECONDS)
     ttl = max(0, min(int(ttl), _MAX_KEY_CACHE_TTL_SECONDS))
     _DNSKEY_CACHE[key] = (rr, now + ttl)
+    _enforce_cache_entry_limit(_DNSKEY_CACHE, _MAX_KEY_CACHE_ENTRIES)
     return rr
 
 
@@ -397,15 +439,18 @@ def _fetch_ds_cached(r: dns.resolver.Resolver, name: dns.name.Name) -> dns.rrset
     """
     key = name.to_text()
     now = time.time()
+    _evict_expired_cache_entries(_DS_CACHE, now)
     cached_entry = _DS_CACHE.get(key)
     if cached_entry is not None:
         rrset, expires_at = cached_entry
         if now < expires_at:
             return rrset
+        _DS_CACHE.pop(key, None)
     rr = _fetch(r, name, "DS").rrset
     ttl = getattr(rr, "ttl", _MAX_KEY_CACHE_TTL_SECONDS)
     ttl = max(0, min(int(ttl), _MAX_KEY_CACHE_TTL_SECONDS))
     _DS_CACHE[key] = (rr, now + ttl)
+    _enforce_cache_entry_limit(_DS_CACHE, _MAX_KEY_CACHE_ENTRIES)
     return rr
 
 
@@ -558,7 +603,7 @@ def _validate_chain(
         return None
 
 
-@registered_cached(cache=TTLCache(maxsize=1024, ttl=120))
+@registered_ttl_cache(maxsize=1024, ttl=120)
 def _find_zone_apex_cached(
     qname_text: str, udp_payload_size: int
 ) -> Optional[dns.name.Name]:
@@ -579,7 +624,7 @@ def _find_zone_apex_cached(
         return None
 
 
-@registered_cached(cache=TTLCache(maxsize=4096, ttl=900))
+@registered_ttl_cache(maxsize=4096, ttl=900)
 def _validate_chain_cached(
     apex_text: str, udp_payload_size: int
 ) -> Optional[dns.rrset.RRset]:
