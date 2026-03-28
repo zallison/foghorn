@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from foghorn.utils.register_caches import registered_lru_cached
+from foghorn.utils.register_caches import registered_lru_cache
 
 # Heuristic support for common ccTLD + second-level public suffix patterns.
 #
@@ -25,7 +25,7 @@ _CCTLD_SECOND_LEVEL_PUBLIC_SUFFIXES = {
 }
 
 
-@registered_lru_cached(maxsize=(16 * 1024))
+@registered_lru_cache(maxsize=(16 * 1024))
 def _normalize_domain(domain: str) -> str:
     """
     Normalize domain name for statistics tracking.
@@ -45,7 +45,7 @@ def _normalize_domain(domain: str) -> str:
     return dns_names.normalize_name(domain)
 
 
-@registered_lru_cached(maxsize=(16 * 1024))
+@registered_lru_cache(maxsize=(16 * 1024))
 def _base_domain(domain: str) -> str:
     """Return the registrable base domain for a name.
 
@@ -91,7 +91,7 @@ def _base_domain(domain: str) -> str:
     return ".".join(parts[-2:])
 
 
-@registered_lru_cached(maxsize=(16 * 1024))
+@registered_lru_cache(maxsize=(16 * 1024))
 def _is_subdomain(domain: str) -> bool:
     """Return True if the name should be treated as a subdomain.
 

@@ -8,7 +8,7 @@ from collections import defaultdict
 from typing import Dict, List, Optional, Set
 
 from foghorn.plugins.querylog import BaseStatsStore
-from foghorn.utils.register_caches import registered_lru_cached
+from foghorn.utils.register_caches import registered_lru_cache
 from foghorn.utils import ip_networks
 
 from ..domain import _normalize_domain
@@ -20,7 +20,7 @@ DEFAULT_MAX_UNIQUE_CLIENTS = 50000
 DEFAULT_MAX_UNIQUE_DOMAINS = 50000
 
 
-@registered_lru_cached(maxsize=4096)
+@registered_lru_cache(maxsize=4096)
 def _parse_client_ip_for_ignore(
     client_ip: str,
 ) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
