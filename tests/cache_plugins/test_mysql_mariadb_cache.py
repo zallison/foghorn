@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional
 import pytest
 
 from foghorn.plugins.cache.registry import get_cache_plugin_class
+from foghorn.plugins.cache.safe_codec import SAFE_SERIALIZED_FLAG
 
 
 class FakeMySQLConnection:
@@ -147,7 +148,7 @@ def test_mysql_cache_encode_decode_roundtrip() -> None:
 
     obj = {"name": "example.com", "qtype": 1}
     payload2, is_pickle2 = MySQLTTLCache._encode(obj)
-    assert is_pickle2 == 1
+    assert is_pickle2 == SAFE_SERIALIZED_FLAG
     assert MySQLTTLCache._decode(payload2, is_pickle2) == obj
 
 
