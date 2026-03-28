@@ -33,6 +33,7 @@ from foghorn.config.config_parser import (
     normalize_upstream_backup_config,
     normalize_upstream_config,
 )
+from foghorn.servers.overload_response import normalize_overload_response
 
 
 def build_effective_config_for_display(cfg: Dict[str, Any]) -> Dict[str, Any]:
@@ -135,6 +136,24 @@ def _expand_server_listen_defaults(server_cfg: Dict[str, Any]) -> None:
     except (TypeError, ValueError):
         default_port = 5335
 
+    global_overload_configured = "overload_response" in listen_cfg
+    global_overload_response = normalize_overload_response(
+        listen_cfg.get("overload_response"),
+        default="servfail",
+    )
+    listen_cfg["overload_response"] = global_overload_response
+    if global_overload_configured:
+        udp_overload_default = global_overload_response
+        tcp_overload_default = global_overload_response
+        dot_overload_default = global_overload_response
+        doh_overload_default = global_overload_response
+    else:
+        # Backward-compatible transport defaults when no global override is set.
+        udp_overload_default = "servfail"
+        tcp_overload_default = "drop"
+        dot_overload_default = "drop"
+        doh_overload_default = "drop"
+
     def _sub(key: str, defaults: Dict[str, Any]) -> Dict[str, Any]:
         block = listen_cfg.get(key, {}) or {}
         if not isinstance(block, dict):
@@ -163,6 +182,7 @@ def _expand_server_listen_defaults(server_cfg: Dict[str, Any]) -> None:
         "enabled": udp_default_enabled,
         "host": default_host,
         "port": default_port or 5335,
+        "overload_response": udp_overload_default,
         # Runtime defaults (see foghorn.main).
         "use_asyncio": False,
         "allow_threaded_fallback": True,
@@ -173,22 +193,32 @@ def _expand_server_listen_defaults(server_cfg: Dict[str, Any]) -> None:
         "max_response_bytes": None,
     }
     listen_cfg["udp"] = _sub("udp", udp_defaults)
+    listen_cfg["udp"]["overload_response"] = normalize_overload_response(
+        listen_cfg["udp"].get("overload_response"),
+        default=udp_overload_default,
+    )
 
     tcp_defaults: Dict[str, Any] = {
         "enabled": tcp_default_enabled,
         "host": default_host,
         "port": default_port or 5335,
+        "overload_response": tcp_overload_default,
         "max_connections": 1024,
         "max_connections_per_ip": 64,
         "max_queries_per_connection": 100,
         "idle_timeout_seconds": 15.0,
     }
     listen_cfg["tcp"] = _sub("tcp", tcp_defaults)
+    listen_cfg["tcp"]["overload_response"] = normalize_overload_response(
+        listen_cfg["tcp"].get("overload_response"),
+        default=tcp_overload_default,
+    )
 
     dot_defaults: Dict[str, Any] = {
         "enabled": dot_default_enabled,
         "host": default_host,
         "port": 853,
+        "overload_response": dot_overload_default,
         "max_connections": 1024,
         "max_connections_per_ip": 64,
         "max_queries_per_connection": 100,
@@ -198,16 +228,25 @@ def _expand_server_listen_defaults(server_cfg: Dict[str, Any]) -> None:
         "key_file": None,
     }
     listen_cfg["dot"] = _sub("dot", dot_defaults)
+    listen_cfg["dot"]["overload_response"] = normalize_overload_response(
+        listen_cfg["dot"].get("overload_response"),
+        default=dot_overload_default,
+    )
 
     doh_defaults: Dict[str, Any] = {
         "enabled": doh_default_enabled,
         "host": default_host,
         "port": 1443,
+        "overload_response": doh_overload_default,
         "cert_file": None,
         "key_file": None,
         "allow_threaded_fallback": True,
     }
     listen_cfg["doh"] = _sub("doh", doh_defaults)
+    listen_cfg["doh"]["overload_response"] = normalize_overload_response(
+        listen_cfg["doh"].get("overload_response"),
+        default=doh_overload_default,
+    )
 
 
 def _expand_server_resolver_defaults(server_cfg: Dict[str, Any]) -> None:
