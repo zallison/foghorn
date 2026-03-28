@@ -12,6 +12,7 @@ from __future__ import annotations
 import base64
 import hmac
 import hashlib
+import os
 import threading
 import time
 from types import SimpleNamespace
@@ -60,6 +61,54 @@ def test_load_list_helpers_strip_comments_and_normalize(tmp_path) -> None:
         "192.0.2.0/24",
         "2001:db8::/32",
     ]
+
+
+def test_load_names_list_from_file_reuses_registered_cache_for_same_signature(
+    tmp_path, monkeypatch
+) -> None:
+    names_file = tmp_path / "names_cached.txt"
+    names_file.write_text("Example.COM.\n", encoding="utf-8")
+    call_count = {"open_calls": 0}
+    original_open = open
+
+    def _counting_open(*args, **kwargs):
+        if args and args[0] == str(names_file):
+            call_count["open_calls"] += 1
+        return original_open(*args, **kwargs)
+
+    monkeypatch.setattr("builtins.open", _counting_open)
+
+    assert uh.load_names_list_from_file(str(names_file)) == ["example.com"]
+    assert uh.load_names_list_from_file(str(names_file)) == ["example.com"]
+    assert call_count["open_calls"] == 1
+
+
+def test_load_names_list_from_file_cache_invalidates_on_signature_change(
+    tmp_path, monkeypatch
+) -> None:
+    names_file = tmp_path / "names_invalidates.txt"
+    names_file.write_text("a.example.com\n", encoding="utf-8")
+    call_count = {"open_calls": 0}
+    original_open = open
+
+    def _counting_open(*args, **kwargs):
+        if args and args[0] == str(names_file):
+            call_count["open_calls"] += 1
+        return original_open(*args, **kwargs)
+
+    monkeypatch.setattr("builtins.open", _counting_open)
+
+    assert uh.load_names_list_from_file(str(names_file)) == ["a.example.com"]
+
+    names_file.write_text("b.example.com\n", encoding="utf-8")
+    stat_result = os.stat(str(names_file))
+    os.utime(
+        str(names_file),
+        ns=(int(stat_result.st_atime_ns), int(stat_result.st_mtime_ns) + 1_000_000_000),
+    )
+
+    assert uh.load_names_list_from_file(str(names_file)) == ["b.example.com"]
+    assert call_count["open_calls"] == 2
 
 
 def test_load_helpers_missing_files_return_empty_and_do_not_raise(

@@ -670,7 +670,7 @@ def test_process_update_message_rate_limits_prereq_scope_and_update_error_paths(
     monkeypatch.setattr(
         up,
         "verify_name_authorization",
-        lambda _name, _zone, auth_scope_config=None: captured_scope.setdefault(
+        lambda _name, _zone, auth_scope_config=None, **_kw: captured_scope.setdefault(
             "scope", auth_scope_config
         )
         or True,

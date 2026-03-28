@@ -16,11 +16,10 @@ Notes:
 from __future__ import annotations
 
 import logging
+import hashlib
 import os
 import time
 from typing import Any, Dict, List, Optional, Tuple
-from cachetools import TTLCache
-
 import dns.exception
 import dns.flags
 import dns.message
@@ -32,7 +31,7 @@ import dns.rdatatype
 import dns.tsig
 import dns.tsigkeyring
 from dnslib import DNSRecord, QTYPE, RR
-from foghorn.utils.register_caches import registered_cached
+from foghorn.utils.register_caches import registered_ttl_cache
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +39,7 @@ logger = logging.getLogger(__name__)
 TSIG_TIMESTAMP_FUDGE = 300
 
 
-@registered_cached(cache=TTLCache(maxsize=4096, ttl=3600))
+@registered_ttl_cache(maxsize=4096, ttl=3600)
 def _normalize_dns_name(name: str) -> str:
     """Brief: Normalize a DNS name for comparisons.
 
@@ -55,7 +54,7 @@ def _normalize_dns_name(name: str) -> str:
     return dns_names.normalize_name(name)
 
 
-@registered_cached(cache=TTLCache(maxsize=1024, ttl=3600))
+@registered_ttl_cache(maxsize=1024, ttl=3600)
 def _normalize_tsig_algorithm(alg: str) -> str:
     """Brief: Normalize a TSIG algorithm name.
 
@@ -851,6 +850,18 @@ def process_update_message(
         auth_scope_config = ctx.tsig_key_config
     elif isinstance(ctx.psk_token_config, dict):
         auth_scope_config = ctx.psk_token_config
+    auth_scope_cache_prefix: Optional[str] = None
+    if isinstance(ctx.tsig_key_config, dict):
+        key_name = _normalize_dns_name(ctx.tsig_key_config.get("name", ""))
+        auth_scope_cache_prefix = f"{apex_norm}_tsig_{key_name or 'unnamed'}"
+    elif isinstance(ctx.psk_token_config, dict):
+        token = str(ctx.psk_token_config.get("token", ""))
+        token_hash = (
+            hashlib.sha256(token.encode("utf-8")).hexdigest()[:16]
+            if token
+            else "anonymous"
+        )
+        auth_scope_cache_prefix = f"{apex_norm}_psk_{token_hash}"
 
     # Check name/value authorization for each update RRset
     for update_rrset in updates:
@@ -864,6 +875,9 @@ def process_update_message(
             owner_norm,
             zone_config,
             auth_scope_config=auth_scope_config,
+            plugin=plugin,
+            zone_apex=apex_norm,
+            auth_scope_cache_prefix=auth_scope_cache_prefix,
         ):
             resp = dns.message.make_response(request_msg)
             resp.set_rcode(dns.rcode.NOTAUTH)
@@ -891,6 +905,9 @@ def process_update_message(
                     qtype_int,
                     zone_config,
                     auth_scope_config=auth_scope_config,
+                    plugin=plugin,
+                    zone_apex=apex_norm,
+                    auth_scope_cache_prefix=auth_scope_cache_prefix,
                 ):
                     resp = dns.message.make_response(request_msg)
                     resp.set_rcode(dns.rcode.NOTAUTH)
@@ -959,6 +976,12 @@ def process_update_message(
                             ),
                         }
                     else:  # pragma: no cover - nocover: lock contention path is scheduler/environment dependent
+                        try:
+                            journal_writer.close()
+                        except (
+                            Exception
+                        ):  # pragma: no cover - nocover: defensive close failure on lock-contention path
+                            pass
                         journal_writer = None
                 except (
                     Exception
@@ -967,7 +990,12 @@ def process_update_message(
 
         try:
             update_rcode, update_err = apply_update_operations(
-                updates, plugin, apex_norm, journal_writer=journal_writer, actor=actor
+                updates,
+                plugin,
+                apex_norm,
+                journal_writer=journal_writer,
+                actor=actor,
+                require_journal_persistence=bool(persistence_enabled),
             )
         finally:
             if journal_writer is not None:
@@ -1041,10 +1069,13 @@ def verify_client_authorization(
     if not allow_clients and not allow_clients_files:
         return True, None
 
-    clients_list = uh.combine_lists(
-        allow_clients,
-        allow_clients_files,
-        uh.load_cidr_list_from_file,
+    cache_key = f"{_normalize_dns_name(ctx.zone_apex)}_allow_clients"
+    clients_list = uh.get_cached_combined_list(
+        plugin=ctx.plugin,
+        cache_key=cache_key,
+        inline=allow_clients,
+        files=allow_clients_files,
+        loader_func=uh.load_cidr_list_from_file,
     )
 
     if not clients_list:
@@ -1060,6 +1091,9 @@ def verify_name_authorization(
     name: str,
     zone_config: dict,
     auth_scope_config: Optional[dict] = None,
+    plugin: Optional[object] = None,
+    zone_apex: Optional[str] = None,
+    auth_scope_cache_prefix: Optional[str] = None,
 ) -> bool:
     """Brief: Verify name is allowed for updates.
 
@@ -1067,34 +1101,47 @@ def verify_name_authorization(
       - name: Domain name to update.
       - zone_config: Zone configuration.
       - auth_scope_config: Optional per-principal scope config (TSIG key or PSK token).
+      - plugin: Optional ZoneRecords plugin instance for cached file-list resolution.
+      - zone_apex: Optional zone apex used to namespace cache keys.
+      - auth_scope_cache_prefix: Optional per-principal cache key prefix.
 
     Outputs:
       - bool: True if name is allowed.
     """
     from foghorn.plugins.resolve.zone_records import update_helpers as uh
 
-    scopes = [s for s in (zone_config, auth_scope_config) if isinstance(s, dict)]
+    zone_prefix = f"{_normalize_dns_name(zone_apex)}_zone" if zone_apex else "zone"
+    auth_prefix = auth_scope_cache_prefix or "auth_scope"
+    scopes: List[Tuple[dict, str]] = []
+    if isinstance(zone_config, dict):
+        scopes.append((zone_config, zone_prefix))
+    if isinstance(auth_scope_config, dict):
+        scopes.append((auth_scope_config, auth_prefix))
 
     # Any matching block list from any scope denies the update.
-    for scope in scopes:
-        blocked_list = uh.combine_lists(
-            scope.get("block_names", []),
-            scope.get("block_names_files", []),
-            uh.load_names_list_from_file,
+    for scope, scope_prefix in scopes:
+        blocked_list = uh.get_cached_combined_list(
+            plugin=plugin,
+            cache_key=f"{scope_prefix}_block_names",
+            inline=scope.get("block_names", []),
+            files=scope.get("block_names_files", []),
+            loader_func=uh.load_names_list_from_file,
         )
         if blocked_list and uh.matches_name_pattern(name, blocked_list):
             return False
 
     # If a scope defines allow names, this name must match that scope.
     # Multiple allow scopes therefore behave as intersection.
-    for scope in scopes:
+    for scope, scope_prefix in scopes:
         allow_names = scope.get("allow_names", [])
         allow_names_files = scope.get("allow_names_files", [])
         if allow_names or allow_names_files:
-            allowed_list = uh.combine_lists(
-                allow_names,
-                allow_names_files,
-                uh.load_names_list_from_file,
+            allowed_list = uh.get_cached_combined_list(
+                plugin=plugin,
+                cache_key=f"{scope_prefix}_allow_names",
+                inline=allow_names,
+                files=allow_names_files,
+                loader_func=uh.load_names_list_from_file,
             )
             if allowed_list and not uh.matches_name_pattern(name, allowed_list):
                 return False
@@ -1107,6 +1154,9 @@ def verify_value_authorization(
     qtype: int,
     zone_config: dict,
     auth_scope_config: Optional[dict] = None,
+    plugin: Optional[object] = None,
+    zone_apex: Optional[str] = None,
+    auth_scope_cache_prefix: Optional[str] = None,
 ) -> bool:
     """Brief: Verify A/AAAA record value is allowed.
 
@@ -1115,6 +1165,9 @@ def verify_value_authorization(
       - qtype: Record type (A=1, AAAA=28).
       - zone_config: Zone configuration.
       - auth_scope_config: Optional per-principal scope config (TSIG key or PSK token).
+      - plugin: Optional ZoneRecords plugin instance for cached file-list resolution.
+      - zone_apex: Optional zone apex used to namespace cache keys.
+      - auth_scope_cache_prefix: Optional per-principal cache key prefix.
 
     Outputs:
       - bool: True if value is allowed.
@@ -1126,27 +1179,37 @@ def verify_value_authorization(
     from foghorn.plugins.resolve.zone_records import update_helpers as uh
     from foghorn.utils import ip_networks
 
-    scopes = [s for s in (zone_config, auth_scope_config) if isinstance(s, dict)]
+    zone_prefix = f"{_normalize_dns_name(zone_apex)}_zone" if zone_apex else "zone"
+    auth_prefix = auth_scope_cache_prefix or "auth_scope"
+    scopes: List[Tuple[dict, str]] = []
+    if isinstance(zone_config, dict):
+        scopes.append((zone_config, zone_prefix))
+    if isinstance(auth_scope_config, dict):
+        scopes.append((auth_scope_config, auth_prefix))
 
     # Any matching block list from any scope denies the update.
-    for scope in scopes:
-        blocked_list = uh.combine_lists(
-            scope.get("block_update_ips", []),
-            scope.get("block_update_ips_files", []),
-            uh.load_cidr_list_from_file,
+    for scope, scope_prefix in scopes:
+        blocked_list = uh.get_cached_combined_list(
+            plugin=plugin,
+            cache_key=f"{scope_prefix}_block_update_ips",
+            inline=scope.get("block_update_ips", []),
+            files=scope.get("block_update_ips_files", []),
+            loader_func=uh.load_cidr_list_from_file,
         )
         if blocked_list and ip_networks.ip_string_in_cidrs(value, blocked_list):
             return False
 
     # If a scope defines allow_update_ips, the value must match that scope.
-    for scope in scopes:
+    for scope, scope_prefix in scopes:
         allow_ips = scope.get("allow_update_ips", [])
         allow_ips_files = scope.get("allow_update_ips_files", [])
         if allow_ips or allow_ips_files:
-            allowed_list = uh.combine_lists(
-                allow_ips,
-                allow_ips_files,
-                uh.load_cidr_list_from_file,
+            allowed_list = uh.get_cached_combined_list(
+                plugin=plugin,
+                cache_key=f"{scope_prefix}_allow_update_ips",
+                inline=allow_ips,
+                files=allow_ips_files,
+                loader_func=uh.load_cidr_list_from_file,
             )
             if allowed_list and not ip_networks.ip_string_in_cidrs(value, allowed_list):
                 return False
@@ -1335,6 +1398,7 @@ def apply_update_operations(
     *,
     journal_writer: Optional[object] = None,
     actor: Optional[Dict] = None,
+    require_journal_persistence: bool = False,
 ) -> Tuple[int, Optional[str]]:
     """Brief: Apply update operations atomically per RFC 2136 Section 3.4.
 
@@ -1344,6 +1408,7 @@ def apply_update_operations(
       - zone_apex: Zone apex.
       - journal_writer: Optional JournalWriter for persistence.
       - actor: Optional actor metadata for journal entries.
+      - require_journal_persistence: If True, fail closed unless journaling is active.
 
     Outputs:
       - Tuple of (rcode, error_message). RCODE=0 (NOERROR) on success.
@@ -1355,26 +1420,174 @@ def apply_update_operations(
         * CLASS ANY, TYPE=ANY: Delete all RRsets at an owner
         * CLASS IN, TYPE!=ANY: Replace entire RRset with provided RR(s)
       - If journal_writer is provided and journaling fails, memory is not mutated (fail-closed).
+      - If require_journal_persistence is True, updates fail if journaling cannot be used.
     """
+    if require_journal_persistence and (
+        journal_writer is None or actor is None
+    ):  # pragma: no cover - nocover: validated in process_update_message integration paths
+        return 2, "Journal unavailable"
     try:
         apex_norm = _normalize_dns_name(zone_apex)
     except Exception:
         apex_norm = ""
 
-    # Snapshot current records
     lock = getattr(plugin, "_records_lock", None)
     if lock is None:
-        snapshot = _clone_records_for_update_processing(
-            getattr(plugin, "records", {}) or {}
-        )
+        snapshot_records = getattr(plugin, "records", None)
+        if snapshot_records is None:
+            snapshot_records = {}
+        snapshot_records_count = len(snapshot_records)
+        snapshot_name_index = getattr(plugin, "_name_index", None)
+        compare_name_index_identity = snapshot_name_index is not None
+        snapshot_generation = int(getattr(plugin, "_records_generation", 0) or 0)
     else:
         with lock:
-            snapshot = _clone_records_for_update_processing(
-                getattr(plugin, "records", {}) or {}
-            )
+            snapshot_records = getattr(plugin, "records", None)
+            if snapshot_records is None:
+                snapshot_records = {}
+            snapshot_records_count = len(snapshot_records)
+            snapshot_name_index = getattr(plugin, "_name_index", None)
+            compare_name_index_identity = snapshot_name_index is not None
+            snapshot_generation = int(getattr(plugin, "_records_generation", 0) or 0)
 
-    new_records = _clone_records_for_update_processing(snapshot)
+    # Build a transactional delta of RRset changes without cloning the full map.
+    pending_rrset_updates: Dict[
+        Tuple[str, int], Optional[Tuple[int, List[str], List[str]]]
+    ] = {}
+    pending_name_delete_all: set[str] = set()
+    touched_owners: set[str] = set()
     default_ttl = 300  # Default TTL for updates without explicit TTL
+
+    def _normalize_record_entry_for_compare(
+        entry: Optional[Tuple[int, List[str], List[str]]],
+    ) -> Optional[Tuple[int, Tuple[str, ...], Tuple[str, ...]]]:
+        """Brief: Normalize RRset tuples into comparable immutable form.
+
+        Inputs:
+          - entry: RRset tuple as (ttl, values[, sources]), or None.
+
+        Outputs:
+          - Comparable tuple (ttl, values_tuple, sources_tuple), or None.
+        """
+        if entry is None:
+            return None
+        try:
+            ttl, values, sources = entry
+        except (TypeError, ValueError):
+            try:
+                ttl, values = entry
+            except (TypeError, ValueError):
+                return None
+            sources = []
+        return (
+            int(ttl),
+            tuple(str(v) for v in list(values or [])),
+            tuple(str(s) for s in list(sources or [])),
+        )
+
+    def _owner_rrsets_from_view(
+        owner_norm: str,
+        records_map: Dict[Tuple[str, int], Tuple[int, List[str], List[str]]],
+        name_index_map: Optional[
+            Dict[str, Dict[int, Tuple[int, List[str], List[str]]]]
+        ],
+    ) -> Dict[int, Tuple[int, Tuple[str, ...], Tuple[str, ...]]]:
+        """Brief: Extract all RRsets for one owner from records/index view.
+
+        Inputs:
+          - owner_norm: Normalized owner name.
+          - records_map: Mapping of (owner, qtype) -> RRset tuple.
+          - name_index_map: Optional owner->qtype->RRset index.
+
+        Outputs:
+          - Mapping of qtype -> normalized comparable RRset tuple.
+        """
+        rrsets: Dict[int, Tuple[int, Tuple[str, ...], Tuple[str, ...]]] = {}
+        per_owner = {}
+        if isinstance(name_index_map, dict):
+            candidate = name_index_map.get(owner_norm, {})
+            if isinstance(candidate, dict):
+                per_owner = candidate
+        if per_owner:
+            for rr_qtype, rr_entry in per_owner.items():
+                normalized = _normalize_record_entry_for_compare(rr_entry)
+                if normalized is None:
+                    continue
+                rrsets[int(rr_qtype)] = normalized
+            return rrsets
+        for (record_owner, record_qtype), rr_entry in (records_map or {}).items():
+            if str(record_owner) != owner_norm:
+                continue
+            normalized = _normalize_record_entry_for_compare(rr_entry)
+            if normalized is None:
+                continue
+            rrsets[int(record_qtype)] = normalized
+        return rrsets
+
+    def _has_concurrent_conflict(
+        *,
+        current_records: Dict[Tuple[str, int], Tuple[int, List[str], List[str]]],
+        current_name_index: Dict[str, Dict[int, Tuple[int, List[str], List[str]]]],
+        current_generation: int,
+    ) -> bool:
+        """Brief: Detect whether in-scope state changed since snapshot.
+
+        Inputs:
+          - current_records: Current plugin records mapping.
+          - current_name_index: Current plugin owner index mapping.
+          - current_generation: Current records generation counter.
+
+        Outputs:
+          - True if a conflicting concurrent mutation is detected.
+        """
+        if current_records is not snapshot_records:
+            return True
+        if len(current_records) != snapshot_records_count:
+            return True
+        if current_generation != snapshot_generation:
+            return True
+        if (
+            compare_name_index_identity
+            and current_name_index is not snapshot_name_index
+        ):
+            return True
+
+        conflict_keys: set[Tuple[str, int]] = set(
+            (str(owner), int(qtype)) for (owner, qtype) in pending_rrset_updates.keys()
+        )
+        for owner_norm in pending_name_delete_all:
+            owner_rrsets = _owner_rrsets_from_view(
+                owner_norm,
+                snapshot_records,
+                snapshot_name_index if isinstance(snapshot_name_index, dict) else None,
+            )
+            for rr_qtype in owner_rrsets.keys():
+                conflict_keys.add((owner_norm, int(rr_qtype)))
+
+        for owner_norm, qtype_int in conflict_keys:
+            expected = _normalize_record_entry_for_compare(
+                snapshot_records.get((owner_norm, int(qtype_int)))
+            )
+            actual = _normalize_record_entry_for_compare(
+                current_records.get((owner_norm, int(qtype_int)))
+            )
+            if expected != actual:
+                return True
+
+        for owner_norm in pending_name_delete_all:
+            expected_owner_rrsets = _owner_rrsets_from_view(
+                owner_norm,
+                snapshot_records,
+                snapshot_name_index if isinstance(snapshot_name_index, dict) else None,
+            )
+            actual_owner_rrsets = _owner_rrsets_from_view(
+                owner_norm,
+                current_records,
+                current_name_index,
+            )
+            if expected_owner_rrsets != actual_owner_rrsets:
+                return True
+        return False
 
     def _bump_soa_serial_for_zone(
         records_map: Dict[Tuple[str, int], Tuple[int, List[str], List[str]]],
@@ -1419,6 +1632,50 @@ def apply_update_operations(
         new_values = [" ".join(parts)] + [str(v) for v in list(values[1:])]
         records_map[key] = (int(ttl), new_values, list(sources or []))
 
+    def _clone_record_entry(
+        entry: Tuple[int, List[str], List[str]],
+    ) -> Tuple[int, List[str], List[str]]:
+        """Brief: Clone one RRset entry into detached mutable lists.
+
+        Inputs:
+          - entry: RRset tuple as (ttl, values[, sources]).
+
+        Outputs:
+          - (ttl, values_copy, sources_copy) tuple.
+        """
+        try:
+            ttl, values, sources = entry
+        except (TypeError, ValueError):
+            ttl, values = entry
+            sources = []
+        return (int(ttl), list(values or []), list(sources or []))
+
+    def _effective_rrset_entry(
+        owner_norm: str,
+        qtype_int: int,
+    ) -> Optional[Tuple[int, List[str], List[str]]]:
+        """Brief: Read the transactional RRset view for a key.
+
+        Inputs:
+          - owner_norm: Normalized owner name.
+          - qtype_int: RRtype integer.
+
+        Outputs:
+          - Current RRset tuple in transactional view, or None if absent.
+        """
+        key = (owner_norm, int(qtype_int))
+        if key in pending_rrset_updates:
+            entry = pending_rrset_updates[key]
+            if entry is None:
+                return None
+            return _clone_record_entry(entry)
+        if owner_norm in pending_name_delete_all:
+            return None
+        base_entry = snapshot_records.get(key)
+        if base_entry is None:
+            return None
+        return _clone_record_entry(base_entry)
+
     # Build normalized actions for journaling
     actions: List[Dict[str, Any]] = []
     update_managed_owner_additions: set[str] = set()
@@ -1439,6 +1696,7 @@ def apply_update_operations(
             return 9, f"Update owner {owner_norm} not in zone {apex_norm}"
 
         record_key = (owner_norm, qtype_int)
+        touched_owners.add(owner_norm)
 
         # Collect rdata strings from the RRset
         rdata_values = [str(rdata) for rdata in update_rrset]
@@ -1450,24 +1708,22 @@ def apply_update_operations(
             if qtype_int == dns.rdatatype.ANY:
                 return 1, "TYPE ANY with CLASS NONE is invalid"
             for rdata_str in rdata_values:
-                if record_key not in new_records:
-                    new_records[record_key] = (ttl, [rdata_str], ["update"])
+                current_entry = _effective_rrset_entry(owner_norm, qtype_int)
+                if current_entry is None:
+                    pending_rrset_updates[record_key] = (ttl, [rdata_str], ["update"])
                 else:
-                    existing_ttl, existing_values, sources = new_records[record_key]
-                    # Check if this RRset has update source
-                    has_update_source = (
-                        isinstance(sources, (list, set)) and "update" in sources
-                    )
+                    _existing_ttl, existing_values, sources = current_entry
+                    has_update_source = "update" in list(sources or [])
                     if rdata_str not in existing_values:
-                        new_values = existing_values + [rdata_str]
-                        # Ensure update source is tracked
+                        new_values = list(existing_values) + [rdata_str]
+                        new_sources = list(sources or [])
                         if not has_update_source:
-                            sources = (
-                                sources + ["update"]
-                                if isinstance(sources, list)
-                                else list(sources) + ["update"]
-                            )
-                        new_records[record_key] = (ttl, new_values, sources)
+                            new_sources.append("update")
+                        pending_rrset_updates[record_key] = (
+                            ttl,
+                            new_values,
+                            new_sources,
+                        )
                 # Record normalized action
                 actions.append(
                     {
@@ -1482,10 +1738,13 @@ def apply_update_operations(
         # CLASS ANY: Delete RR or RRset
         elif qclass == dns.rdataclass.ANY:
             if qtype_int == dns.rdatatype.ANY:
-                # Delete all RRsets at this owner
-                keys_to_delete = [k for k in new_records if k[0] == owner_norm]
-                for k in keys_to_delete:
-                    del new_records[k]
+                # Delete all RRsets at this owner in transactional view.
+                pending_name_delete_all.add(owner_norm)
+                keys_to_clear = [
+                    k for k in list(pending_rrset_updates.keys()) if k[0] == owner_norm
+                ]
+                for key_to_clear in keys_to_clear:
+                    del pending_rrset_updates[key_to_clear]
                 # Mark this owner as update-managed
                 update_managed_owner_additions.add(owner_norm)
                 actions.append(
@@ -1496,16 +1755,19 @@ def apply_update_operations(
                 )
             else:
                 # Delete specific RRs from RRset, or delete RRset if empty/optional
-                if record_key in new_records:
-                    existing_ttl, existing_values, sources = new_records[record_key]
+                existing_entry = _effective_rrset_entry(owner_norm, qtype_int)
+                if existing_entry is not None:
+                    existing_ttl, existing_values, sources = existing_entry
                     for rdata_str in rdata_values:
                         if rdata_str in existing_values:
                             if len(existing_values) > 1:
-                                existing_values.remove(rdata_str)
-                                new_records[record_key] = (
+                                new_values = [
+                                    v for v in existing_values if v != rdata_str
+                                ]
+                                pending_rrset_updates[record_key] = (
                                     existing_ttl,
-                                    existing_values,
-                                    sources,
+                                    new_values,
+                                    list(sources or []),
                                 )
                                 actions.append(
                                     {
@@ -1515,8 +1777,9 @@ def apply_update_operations(
                                         "value": rdata_str,
                                     }
                                 )
+                                existing_values = new_values
                             else:
-                                del new_records[record_key]
+                                pending_rrset_updates[record_key] = None
                                 actions.append(
                                     {
                                         "type": "rr_delete_rrset",
@@ -1532,7 +1795,11 @@ def apply_update_operations(
                 return 1, "TYPE ANY with CLASS IN is invalid"
             # Replace entire RRset with all RRs from this update_rrset
             if rdata_values:
-                new_records[record_key] = (ttl, rdata_values, ["update"])
+                pending_rrset_updates[record_key] = (
+                    ttl,
+                    list(rdata_values),
+                    ["update"],
+                )
                 actions.append(
                     {
                         "type": "rr_replace",
@@ -1583,83 +1850,80 @@ def apply_update_operations(
             "max_journal_bytes": max_journal_bytes,
         }
 
-    # Commit under lock
-    def _rebuild_name_index_from_records(
-        records: Dict[Tuple[str, int], Tuple[int, List[str], List[str]]],
-    ) -> Dict[str, Dict[int, Tuple[int, List[str], List[str]]]]:
-        """Brief: Rebuild name index from records mapping.
+    # Commit under lock by applying only touched RRsets/owners.
+    def _apply_commit_delta() -> (
+        Dict[Tuple[str, int], Tuple[int, List[str], List[str]]]
+    ):
+        """Brief: Apply transactional UPDATE deltas to plugin state.
 
         Inputs:
-          - records: Mapping of (owner, qtype) -> (ttl, values, sources).
+          - None (reads plugin state and pending deltas from closure).
 
         Outputs:
-          - owner -> qtype -> (ttl, values, sources) mapping.
-        """
-        name_index: Dict[str, Dict[int, Tuple[int, List[str], List[str]]]] = {}
-        for (owner, qtype), entry in (records or {}).items():
-            try:
-                ttl, values, sources = entry
-            except (ValueError, TypeError):
-                try:
-                    ttl, values = entry
-                    sources = []
-                except (ValueError, TypeError):
-                    continue
-
-            owner_norm = _normalize_dns_name(owner)
-            qtype_int = int(qtype)
-            ttl_int = int(ttl)
-            values_list = list(values or [])
-            if isinstance(sources, set):
-                sources_list = list(sources)
-            else:
-                sources_list = list(sources or [])
-
-            per_name = name_index.setdefault(owner_norm, {})
-            per_name[qtype_int] = (ttl_int, values_list, sources_list)
-        return name_index
-
-    def _rebuild_wildcard_owners_from_name_index(
-        name_index: Dict[str, Dict[int, Tuple[int, List[str], List[str]]]],
-    ) -> List[str]:
-        """Brief: Rebuild sorted wildcard owner patterns from name index.
-
-        Inputs:
-          - name_index: owner -> qtype -> (ttl, values, sources) mapping.
-
-        Outputs:
-          - Sorted list of wildcard owner patterns for query matching.
+          - Current records mapping after successful mutation.
         """
         from . import helpers as zone_helpers
 
-        wildcard_patterns = [
-            owner
-            for owner in (name_index or {}).keys()
-            if zone_helpers.is_wildcard_domain_pattern(str(owner))
-        ]
-        return zone_helpers.sort_wildcard_patterns(wildcard_patterns)
+        live_records = getattr(plugin, "records", None)
+        if live_records is None:
+            live_records = {}
+        live_name_index = getattr(plugin, "_name_index", None)
+        if live_name_index is None:
+            live_name_index = {}
 
-    rebuilt_name_index: Optional[
-        Dict[str, Dict[int, Tuple[int, List[str], List[str]]]]
-    ] = None
-    rebuilt_wildcard_owners: Optional[List[str]] = None
-    try:
-        rebuilt_name_index = _rebuild_name_index_from_records(new_records)
-        rebuilt_wildcard_owners = _rebuild_wildcard_owners_from_name_index(
-            rebuilt_name_index
+        for owner_norm in pending_name_delete_all:
+            rrsets_for_owner = live_name_index.get(owner_norm, {}) or {}
+            for rr_qtype in list(rrsets_for_owner.keys()):
+                live_records.pop((owner_norm, int(rr_qtype)), None)
+            live_name_index.pop(owner_norm, None)
+
+        for (owner_norm, qtype_int), entry in pending_rrset_updates.items():
+            qtype_code = int(qtype_int)
+            if entry is None:
+                live_records.pop((owner_norm, qtype_code), None)
+                per_name = live_name_index.get(owner_norm, {})
+                if isinstance(per_name, dict):
+                    per_name.pop(qtype_code, None)
+                    if not per_name:
+                        live_name_index.pop(owner_norm, None)
+                continue
+
+            ttl_val, values_val, sources_val = _clone_record_entry(entry)
+            normalized_entry = (ttl_val, values_val, sources_val)
+            live_records[(owner_norm, qtype_code)] = normalized_entry
+            per_name = live_name_index.setdefault(owner_norm, {})
+            per_name[qtype_code] = normalized_entry
+
+        wildcard_set = set(getattr(plugin, "_wildcard_owners", []) or [])
+        for owner_norm in touched_owners:
+            is_wild_owner = zone_helpers.is_wildcard_domain_pattern(str(owner_norm))
+            if not is_wild_owner:
+                continue
+            if owner_norm in live_name_index and bool(live_name_index.get(owner_norm)):
+                wildcard_set.add(owner_norm)
+            else:
+                wildcard_set.discard(owner_norm)
+        plugin._wildcard_owners = zone_helpers.sort_wildcard_patterns(
+            list(wildcard_set)
         )
-    except Exception:  # pragma: no cover - defensive
-        logger.warning(
-            "Failed to rebuild _name_index/_wildcard_owners after DNS UPDATE commit",
-            exc_info=True,
-        )
+        plugin._name_index = live_name_index
+        plugin.records = live_records
+        return live_records
 
     conflict_error = "Concurrent update conflict detected"
     if lock is None:
-        current_records = _clone_records_for_update_processing(
-            getattr(plugin, "records", {}) or {}
-        )
-        if current_records != snapshot:
+        current_records = getattr(plugin, "records", None)
+        if current_records is None:
+            current_records = {}
+        current_name_index = getattr(plugin, "_name_index", None)
+        if current_name_index is None:
+            current_name_index = {}
+        current_generation = int(getattr(plugin, "_records_generation", 0) or 0)
+        if _has_concurrent_conflict(
+            current_records=current_records,
+            current_name_index=current_name_index,
+            current_generation=current_generation,
+        ):
             logger.warning(
                 "Concurrent DNS UPDATE conflict detected for zone %s; stale commit rejected",
                 apex_norm,
@@ -1669,20 +1933,25 @@ def apply_update_operations(
             journal_entry = journal_writer.append_entry(**journal_append_kwargs)
             if journal_entry is None:
                 return 2, "Journal write failed"
-        plugin.records = new_records
-        if rebuilt_name_index is not None:
-            plugin._name_index = rebuilt_name_index
-        if rebuilt_wildcard_owners is not None:
-            plugin._wildcard_owners = rebuilt_wildcard_owners
+        committed_records = _apply_commit_delta()
+        plugin._records_generation = current_generation + 1
         update_managed_owners = getattr(plugin, "_update_managed_owners", None)
         if isinstance(update_managed_owners, set):
             update_managed_owners.update(update_managed_owner_additions)
     else:
         with lock:
-            current_records = _clone_records_for_update_processing(
-                getattr(plugin, "records", {}) or {}
-            )
-            if current_records != snapshot:
+            current_records = getattr(plugin, "records", None)
+            if current_records is None:
+                current_records = {}
+            current_name_index = getattr(plugin, "_name_index", None)
+            if current_name_index is None:
+                current_name_index = {}
+            current_generation = int(getattr(plugin, "_records_generation", 0) or 0)
+            if _has_concurrent_conflict(
+                current_records=current_records,
+                current_name_index=current_name_index,
+                current_generation=current_generation,
+            ):
                 logger.warning(
                     "Concurrent DNS UPDATE conflict detected for zone %s; stale commit rejected",
                     apex_norm,
@@ -1692,11 +1961,8 @@ def apply_update_operations(
                 journal_entry = journal_writer.append_entry(**journal_append_kwargs)
                 if journal_entry is None:
                     return 2, "Journal write failed"
-            plugin.records = new_records
-            if rebuilt_name_index is not None:
-                plugin._name_index = rebuilt_name_index
-            if rebuilt_wildcard_owners is not None:
-                plugin._wildcard_owners = rebuilt_wildcard_owners
+            committed_records = _apply_commit_delta()
+            plugin._records_generation = current_generation + 1
             update_managed_owners = getattr(plugin, "_update_managed_owners", None)
             if isinstance(update_managed_owners, set):
                 update_managed_owners.update(update_managed_owner_additions)
@@ -1728,7 +1994,7 @@ def apply_update_operations(
                 compacted = compact_zone_journal(
                     zone_apex=apex_norm,
                     base_dir=journal_writer.base_dir,
-                    records=new_records,
+                    records=committed_records,
                     seq=int(getattr(journal_entry, "seq", 0) or 0),
                 )
                 if compacted:

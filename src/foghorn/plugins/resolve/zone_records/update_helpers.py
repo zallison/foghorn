@@ -15,14 +15,35 @@ import os
 import time
 from typing import Callable, Dict, List, Optional, Tuple
 from foghorn.utils import dns_names
-from foghorn.utils.register_caches import registered_lru_cached
+from foghorn.utils.register_caches import registered_lru_cache, registered_ttl_cache
 
 logger = logging.getLogger(__name__)
 TsigKeySourceLoader = Callable[[dict], List[dict]]
 
 
-def load_cidr_list_from_file(path: str) -> List[str]:
-    """Brief: Load newline-separated CIDR list from file.
+def _get_file_signature(path: str) -> Tuple[int, int]:
+    """Brief: Return a stable file signature for cache-key invalidation.
+
+    Inputs:
+      - path: File path.
+
+    Outputs:
+      - Tuple of (mtime_ns, size_bytes), or (0, 0) when unavailable.
+    """
+    try:
+        stat_result = os.stat(path)
+    except Exception:
+        return (0, 0)
+    try:
+        mtime_ns = int(getattr(stat_result, "st_mtime_ns", 0) or 0)
+        size_bytes = int(getattr(stat_result, "st_size", 0) or 0)
+    except Exception:
+        return (0, 0)
+    return (mtime_ns, size_bytes)
+
+
+def _load_cidr_list_from_file_uncached(path: str) -> List[str]:
+    """Brief: Load newline-separated CIDR list from file without memoization.
 
     Inputs:
       - path: File path.
@@ -43,6 +64,77 @@ def load_cidr_list_from_file(path: str) -> List[str]:
     return cidrs
 
 
+@registered_ttl_cache(maxsize=4096, ttl=300)
+def _load_cidr_list_from_file_cached(
+    path: str,
+    file_signature: Tuple[int, int],
+) -> List[str]:
+    """Brief: Cached CIDR file load keyed by path + file signature.
+
+    Inputs:
+      - path: File path.
+      - file_signature: Tuple of (mtime_ns, size_bytes) used for cache keying.
+
+    Outputs:
+      - Parsed CIDR entries from the file.
+    """
+    _ = file_signature
+    return _load_cidr_list_from_file_uncached(path)
+
+
+def load_cidr_list_from_file(path: str) -> List[str]:
+    """Brief: Load newline-separated CIDR list from file.
+
+    Inputs:
+      - path: File path.
+
+    Outputs:
+      - List of CIDR strings (comments stripped, blank lines skipped).
+    """
+    return _load_cidr_list_from_file_cached(path, _get_file_signature(path))
+
+
+def _load_names_list_from_file_uncached(path: str) -> List[str]:
+    """Brief: Load newline-separated domain names from file without memoization.
+
+    Inputs:
+      - path: File path.
+
+    Outputs:
+      - List of normalized domain names.
+    """
+    names = []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+
+                names.append(dns_names.normalize_name(line))
+    except Exception as exc:
+        logger.warning("Failed to load names list from %s: %s", path, exc)
+    return names
+
+
+@registered_ttl_cache(maxsize=4096, ttl=300)
+def _load_names_list_from_file_cached(
+    path: str,
+    file_signature: Tuple[int, int],
+) -> List[str]:
+    """Brief: Cached domain file load keyed by path + file signature.
+
+    Inputs:
+      - path: File path.
+      - file_signature: Tuple of (mtime_ns, size_bytes) used for cache keying.
+
+    Outputs:
+      - Parsed normalized domain names from the file.
+    """
+    _ = file_signature
+    return _load_names_list_from_file_uncached(path)
+
+
 def load_names_list_from_file(path: str) -> List[str]:
     """Brief: Load newline-separated domain names from file.
 
@@ -52,19 +144,7 @@ def load_names_list_from_file(path: str) -> List[str]:
     Outputs:
       - List of domain names (comments stripped, blank lines skipped).
     """
-    names = []
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("#"):
-                    continue
-                from foghorn.utils import dns_names
-
-                names.append(dns_names.normalize_name(line))
-    except Exception as exc:
-        logger.warning("Failed to load names list from %s: %s", path, exc)
-    return names
+    return _load_names_list_from_file_cached(path, _get_file_signature(path))
 
 
 def combine_lists(
@@ -89,6 +169,59 @@ def combine_lists(
         for path in files:
             combined.extend(loader_func(path))
     return combined
+
+
+def get_cached_combined_list(
+    plugin: object,
+    cache_key: str,
+    inline: Optional[List[str]],
+    files: Optional[List[str]],
+    loader_func,
+) -> List[str]:
+    """Brief: Resolve inline/file lists using plugin cache with mtime invalidation.
+
+    Inputs:
+      - plugin: ZoneRecords plugin instance.
+      - cache_key: Unique cache key for this resolved list.
+      - inline: Inline list entries.
+      - files: File paths containing additional list entries.
+      - loader_func: Loader for each file path.
+
+    Outputs:
+      - Resolved list combining inline and file-backed entries.
+
+    Notes:
+      - Falls back to direct combine_lists behavior when plugin cache state
+        is unavailable.
+      - Cache invalidation is driven by file mtime changes.
+    """
+    file_paths = list(files or [])
+    if not file_paths:
+        return list(inline or [])
+
+    cache_lock = getattr(plugin, "_dns_update_cache_lock", None)
+    cache = getattr(plugin, "_dns_update_lists_cache", None)
+    timestamps = getattr(plugin, "_dns_update_timestamps", None)
+    if (
+        cache_lock is None
+        or not isinstance(cache, dict)
+        or not isinstance(timestamps, dict)
+    ):
+        return combine_lists(inline, file_paths, loader_func)
+
+    with cache_lock:
+        need_reload = cache_key not in cache
+        for path in file_paths:
+            current_mtime = os.path.getmtime(path) if os.path.exists(path) else 0
+            last_mtime = timestamps.get(path, 0)
+            if current_mtime != last_mtime:
+                need_reload = True
+                timestamps[path] = current_mtime
+
+        if need_reload:
+            cache[cache_key] = combine_lists(inline, file_paths, loader_func)
+
+        return list(cache.get(cache_key, []))
 
 
 def load_tsig_keys_from_file(path: str) -> List[dict]:
@@ -469,7 +602,7 @@ def tsig_hmac_verify(
         return False
 
 
-@registered_lru_cached(maxsize=4096)
+@registered_lru_cache(maxsize=4096)
 def parse_domain_name_wire(data: bytes, offset: int) -> Tuple[Optional[str], int]:
     """Brief: Parse DNS wire-format domain name.
 
