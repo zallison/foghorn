@@ -15,6 +15,7 @@ from contextlib import closing
 import pytest
 from dnslib import QTYPE, DNSRecord
 from pydantic import ValidationError
+from foghorn.plugins.cache.none import NullCache
 
 import foghorn.plugins.resolve.rate_limit as rate_limit_module
 from foghorn.plugins.resolve.base import PluginContext
@@ -173,6 +174,54 @@ def test_hard_cap_enforces_when_avg_below_min_enforce_rps(tmp_path, monkeypatch)
         # configured hard cap should still deny once current_rps exceeds 10.
         assert denied > 0
         assert denied < total
+
+
+def test_cache_none_falls_back_to_stateful_window_counters(tmp_path, monkeypatch):
+    """Brief: RateLimit still enforces when cache backend is NullCache.
+
+    Inputs:
+      - tmp_path: temporary directory for sqlite DB.
+      - monkeypatch: pytest monkeypatch fixture to pin requests to one window.
+
+    Outputs:
+      - None: Asserts NullCache does not disable window/global counter enforcement.
+    """
+
+    db = tmp_path / "rl-cache-none-fallback.db"
+    plugin = RateLimit(
+        db_path=str(db),
+        cache=NullCache(),
+        bucket_network_prefix_v4=32,
+        alpha=0.05,
+        alpha_down=0.10,
+        burst_factor=10.0,
+        max_enforce_rps=20.0,
+        bootstrap_rps=40.0,
+        global_max_rps=50.0,
+        min_enforce_rps=5.0,
+        window_seconds=5,
+        warmup_windows=4,
+        burst_windows=6,
+        mode="per_client",
+        deny_response="nxdomain",
+    )
+    plugin.setup()
+    ctx = PluginContext(client_ip="1.2.3.4", listener="tcp")
+
+    with closing(plugin._conn):
+        backend = getattr(plugin._window_cache, "_backend", None)
+        assert not isinstance(backend, NullCache)
+
+        _set_time(monkeypatch, 0.0)
+        denied = 0
+        total = 1000
+        for _ in range(total):
+            decision = plugin.pre_resolve("example.com", QTYPE.A, b"", ctx)
+            if decision is not None:
+                denied += 1
+
+    assert denied > 0
+    assert denied < total
 
 
 def test_per_domain_mode_uses_base_domain_key(tmp_path, monkeypatch):
@@ -338,6 +387,7 @@ def test_rate_limit_config_applies_defaults_for_new_fields():
     cfg = rate_limit_module.RateLimitConfig()
 
     assert cfg.max_profiles == 10000
+    assert cfg.active_window_max_keys == 2048
     assert cfg.profile_ttl_seconds == 7 * 24 * 60 * 60
     assert cfg.prune_interval_seconds == 60
 
@@ -366,6 +416,22 @@ def test_rate_limit_config_validates_max_profiles_ge_1():
 
     with pytest.raises(ValidationError):
         rate_limit_module.RateLimitConfig(max_profiles=0)
+
+
+def test_rate_limit_config_validates_active_window_max_keys_ge_1():
+    """Brief: active_window_max_keys must be >= 1.
+
+    Inputs:
+      - None
+
+    Outputs:
+      - None: asserts ValidationError for invalid values.
+    """
+
+    rate_limit_module.RateLimitConfig(active_window_max_keys=1)
+
+    with pytest.raises(ValidationError):
+        rate_limit_module.RateLimitConfig(active_window_max_keys=0)
 
 
 def test_rate_limit_config_validates_ttls_and_prune_interval_ge_0():
@@ -1705,6 +1771,70 @@ def test_current_window_rps_helpers_cover_malformed_stale_and_limit_paths(
     assert steady_snapshot == {"steady": pytest.approx(0.2)}
 
 
+def test_active_window_tracking_is_capped_by_active_window_max_keys(tmp_path):
+    """Brief: Active-window counters are bounded by active_window_max_keys.
+
+    Inputs:
+      - tmp_path: pytest temporary path.
+
+    Outputs:
+      - None: asserts active-window tracking admits only up to
+        active_window_max_keys keys per window while still updating tracked keys.
+    """
+
+    plugin = RateLimit(
+        db_path=str(tmp_path / "rl-active-window-cap.db"),
+        window_seconds=10,
+        max_profiles=50,
+        active_window_max_keys=2,
+    )
+    plugin.setup()
+
+    assert plugin._active_window_max_keys == 2
+
+    plugin._record_active_window_count("k1", window_id=1, count=1)
+    plugin._record_active_window_count("k2", window_id=1, count=1)
+    plugin._record_active_window_count("k3", window_id=1, count=1)
+
+    assert set(plugin._active_window_counts.keys()) == {"k1", "k2"}
+    assert "k3" not in plugin._active_window_counts
+    assert len(plugin._active_window_counts) == 2
+
+    plugin._record_active_window_count("k1", window_id=1, count=5)
+    assert plugin._active_window_counts["k1"] == (1, 5)
+
+    plugin.shutdown()
+
+
+def test_active_window_max_keys_default_and_clamp_paths(tmp_path):
+    """Brief: active_window_max_keys defaults safely and clamps to max_profiles.
+
+    Inputs:
+      - tmp_path: pytest temporary path.
+
+    Outputs:
+      - None: asserts the default cap is bounded for large max_profiles and
+        explicit over-cap values are clamped to max_profiles.
+    """
+
+    default_cap_plugin = RateLimit(
+        db_path=str(tmp_path / "rl-active-window-default-cap.db"),
+        max_profiles=50000,
+    )
+    default_cap_plugin.setup()
+    assert default_cap_plugin._active_window_max_keys == 2048
+    default_cap_plugin.shutdown()
+
+    clamped_plugin = RateLimit(
+        db_path=str(tmp_path / "rl-active-window-clamped-cap.db"),
+        max_profiles=3,
+        active_window_max_keys=999,
+    )
+    clamped_plugin.setup()
+    assert clamped_plugin._active_window_max_keys == 3
+    clamped_plugin.shutdown()
+
+
 def test_burst_counter_helpers_cover_parse_and_reset_paths(tmp_path):
     """Brief: Burst helper branches handle malformed values and reset edge cases.
 
@@ -1773,6 +1903,85 @@ def test_throttled_deny_log_zero_interval_and_suppression_flush(tmp_path, monkey
     plugin._throttled_deny_log("k2", "burst %s", "event")
 
     assert any("suppressed %d similar" in str(msg) for msg, _args in records)
+
+
+def test_throttled_deny_log_prunes_high_cardinality_maps(tmp_path, monkeypatch):
+    """Brief: Deny-log throttle maps are pruned under high-cardinality traffic.
+
+    Inputs:
+      - tmp_path: pytest temporary path.
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None: asserts deny-log throttle maps stay bounded by configured limits.
+    """
+
+    plugin = RateLimit(
+        db_path=str(tmp_path / "rl-throttle-prune.db"),
+        max_profiles=2,
+        deny_log_interval_seconds=60,
+    )
+    plugin.setup()
+
+    monkeypatch.setattr(
+        rate_limit_module.logger,
+        "info",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(rate_limit_module.time, "time", lambda: 100.0)
+
+    for i in range(50):
+        key = f"key-{i}"
+        plugin._throttled_deny_log(key, "deny key=%s", key)
+        plugin._throttled_deny_log(key, "deny key=%s", key)
+
+    max_keys = max(int(plugin.max_profiles), 1) * 2
+    assert len(plugin._deny_log_ts) <= max_keys
+    assert len(plugin._deny_log_suppressed) <= max_keys
+    assert set(plugin._deny_log_suppressed).issubset(set(plugin._deny_log_ts))
+
+
+def test_throttled_deny_log_prunes_stale_suppressed_entries(tmp_path, monkeypatch):
+    """Brief: Stale suppressed deny-log entries are pruned without breaking flush.
+
+    Inputs:
+      - tmp_path: pytest temporary path.
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None: asserts stale suppressed keys are evicted while current-key
+        suppressed-count flush still appears on next emitted log.
+    """
+
+    plugin = RateLimit(
+        db_path=str(tmp_path / "rl-throttle-stale-prune.db"),
+        deny_log_interval_seconds=5,
+        max_profiles=100,
+    )
+    plugin.setup()
+
+    records: list[tuple[object, tuple[object, ...]]] = []
+    monkeypatch.setattr(
+        rate_limit_module.logger,
+        "info",
+        lambda msg, *args: records.append((msg, args)),
+    )
+
+    times = iter([100.0, 101.0, 102.0, 103.0, 107.0])
+    monkeypatch.setattr(rate_limit_module.time, "time", lambda: next(times))
+
+    plugin._throttled_deny_log("keep", "deny key=%s", "keep")
+    plugin._throttled_deny_log("keep", "deny key=%s", "keep")
+    plugin._throttled_deny_log("stale", "deny key=%s", "stale")
+    plugin._throttled_deny_log("stale", "deny key=%s", "stale")
+    plugin._throttled_deny_log("keep", "deny key=%s", "keep")
+
+    assert any(
+        "suppressed %d similar" in str(msg) and args and args[0] == "keep"
+        for msg, args in records
+    )
+    assert "stale" not in plugin._deny_log_ts
+    assert "stale" not in plugin._deny_log_suppressed
 
 
 def test_build_deny_decision_ede_and_ip_fallback_paths(tmp_path, monkeypatch):
