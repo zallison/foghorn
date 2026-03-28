@@ -7,6 +7,12 @@ import time
 from typing import Any, Optional, Tuple
 
 from .base import CachePlugin, cache_aliases
+from .safe_codec import (
+    RAW_BYTES_FLAG,
+    SAFE_SERIALIZED_FLAG,
+    safe_deserialize,
+    safe_serialize,
+)
 
 
 def _import_pymemcache() -> Any:
@@ -62,8 +68,8 @@ def _encode_value(value: Any) -> Tuple[bytes, int]:
     """
 
     if isinstance(value, (bytes, bytearray, memoryview)):
-        return bytes(value), 0
-    return pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL), 1
+        return bytes(value), RAW_BYTES_FLAG
+    return safe_serialize(value), SAFE_SERIALIZED_FLAG
 
 
 def _decode_value(payload: bytes, is_pickle: int) -> Any:
@@ -77,9 +83,11 @@ def _decode_value(payload: bytes, is_pickle: int) -> Any:
       - Any: Decoded object.
     """
 
-    if int(is_pickle) == 1:
-        return pickle.loads(payload)
-    return payload
+    if int(is_pickle) == RAW_BYTES_FLAG:
+        return bytes(payload)
+    if int(is_pickle) == SAFE_SERIALIZED_FLAG:
+        return safe_deserialize(payload)
+    raise ValueError("Unsupported cache payload encoding flag")
 
 
 @cache_aliases("memcached", "memcache")
@@ -196,7 +204,7 @@ class MemcachedCache(CachePlugin):
             return None, None, None
 
         try:
-            envelope = pickle.loads(blob)
+            envelope = safe_deserialize(bytes(blob))
         except Exception:
             # Corrupted entry: treat as miss and best-effort delete.
             try:
@@ -275,11 +283,7 @@ class MemcachedCache(CachePlugin):
         }
 
         try:
-            blob = pickle.dumps(envelope, protocol=pickle.HIGHEST_PROTOCOL)
-        except Exception:
-            return
-
-        try:
+            blob = safe_serialize(envelope)
             self._client.set(mem_key, blob, expire=ttl_int)
         except Exception:
             # Best-effort only; failures are treated as cache miss.

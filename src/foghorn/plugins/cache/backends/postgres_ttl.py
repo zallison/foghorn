@@ -19,11 +19,16 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import pickle
 import re
 import threading
 import time
 from typing import Any, Dict, Optional, Tuple
+from foghorn.plugins.cache.safe_codec import (
+    RAW_BYTES_FLAG,
+    SAFE_SERIALIZED_FLAG,
+    safe_deserialize,
+    safe_serialize,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -69,13 +74,13 @@ def _stable_digest_for_key(key: Any) -> bytes:
 
     Notes:
       - Bytes-like keys are hashed directly.
-      - Other keys are pickled (highest protocol) then hashed.
+      - Other keys are safely serialized then hashed.
     """
 
     if isinstance(key, (bytes, bytearray, memoryview)):
         payload = bytes(key)
     else:
-        payload = pickle.dumps(key, protocol=pickle.HIGHEST_PROTOCOL)
+        payload = safe_serialize(key)
 
     return hashlib.sha256(payload).digest()
 
@@ -92,13 +97,12 @@ def _encode_key_blob(key: Any) -> bytes:
     Notes:
       - This is used only for diagnostic/introspection purposes (key lookups are
         driven by key_digest).
-      - We store bytes-like keys directly; other keys are pickled.
+      - We store bytes-like keys directly; other keys are safely serialized.
     """
 
     if isinstance(key, (bytes, bytearray, memoryview)):
         return bytes(key)
-
-    return pickle.dumps(key, protocol=pickle.HIGHEST_PROTOCOL)
+    return safe_serialize(key)
 
 
 class PostgresTTLCache:
@@ -205,8 +209,8 @@ class PostgresTTLCache:
         """
 
         if isinstance(value, (bytes, bytearray, memoryview)):
-            return bytes(value), 0
-        return pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL), 1
+            return bytes(value), RAW_BYTES_FLAG
+        return safe_serialize(value), SAFE_SERIALIZED_FLAG
 
     @staticmethod
     def _decode(payload: Any, is_pickle: int) -> Any:
@@ -220,10 +224,12 @@ class PostgresTTLCache:
             Decoded value.
         """
 
-        if int(is_pickle) == 0:
+        if int(is_pickle) == RAW_BYTES_FLAG:
             # psycopg2 returns BYTEA as memoryview.
             return bytes(payload)
-        return pickle.loads(bytes(payload))
+        if int(is_pickle) == SAFE_SERIALIZED_FLAG:
+            return safe_deserialize(bytes(payload))
+        raise ValueError("Unsupported cache payload encoding flag")
 
     def set(self, key: Any, ttl: int, value: Any) -> None:
         """Cache a value with TTL.

@@ -2,10 +2,15 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import pickle
 import threading
 import time
 from typing import Any, Optional, Tuple
+from foghorn.plugins.cache.safe_codec import (
+    RAW_BYTES_FLAG,
+    SAFE_SERIALIZED_FLAG,
+    safe_deserialize,
+    safe_serialize,
+)
 
 _logger = logging.getLogger(__name__)
 
@@ -188,7 +193,7 @@ def _stable_digest_for_key(key: Any) -> str:
       - We hash a pickle of the key to avoid ambiguities.
     """
 
-    payload = pickle.dumps(key, protocol=pickle.HIGHEST_PROTOCOL)
+    payload = safe_serialize(key)
     return hashlib.sha256(payload).hexdigest()
 
 
@@ -362,8 +367,8 @@ class MySQLTTLCache:
         """
 
         if isinstance(obj, (bytes, bytearray, memoryview)):
-            return bytes(obj), 0
-        return pickle.dumps(obj, protocol=pickle.HIGHEST_PROTOCOL), 1
+            return bytes(obj), RAW_BYTES_FLAG
+        return safe_serialize(obj), SAFE_SERIALIZED_FLAG
 
     @staticmethod
     def _decode(payload: bytes, is_pickle: int) -> Any:
@@ -377,9 +382,11 @@ class MySQLTTLCache:
           - Any: Decoded object.
         """
 
-        if int(is_pickle) == 1:
-            return pickle.loads(payload)
-        return payload
+        if int(is_pickle) == RAW_BYTES_FLAG:
+            return bytes(payload)
+        if int(is_pickle) == SAFE_SERIALIZED_FLAG:
+            return safe_deserialize(payload)
+        raise ValueError("Unsupported cache payload encoding flag")
 
     def get(self, key: Any) -> Any | None:
         """Brief: Lookup a cached entry enforcing expiry.
