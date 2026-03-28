@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional
 import pytest
 
 from foghorn.plugins.cache.registry import get_cache_plugin_class
+from foghorn.plugins.cache.safe_codec import SAFE_SERIALIZED_FLAG
 
 
 class FakePostgresConnection:
@@ -129,7 +130,7 @@ def test_postgres_cache_encode_decode_roundtrip() -> None:
 
     obj = {"name": "example.com", "qtype": 1}
     payload2, is_pickle2 = PostgresTTLCache._encode(obj)
-    assert is_pickle2 == 1
+    assert is_pickle2 == SAFE_SERIALIZED_FLAG
     assert PostgresTTLCache._decode(payload2, is_pickle2) == obj
 
 
