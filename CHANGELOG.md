@@ -4,6 +4,7 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 ### Recent incremental updates
+- Hardened external cache backends against untrusted-data deserialization by replacing pickle-based payload decoding with a safe JSON/tagged codec in Redis, Memcached, MongoDB, SQLite, MySQL, and PostgreSQL cache paths; legacy pickle-encoded cache entries now fail closed as cache misses (with best-effort cleanup), and persisted key encoding updates in SQLite/MySQL/PostgreSQL may invalidate previously stored entries until repopulated.
 - Added query-log flood hardening controls across runtime/config/backends: global `logging.max_logging_queue`, retention byte caps (`max_bytes`), prune cadence controls (`prune_interval_seconds`, `prune_every_n_inserts`), pre-persistence sampling (`query_log_sampling`) and dedupe (`query_log_dedupe`) options, plus backend maintenance knobs (SQLite/PostgreSQL vacuum, MySQL optimize, MongoDB native TTL index support, SQLite auto-vacuum mode).
 - Runtime stats initialization now propagates global logging retention defaults into backend configs (with per-backend override precedence) and passes query-log sampling/dedupe settings into `StatsCollector` so persistent query-log writes can be throttled before backend insert.
 - Hardened ZoneRecords file/transfer behavior by keeping BIND path reads pinned to the validated resolved path (even if CWD changes mid-load) and pruning stale AXFR per-client rate-limit buckets after idle TTL expiry.

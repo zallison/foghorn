@@ -226,8 +226,8 @@ def test_load_cache_plugin_redis_raises_helpful_error_when_dependency_missing(
     assert "pip install redis" in msg
 
 
-def test_encode_decode_roundtrip_bytes_and_pickled() -> None:
-    """Brief: Helper encode/decode functions support bytes and arbitrary objects.
+def test_encode_decode_roundtrip_bytes_and_safe_serialized() -> None:
+    """Brief: Helper encode/decode functions support bytes and safe serialized objects.
 
     Inputs:
       - None.
@@ -244,7 +244,7 @@ def test_encode_decode_roundtrip_bytes_and_pickled() -> None:
 
     obj = {"name": "example.com", "qtype": 1}
     payload2, is_pickle2 = redis_cache_mod._encode_value(obj)
-    assert is_pickle2 == 1
+    assert is_pickle2 == 2
     assert redis_cache_mod._decode_value(payload2, is_pickle2) == obj
 
 
