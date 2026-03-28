@@ -9,6 +9,7 @@ Outputs:
 """
 
 import builtins
+import logging
 import threading
 from contextlib import closing
 
@@ -2672,4 +2673,75 @@ def test_build_deny_decision_unknown_mode_falls_back_to_simple_deny(tmp_path):
         PluginContext(client_ip="1.2.3.4", listener="tcp"),
     )
     assert decision.action == "deny"
+    plugin.shutdown()
+
+
+def test_setup_warns_when_limit_precedence_is_conflicting(
+    tmp_path,
+    caplog,
+):
+    """Brief: setup() logs warnings when stricter limits will trigger earlier.
+
+    Inputs:
+      - tmp_path: pytest temp path for sqlite db.
+      - caplog: pytest logging capture fixture.
+
+    Outputs:
+      - None: asserts startup warnings are emitted for conflicting thresholds.
+    """
+
+    db = tmp_path / "rl-precedence-warn.db"
+    plugin = RateLimit(
+        db_path=str(db),
+        warmup_max_rps=100.0,
+        max_enforce_rps=10.0,
+        bootstrap_rps=20.0,
+        burst_factor=3.0,
+        min_enforce_rps=50.0,
+        global_max_rps=5.0,
+    )
+    with caplog.at_level(logging.WARNING):
+        plugin.setup()
+
+    text = caplog.text
+    assert "warmup_max_rps=100.00 exceeds max_enforce_rps=10.00" in text
+    assert "bootstrap threshold 60.00" in text
+    assert "max_enforce_rps=10.00 is below min_enforce_rps=50.00" in text
+    assert "global_max_rps=5.00 is below warmup_max_rps=100.00" in text
+    assert "global_max_rps=5.00 is below max_enforce_rps=10.00" in text
+    plugin.shutdown()
+
+
+def test_setup_no_precedence_warnings_for_non_conflicting_limits(
+    tmp_path,
+    caplog,
+):
+    """Brief: setup() does not emit precedence warnings for aligned thresholds.
+
+    Inputs:
+      - tmp_path: pytest temp path for sqlite db.
+      - caplog: pytest logging capture fixture.
+
+    Outputs:
+      - None: asserts precedence warning text is absent.
+    """
+
+    db = tmp_path / "rl-precedence-clean.db"
+    plugin = RateLimit(
+        db_path=str(db),
+        warmup_max_rps=10.0,
+        max_enforce_rps=100.0,
+        bootstrap_rps=10.0,
+        burst_factor=2.0,
+        min_enforce_rps=5.0,
+        global_max_rps=1000.0,
+    )
+    with caplog.at_level(logging.WARNING):
+        plugin.setup()
+
+    text = caplog.text
+    assert "warmup_max_rps=" not in text
+    assert "bootstrap threshold" not in text
+    assert "global_max_rps=" not in text
+    assert "hard-cap enforcement may trigger" not in text
     plugin.shutdown()
