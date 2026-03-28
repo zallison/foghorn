@@ -188,12 +188,12 @@ def test_encode_decode_bytes(monkeypatch) -> None:
     assert cache._decode(encoded, flag) == raw
 
 
-def test_encode_decode_pickle(monkeypatch) -> None:
-    """Test encode/decode for objects."""
+def test_encode_decode_safe_serialized(monkeypatch) -> None:
+    """Test encode/decode for safely serialized objects."""
     cache, conn, _ = _init_cache_with_fake_conn(monkeypatch)
     obj = {"x": 1, "y": 2}
     encoded, flag = cache._encode(obj)
-    assert flag == 1
+    assert flag == 2
     assert cache._decode(encoded, flag) == obj
 
 

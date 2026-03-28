@@ -149,8 +149,8 @@ def test_load_cache_plugin_memcached_raises_helpful_error_when_dependency_missin
     assert "pip install pymemcache" in msg
 
 
-def test_encode_decode_roundtrip_bytes_and_pickled() -> None:
-    """Brief: Helper encode/decode functions support bytes and arbitrary objects.
+def test_encode_decode_roundtrip_bytes_and_safe_serialized() -> None:
+    """Brief: Helper encode/decode functions support bytes and safe serialized objects.
 
     Inputs:
       - None.
@@ -167,7 +167,7 @@ def test_encode_decode_roundtrip_bytes_and_pickled() -> None:
 
     obj = {"name": "example.com", "qtype": 1}
     payload2, is_pickle2 = memcached_cache_mod._encode_value(obj)
-    assert is_pickle2 == 1
+    assert is_pickle2 == 2
     assert memcached_cache_mod._decode_value(payload2, is_pickle2) == obj
 
 
@@ -242,8 +242,10 @@ def test_memcached_cache_roundtrip_bytes_and_metadata_with_fake_client(
         ("tuple", 123),
     ],
 )
-def test_memcached_cache_roundtrip_pickled_objects(monkeypatch, value: Any) -> None:
-    """Brief: Non-bytes values are stored via pickle and returned on get().
+def test_memcached_cache_roundtrip_safe_serialized_objects(
+    monkeypatch, value: Any
+) -> None:
+    """Brief: Non-bytes values are safely serialized and returned on get().
 
     Inputs:
       - monkeypatch: pytest monkeypatch fixture.
