@@ -18,7 +18,7 @@ import dns.tsigkeyring
 
 from dnslib import QTYPE, RCODE, RR, DNSHeader, DNSRecord
 
-from foghorn.utils.register_caches import registered_lru_cached
+from foghorn.utils.register_caches import registered_lru_cache
 
 logger = logging.getLogger(__name__)
 _AXFR_LIMIT_LOCK = threading.Lock()
@@ -317,7 +317,7 @@ def _maybe_sign_axfr_wire(wire: bytes, req: DNSRecord, signer: Optional[dict]) -
     return signed_wire
 
 
-@registered_lru_cached(maxsize=256)
+@registered_lru_cache(maxsize=256)
 def _compiled_allowlist_networks(cidr_values: tuple[str, ...]) -> tuple:
     """Brief: Compile allowlist CIDRs into parsed network objects.
 

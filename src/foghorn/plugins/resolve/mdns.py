@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Set, Tuple, Final
 from pydantic import BaseModel, Field, validator, ConfigDict
-from foghorn.utils.register_caches import registered_lru_cached
+from foghorn.utils.register_caches import registered_lru_cache
 
 from dnslib import (
     AAAA,
@@ -613,7 +613,7 @@ class MdnsBridge(BasePlugin):
                     exc_info=True,
                 )
 
-    @registered_lru_cached(maxsize=4096)
+    @registered_lru_cache(maxsize=4096)
     def _normalize_owner(
         self, name: str
     ) -> str:  # pragma: nocover defensive normalization
@@ -630,7 +630,7 @@ class MdnsBridge(BasePlugin):
 
         return dns_names.normalize_name(name)
 
-    @registered_lru_cached(maxsize=4096)
+    @registered_lru_cache(maxsize=4096)
     def _to_dns_domain(self, fqdn: str) -> str:  # pragma: nocover suffix rewrite helper
         """Brief: Map a `.local` mDNS name to the configured DNS suffix.
 
@@ -652,7 +652,7 @@ class MdnsBridge(BasePlugin):
             return base[: -len(self._mdns_domain)] + self._dns_domain
         return base
 
-    @registered_lru_cached(maxsize=1024)
+    @registered_lru_cache(maxsize=1024)
     def _mirror_suffixes(
         self, fqdn: str
     ) -> List[str]:  # pragma: nocover suffix mapping helper
@@ -1132,7 +1132,7 @@ class MdnsBridge(BasePlugin):
                 exc_info=True,
             )
 
-    @registered_lru_cached(maxsize=1024)
+    @registered_lru_cache(maxsize=1024)
     def _sanitize_qname(
         self, name: str
     ) -> str:  # pragma: nocover string sanitization helper

@@ -125,7 +125,7 @@ class BaseStatsStore:
             return
 
         # Default queue capacity when backends do not override it.
-        max_q = 4096
+        max_q = 1024 * 64  # 64k
         try:
             max_q_obj = getattr(self, "_max_logging_queue", None)
             if max_q_obj is None:
@@ -133,7 +133,7 @@ class BaseStatsStore:
             if max_q_obj is not None:
                 max_q = int(max_q_obj)
         except Exception:
-            max_q = 4096
+            max_q = 1024 * 64
 
         # maxsize=0 in queue.Queue means unbounded.
         maxsize = max(0, int(max_q))

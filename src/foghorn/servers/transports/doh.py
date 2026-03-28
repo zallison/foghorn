@@ -4,7 +4,7 @@ import importlib
 import ssl
 import urllib.parse
 from typing import Dict, Optional, Tuple
-from foghorn.utils.register_caches import registered_lru_cached
+from foghorn.utils.register_caches import registered_lru_cache
 
 try:
     FOGHORN_VERSION = importlib.metadata.version("foghorn")
@@ -45,7 +45,7 @@ def _b64url_no_pad(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
 
 
-@registered_lru_cached(maxsize=32)
+@registered_lru_cache(maxsize=32)
 def _build_ssl_ctx(
     verify: bool = True, ca_file: Optional[str] = None
 ) -> Optional[ssl.SSLContext]:

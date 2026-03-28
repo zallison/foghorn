@@ -13,7 +13,7 @@ import re
 from typing import Dict, Iterable, List, Optional, Tuple
 
 from foghorn.utils import dns_names
-from foghorn.utils.register_caches import registered_lru_cached
+from foghorn.utils.register_caches import registered_lru_cache
 
 logger = logging.getLogger(__name__)
 _ZONE_SUFFIX_TERMINAL = object()
@@ -807,7 +807,7 @@ def _normalize_dns_name_for_cache(text: object) -> Optional[str]:
     return norm
 
 
-@registered_lru_cached(maxsize=4096)
+@registered_lru_cache(maxsize=4096)
 def _split_dns_labels_cached(norm: str) -> tuple[str, ...]:
     """Brief: Split a normalized domain into DNS labels (cached).
 
@@ -855,7 +855,7 @@ def _split_dns_labels(text: str) -> tuple[str, ...]:
     return _split_dns_labels_cached(norm)
 
 
-@registered_lru_cached(maxsize=8192)
+@registered_lru_cache(maxsize=8192)
 def is_wildcard_domain_pattern(pattern: str) -> bool:
     """Brief: Return True when *pattern* contains one or more wildcard labels.
 
@@ -873,7 +873,7 @@ def is_wildcard_domain_pattern(pattern: str) -> bool:
     return any(lbl == "*" for lbl in labels)
 
 
-@registered_lru_cached(maxsize=8192)
+@registered_lru_cache(maxsize=8192)
 def match_wildcard_domain(name: str, pattern: str) -> bool:
     """Brief: Match a domain name against a ZoneRecords wildcard pattern.
 
@@ -935,7 +935,7 @@ def match_wildcard_domain(name: str, pattern: str) -> bool:
     return True
 
 
-@registered_lru_cached(maxsize=8196)
+@registered_lru_cache(maxsize=8196)
 def wildcard_matched_character_count(name: str, pattern: str) -> Optional[int]:
     """Brief: Count how many characters were consumed by a leading wildcard match.
 

@@ -15,7 +15,7 @@ from foghorn.plugins.resolve.base import (
     PluginDecision,
     plugin_aliases,
 )
-from foghorn.utils.register_caches import registered_lru_cached
+from foghorn.utils.register_caches import registered_lru_cache
 
 logger = logging.getLogger(__name__)
 
@@ -110,7 +110,7 @@ class FingerConfig(BaseModel):
         return text
 
 
-@registered_lru_cached(maxsize=4096)
+@registered_lru_cache(maxsize=4096)
 def _is_user_allowed_cached(
     username: str,
     policy: str,

@@ -61,7 +61,7 @@ Important directories and modules:
   - `registry.py`: discovers stats backends and resolves aliases; provides `discover_stats_backends` and `get_stats_backend_class`.
   - `sqlite.py`, `mysql_mariadb.py`, `postgresql.py`, `mongodb.py`, `influxdb.py`, `mqtt_logging.py`: built‑in stats/query-log backends.
 - `src/foghorn/utils/register_caches.py`
-  - Registers decorated helper functions (`registered_cached`, `registered_lru_cached`, `registered_foghorn_ttl`, `registered_sqlite_ttl`) and applies config‑driven overrides (`apply_decorated_cache_overrides`).
+  - Registers decorated helper functions (`registered_cached`, `registered_lru_cache`, `registered_foghorn_ttl`, `registered_sqlite_ttl`) and applies config‑driven overrides (`apply_decorated_cache_overrides`).
 - `src/foghorn/stats.py`
   - Higher-level statistics collector and reporter built on top of `BaseStatsStore`.
 - `src/foghorn/servers/`
@@ -210,7 +210,7 @@ There are two distinct caching layers in Foghorn:
 
 2. **Function/helper caches** (configured via `server.cache.modify` / `decorated_overrides` / `func_caches`)
    - Implemented in `foghorn.utils.register_caches`.
-   - Helpers such as `registered_cached`, `registered_lru_cached`, `registered_foghorn_ttl`, and `registered_sqlite_ttl` wrap individual functions or methods.
+   - Helpers such as `registered_cached`, `registered_lru_cache`, `registered_foghorn_ttl`, and `registered_sqlite_ttl` wrap individual functions or methods.
    - Each decorated function creates a registry entry containing module, name, backend type (`ttlcache`, `lru_cache`, `foghorn_ttl`, `sqlite_ttl`, `lfu_cache`, `rr_cache`), TTL and maxsize hints, and hit/miss counters.
    - `apply_decorated_cache_overrides()` reads an array of overrides from configuration and can adjust TTL or maxsize at runtime without code changes.
 

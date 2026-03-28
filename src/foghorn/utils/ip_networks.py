@@ -10,10 +10,10 @@ from __future__ import annotations
 import ipaddress
 from typing import Iterable, Optional
 
-from foghorn.utils.register_caches import registered_lru_cached
+from foghorn.utils.register_caches import registered_lru_cache
 
 
-@registered_lru_cached(maxsize=4096)
+@registered_lru_cache(maxsize=4096)
 def parse_ip(
     value: object,
 ) -> Optional[ipaddress.IPv4Address | ipaddress.IPv6Address]:
@@ -35,7 +35,7 @@ def parse_ip(
         return None
 
 
-@registered_lru_cached(maxsize=4096)
+@registered_lru_cache(maxsize=4096)
 def parse_network(
     value: object,
     *,
@@ -70,7 +70,7 @@ def parse_network(
         return None
 
 
-@registered_lru_cached(maxsize=131072)
+@registered_lru_cache(maxsize=131072)
 def _ip_in_network(
     ip: ipaddress._BaseAddress,
     network: ipaddress._BaseNetwork,
