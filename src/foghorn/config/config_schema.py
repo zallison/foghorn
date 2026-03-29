@@ -24,6 +24,68 @@ except (
     SchemaError = Exception  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
+_PLUGIN_HOOK_ALLOWED_KEYS = {
+    "priority",
+    "pre_resolve",
+    "post_resolve",
+    "setup",
+    "comment",
+    "id",
+}
+_PLUGIN_HOOK_NODE_ALLOWED_KEYS = {"priority", "comment", "id"}
+
+
+def _validate_plugin_hooks_for_validation(
+    hooks_obj: Any,
+    *,
+    entry_path: str,
+) -> None:
+    """Brief: Enforce strict key validation for plugins[].hooks objects.
+
+    Inputs:
+      - hooks_obj: Value of a plugin entry's hooks field.
+      - entry_path: Human-readable config path prefix (for example, "plugins[0]").
+
+    Outputs:
+      - None.
+
+    Raises:
+      - ValueError: When hooks contains unsupported keys at the top level or
+        under hooks.pre_resolve/hooks.post_resolve/hooks.setup mapping forms.
+    """
+
+    if hooks_obj is None:
+        return
+    if not isinstance(hooks_obj, dict):
+        raise ValueError(f"{entry_path}.hooks must be a mapping when present")
+
+    unknown_top_level = sorted(
+        str(k) for k in hooks_obj.keys() if str(k) not in _PLUGIN_HOOK_ALLOWED_KEYS
+    )
+    if unknown_top_level:
+        allowed = ", ".join(sorted(_PLUGIN_HOOK_ALLOWED_KEYS))
+        found = ", ".join(repr(k) for k in unknown_top_level)
+        raise ValueError(
+            f"{entry_path}.hooks contains unsupported key(s): {found}. "
+            + f"Supported keys: {allowed}"
+        )
+
+    for hook_name in ("pre_resolve", "post_resolve", "setup"):
+        hook_value = hooks_obj.get(hook_name)
+        if not isinstance(hook_value, dict):
+            continue
+        unknown_nested = sorted(
+            str(k)
+            for k in hook_value.keys()
+            if str(k) not in _PLUGIN_HOOK_NODE_ALLOWED_KEYS
+        )
+        if unknown_nested:
+            allowed_nested = ", ".join(sorted(_PLUGIN_HOOK_NODE_ALLOWED_KEYS))
+            found_nested = ", ".join(repr(k) for k in unknown_nested)
+            raise ValueError(
+                f"{entry_path}.hooks.{hook_name} contains unsupported key(s): "
+                + f"{found_nested}. Supported keys: {allowed_nested}"
+            )
 
 
 def _reject_obsolete_server_listen_keys(cfg: Dict[str, Any]) -> None:
@@ -349,7 +411,7 @@ def _normalize_plugin_entries_for_validation(cfg: Dict[str, Any]) -> None:
         return
 
     normalized: list[Any] = []
-    for entry in plugins:
+    for idx, entry in enumerate(plugins):
         if not isinstance(entry, dict):
             normalized.append(entry)
             continue
@@ -380,6 +442,11 @@ def _normalize_plugin_entries_for_validation(cfg: Dict[str, Any]) -> None:
 
         if not enabled:
             continue
+
+        _validate_plugin_hooks_for_validation(
+            entry.get("hooks"),
+            entry_path=f"plugins[{idx}]",
+        )
 
         # Strip non-schema fields.
         entry.pop("enabled", None)
@@ -547,7 +614,7 @@ def validate_config(
     *,
     schema_path: Optional[Path] = None,
     config_path: Optional[str] = None,
-    unknown_keys: str = "warn",
+    unknown_keys: str = "error",
     skip_schema_validation: bool = False,
 ) -> None:
     """Brief: Validate a parsed YAML configuration mapping against JSON Schema.
@@ -566,10 +633,10 @@ def validate_config(
         schema cannot be shipped.
 
         - "ignore": ignore extra-property validation errors entirely.
-        - "warn": (default) log a warning listing the offending paths but do
-          not treat them as fatal.
-        - "error": treat extra-property errors as fatal, alongside all other
-          validation errors.
+        - "warn": log a warning listing the offending paths but do not treat
+          them as fatal.
+        - "error": (default) treat extra-property errors as fatal, alongside
+          all other validation errors.
 
     Outputs:
       - None on success.
