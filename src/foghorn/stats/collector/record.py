@@ -372,6 +372,43 @@ class _StatsCollectorRecordUtils:
                 if self._latency_recent is not None:
                     self._latency_recent.add(seconds)
 
+    def record_suppressed_query_log_drop_candidate(
+        self,
+        *,
+        rcode: Optional[str],
+        status: Optional[str],
+    ) -> None:
+        """Record a suppressed query-log candidate for queue-drop accounting.
+
+        Inputs:
+            rcode: Optional DNS response code for the suppressed row.
+            status: Optional status for the suppressed row.
+
+        Outputs:
+            None.
+
+        Notes:
+            This does not write a query-log row. It only lets queue metrics
+            account for suppressed low-priority rows when queue pressure is high.
+        """
+
+        if self._store is None:
+            return
+
+        try:
+            handler = getattr(self._store, "record_suppressed_query_log_drop_candidate")
+        except Exception:
+            return
+        if not callable(handler):
+            return
+        try:
+            handler(rcode=rcode, status=status)
+        except Exception:  # pragma: no cover
+            logger.debug(
+                "StatsCollector: failed to account for suppressed query_log row",
+                exc_info=True,
+            )
+
     def record_query_result(
         self,
         client_ip: str,
