@@ -149,6 +149,7 @@ class BaseStatsStore:
         self._op_queue_warn_last_bucket: int | None = None
         self._op_queue_drops_total: int = 0
         self._op_queue_drops_by_op: dict[str, int] = {}
+        self._op_queue_drops_by_reason: dict[str, int] = {}
 
         worker = threading.Thread(
             target=self._worker_loop,
@@ -304,13 +305,28 @@ class BaseStatsStore:
             drops = int(getattr(self, "_op_queue_drops_total", 0) or 0)
         except Exception:
             drops = 0
+        full_drops = 0
+        low_priority_drops = 0
+        try:
+            by_reason = getattr(self, "_op_queue_drops_by_reason", {}) or {}
+            if isinstance(by_reason, dict):
+                full_drops = int(by_reason.get("full", 0) or 0)
+                low_priority_drops = int(by_reason.get("low_priority", 0) or 0)
+        except Exception:
+            full_drops = 0
+            low_priority_drops = 0
 
-        msg = "Querylog async queue pressure: %d/%d (%.1f%%), bucket=%d%%, drops=%d" % (
+        msg = (
+            "Querylog async queue pressure: %d/%d (%.1f%%), bucket=%d%%, "
+            "drops=%d (full=%d, low_priority=%d)"
+        ) % (
             size,
             cap,
             pct_full,
             bucket,
             drops,
+            full_drops,
+            low_priority_drops,
         )
 
         log = logging.getLogger(__name__)
@@ -319,11 +335,12 @@ class BaseStatsStore:
         else:
             log.info(msg)
 
-    def _record_queue_drop(self, op_name: str) -> None:
+    def _record_queue_drop(self, op_name: str, reason: str = "full") -> None:
         """Brief: Increment best-effort counters for a dropped queue operation.
 
         Inputs:
           - op_name: Operation name (e.g. 'insert_query_log').
+          - reason: Drop-reason key (for example, 'full' or 'low_priority').
 
         Outputs:
           - None.
@@ -343,6 +360,123 @@ class BaseStatsStore:
         except Exception:
             pass
 
+        try:
+            reason_key = str(reason or "unknown").strip().lower() or "unknown"
+        except Exception:
+            reason_key = "unknown"
+        try:
+            by_reason = getattr(self, "_op_queue_drops_by_reason", None)
+            if by_reason is None:
+                by_reason = {}
+                self._op_queue_drops_by_reason = by_reason
+            if isinstance(by_reason, dict):
+                by_reason[reason_key] = int(by_reason.get(reason_key, 0) or 0) + 1
+        except Exception:
+            pass
+
+    @staticmethod
+    def _is_low_priority_query_log_row(*, rcode: object, status: object) -> bool:
+        """Brief: Return True when a query-log row is low-priority under pressure.
+
+        Inputs:
+          - rcode: Query-log rcode value.
+          - status: Query-log status value.
+
+        Outputs:
+          - bool: True for REFUSED responses or drop-style statuses.
+        """
+
+        try:
+            rcode_s = str(rcode or "").strip().upper()
+        except Exception:
+            rcode_s = ""
+        if rcode_s == "REFUSED":
+            return True
+
+        try:
+            status_s = str(status or "").strip().lower()
+        except Exception:
+            status_s = ""
+        return status_s in {"drop", "dropped"}
+
+    def _should_shed_low_priority_query_log(
+        self,
+        *,
+        rcode: object,
+        status: object,
+    ) -> bool:
+        """Brief: Decide whether to shed a low-priority query-log row pre-enqueue.
+
+        Inputs:
+          - rcode: Query-log rcode value.
+          - status: Query-log status value.
+
+        Outputs:
+          - bool: True when queue is bounded, >=25% full, and row is low-priority.
+        """
+
+        q = getattr(self, "_op_queue", None)
+        if q is None:
+            return False
+
+        try:
+            cap = int(getattr(q, "maxsize", 0) or 0)
+            if cap <= 0:
+                return False
+            size = int(q.qsize())
+        except Exception:
+            return False
+
+        pct_full = (float(size) / float(max(1, cap))) * 100.0
+        if pct_full < 25.0:
+            return False
+        return self._is_low_priority_query_log_row(rcode=rcode, status=status)
+
+    def record_suppressed_query_log_drop_candidate(
+        self,
+        *,
+        rcode: object,
+        status: object,
+    ) -> bool:
+        """Brief: Account for a suppressed low-priority query-log row under pressure.
+
+        Inputs:
+          - rcode: Candidate query-log rcode value.
+          - status: Candidate query-log status value.
+
+        Outputs:
+          - bool: True when the row qualifies as low-priority and queue pressure
+            indicates it would be shed (bounded queue at >=25% full).
+        """
+
+        try:
+            should_count = self._should_shed_low_priority_query_log(
+                rcode=rcode,
+                status=status,
+            )
+        except Exception:
+            should_count = False
+        if not should_count:
+            return False
+
+        self._record_queue_drop("insert_query_log", reason="low_priority")
+        try:
+            q = getattr(self, "_op_queue", None)
+            size = int(q.qsize()) if q is not None else 0
+            cap = int(getattr(q, "maxsize", 0) or 0) if q is not None else 0
+            logging.getLogger(__name__).debug(
+                "Counted suppressed query-log row as low_priority drop "
+                "(rcode=%s status=%s queue=%d/%d)",
+                str(rcode),
+                str(status),
+                size,
+                cap,
+            )
+        except Exception:
+            pass
+        self._maybe_warn_queue_pressure()
+        return True
+
     def get_async_queue_metrics(self) -> Dict[str, object]:
         """Brief: Return best-effort metrics for the async worker queue.
 
@@ -356,6 +490,7 @@ class BaseStatsStore:
               - pct_full: float | None percent full (None when unbounded)
               - drops_total: int best-effort dropped op count
               - drops_by_op: dict[str,int] best-effort drops per op
+              - drops_by_reason: dict[str,int] best-effort drops per reason
         """
 
         q = getattr(self, "_op_queue", None)
@@ -391,6 +526,16 @@ class BaseStatsStore:
                     drops_by_op[str(k)] = int(v)
                 except Exception:
                     continue
+        drops_by_reason_raw = getattr(self, "_op_queue_drops_by_reason", {}) or {}
+        drops_by_reason: dict[str, int] = {}
+        if isinstance(drops_by_reason_raw, dict):
+            for k, v in drops_by_reason_raw.items():
+                if not k:
+                    continue
+                try:
+                    drops_by_reason[str(k)] = int(v)
+                except Exception:
+                    continue
 
         return {
             "capacity": cap,
@@ -398,6 +543,7 @@ class BaseStatsStore:
             "pct_full": pct_full,
             "drops_total": drops_total,
             "drops_by_op": drops_by_op,
+            "drops_by_reason": drops_by_reason,
         }
 
     # ------------------------------------------------------------------
@@ -456,7 +602,7 @@ class BaseStatsStore:
             except queue.Full:
                 # Drop on full queue; this is explicitly allowed so query
                 # processing is never delayed by logging backpressure.
-                self._record_queue_drop("increment_count")
+                self._record_queue_drop("increment_count", reason="full")
                 self._maybe_warn_queue_pressure()
                 return
 
@@ -590,7 +736,8 @@ class BaseStatsStore:
           - None; returns after queuing the operation. The worker thread will
             later call ``_insert_query_log`` on this instance. When the queue
             cannot be used, falls back to calling ``_insert_query_log``
-            synchronously when available.
+            synchronously when available. Low-priority rows may be shed when
+            the queue is near capacity.
         """
 
         try:
@@ -598,6 +745,10 @@ class BaseStatsStore:
             q = getattr(self, "_op_queue", None)
             if q is None:
                 raise RuntimeError("op queue not initialized")
+            if self._should_shed_low_priority_query_log(rcode=rcode, status=status):
+                self._record_queue_drop("insert_query_log", reason="low_priority")
+                self._maybe_warn_queue_pressure()
+                return
 
             try:
                 q.put_nowait(
@@ -619,7 +770,7 @@ class BaseStatsStore:
                     )
                 )
             except queue.Full:
-                self._record_queue_drop("insert_query_log")
+                self._record_queue_drop("insert_query_log", reason="full")
                 self._maybe_warn_queue_pressure()
                 return
 
