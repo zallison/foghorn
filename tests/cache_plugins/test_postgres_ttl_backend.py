@@ -9,6 +9,7 @@ Outputs:
 
 from __future__ import annotations
 
+import hashlib
 import types
 from typing import Any, List, Optional, Tuple
 
@@ -117,7 +118,14 @@ def test_import_driver_raises_when_missing(monkeypatch) -> None:
         postgres_mod._import_postgres_driver()
 
 
-def _init_cache_with_fake_conn(monkeypatch, *, namespace: str = "cache"):
+def _init_cache_with_fake_conn(
+    monkeypatch,
+    *,
+    namespace: str = "cache",
+    user: Optional[str] = "u",
+    password: Optional[str] = "p",
+    connect_kwargs: Optional[dict] = None,
+):
     """Helper to initialize cache with fake connection."""
     conn = FakeConn()
     driver = FakeDriver(conn)
@@ -126,10 +134,12 @@ def _init_cache_with_fake_conn(monkeypatch, *, namespace: str = "cache"):
         namespace=namespace,
         host="h",
         port=5432,
-        user="u",
-        password="p",
+        user=user,
+        password=password,
         database="db",
-        connect_kwargs={"sslmode": "require"},
+        connect_kwargs=(
+            connect_kwargs if connect_kwargs is not None else {"sslmode": "require"}
+        ),
     )
     return cache, conn, driver
 
@@ -152,11 +162,114 @@ def test_init_builds_kwargs_and_creates_schema(monkeypatch) -> None:
     assert "CREATE INDEX IF NOT EXISTS" in joined_sql
 
 
+def test_init_rejects_invalid_namespace_before_driver_import(monkeypatch) -> None:
+    """Test invalid namespace fails fast before driver import."""
+    called = False
+
+    def fake_driver_import():
+        nonlocal called
+        called = True
+        return FakeDriver(FakeConn())
+
+    monkeypatch.setattr(postgres_mod, "_import_postgres_driver", fake_driver_import)
+    with pytest.raises(ValueError, match="namespace must match"):
+        postgres_mod.PostgresTTLCache(namespace="bad-name")
+    assert called is False
+
+
+def test_init_omits_optional_kwargs_when_none(monkeypatch) -> None:
+    """Test connect kwargs omit optional fields when values are not set."""
+    _cache, _conn, driver = _init_cache_with_fake_conn(
+        monkeypatch,
+        user=None,
+        password=None,
+        connect_kwargs={},
+    )
+
+    assert driver.kwargs is not None
+    assert "user" not in driver.kwargs
+    assert "password" not in driver.kwargs
+    assert "sslmode" not in driver.kwargs
+
+
+def test_non_bytes_keys_use_safe_serializer(monkeypatch) -> None:
+    """Test digest/blob helper paths serialize non-bytes keys."""
+    calls: List[Any] = []
+
+    def fake_safe_serialize(value: Any) -> bytes:
+        calls.append(value)
+        return b"serialized-key"
+
+    key = {"zone": "example.org", "rrtype": "A"}
+    monkeypatch.setattr(postgres_mod, "safe_serialize", fake_safe_serialize)
+
+    digest = postgres_mod._stable_digest_for_key(key)
+    assert digest == hashlib.sha256(b"serialized-key").digest()
+    assert postgres_mod._encode_key_blob(key) == b"serialized-key"
+    assert calls == [key, key]
+
+
 def test_get_with_meta_miss(monkeypatch) -> None:
     """Test get_with_meta() returns (None, None, None) on miss."""
     cache, conn, _ = _init_cache_with_fake_conn(monkeypatch)
     result = cache.get_with_meta(b"m1")
     assert result == (None, None, None)
+
+
+def test_get_returns_none_on_miss(monkeypatch) -> None:
+    """Test get() returns None when no row exists."""
+    cache, _conn, _ = _init_cache_with_fake_conn(monkeypatch)
+    assert cache.get(b"missing") is None
+
+
+def test_get_returns_value_when_not_expired(monkeypatch) -> None:
+    """Test get() returns decoded value when expiry is in the future."""
+    cache, conn, _ = _init_cache_with_fake_conn(monkeypatch)
+    cur = FakeCursor()
+    cur.queue_rows([(b"value", postgres_mod.RAW_BYTES_FLAG, 120.0)])
+    monkeypatch.setattr(conn, "cursor", lambda: cur)
+    monkeypatch.setattr(postgres_mod.time, "time", lambda: 100.0)
+
+    assert cache.get(b"k1") == b"value"
+    assert all("DELETE FROM" not in sql for (sql, _params) in cur.executes)
+
+
+def test_get_treats_invalid_expiry_as_expired(monkeypatch) -> None:
+    """Test get() expires rows when expiry cannot be parsed."""
+    cache, conn, _ = _init_cache_with_fake_conn(monkeypatch)
+    cur = FakeCursor()
+    cur.queue_rows([(b"value", postgres_mod.RAW_BYTES_FLAG, object())])
+    monkeypatch.setattr(conn, "cursor", lambda: cur)
+    monkeypatch.setattr(postgres_mod.time, "time", lambda: 100.0)
+
+    assert cache.get(b"k2") is None
+    assert any("DELETE FROM" in sql for (sql, _params) in cur.executes)
+
+
+def test_get_with_meta_returns_value_and_metadata(monkeypatch) -> None:
+    """Test get_with_meta() returns value, remaining TTL, and original TTL."""
+    cache, conn, _ = _init_cache_with_fake_conn(monkeypatch)
+    cur = FakeCursor()
+    cur.queue_rows([(b"value", postgres_mod.RAW_BYTES_FLAG, 30, 130.0)])
+    monkeypatch.setattr(conn, "cursor", lambda: cur)
+    monkeypatch.setattr(postgres_mod.time, "time", lambda: 100.0)
+
+    value, remaining, ttl = cache.get_with_meta(b"m2")
+    assert value == b"value"
+    assert remaining == 30.0
+    assert ttl == 30
+
+
+def test_get_with_meta_handles_invalid_ttl_and_expiry(monkeypatch) -> None:
+    """Test get_with_meta() coercion fallback for malformed ttl/expiry fields."""
+    cache, conn, _ = _init_cache_with_fake_conn(monkeypatch)
+    cur = FakeCursor()
+    cur.queue_rows([(b"value", postgres_mod.RAW_BYTES_FLAG, "bad-ttl", object())])
+    monkeypatch.setattr(conn, "cursor", lambda: cur)
+    monkeypatch.setattr(postgres_mod.time, "time", lambda: 100.0)
+
+    assert cache.get_with_meta(b"m3") == (None, None, None)
+    assert any("DELETE FROM" in sql for (sql, _params) in cur.executes)
 
 
 def test_set_and_purge(monkeypatch) -> None:
@@ -178,6 +291,18 @@ def test_set_and_purge(monkeypatch) -> None:
     assert removed == 5
 
 
+def test_set_clamps_negative_ttl_to_zero(monkeypatch) -> None:
+    """Test set() clamps negative TTL values to zero."""
+    cache, conn, _ = _init_cache_with_fake_conn(monkeypatch)
+    monkeypatch.setattr(postgres_mod.time, "time", lambda: 100.0)
+    cache.set(b"neg", -30, b"value")
+
+    assert conn.last_cursor is not None
+    _sql, params = conn.last_cursor.executes[-1]
+    assert params[4] == 0
+    assert params[5] == 100.0
+
+
 def test_encode_decode_bytes(monkeypatch) -> None:
     """Test encode/decode for raw bytes."""
     cache, conn, _ = _init_cache_with_fake_conn(monkeypatch)
@@ -197,6 +322,12 @@ def test_encode_decode_safe_serialized(monkeypatch) -> None:
     assert cache._decode(encoded, flag) == obj
 
 
+def test_decode_unknown_flag_raises() -> None:
+    """Test _decode() raises for unsupported encoding flags."""
+    with pytest.raises(ValueError, match="Unsupported cache payload encoding flag"):
+        postgres_mod.PostgresTTLCache._decode(b"data", 99)
+
+
 def test_close(monkeypatch) -> None:
     """Test close() closes connection."""
     cache, conn, _ = _init_cache_with_fake_conn(monkeypatch)
@@ -214,4 +345,11 @@ def test_close_with_exception(monkeypatch) -> None:
 
     monkeypatch.setattr(conn, "close", raise_error)
     # Should not raise
+    cache.close()
+
+
+def test_close_when_connection_attribute_missing(monkeypatch) -> None:
+    """Test close() no-ops when _conn attribute is absent."""
+    cache, _conn, _ = _init_cache_with_fake_conn(monkeypatch)
+    del cache._conn
     cache.close()
