@@ -247,7 +247,7 @@ def test_json_logging_invalid_max_logging_queue_falls_back_to_default(
         max_logging_queue="not-an-int",
     )
 
-    assert backend._max_logging_queue == 4096  # type: ignore[attr-defined]
+    assert backend._max_logging_queue == 16384  # type: ignore[attr-defined]
 
 
 def test_json_logging_retention_max_records(tmp_path: Path) -> None:

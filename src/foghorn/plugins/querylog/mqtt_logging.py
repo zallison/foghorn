@@ -108,7 +108,7 @@ class MqttLogging(BaseStatsStore):
         retain: bool = False,
         connect_kwargs: Optional[Dict[str, Any]] = None,
         async_logging: bool = False,
-        max_logging_queue: int = 4096,
+        max_logging_queue: int = 16384,
         retention_max_records: Optional[int] = None,
         retention_days: Optional[float] = None,
         **_: Any,
@@ -130,7 +130,7 @@ class MqttLogging(BaseStatsStore):
         try:
             self._max_logging_queue = int(max_logging_queue)
         except Exception:
-            self._max_logging_queue = 4096
+            self._max_logging_queue = 16384
         if retention_max_records is not None or retention_days is not None:
             logger.debug(
                 "MqttLogging does not support retention pruning; ignoring retention_max_records=%r retention_days=%r",
