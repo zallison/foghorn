@@ -596,37 +596,54 @@ def _ensure_old_plugin_reaper_thread() -> None:
 
 
 def _reap_old_plugins_loop() -> None:
-    """Brief: Background loop that shuts down old plugin instances after grace.
+    """Brief: Drain queued old plugin generations after the shutdown grace period.
 
-    Inputs: none
-    Outputs: none
+    Inputs:
+      - None.
+
+    Outputs:
+      - None.
+
+    Notes:
+      - This loop exits only when the queued old-plugin list is empty.
+      - Shutdown hooks run outside the queue lock so reloading is never blocked
+        by plugin teardown.
     """
 
     while True:
         now = time.time()
         batch: List[List[object]] = []
+        sleep_for_seconds: float | None = None
         with _OLD_PLUGINS_LOCK:
             remaining: List[Tuple[float, List[object]]] = []
             for ts, plugins in _OLD_PLUGINS:
-                if now - ts >= _PLUGIN_SHUTDOWN_GRACE_SECONDS:
+                age_seconds = now - ts
+                if age_seconds >= _PLUGIN_SHUTDOWN_GRACE_SECONDS:
                     batch.append(list(plugins or []))
                 else:
                     remaining.append((ts, plugins))
+                    wait_for = _PLUGIN_SHUTDOWN_GRACE_SECONDS - age_seconds
+                    if sleep_for_seconds is None or wait_for < sleep_for_seconds:
+                        sleep_for_seconds = wait_for
             _OLD_PLUGINS[:] = remaining
 
-        if not batch:
+        if batch:
+            for plugins in batch:
+                for p in plugins:
+                    try:
+                        shutdown = getattr(p, "shutdown", None)
+                        if callable(shutdown):
+                            shutdown()
+                    except Exception:
+                        logger.debug(
+                            "Plugin shutdown failed for %r", p, exc_info=True
+                        )  # pragma: no cover - defensive
+            continue
+
+        if sleep_for_seconds is None:
             return
 
-        for plugins in batch:
-            for p in plugins:
-                try:
-                    shutdown = getattr(p, "shutdown", None)
-                    if callable(shutdown):
-                        shutdown()
-                except Exception:
-                    logger.debug(
-                        "Plugin shutdown failed for %r", p, exc_info=True
-                    )  # pragma: no cover - defensive
+        time.sleep(max(0.01, float(sleep_for_seconds)))
 
 
 def _build_snapshot(
