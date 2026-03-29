@@ -6,8 +6,9 @@ upstreams:
   max_concurrent: 1
 plugins: []
 logging:
-  level: info
-  stderr: true
+  python:
+    level: info
+    stderr: true
 server:
   listen:
     udp:

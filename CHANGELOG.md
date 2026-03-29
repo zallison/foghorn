@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 ### Recent incremental updates
+- Config validation now defaults unknown schema keys to `error` (instead of `warn`) across CLI/runtime/parser paths, and plugin hook validation now rejects unsupported keys (including nested hook mapping typos) with explicit config-path errors.
+- Query-log backends now support configurable write batching (`batch_writes`, `batch_time_sec`, `batch_max_size`) for InfluxDB, JSON logging, MongoDB, MySQL/MariaDB, and PostgreSQL stores, with pending-write flushes on close and read/report paths to preserve visibility semantics.
+- SQLite stats/query-log helpers now flush pending batched operations before read helpers (`has_counts`, `export_counts`, `has_query_log`) for read-after-write consistency in batch mode.
+- Filter plugin pre-resolve domain decision caching is now namespaced per plugin instance name, preventing allow/deny cache leakage across multiple Filter instances sharing a cache backend.
+- Rate-limit profile collection now canonicalizes competing global alias rows into one deterministic profile row so API output no longer depends on sqlite row ordering.
+- Example configs were updated to use nested Python logging shape (`logging.python.level` / `logging.python.stderr`) rather than legacy top-level logging keys.
 - Runtime reload teardown now keeps the old-plugin reaper alive until queued generations age past the shutdown grace window, so `shutdown()` runs without requiring an additional reload cycle.
 - Query-log backends now default `max_logging_queue` to `16384`, and `BaseStatsStore` queue-pressure metrics now track drop reasons (`full`, `low_priority`) with low-priority query-log shedding under sustained queue pressure.
 - Server hot-path helpers now normalize unknown qtypes to `UNKNOWN` for stats labels, bound plugin-order and non-QUERY opcode rate-bucket caches, and clear coalescing in-flight markers when background submissions are rejected.
