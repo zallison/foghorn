@@ -738,11 +738,11 @@ def test_load_records_bind_multi_rr_counter_and_synthesis_tld_mismatch_branch(tm
     assert plugin_mismatch._zone_soa == {}
 
 
-def test_load_records_synthesizes_tld_soa_when_use_tld_matches():
+def test_load_records_synthesizes_tld_soa_when_use_tld_matches(tmp_path):
     """Brief: SOA synthesis accepts single-label suffix when dnssec_signing.use_tld matches.
 
     Inputs:
-      - None.
+      - tmp_path: pytest temporary path.
 
     Outputs:
       - None: asserts synthesized SOA exists for matching single-label suffix.
@@ -753,7 +753,7 @@ def test_load_records_synthesizes_tld_soa_when_use_tld_matches():
             "a.tld|A|300|192.0.2.1",
             "b.tld|A|300|192.0.2.2",
         ],
-        dnssec_signing={"use_tld": "tld"},
+        dnssec_signing={"use_tld": "tld", "keys_dir": str(tmp_path)},
         soa_synthesis_enabled=True,
     )
     plugin.setup()
