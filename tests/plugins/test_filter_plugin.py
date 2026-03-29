@@ -845,6 +845,55 @@ def test_multiple_filter_instances_use_isolated_dbs_by_default(tmp_path):
     assert p2.pre_resolve("p1-block.com", QTYPE.A, b"", ctx).action == "skip"
 
 
+def test_multiple_filter_instances_do_not_leak_pre_resolve_cache_decisions(tmp_path):
+    """Brief: Shared cache backend does not leak allow decisions across Filter instances.
+
+    Inputs:
+      - Shared in-memory cache passed to both filter instances.
+      - PTR query from the targeted Plex client IP.
+
+    Outputs:
+      - None: Asserts plex_ptr denies regardless of whether malware_and_ads runs first.
+    """
+    shared_cache = InMemoryTTLCache()
+
+    malware_and_ads = Filter(
+        name="malware_and_ads",
+        db_path=str(tmp_path / "malware_and_ads.db"),
+        default="allow",
+        cache=shared_cache,
+    )
+    malware_and_ads.setup()
+
+    plex_ptr = Filter(
+        name="plex_ptr",
+        db_path=str(tmp_path / "plex_ptr.db"),
+        default="deny",
+        cache=shared_cache,
+        targets={"ips": ["192.168.88.135"], "qtypes": ["PTR"]},
+    )
+    plex_ptr.setup()
+
+    ctx = PluginContext(client_ip="192.168.88.135")
+    ptr_name = "135.88.168.192.in-addr.arpa"
+
+    with closing(malware_and_ads.conn), closing(plex_ptr.conn):
+        # Baseline: plex_ptr first should deny.
+        baseline_decision = plex_ptr.pre_resolve(ptr_name, QTYPE.PTR, b"", ctx)
+        assert isinstance(baseline_decision, PluginDecision)
+        assert baseline_decision.action == "deny"
+
+        # Regression case: malware_and_ads runs first and allows the query.
+        allow_decision = malware_and_ads.pre_resolve(ptr_name, QTYPE.PTR, b"", ctx)
+        assert isinstance(allow_decision, PluginDecision)
+        assert allow_decision.action == "skip"
+
+        # plex_ptr must still deny after the earlier allow from malware_and_ads.
+        post_allow_decision = plex_ptr.pre_resolve(ptr_name, QTYPE.PTR, b"", ctx)
+        assert isinstance(post_allow_decision, PluginDecision)
+        assert post_allow_decision.action == "deny"
+
+
 def test_get_config_model_returns_filter_config():
     """Brief: get_config_model returns the FilterConfig model class.
 
