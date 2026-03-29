@@ -294,6 +294,38 @@ def _clone_records_for_update_processing(
     return cloned
 
 
+def _prune_dns_update_rate_buckets(
+    buckets: Dict[str, Dict[str, float | int]],
+    now: float,
+    *,
+    window_seconds: float = 60.0,
+) -> None:
+    """Brief: Remove stale DNS UPDATE rate-limit token buckets.
+
+    Inputs:
+      - buckets: Mutable bucket map keyed by client/key identifier.
+      - now: Current epoch seconds.
+      - window_seconds: Active token-window duration.
+
+    Outputs:
+      - None. Mutates ``buckets`` in place by deleting stale entries.
+    """
+    stale_keys: List[str] = []
+    for bucket_key, bucket_value in buckets.items():
+        if not isinstance(bucket_value, dict):
+            stale_keys.append(bucket_key)
+            continue
+        try:
+            start = float(bucket_value.get("start", now))
+        except (TypeError, ValueError):
+            stale_keys.append(bucket_key)
+            continue
+        if now - start >= window_seconds:
+            stale_keys.append(bucket_key)
+    for stale_key in stale_keys:
+        buckets.pop(stale_key, None)
+
+
 def process_update_message(
     request_data: bytes,
     zone_apex: str,
@@ -758,6 +790,14 @@ def process_update_message(
         if not isinstance(buckets, dict):
             buckets = {}
             setattr(plugin, "_dns_update_rate_buckets", buckets)
+        last_prune = getattr(plugin, "_dns_update_rate_buckets_last_prune", 0.0)
+        try:
+            last_prune_ts = float(last_prune)
+        except (TypeError, ValueError):
+            last_prune_ts = 0.0
+        if now - last_prune_ts >= 60.0:
+            _prune_dns_update_rate_buckets(buckets, now, window_seconds=60.0)
+            setattr(plugin, "_dns_update_rate_buckets_last_prune", now)
 
         limit_client = int(security_cfg.get("rate_limit_per_client", 0) or 0)
         if limit_client > 0:
