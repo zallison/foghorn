@@ -362,6 +362,36 @@ def test_get_current_namespaced_cache_with_in_memory_plugin_shares_store() -> No
     assert adapter_b.get(key) == b"B"
 
 
+def test_get_current_namespaced_cache_in_memory_namespace_enforces_capacity() -> None:
+    """Brief: Namespaced in-memory views retain size and eviction configuration.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts namespaced writes are bounded by configured cache size.
+    """
+
+    plugin = InMemoryTTLCache(max_size=2, pct_nxdomain=0.0, eviction_policy="fifo")
+    adapter = get_current_namespaced_cache(namespace="ns-capacity", cache_plugin=plugin)
+
+    key1 = ("cap1.example", 1)
+    key2 = ("cap2.example", 1)
+    key3 = ("cap3.example", 1)
+
+    adapter.set(key1, 60, b"one")
+    adapter.set(key2, 60, b"two")
+    adapter.set(key3, 60, b"three")
+
+    # FIFO with max_size=2 should evict the first inserted key.
+    assert adapter.get(key1) is None
+    assert adapter.get(key2) == b"two"
+    assert adapter.get(key3) == b"three"
+
+    # Underlying shared store must remain bounded.
+    assert len(plugin._cache._store) <= 2
+
+
 def test_get_current_namespaced_cache_with_cache_plugin_wraps_plugin() -> None:
     """Brief: Generic CachePlugin instances are wrapped directly.
 
@@ -471,6 +501,7 @@ def test_get_current_namespaced_cache_with_sqlite_plugin_uses_sqlite_backend(
           - namespace: Logical namespace/table name.
           - journal_mode: Journal mode string.
           - create_dir: Whether directory creation was requested.
+          - maxsize: Optional capacity bound for size-based eviction.
 
         Outputs:
           - _RecordingSQLite3TTLCache instance.
@@ -483,11 +514,13 @@ def test_get_current_namespaced_cache_with_sqlite_plugin_uses_sqlite_backend(
             namespace: str,
             journal_mode: str,
             create_dir: bool,
+            maxsize: int | None = None,
         ) -> None:
             recorded["db_path"] = db_path
             recorded["namespace"] = namespace
             recorded["journal_mode"] = journal_mode
             recorded["create_dir"] = create_dir
+            recorded["maxsize"] = maxsize
 
     monkeypatch.setattr(
         current_cache_module,
