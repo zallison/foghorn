@@ -49,10 +49,10 @@ def _build_main_arg_parser() -> argparse.ArgumentParser:
         "--config-extras",
         dest="config_extras",
         choices=["ignore", "warn", "error"],
-        default="warn",
+        default="error",
         help=(
             "Policy for unknown config keys not described by the JSON Schema: "
-            "ignore (keep current behaviour), warn (default), or error."
+            "ignore, warn, or error (default)."
         ),
     )
     parser.add_argument(

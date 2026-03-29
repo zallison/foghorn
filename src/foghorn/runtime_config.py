@@ -280,7 +280,7 @@ _LOCK = threading.Lock()
 _ACTIVE: RuntimeSnapshot | None = None
 _CONFIG_PATH: str | None = None
 _CLI_VARS: List[str] = []
-_UNKNOWN_KEYS_POLICY: Final[str] = "warn"
+_UNKNOWN_KEYS_POLICY: Final[str] = "error"
 
 # Background teardown tracking for old plugin instances.
 _OLD_PLUGINS_LOCK = threading.Lock()
@@ -293,7 +293,7 @@ def initialize_runtime(
     snapshot: RuntimeSnapshot,
     config_path: str,
     cli_vars: Sequence[str] | None = None,
-    unknown_keys_policy: str = "warn",
+    unknown_keys_policy: str = "error",
 ) -> None:
     """Brief: Initialize the active runtime snapshot used by the resolver.
 
@@ -317,7 +317,7 @@ def initialize_runtime(
         _ACTIVE = snapshot
         _CONFIG_PATH = str(config_path)
         _CLI_VARS = list(cli_vars or [])
-        _UNKNOWN_KEYS_POLICY = str(unknown_keys_policy or "warn")
+        _UNKNOWN_KEYS_POLICY = str(unknown_keys_policy or "error")
 
     _apply_snapshot_to_runtime_globals(snapshot)
 
@@ -344,7 +344,7 @@ def clear_runtime() -> None:
         _ACTIVE = None
         _CONFIG_PATH = None
         _CLI_VARS = []
-        _UNKNOWN_KEYS_POLICY = "warn"
+        _UNKNOWN_KEYS_POLICY = "error"
 
     with _OLD_PLUGINS_LOCK:
         _OLD_PLUGINS[:] = []
@@ -396,7 +396,7 @@ def load_config_from_disk(*, config_path: str | None = None) -> Dict[str, Any]:
     return parse_config_file(
         cfg_path,
         cli_vars=list(_CLI_VARS or []),
-        unknown_keys=str(_UNKNOWN_KEYS_POLICY or "warn"),
+        unknown_keys=str(_UNKNOWN_KEYS_POLICY or "error"),
     )
 
 
@@ -481,7 +481,7 @@ def reload_from_disk(
         desired = parse_config_file(
             cfg_path,
             cli_vars=list(_CLI_VARS or []),
-            unknown_keys=str(_UNKNOWN_KEYS_POLICY or "warn"),
+            unknown_keys=str(_UNKNOWN_KEYS_POLICY or "error"),
         )
     except Exception as exc:
         return ReloadResult(
