@@ -157,10 +157,21 @@ class Filter(BasePlugin):
             - When multiple instances explicitly share the same non-empty
               ``db_path``, they also share the same underlying table and
               last-writer-wins semantics apply.
+            - Pre-resolve domain decision cache entries are namespaced per
+              plugin instance name, so multiple Filter instances do not
+              leak allow/deny cache decisions across each other.
         """
         # super().__init__(**config)
+        instance_name = str(getattr(self, "name", "") or self.__class__.__name__)
+        cache_label = re.sub(r"[^0-9A-Za-z_]", "_", instance_name).strip("_")
+        if not cache_label:
+            cache_label = "plugin"
+        if cache_label[0].isdigit():
+            cache_label = f"p_{cache_label}"
+        cache_digest = hashlib.sha1(instance_name.encode("utf-8")).hexdigest()[:8]
+        cache_namespace = f"{module_namespace(__file__)}_{cache_label}_{cache_digest}"
         self._domain_cache = get_current_namespaced_cache(
-            namespace=module_namespace(__file__),
+            namespace=cache_namespace,
             cache_plugin=self.config.get("cache"),
         )
         # Serialize SQLite access across ThreadingUDPServer handler threads to
