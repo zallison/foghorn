@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 ### Recent incremental updates
+- Runtime reload teardown now keeps the old-plugin reaper alive until queued generations age past the shutdown grace window, so `shutdown()` runs without requiring an additional reload cycle.
+- Query-log backends now default `max_logging_queue` to `16384`, and `BaseStatsStore` queue-pressure metrics now track drop reasons (`full`, `low_priority`) with low-priority query-log shedding under sustained queue pressure.
+- Server hot-path helpers now normalize unknown qtypes to `UNKNOWN` for stats labels, bound plugin-order and non-QUERY opcode rate-bucket caches, and clear coalescing in-flight markers when background submissions are rejected.
+- Namespaced cache views now preserve cache capacity/eviction settings, and current-cache namespace wrappers now bound in-memory maxsize using backend cache budget hints.
+- FileDownloader now enforces bounded streamed downloads (including `Content-Length` pre-checks and mid-stream overflow aborts), and ZoneRecords DNS UPDATE rate buckets now prune stale entries during request processing.
+- Example config behavior now documents dropping responses on overload via `overload_response: drop`.
 - RateLimit now emits startup warnings when configured limits are likely to be shadowed by stricter thresholds (for example warmup/bootstrap/global caps versus per-key hard caps), and its docstrings now explicitly note that listener concurrency controls (e.g. `max_in_flight`) are enforced outside the plugin and may apply before RPS-based limits.
 - Hardened external cache backends against untrusted-data deserialization by replacing pickle-based payload decoding with a safe JSON/tagged codec in Redis, Memcached, MongoDB, SQLite, MySQL, and PostgreSQL cache paths; legacy pickle-encoded cache entries now fail closed as cache misses (with best-effort cleanup), and persisted key encoding updates in SQLite/MySQL/PostgreSQL may invalidate previously stored entries until repopulated.
 - Added query-log flood hardening controls across runtime/config/backends: global `logging.max_logging_queue`, retention byte caps (`max_bytes`), prune cadence controls (`prune_interval_seconds`, `prune_every_n_inserts`), pre-persistence sampling (`query_log_sampling`) and dedupe (`query_log_dedupe`) options, plus backend maintenance knobs (SQLite/PostgreSQL vacuum, MySQL optimize, MongoDB native TTL index support, SQLite auto-vacuum mode).
