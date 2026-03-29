@@ -199,13 +199,16 @@ class PostgresTTLCache:
 
     @staticmethod
     def _encode(value: Any) -> Tuple[bytes, int]:
-        """Encode a value as bytes with a pickle flag.
+        """Encode a value as bytes with an encoding flag.
 
         Inputs:
             value: Raw bytes or arbitrary object to cache.
 
         Outputs:
-            Tuple of (encoded bytes, is_pickle flag: 0 for bytes, 1 for pickled).
+            Tuple of:
+              - encoded bytes payload
+              - encoding flag (RAW_BYTES_FLAG for bytes-like inputs, or
+                SAFE_SERIALIZED_FLAG for safely serialized objects)
         """
 
         if isinstance(value, (bytes, bytearray, memoryview)):
@@ -218,7 +221,8 @@ class PostgresTTLCache:
 
         Inputs:
             payload: Encoded bytes-like object.
-            is_pickle: Flag indicating whether payload is pickled (1) or raw (0).
+            is_pickle: Encoding flag value (RAW_BYTES_FLAG for raw bytes payloads,
+                SAFE_SERIALIZED_FLAG for safe-serialized payloads).
 
         Outputs:
             Decoded value.
@@ -236,7 +240,7 @@ class PostgresTTLCache:
 
         Inputs:
             key: Cache key (any Python object).
-            ttl: Time-to-live in seconds.
+            ttl: Time-to-live in seconds; coerced to int and clamped to >= 0.
             value: Value to cache (bytes or arbitrary object).
 
         Outputs:
