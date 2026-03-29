@@ -658,6 +658,98 @@ def test_json_logging_retention_max_records_without_header_marker(
     assert kept_names == ["second.example", "third.example"]
 
 
+def test_json_logging_batch_writes_flush_on_batch_size(tmp_path: Path) -> None:
+    """Brief: JsonLogging flushes buffered lines once batch_max_size is reached.
+
+    Inputs:
+        tmp_path: pytest-provided temporary directory path.
+
+    Outputs:
+        None; asserts the first insert remains buffered and second insert flushes both.
+    """
+
+    log_file = tmp_path / "queries.jsonl"
+    backend = JsonLogging(
+        file_path=str(log_file),
+        async_logging=False,
+        batch_writes=True,
+        batch_max_size=2,
+        batch_time_sec=9999.0,
+    )
+
+    backend._insert_query_log(  # type: ignore[attr-defined]
+        ts=1.0,
+        client_ip="192.0.2.1",
+        name="first-batch.example",
+        qtype="A",
+        upstream_id=None,
+        rcode="NOERROR",
+        status="ok",
+        error=None,
+        first=None,
+        result_json="{}",
+    )
+    assert len(log_file.read_text(encoding="utf-8").splitlines()) == 1
+
+    backend._insert_query_log(  # type: ignore[attr-defined]
+        ts=2.0,
+        client_ip="192.0.2.2",
+        name="second-batch.example",
+        qtype="A",
+        upstream_id=None,
+        rcode="NOERROR",
+        status="ok",
+        error=None,
+        first=None,
+        result_json="{}",
+    )
+    lines = log_file.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 3
+    names = [json.loads(line)["name"] for line in lines[1:]]
+    assert names == ["first-batch.example", "second-batch.example"]
+
+    backend.close()
+
+
+def test_json_logging_batch_writes_flush_on_close(tmp_path: Path) -> None:
+    """Brief: close() flushes pending buffered lines in batch-write mode.
+
+    Inputs:
+        tmp_path: pytest-provided temporary directory path.
+
+    Outputs:
+        None; asserts one buffered insert is persisted during close().
+    """
+
+    log_file = tmp_path / "queries.jsonl"
+    backend = JsonLogging(
+        file_path=str(log_file),
+        async_logging=False,
+        batch_writes=True,
+        batch_max_size=100,
+        batch_time_sec=9999.0,
+    )
+
+    backend._insert_query_log(  # type: ignore[attr-defined]
+        ts=3.0,
+        client_ip="192.0.2.3",
+        name="close-batch.example",
+        qtype="A",
+        upstream_id=None,
+        rcode="NOERROR",
+        status="ok",
+        error=None,
+        first=None,
+        result_json="{}",
+    )
+    assert len(log_file.read_text(encoding="utf-8").splitlines()) == 1
+
+    backend.close()
+    lines = log_file.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 2
+    assert json.loads(lines[1])["name"] == "close-batch.example"
+
+
 def test_json_logging_retention_returns_early_for_empty_log_file(
     tmp_path: Path,
 ) -> None:

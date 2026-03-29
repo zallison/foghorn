@@ -154,6 +154,7 @@ class _FakeConn:
     def __init__(self, **kwargs: Any) -> None:
         self.kwargs = dict(kwargs)
         self.closed = False
+        self.commit_calls = 0
         self.counts: Dict[tuple[str, str], int] = {}
         self.query_log_rows: int = 0
         self.select_rows: List[Tuple[Any, ...]] | None = None
@@ -181,6 +182,7 @@ class _FakeConn:
         Outputs:
           - None.
         """
+        self.commit_calls += 1
         return None
 
     def close(self) -> None:
@@ -652,3 +654,72 @@ def test_rebuild_counts_if_needed_branches(fake_mysql_driver, monkeypatch) -> No
     monkeypatch.setattr(backend, "has_counts", lambda: False)
     backend.rebuild_counts_if_needed(force_rebuild=False, logger_obj=None)
     assert calls["rebuild"] == 2
+
+
+def test_batch_writes_flush_on_read_paths(fake_mysql_driver) -> None:  # type: ignore[no-untyped-def]
+    """Brief: Batched count writes flush when read paths are invoked.
+
+    Inputs:
+      - fake_mysql_driver: fixture installing fake driver.
+
+    Outputs:
+      - None; asserts write commit is deferred until a read flushes the batch.
+    """
+
+    backend = _make_backend(
+        batch_writes=True,
+        batch_max_size=100,
+        batch_time_sec=9999.0,
+    )
+    conn: _FakeConn = backend._conn  # type: ignore[assignment]
+    baseline_commits = int(conn.commit_calls)
+
+    backend.increment_count("totals", "batched", 1)
+    assert conn.commit_calls == baseline_commits
+
+    exported = backend.export_counts()
+    assert conn.commit_calls == (baseline_commits + 1)
+    assert exported["totals"]["batched"] == 1
+
+
+def test_batch_writes_defer_retention_until_flush(
+    fake_mysql_driver, monkeypatch
+) -> None:  # type: ignore[no-untyped-def]
+    """Brief: Query-log retention runs once after a batched flush.
+
+    Inputs:
+      - fake_mysql_driver: fixture installing fake driver.
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts retention is not evaluated at enqueue time.
+    """
+
+    backend = _make_backend(
+        batch_writes=True,
+        batch_max_size=100,
+        batch_time_sec=9999.0,
+    )
+    retention_calls: List[str] = []
+    monkeypatch.setattr(
+        backend,
+        "_apply_query_log_retention",
+        lambda: retention_calls.append("called"),
+    )
+
+    backend.insert_query_log(
+        ts=1.0,
+        client_ip="203.0.113.1",
+        name="example.org",
+        qtype="A",
+        upstream_id="up1",
+        rcode="NOERROR",
+        status="ok",
+        error=None,
+        first="1.2.3.4",
+        result_json="{}",
+    )
+    assert retention_calls == []
+
+    assert backend.has_query_log() is True
+    assert retention_calls == ["called"]
