@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import threading
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -247,6 +248,9 @@ class MySqlStatsStore(BaseStatsStore):
         connect_kwargs: Optional[Dict[str, Any]] = None,
         async_logging: bool = False,
         max_logging_queue: int = 16384,
+        batch_writes: bool = False,
+        batch_time_sec: float = 15.0,
+        batch_max_size: int = 1000,
         retention_max_records: Optional[int] = None,
         retention_days: Optional[float] = None,
         retention_max_bytes: Optional[int] = None,
@@ -285,6 +289,13 @@ class MySqlStatsStore(BaseStatsStore):
             self._max_logging_queue = int(max_logging_queue)
         except Exception:
             self._max_logging_queue = 16384
+        self._batch_writes = bool(batch_writes)
+        self._batch_time_sec = float(batch_time_sec)
+        self._batch_max_size = int(batch_max_size)
+        self._lock = threading.RLock()
+        self._pending_ops: List[Tuple[str, Tuple[Any, ...]]] = []
+        self._pending_retention = False
+        self._last_flush = time.time()
         self._query_log_retention_max_records = (
             BaseStatsStore._normalize_retention_max_records(retention_max_records)
         )
@@ -373,6 +384,110 @@ class MySqlStatsStore(BaseStatsStore):
     # ------------------------------------------------------------------
     # Health and lifecycle
     # ------------------------------------------------------------------
+    def _flush_pending_writes(self) -> None:
+        """Flush pending batched operations, if batching is enabled.
+
+        Inputs:
+            None.
+
+        Outputs:
+            None.
+        """
+
+        if not self._batch_writes:
+            return
+        with self._lock:
+            self._flush_locked()
+
+    def _execute(
+        self,
+        sql: str,
+        params: Tuple[Any, ...],
+        *,
+        mark_query_log_retention: bool = False,
+    ) -> None:
+        """Execute SQL immediately or queue it for a batched flush.
+
+        Inputs:
+            sql: SQL statement text.
+            params: SQL parameters tuple.
+            mark_query_log_retention: When True, retention prune is evaluated
+                once after the current batched flush succeeds.
+
+        Outputs:
+            None.
+        """
+
+        if not self._batch_writes:
+            cur = self._conn.cursor()
+            cur.execute(sql, params)
+            self._conn.commit()
+            if mark_query_log_retention:
+                self._apply_query_log_retention()
+            return
+
+        with self._lock:
+            self._pending_ops.append((sql, params))
+            if mark_query_log_retention:
+                self._pending_retention = True
+            self._maybe_flush_locked()
+
+    def _maybe_flush_locked(self) -> None:
+        """Flush queued SQL operations when batch thresholds are reached.
+
+        Inputs:
+            None. Caller must hold ``self._lock``.
+
+        Outputs:
+            None.
+        """
+
+        if not self._batch_writes:
+            return
+        ops_len = len(self._pending_ops)
+        if ops_len == 0:
+            return
+
+        now = time.time()
+        age = now - self._last_flush
+        if ops_len >= self._batch_max_size or age >= self._batch_time_sec:
+            self._flush_locked()
+
+    def _flush_locked(self) -> None:
+        """Flush all pending SQL operations in a single commit.
+
+        Inputs:
+            None. Caller must hold ``self._lock``.
+
+        Outputs:
+            None.
+        """
+
+        if not self._pending_ops:
+            return
+
+        pending_ops = list(self._pending_ops)
+        run_retention = bool(self._pending_retention)
+
+        try:
+            cur = self._conn.cursor()
+            for sql, params in pending_ops:
+                cur.execute(sql, params)
+            self._conn.commit()
+            self._pending_ops.clear()
+            self._pending_retention = False
+            self._last_flush = time.time()
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.error(
+                "MySqlStatsStore batched flush failed: %s",
+                exc,
+                exc_info=True,
+            )
+            return
+
+        if run_retention:
+            self._apply_query_log_retention()
+
     def health_check(self) -> bool:
         """Return True when the underlying MySQL/MariaDB store is usable.
 
@@ -402,6 +517,7 @@ class MySqlStatsStore(BaseStatsStore):
         """
 
         try:
+            self._flush_pending_writes()
             conn = getattr(self, "_conn", None)
             if conn is not None:
                 conn.close()
@@ -446,9 +562,7 @@ class MySqlStatsStore(BaseStatsStore):
             f"INSERT INTO counts(scope, key, value) VALUES({ph}, {ph}, {ph}) "
             "ON DUPLICATE KEY UPDATE value = value + VALUES(value)"
         )
-        cur = self._conn.cursor()
-        cur.execute(sql, (scope, key, int(delta)))
-        self._conn.commit()
+        self._execute(sql, (scope, key, int(delta)))
 
     def set_count(self, scope: str, key: str, value: int) -> None:
         """Set an aggregate counter in the counts table.
@@ -467,9 +581,7 @@ class MySqlStatsStore(BaseStatsStore):
             f"INSERT INTO counts(scope, key, value) VALUES({ph}, {ph}, {ph}) "
             "ON DUPLICATE KEY UPDATE value = VALUES(value)"
         )
-        cur = self._conn.cursor()
-        cur.execute(sql, (scope, key, int(value)))
-        self._conn.commit()
+        self._execute(sql, (scope, key, int(value)))
 
     def has_counts(self) -> bool:
         """Return True if the counts table contains at least one row.
@@ -481,6 +593,7 @@ class MySqlStatsStore(BaseStatsStore):
             bool indicating whether counts has rows.
         """
 
+        self._flush_pending_writes()
         cur = self._conn.cursor()
         cur.execute("SELECT 1 FROM counts LIMIT 1")
         return cur.fetchone() is not None
@@ -496,6 +609,7 @@ class MySqlStatsStore(BaseStatsStore):
         """
 
         result: Dict[str, Dict[str, int]] = {}
+        self._flush_pending_writes()
         cur = self._conn.cursor()
         cur.execute("SELECT scope, key, value FROM counts")
         for scope, key, value in cur:
@@ -605,8 +719,7 @@ class MySqlStatsStore(BaseStatsStore):
             "status, error, first, result_json) "
             f"VALUES ({ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph})"
         )
-        cur = self._conn.cursor()
-        cur.execute(
+        self._execute(
             sql,
             (
                 float(ts),
@@ -620,9 +733,8 @@ class MySqlStatsStore(BaseStatsStore):
                 first,
                 result_json,
             ),
+            mark_query_log_retention=True,
         )
-        self._conn.commit()
-        self._apply_query_log_retention()
 
     def _apply_query_log_retention(self) -> None:
         """Brief: Enforce configured query-log retention limits.
@@ -790,6 +902,7 @@ class MySqlStatsStore(BaseStatsStore):
             bool indicating whether query_log has rows.
         """
 
+        self._flush_pending_writes()
         cur = self._conn.cursor()
         cur.execute("SELECT 1 FROM query_log LIMIT 1")
         return cur.fetchone() is not None
@@ -861,6 +974,7 @@ class MySqlStatsStore(BaseStatsStore):
 
         where_sql = " WHERE " + " AND ".join(where) if where else ""
 
+        self._flush_pending_writes()
         cur = self._conn.cursor()
         cur.execute(f"SELECT COUNT(1) FROM query_log{where_sql}", tuple(params))
         row = cur.fetchone()
@@ -998,6 +1112,7 @@ class MySqlStatsStore(BaseStatsStore):
                 group_col = mapping[gb]
                 group_label = gb
 
+        self._flush_pending_writes()
         cur = self._conn.cursor()
         rows: List[Tuple[int, Optional[str], int]] = []
         if group_col:
@@ -1108,6 +1223,7 @@ class MySqlStatsStore(BaseStatsStore):
         """
 
         log = logger_obj or logger
+        self._flush_pending_writes()
         conn = self._conn
         cur = conn.cursor()
 
