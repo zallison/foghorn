@@ -27,7 +27,7 @@ server:
   listen:
     # Global listener overload response policy. Applies to listeners unless
     # a listener-specific overload_response override is provided.
-    overload_response: servfail # servfail | refused | drop
+    overload_response: drop # servfail | refused | drop
 
     # Legacy compatibility block. Prefer server.listen.{udp,tcp} instead.
     dns:
