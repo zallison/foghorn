@@ -28,7 +28,7 @@ import socket
 import threading
 import time
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from foghorn.stats import FOGHORN_VERSION
 
@@ -71,6 +71,9 @@ class JsonLogging(BaseStatsStore):
         file_path: str,
         async_logging: bool = False,
         max_logging_queue: int = 16384,
+        batch_writes: bool = False,
+        batch_time_sec: float = 15.0,
+        batch_max_size: int = 1000,
         retention_max_records: Optional[int] = None,
         retention_days: Optional[float] = None,
         retention_max_bytes: Optional[int] = None,
@@ -111,6 +114,11 @@ class JsonLogging(BaseStatsStore):
             self._max_logging_queue = int(max_logging_queue)
         except Exception:
             self._max_logging_queue = 16384
+        self._batch_writes = bool(batch_writes)
+        self._batch_time_sec = float(batch_time_sec)
+        self._batch_max_size = int(batch_max_size)
+        self._pending_lines: List[str] = []
+        self._last_flush = time.time()
         self._query_log_retention_max_records = (
             BaseStatsStore._normalize_retention_max_records(retention_max_records)
         )
@@ -158,6 +166,54 @@ class JsonLogging(BaseStatsStore):
     # ------------------------------------------------------------------
     # Health and lifecycle
     # ------------------------------------------------------------------
+    def _maybe_flush_locked(self) -> None:
+        """Flush buffered log lines when size/time thresholds are reached.
+
+        Inputs:
+            None. Caller must hold ``self._io_lock``.
+
+        Outputs:
+            None.
+        """
+
+        if not self._batch_writes:
+            return
+        lines_len = len(self._pending_lines)
+        if lines_len == 0:
+            return
+
+        now = time.time()
+        age = now - self._last_flush
+        if lines_len >= self._batch_max_size or age >= self._batch_time_sec:
+            self._flush_locked()
+
+    def _flush_locked(self) -> None:
+        """Flush all pending JSON lines and run retention once per flush.
+
+        Inputs:
+            None. Caller must hold ``self._io_lock``.
+
+        Outputs:
+            None.
+        """
+
+        fh = getattr(self, "_fh", None)
+        if fh is None:
+            return
+        if not self._pending_lines:
+            return
+
+        try:
+            for item in self._pending_lines:
+                fh.write(item + "\n")
+            fh.flush()
+            self._pending_lines.clear()
+            self._last_flush = time.time()
+            self._apply_query_log_retention_locked()
+        except Exception:  # pragma: no cover - defensive
+            logger.exception("Failed to flush buffered JsonLogging entries")
+            self._healthy = False
+
     def health_check(self) -> bool:  # type: ignore[override]
         """Return True when the JSON logging backend is considered usable.
 
@@ -184,12 +240,10 @@ class JsonLogging(BaseStatsStore):
 
         try:
             with self._io_lock:
+                if self._batch_writes:
+                    self._flush_locked()
                 fh = getattr(self, "_fh", None)
                 if fh is not None:
-                    try:
-                        fh.flush()
-                    except Exception:  # pragma: no cover - defensive
-                        logger.exception("Failed to flush JsonLogging file on close")
                     try:
                         fh.close()
                     except Exception:  # pragma: no cover - defensive
@@ -278,9 +332,14 @@ class JsonLogging(BaseStatsStore):
                 # pragma: nocover - concurrent close() can clear _fh after health_check().
                 if fh is None:  # pragma: no cover - defensive race
                     return
-                fh.write(line + "\n")
-                fh.flush()
-                self._apply_query_log_retention_locked()
+                if not self._batch_writes:
+                    fh.write(line + "\n")
+                    fh.flush()
+                    self._apply_query_log_retention_locked()
+                    return
+
+                self._pending_lines.append(line)
+                self._maybe_flush_locked()
         except Exception:  # pragma: no cover - defensive
             logger.exception("Failed to append JSON query_log entry to file")
             self._healthy = False
