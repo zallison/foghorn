@@ -36,6 +36,7 @@ class _FakeCollection:
         self.counts: Dict[Tuple[str, str], int] = {}
         # For query_log, we track number of rows for presence checks.
         self.query_log_rows: int = 0
+        self.insert_many_calls: int = 0
         # Pre-baked rows for select_query_log tests.
         self.select_docs: List[Dict[str, Any]] | None = None
         # Pre-baked rows for aggregate_query_log_counts tests.
@@ -135,6 +136,20 @@ class _FakeCollection:
 
         if self.name == "query_log":
             self.query_log_rows += 1
+
+    def insert_many(self, docs: List[Dict[str, Any]]) -> None:  # noqa: D401
+        """Brief: Record a batched query_log insert operation.
+
+        Inputs:
+          - docs: Sequence of query-log documents.
+
+        Outputs:
+          - None; increments query_log row count and batch call count.
+        """
+
+        if self.name == "query_log":
+            self.insert_many_calls += 1
+            self.query_log_rows += len(list(docs))
 
     def count_documents(self, flt: Dict[str, Any]) -> int:  # noqa: D401
         """Brief: Return the number of documents matching the filter.
@@ -325,7 +340,9 @@ def fake_mongo_driver(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setitem(sys.modules, "pymongo", driver_mod)
 
 
-def _make_backend(fake_mongo_driver) -> MongoStatsStore:  # type: ignore[no-untyped-def]
+def _make_backend(
+    fake_mongo_driver, **kwargs: Any
+) -> MongoStatsStore:  # type: ignore[no-untyped-def]
     """Brief: Helper to construct a backend using the fake MongoDB driver.
 
     Inputs:
@@ -335,10 +352,14 @@ def _make_backend(fake_mongo_driver) -> MongoStatsStore:  # type: ignore[no-unty
       - MongoStatsStore instance with an in-memory _FakeMongoClient.
     """
 
+    base: Dict[str, Any] = {
+        "uri": "mongodb://example/",
+        "database": "db",
+        "connect_kwargs": {"tls": True},
+    }
+    base.update(kwargs)
     return MongoStatsStore(
-        uri="mongodb://example/",
-        database="db",
-        connect_kwargs={"tls": True},
+        **base,
     )
 
 
@@ -715,3 +736,82 @@ def test_rebuild_counts_if_needed_branches(fake_mongo_driver, monkeypatch) -> No
     monkeypatch.setattr(backend, "has_counts", lambda: False)
     backend.rebuild_counts_if_needed(force_rebuild=False, logger_obj=None)
     assert calls["rebuild"] == 2
+
+
+def test_batch_writes_flush_query_log_on_read(fake_mongo_driver) -> None:  # type: ignore[no-untyped-def]
+    """Brief: Batched Mongo query-log writes flush before read operations.
+
+    Inputs:
+      - fake_mongo_driver: fixture installing fake driver.
+
+    Outputs:
+      - None; asserts buffered docs are written via insert_many before has_query_log.
+    """
+
+    backend = _make_backend(
+        fake_mongo_driver,
+        batch_writes=True,
+        batch_max_size=100,
+        batch_time_sec=9999.0,
+    )
+    client: _FakeMongoClient = backend._client  # type: ignore[assignment]
+    qcoll: _FakeCollection = client.databases["db"]["query_log"]
+
+    backend._insert_query_log(  # type: ignore[attr-defined]
+        ts=1.0,
+        client_ip="192.0.2.1",
+        name="example.org",
+        qtype="A",
+        upstream_id="up1",
+        rcode="NOERROR",
+        status="ok",
+        error=None,
+        first="1.2.3.4",
+        result_json="{}",
+    )
+    assert qcoll.query_log_rows == 0
+    assert qcoll.insert_many_calls == 0
+
+    assert backend.has_query_log() is True
+    assert qcoll.query_log_rows == 1
+    assert qcoll.insert_many_calls == 1
+
+
+def test_batch_writes_flush_query_log_on_close(
+    fake_mongo_driver,
+) -> None:  # type: ignore[no-untyped-def]
+    """Brief: close() flushes any pending batched Mongo query-log writes.
+
+    Inputs:
+      - fake_mongo_driver: fixture installing fake driver.
+
+    Outputs:
+      - None; asserts one pending document is persisted during close().
+    """
+
+    backend = _make_backend(
+        fake_mongo_driver,
+        batch_writes=True,
+        batch_max_size=100,
+        batch_time_sec=9999.0,
+    )
+    client: _FakeMongoClient = backend._client  # type: ignore[assignment]
+    qcoll: _FakeCollection = client.databases["db"]["query_log"]
+
+    backend._insert_query_log(  # type: ignore[attr-defined]
+        ts=2.0,
+        client_ip="192.0.2.2",
+        name="close-flush.example",
+        qtype="A",
+        upstream_id="up2",
+        rcode="NOERROR",
+        status="ok",
+        error=None,
+        first="1.2.3.4",
+        result_json="{}",
+    )
+    assert qcoll.query_log_rows == 0
+
+    backend.close()
+    assert qcoll.query_log_rows == 1
+    assert qcoll.insert_many_calls == 1

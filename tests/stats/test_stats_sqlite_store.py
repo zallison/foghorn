@@ -684,6 +684,47 @@ def test_sqlite_backend_batching_execute_flush_and_close(tmp_path) -> None:
     backend.close()
 
 
+def test_sqlite_backend_batching_flushes_pending_writes_before_read_helpers() -> None:
+    """Brief: Batched SQLite reads flush queued writes for parity with other backends.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts has_counts, export_counts, and has_query_log include pending writes.
+    """
+
+    backend = SqliteStatsStore(":memory:", batch_writes=True, batch_time_sec=3600.0)
+
+    backend._increment_count("totals", "queued", 1)
+    assert backend._pending_ops  # type: ignore[attr-defined]
+    assert backend.has_counts() is True
+    assert not backend._pending_ops  # type: ignore[attr-defined]
+
+    backend._increment_count("totals", "from_export", 2)
+    assert backend._pending_ops  # type: ignore[attr-defined]
+    counts = backend.export_counts()
+    assert counts["totals"]["queued"] == 1
+    assert counts["totals"]["from_export"] == 2
+    assert not backend._pending_ops  # type: ignore[attr-defined]
+
+    backend._insert_query_log(
+        ts=1.0,
+        client_ip="192.0.2.1",
+        name="queued.example",
+        qtype="A",
+        upstream_id=None,
+        rcode="NOERROR",
+        status="ok",
+        error=None,
+        first=None,
+        result_json="{}",
+    )
+    assert backend._pending_ops  # type: ignore[attr-defined]
+    assert backend.has_query_log() is True
+    assert not backend._pending_ops  # type: ignore[attr-defined]
+
+
 def test_sqlite_backend_query_log_retention_max_records() -> None:
     """Brief: SQLite backend keeps only newest N records when configured.
 
