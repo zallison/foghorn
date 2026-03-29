@@ -317,8 +317,8 @@ def test_collect_rate_limit_stats_handles_live_readers_and_snapshot_only_profile
         conn.executemany(
             "INSERT INTO rate_profiles (key, avg_rps, max_rps, samples, last_update) VALUES (?, ?, ?, ?, ?)",
             [
-                ("global", 100.0, 120.0, 10, now),
-                ("__global__", 90.0, 110.0, 9, now),
+                ("global", 10.0, 120.0, 200, now),
+                ("__global__", 90.0, 110.0, 5, now),
                 ("client1", 40.0, 60.0, 12, now),
                 ("client2", "bad", "bad", "bad", "bad"),
             ],
@@ -389,6 +389,7 @@ def test_collect_rate_limit_stats_handles_live_readers_and_snapshot_only_profile
     profiles_by_key = {row["key"]: row for row in summary["profiles"]}
     assert "global" in profiles_by_key
     assert "new-key" in profiles_by_key
+    assert profiles_by_key["global"]["samples"] == 200
     assert profiles_by_key["new-key"]["samples"] == 0
     assert profiles_by_key["new-key"]["current_rps"] == 7.5
     assert summary["total_profiles"] >= 3
