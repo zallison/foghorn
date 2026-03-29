@@ -13,6 +13,7 @@ Outputs:
 """
 
 from __future__ import annotations
+from dataclasses import replace
 
 import threading
 import time
@@ -185,6 +186,64 @@ def test_reload_from_config_no_restart_needed() -> None:
     result = reload_from_config(cfg)
     assert result.ok is True
     assert result.restart_required is False
+
+
+class _ShutdownSpyPlugin:
+    """Record shutdown invocations for runtime reaper tests."""
+
+    def __init__(self) -> None:
+        self.shutdown_calls = 0
+        self.shutdown_event = threading.Event()
+
+    def shutdown(self) -> None:
+        self.shutdown_calls += 1
+        self.shutdown_event.set()
+
+
+def test_swap_snapshot_reaps_old_plugins_after_grace_without_extra_reload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Single reload eventually reaps queued old plugins after grace."""
+    clear_runtime()
+    monkeypatch.setattr(runtime_config_mod, "_PLUGIN_SHUTDOWN_GRACE_SECONDS", 0.05)
+
+    old_plugin = _ShutdownSpyPlugin()
+    old_snapshot = replace(_default_snapshot(), plugins=[old_plugin], generation=1)
+    initialize_runtime(snapshot=old_snapshot, config_path="/tmp/test.yaml")
+
+    _swap_snapshot(replace(_default_snapshot(), generation=2))
+
+    assert old_plugin.shutdown_event.wait(timeout=1.5)
+    assert old_plugin.shutdown_calls == 1
+    with runtime_config_mod._OLD_PLUGINS_LOCK:
+        assert runtime_config_mod._OLD_PLUGINS == []
+    clear_runtime()
+
+
+def test_swap_snapshot_reaps_multiple_old_plugin_generations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Multiple queued generations are drained and each plugin is shut down once."""
+    clear_runtime()
+    monkeypatch.setattr(runtime_config_mod, "_PLUGIN_SHUTDOWN_GRACE_SECONDS", 0.05)
+
+    plugin_gen1 = _ShutdownSpyPlugin()
+    plugin_gen2 = _ShutdownSpyPlugin()
+
+    initialize_runtime(
+        snapshot=replace(_default_snapshot(), plugins=[plugin_gen1], generation=1),
+        config_path="/tmp/test.yaml",
+    )
+    _swap_snapshot(replace(_default_snapshot(), plugins=[plugin_gen2], generation=2))
+    _swap_snapshot(replace(_default_snapshot(), generation=3))
+
+    assert plugin_gen1.shutdown_event.wait(timeout=1.5)
+    assert plugin_gen2.shutdown_event.wait(timeout=1.5)
+    assert plugin_gen1.shutdown_calls == 1
+    assert plugin_gen2.shutdown_calls == 1
+    with runtime_config_mod._OLD_PLUGINS_LOCK:
+        assert runtime_config_mod._OLD_PLUGINS == []
+    clear_runtime()
 
 
 def test_swap_snapshot_atomic() -> None:
