@@ -88,6 +88,31 @@ _DNSSEC_SEARCH_QUALIFICATION_EXCLUDED_QTYPES: frozenset[int] = frozenset(
 )
 
 
+def _qtype_label_for_stats(qtype: object) -> str:
+    """Brief: Return a bounded qtype label for stats and query-log aggregation.
+
+    Inputs:
+      - qtype: Raw DNS qtype value (typically an integer from dnslib).
+
+    Outputs:
+      - str: Canonical qtype name when known, otherwise ``UNKNOWN``.
+
+    Notes:
+      - Unknown numeric qtypes are collapsed to ``UNKNOWN`` so untrusted query
+        traffic cannot create unbounded qtype-cardinality in stats keys.
+    """
+
+    try:
+        qtype_num = int(qtype)
+    except Exception:
+        return "UNKNOWN"
+
+    try:
+        return str(QTYPE[qtype_num])
+    except Exception:
+        return "UNKNOWN"
+
+
 @registered_lru_cache(maxsize=2048)
 def _is_rfc1918_ptr_query_name(qname: str) -> bool:
     """Brief: Determine whether qname is an IPv4 PTR under RFC1918 space.
@@ -143,6 +168,40 @@ _PLUGIN_ORDER_LOCK = threading.Lock()
 # Keyed by (kind, token). kind is 'snap' (token=generation) or 'state'
 # (token=id(plugins_list)).
 _PLUGIN_ORDER_CACHE: dict[tuple[str, int], tuple[list[object], list[object]]] = {}
+_PLUGIN_ORDER_CACHE_MAX_SNAP_GENERATIONS = 32
+_PLUGIN_ORDER_CACHE_MAX_STATE_KEYS = 64
+
+
+def _prune_plugin_order_cache_locked() -> None:
+    """Brief: Prune plugin-order cache keys to keep bounded memory usage.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; mutates _PLUGIN_ORDER_CACHE in place.
+
+    Notes:
+      - Keeps only recent runtime snapshot generations (kind='snap').
+      - Keeps a bounded number of DNSRuntimeState list-id entries (kind='state').
+      - Caller must hold _PLUGIN_ORDER_LOCK.
+    """
+
+    snap_tokens = sorted(
+        token for (kind, token) in _PLUGIN_ORDER_CACHE.keys() if kind == "snap"
+    )
+    snap_overflow = len(snap_tokens) - int(_PLUGIN_ORDER_CACHE_MAX_SNAP_GENERATIONS)
+    if snap_overflow > 0:
+        min_keep_token = int(snap_tokens[snap_overflow])
+        for key in list(_PLUGIN_ORDER_CACHE.keys()):
+            if key[0] == "snap" and int(key[1]) < min_keep_token:
+                _PLUGIN_ORDER_CACHE.pop(key, None)
+
+    state_keys = [key for key in _PLUGIN_ORDER_CACHE.keys() if key[0] == "state"]
+    state_overflow = len(state_keys) - int(_PLUGIN_ORDER_CACHE_MAX_STATE_KEYS)
+    if state_overflow > 0:
+        for key in state_keys[:state_overflow]:
+            _PLUGIN_ORDER_CACHE.pop(key, None)
 
 
 def _get_ordered_plugins(
@@ -165,8 +224,8 @@ def _get_ordered_plugins(
       - This is hot-path sensitive; it avoids O(n log n) sorting on every query.
       - For snapshots we key by generation; for DNSRuntimeState by id(list).
     """
-
-    cache_key = (str(token_kind), int(token))
+    normalized_kind = "snap" if str(token_kind) == "snap" else "state"
+    cache_key = (normalized_kind, int(token))
     with _PLUGIN_ORDER_LOCK:
         cached = _PLUGIN_ORDER_CACHE.get(cache_key)
         if cached is not None:
@@ -177,11 +236,12 @@ def _get_ordered_plugins(
 
     with _PLUGIN_ORDER_LOCK:
         _PLUGIN_ORDER_CACHE[cache_key] = (pre, post)
+        _prune_plugin_order_cache_locked()
 
     return pre, post
 
 
-def _bg_submit(key: object, fn) -> None:
+def _bg_submit(key: object, fn) -> bool:
     """Brief: Submit a bounded background task with best-effort coalescing.
 
     Inputs:
@@ -189,7 +249,7 @@ def _bg_submit(key: object, fn) -> None:
       - fn: Zero-arg callable to execute.
 
     Outputs:
-      - None.
+      - bool: True when accepted for execution, False when dropped/rejected.
 
     Notes:
       - Uses bg_executor admission control to bound outstanding tasks. When
@@ -200,9 +260,40 @@ def _bg_submit(key: object, fn) -> None:
         from .bg_executor import submit_bg_executor_task
 
         _ = key
-        submit_bg_executor_task(fn)
+        future = submit_bg_executor_task(fn)
+        return future is not None
     except Exception:
         logger.debug("Failed to submit background task", exc_info=True)
+        return False
+
+
+def _record_suppressed_query_log_drop_candidate(
+    stats_obj: object,
+    *,
+    rcode: Optional[str],
+    status: Optional[str],
+) -> None:
+    """Brief: Forward suppressed query-log candidates to stats drop accounting.
+
+    Inputs:
+      - stats_obj: Stats collector instance or compatible object.
+      - rcode: Optional DNS response code for the suppressed row.
+      - status: Optional query status for the suppressed row.
+
+    Outputs:
+      - None; best-effort forwarding only.
+    """
+
+    try:
+        handler = getattr(stats_obj, "record_suppressed_query_log_drop_candidate", None)
+    except Exception:
+        return
+    if not callable(handler):
+        return
+    try:
+        handler(rcode=rcode, status=status)
+    except Exception:
+        pass
 
 
 def _schedule_notify_axfr_refresh(zone_name: str, upstream: Dict) -> None:
@@ -256,15 +347,18 @@ def _schedule_cache_refresh(data: bytes, client_ip: str) -> None:
                 _BG_CACHE_INFLIGHT.discard(key)
 
     try:
-        _bg_submit(
+        submit_result = _bg_submit(
             key, _wrapped
         )  # pragma: no cover - defensive/metrics path excluded from coverage
+        submitted = submit_result is not False
     except (
         Exception
     ):  # pragma: no cover - defensive/metrics path excluded from coverage
+        submitted = False
+    if not submitted:
         with _BG_LOCK:
             _BG_CACHE_INFLIGHT.discard(key)
-        logger.debug("Failed to schedule cache refresh task", exc_info=True)
+        logger.debug("Failed to schedule cache refresh task")
 
     # Periodic upstream health cleanup can be called via DNSUDPHandler._cleanup_upstream_health
 
@@ -693,7 +787,7 @@ def _resolve_core(
         # Record query stats (mirrors DNSUDPHandler.handle)
         if stats is not None:
             try:
-                qtype_name = QTYPE.get(qtype, str(qtype))
+                qtype_name = _qtype_label_for_stats(qtype)
                 stats.record_query(client_ip, qname, qtype_name)
             except (
                 Exception
@@ -745,6 +839,12 @@ def _resolve_core(
                 decision = None
             if isinstance(decision, PluginDecision):
                 if decision.action == "drop":
+                    if stats is not None:
+                        _record_suppressed_query_log_drop_candidate(
+                            stats,
+                            rcode="DROP",
+                            status="drop",
+                        )
                     # Pre-plugin timeout/drop: return sentinel empty wire so UDP
                     # handlers and othefoghorn.servers.transports can choose not to reply.
                     return _ResolveCoreResult(
@@ -810,7 +910,7 @@ def _resolve_core(
                     wire = _set_response_id(r.pack(), req.header.id)
                     if stats is not None:
                         try:
-                            qtype_name = QTYPE.get(qtype, str(qtype))
+                            qtype_name = _qtype_label_for_stats(qtype)
                             # Track the EDE info-code used for this synthetic
                             # NXDOMAIN so metrics and warm-loaded aggregates can
                             # expose EDE volumes alongside rcodes.
@@ -888,6 +988,12 @@ def _resolve_core(
                                     error=None,
                                     first=None,
                                     result=result_ctx,
+                                )
+                            else:
+                                _record_suppressed_query_log_drop_candidate(
+                                    stats,
+                                    rcode="NXDOMAIN",
+                                    status="deny_pre",
                                 )
                         except (
                             Exception
@@ -1019,7 +1125,7 @@ def _resolve_core(
                                     result_ctx["listener"] = listener
                                 if secure is not None:
                                     result_ctx["secure"] = bool(secure)
-                                qtype_name = QTYPE.get(qtype, str(qtype))
+                                qtype_name = _qtype_label_for_stats(qtype)
                                 stats.record_query_result(
                                     client_ip=client_ip,
                                     qname=qname,
@@ -1030,6 +1136,12 @@ def _resolve_core(
                                     error=None,
                                     first=str(first) if first is not None else None,
                                     result=result_ctx,
+                                )
+                            else:
+                                _record_suppressed_query_log_drop_candidate(
+                                    stats,
+                                    rcode=rcode_name,
+                                    status="override_pre",
                                 )
                         except (
                             Exception
@@ -1060,6 +1172,15 @@ def _resolve_core(
         seconds_remaining: Optional[float] = None
         ttl_original: Optional[int] = None
         bypass_cache = bool(getattr(_CACHE_LOCAL, "bypass_cache", False))
+        prefetch_enabled = bool(getattr(handler, "cache_prefetch_enabled", False))
+        window_after = float(
+            getattr(
+                handler,
+                "cache_prefetch_allow_stale_after_expiry",
+                0.0,
+            )
+            or 0.0
+        )
 
         if cache is not None and not bypass_cache:
             # Prefer get_with_meta() for stale-while-revalidate behavior. Allow a
@@ -1085,6 +1206,17 @@ def _resolve_core(
                 Exception
             ):  # pragma: no cover - defensive: cache implementation detail
                 cached = None
+        if (
+            cached is not None
+            and seconds_remaining is not None
+            and seconds_remaining < 0.0
+            and not (
+                prefetch_enabled
+                and window_after > 0.0
+                and (-window_after <= seconds_remaining < 0.0)
+            )
+        ):
+            cached = None
 
         if cached is not None:
             # Record cache hit statistics
@@ -1113,7 +1245,7 @@ def _resolve_core(
                         result_ctx["listener"] = listener
                     if secure is not None:
                         result_ctx["secure"] = bool(secure)
-                    qtype_name = QTYPE.get(qtype, str(qtype))
+                    qtype_name = _qtype_label_for_stats(qtype)
                     stats.record_query_result(
                         client_ip=client_ip,
                         qname=qname,
@@ -1131,21 +1263,12 @@ def _resolve_core(
                     pass
 
             # Decide whether to schedule a background refresh for this cache hit
-            prefetch_enabled = bool(getattr(handler, "cache_prefetch_enabled", False))
             min_ttl = int(getattr(handler, "cache_prefetch_min_ttl", 0) or 0)
             max_ttl = int(getattr(handler, "cache_prefetch_max_ttl", 0) or 0)
             window_before = float(
                 getattr(
                     handler,
                     "cache_prefetch_refresh_before_expiry",
-                    0.0,
-                )
-                or 0.0
-            )
-            window_after = float(
-                getattr(
-                    handler,
-                    "cache_prefetch_allow_stale_after_expiry",
                     0.0,
                 )
                 or 0.0
@@ -1230,7 +1353,7 @@ def _resolve_core(
             wire = _set_response_id(r.pack(), req.header.id)
             if stats is not None:
                 try:
-                    qtype_name = QTYPE.get(qtype, str(qtype))
+                    qtype_name = _qtype_label_for_stats(qtype)
                     stats.record_response_rcode("NXDOMAIN", qname)
                     stats.record_query_result(
                         client_ip=client_ip,
@@ -1606,7 +1729,7 @@ def _resolve_core(
                             Exception
                         ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
                             pass
-                    qtype_name = QTYPE.get(qtype, str(qtype))
+                    qtype_name = _qtype_label_for_stats(qtype)
                     status = str(reason or "all_failed")
                     result_ctx = {
                         "source": "upstream",
@@ -1680,6 +1803,12 @@ def _resolve_core(
                 decision = None
             if isinstance(decision, PluginDecision):
                 if decision.action == "drop":
+                    if stats is not None:
+                        _record_suppressed_query_log_drop_candidate(
+                            stats,
+                            rcode="DROP",
+                            status="drop",
+                        )
                     # Post-plugin timeout/drop: do not send a response.
                     return _ResolveCoreResult(
                         wire=b"",
@@ -1920,7 +2049,7 @@ def _resolve_core(
                     result_ctx["listener"] = listener
                 if secure is not None:
                     result_ctx["secure"] = bool(secure)
-                qtype_name = QTYPE.get(qtype, str(qtype))
+                qtype_name = _qtype_label_for_stats(qtype)
                 status = "ok" if rcode_name == "NOERROR" else "error"
                 stats.record_query_result(
                     client_ip=client_ip,
@@ -1988,7 +2117,7 @@ def _resolve_core(
                         q = req.questions[0]
                         qname = str(q.qname).rstrip(".")
                         qtype = q.qtype
-                        qtype_name = QTYPE.get(qtype, str(qtype))
+                        qtype_name = _qtype_label_for_stats(qtype)
                     else:
                         qname = ""
                         qtype_name = ""

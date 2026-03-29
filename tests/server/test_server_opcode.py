@@ -658,6 +658,72 @@ def test_non_query_rate_limit_refused(monkeypatch) -> None:
     assert resp.header.rcode == RCODE.REFUSED
 
 
+def test_non_query_rate_bucket_pruning_and_cap(monkeypatch) -> None:
+    """Brief: Rate buckets are pruned and bounded to avoid unbounded growth.
+
+    Inputs:
+      - monkeypatch: Pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts stale buckets are evicted and overflow is capped.
+    """
+
+    handler = SimpleNamespace(plugins=[])
+    wire = _make_non_query_wire(opcode=OPCODE.NOTIFY, request_id=0x1212)
+
+    opcode_mod._OP_RATE_BUCKETS.clear()
+    opcode_mod._OP_RATE_BUCKETS.update(
+        {
+            (4, "stale-client"): (100, 1),
+            (4, "fresh-client"): (104, 1),
+        }
+    )
+    opcode_mod._OP_RATE_LAST_PRUNE_BUCKET = -1
+    monkeypatch.setattr(opcode_mod, "_OP_RATE_BUCKET_RETENTION_SECONDS", 2)
+    monkeypatch.setattr(opcode_mod, "_OP_RATE_BUCKET_MAX_ENTRIES", 10)
+    monkeypatch.setattr(opcode_mod.time, "time", lambda: 105.0)
+
+    _handle_non_query_opcode(
+        opcode=OPCODE.NOTIFY,
+        data=wire,
+        client_ip="trigger-prune",
+        listener="udp",
+        secure=False,
+        handler=handler,
+    )
+
+    assert (4, "stale-client") not in opcode_mod._OP_RATE_BUCKETS
+    assert (4, "fresh-client") in opcode_mod._OP_RATE_BUCKETS
+
+    opcode_mod._OP_RATE_BUCKETS.clear()
+    opcode_mod._OP_RATE_BUCKETS.update(
+        {
+            (4, "client-1"): (200, 1),
+            (4, "client-2"): (200, 1),
+            (4, "client-3"): (200, 1),
+            (4, "client-4"): (200, 1),
+            (4, "client-5"): (200, 1),
+        }
+    )
+    opcode_mod._OP_RATE_LAST_PRUNE_BUCKET = 200
+    monkeypatch.setattr(opcode_mod, "_OP_RATE_BUCKET_RETENTION_SECONDS", 9999)
+    monkeypatch.setattr(opcode_mod, "_OP_RATE_BUCKET_MAX_ENTRIES", 3)
+    monkeypatch.setattr(opcode_mod.time, "time", lambda: 200.0)
+
+    _handle_non_query_opcode(
+        opcode=OPCODE.NOTIFY,
+        data=wire,
+        client_ip="client-5",
+        listener="udp",
+        secure=False,
+        handler=handler,
+    )
+
+    assert len(opcode_mod._OP_RATE_BUCKETS) <= 3
+    assert (4, "client-1") not in opcode_mod._OP_RATE_BUCKETS
+    assert (4, "client-2") not in opcode_mod._OP_RATE_BUCKETS
+
+
 def test_notify_allowlist_refuses_disallowed_client(monkeypatch) -> None:
     """Brief: NOTIFY is refused when AXFR policy is enabled and client not allowed.
 

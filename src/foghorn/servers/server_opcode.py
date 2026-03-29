@@ -33,6 +33,9 @@ NON_QUERY_RATE_LIMIT_PER_SEC = 10
 # Module-local caches for hot-path helpers.
 _OP_PLUGINS_SORT_CACHE: dict[tuple[int, ...], list[object]] = {}
 _OP_RATE_BUCKETS: dict[tuple[int, str], tuple[int, int]] = {}
+_OP_RATE_BUCKET_MAX_ENTRIES = 4096
+_OP_RATE_BUCKET_RETENTION_SECONDS = 3
+_OP_RATE_LAST_PRUNE_BUCKET = -1
 
 
 class _ResolveCoreResult(NamedTuple):
@@ -51,6 +54,41 @@ class _ResolveCoreResult(NamedTuple):
     dnssec_status: Optional[str]
     upstream_id: Optional[str]
     rcode_name: str
+
+
+def _prune_op_rate_buckets(now_bucket: int) -> None:
+    """Brief: Prune stale non-query rate-limit buckets and enforce a hard cap.
+
+    Inputs:
+      - now_bucket: Current 1-second time bucket used by the rate limiter.
+
+    Outputs:
+      - None; mutates the module-local _OP_RATE_BUCKETS map in place.
+    """
+    try:
+        retention_seconds = max(1, int(_OP_RATE_BUCKET_RETENTION_SECONDS))
+    except Exception:
+        retention_seconds = 3
+    stale_before = int(now_bucket) - retention_seconds
+
+    if _OP_RATE_BUCKETS:
+        stale_keys = [
+            key
+            for key, (bucket, _count) in _OP_RATE_BUCKETS.items()
+            if bucket < stale_before
+        ]
+        for key in stale_keys:
+            _OP_RATE_BUCKETS.pop(key, None)
+
+    try:
+        max_entries = max(1, int(_OP_RATE_BUCKET_MAX_ENTRIES))
+    except Exception:
+        max_entries = 4096
+    overflow = len(_OP_RATE_BUCKETS) - max_entries
+    if overflow > 0:
+        # dict preserves insertion order; dropping oldest entries keeps memory bounded.
+        for key in list(_OP_RATE_BUCKETS.keys())[:overflow]:
+            _OP_RATE_BUCKETS.pop(key, None)
 
 
 def _handle_non_query_opcode(
@@ -110,7 +148,13 @@ def _handle_non_query_opcode(
     except Exception:
         limit = 0
     if limit > 0 and client_ip:
+        global _OP_RATE_LAST_PRUNE_BUCKET
         now_bucket = int(time.time())
+        if now_bucket != _OP_RATE_LAST_PRUNE_BUCKET:
+            _prune_op_rate_buckets(now_bucket)
+            _OP_RATE_LAST_PRUNE_BUCKET = now_bucket
+        elif len(_OP_RATE_BUCKETS) > int(_OP_RATE_BUCKET_MAX_ENTRIES):
+            _prune_op_rate_buckets(now_bucket)
         key = (int(opcode), str(client_ip))
         prev_bucket, prev_count = _OP_RATE_BUCKETS.get(key, (now_bucket, 0))
         if prev_bucket != now_bucket:
