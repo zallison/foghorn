@@ -966,6 +966,10 @@ class SqliteStatsStore(BaseStatsStore):
         """Return True if the counts table contains at least one row."""
 
         try:
+            # Reads should include any queued batched ops.
+            if self._batch_writes:
+                with self._lock:
+                    self._flush_locked()
             cur = self._conn.execute("SELECT 1 FROM counts LIMIT 1")  # type: ignore[attr-defined]
             return cur.fetchone() is not None
         except Exception as exc:  # pragma: no cover - defensive
@@ -977,6 +981,10 @@ class SqliteStatsStore(BaseStatsStore):
 
         result: Dict[str, Dict[str, int]] = {}
         try:
+            # Reads should include any queued batched ops.
+            if self._batch_writes:
+                with self._lock:
+                    self._flush_locked()
             cur = self._conn.cursor()  # type: ignore[attr-defined]
             cur.execute("SELECT scope, key, value FROM counts")
             for scope, key, value in cur:
@@ -994,6 +1002,10 @@ class SqliteStatsStore(BaseStatsStore):
         """Return True if the query_log table contains at least one row."""
 
         try:
+            # Reads should include any queued batched ops.
+            if self._batch_writes:
+                with self._lock:
+                    self._flush_locked()
             cur = self._conn.execute("SELECT 1 FROM query_log LIMIT 1")  # type: ignore[attr-defined]
             return cur.fetchone() is not None
         except Exception as exc:  # pragma: no cover - defensive
