@@ -659,14 +659,22 @@ def test_fetch_writes_header_and_body(monkeypatch, tmp_path):
 
     class DummyResp:
         def __init__(self, text: str) -> None:
-            self.text = text
+            self._body = text.encode("utf-8")
+            self.headers = {"Content-Length": str(len(self._body))}
 
         def raise_for_status(self) -> None:  # pragma: no cover - trivial
             return None
 
-    def fake_get(u, timeout):
+        def iter_content(self, chunk_size: int = 1):  # noqa: ARG002
+            yield self._body
+
+        def close(self) -> None:  # pragma: no cover - trivial
+            return None
+
+    def fake_get(u, timeout, stream):
         assert u == url
         assert timeout == 20
+        assert stream is True
         return DummyResp("line1\nline2\n")
 
     monkeypatch.setattr(file_downloader_mod.requests, "get", fake_get)
@@ -683,6 +691,116 @@ def test_fetch_writes_header_and_body(monkeypatch, tmp_path):
     lines = content.splitlines()
     assert lines[0] == f"# HEADER {url}"
     assert lines[1:] == ["line1", "line2"]
+
+
+def test_fetch_rejects_response_with_oversized_content_length(monkeypatch, tmp_path):
+    """Brief: _fetch rejects responses whose Content-Length exceeds the max cap.
+
+    Inputs:
+      - monkeypatch: Pytest monkeypatch fixture.
+      - tmp_path: Temporary directory for output path checks.
+
+    Outputs:
+      - None; asserts ValueError is raised before body iteration.
+    """
+
+    dl = FileDownloader(
+        download_path=str(tmp_path),
+        urls=["https://example.com/list.txt"],
+        url_files=[],
+        add_comment=False,
+    )
+    _setup_downloader_for_tests(dl)
+    url = "https://example.com/list.txt"
+    out = tmp_path / "out.txt"
+
+    calls = {"iter": 0, "closed": 0}
+
+    class DummyResp:
+        headers = {
+            "Content-Length": str(file_downloader_mod.MAX_DOWNLOAD_RESPONSE_BYTES + 1)
+        }
+
+        def raise_for_status(self) -> None:  # pragma: no cover - trivial
+            return None
+
+        def iter_content(self, chunk_size: int = 1):  # noqa: ARG002
+            calls["iter"] += 1
+            yield b"one.example\n"
+
+        def close(self) -> None:
+            calls["closed"] += 1
+
+    def fake_get(u, timeout, stream):
+        assert u == url
+        assert timeout == 20
+        assert stream is True
+        return DummyResp()
+
+    monkeypatch.setattr(file_downloader_mod.requests, "get", fake_get)
+
+    with pytest.raises(ValueError, match="exceeds max allowed size"):
+        dl._fetch(url, str(out))
+    assert calls["iter"] == 0
+    assert calls["closed"] == 1
+    assert url in dl._failure_state
+
+
+def test_fetch_rejects_stream_when_total_bytes_exceed_limit(monkeypatch, tmp_path):
+    """Brief: _fetch rejects streamed responses that exceed max bytes mid-download.
+
+    Inputs:
+      - monkeypatch: Pytest monkeypatch fixture.
+      - tmp_path: Temporary directory for output path checks.
+
+    Outputs:
+      - None; asserts streamed overflow raises and temp file is cleaned up.
+    """
+
+    dl = FileDownloader(
+        download_path=str(tmp_path),
+        urls=["https://example.com/list.txt"],
+        url_files=[],
+        add_comment=False,
+    )
+    _setup_downloader_for_tests(dl)
+    url = "https://example.com/list.txt"
+    out = tmp_path / "out.txt"
+
+    monkeypatch.setattr(file_downloader_mod, "MAX_DOWNLOAD_RESPONSE_BYTES", 8)
+    monkeypatch.setattr(file_downloader_mod, "DOWNLOAD_STREAM_CHUNK_BYTES", 4)
+
+    calls = {"closed": 0}
+
+    class DummyResp:
+        headers = {"Content-Length": "0"}
+
+        def raise_for_status(self) -> None:  # pragma: no cover - trivial
+            return None
+
+        def iter_content(self, chunk_size: int = 1):
+            assert chunk_size == 4
+            yield b"abcd"
+            yield b"efgh"
+            yield b"i"
+
+        def close(self) -> None:
+            calls["closed"] += 1
+
+    def fake_get(u, timeout, stream):
+        assert u == url
+        assert timeout == 20
+        assert stream is True
+        return DummyResp()
+
+    monkeypatch.setattr(file_downloader_mod.requests, "get", fake_get)
+
+    with pytest.raises(ValueError, match="exceeded max allowed size"):
+        dl._fetch(url, str(out))
+    assert calls["closed"] == 1
+    assert url in dl._failure_state
+    assert out.exists() is False
+    assert list(tmp_path.glob(".file_downloader.*")) == []
 
 
 def test_download_all_fetches_and_validates(monkeypatch, tmp_path):

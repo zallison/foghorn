@@ -13,6 +13,7 @@ from urllib.parse import urlparse
 
 import requests
 from pydantic import BaseModel, Field, ConfigDict
+from foghorn.security_limits import maybe_parse_content_length
 
 from .base import BasePlugin
 
@@ -22,6 +23,8 @@ ONE_DAY_SECONDS = 24 * 60 * 60
 MAX_DOMAIN_LIST_LINE_LENGTH = 2048
 FAILURE_BACKOFF_BASE_SECONDS = 30
 FAILURE_BACKOFF_MAX_SECONDS = 15 * 60
+MAX_DOWNLOAD_RESPONSE_BYTES = 25 * 1024 * 1024
+DOWNLOAD_STREAM_CHUNK_BYTES = 64 * 1024
 
 
 class FileDownloaderConfig(BaseModel):
@@ -857,37 +860,61 @@ class FileDownloader(BasePlugin):
           - When the effective add_comment option for the URL is True, a
             timestamped header line is written as the first line in the file.
           - When add_comment is False or None, only the body is written.
+          - Rejects responses larger than MAX_DOWNLOAD_RESPONSE_BYTES.
         """
 
         now = time.time()
+        response: requests.Response | None = None
+        temp_path: str | None = None
         try:
-            r = requests.get(url, timeout=20)
-            r.raise_for_status()
-        except requests.RequestException:
-            self._record_failure(url, now)
-            raise
-        _, add_comment = self._get_effective_url_options(url)
-        body = r.text
-        temp_dir = os.path.dirname(filepath) or "."
-        fd, temp_path = tempfile.mkstemp(
-            prefix=".file_downloader.", dir=temp_dir, text=True
-        )
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8", errors="ignore") as f:
+            response = requests.get(url, timeout=20, stream=True)
+            response.raise_for_status()
+            content_length = maybe_parse_content_length(
+                response.headers.get("Content-Length")
+            )
+            if content_length > MAX_DOWNLOAD_RESPONSE_BYTES:
+                raise ValueError(
+                    "Upstream list exceeds max allowed size "
+                    f"({content_length} > {MAX_DOWNLOAD_RESPONSE_BYTES} bytes): {url}"
+                )
+
+            _, add_comment = self._get_effective_url_options(url)
+            temp_dir = os.path.dirname(filepath) or "."
+            fd, temp_path = tempfile.mkstemp(prefix=".file_downloader.", dir=temp_dir)
+            with os.fdopen(fd, "wb") as f:
                 if add_comment is True:
                     header = self._make_header_line(url)
-                    f.write(header)
-                    f.write("\n")
-                f.write(body)
+                    f.write(header.encode("utf-8", errors="ignore"))
+                    f.write(b"\n")
+                downloaded_bytes = 0
+                assert response is not None
+                for chunk in response.iter_content(
+                    chunk_size=DOWNLOAD_STREAM_CHUNK_BYTES
+                ):
+                    if not chunk:
+                        continue
+                    downloaded_bytes += len(chunk)
+                    if downloaded_bytes > MAX_DOWNLOAD_RESPONSE_BYTES:
+                        raise ValueError(
+                            "Upstream list exceeded max allowed size "
+                            f"({downloaded_bytes} > {MAX_DOWNLOAD_RESPONSE_BYTES} bytes): {url}"
+                        )
+                    f.write(chunk)
                 f.flush()
                 os.fsync(f.fileno())
         except Exception:
             try:
-                os.remove(temp_path)
+                if temp_path is not None:
+                    os.remove(temp_path)
             except OSError:
                 logger.warning("FileDownloader failed cleaning temp file %s", temp_path)
             self._record_failure(url, now)
             raise
+        finally:
+            if response is not None:
+                response.close()
+
+        assert temp_path is not None
         return temp_path
 
     def _validate_domain_list(self, filepath: str) -> bool:
