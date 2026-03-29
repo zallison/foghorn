@@ -96,7 +96,7 @@ def main(argv: List[str] | None = None) -> int:
         cfg = parse_config_file(
             args.config,
             cli_vars=list(getattr(args, "var", []) or []),
-            unknown_keys=str(getattr(args, "config_extras", "warn") or "warn"),
+            unknown_keys=str(getattr(args, "config_extras", "error") or "error"),
             skip_schema_validation=bool(getattr(args, "skip_schema_validation", False)),
         )
     except ValueError as exc:
@@ -2211,7 +2211,7 @@ def _initialize_runtime_snapshot(
             snapshot=snapshot,
             config_path=cfg_path,
             cli_vars=list(getattr(args, "var", []) or []),
-            unknown_keys_policy=str(getattr(args, "config_extras", "warn") or "warn"),
+            unknown_keys_policy=str(getattr(args, "config_extras", "error") or "error"),
         )
     except Exception:
         logger.error("Failed to initialize runtime snapshot", exc_info=True)

@@ -346,7 +346,7 @@ def parse_config_file(
     config_path: str,
     *,
     cli_vars: Optional[List[str]] = None,
-    unknown_keys: str = "warn",
+    unknown_keys: str = "error",
     skip_schema_validation: bool = False,
 ) -> Dict[str, Any]:
     """Brief: Read, variable-merge, and schema-validate a v2 YAML config file.
