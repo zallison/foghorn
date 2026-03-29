@@ -101,7 +101,7 @@ class SqliteStatsStore(BaseStatsStore):
         batch_time_sec: float = 15.0,
         batch_max_size: int = 1000,
         async_logging: bool = False,
-        max_logging_queue: int = 4096,
+        max_logging_queue: int = 16384,
         retention_max_records: Optional[int] = None,
         retention_days: Optional[float] = None,
         retention_max_bytes: Optional[int] = None,
@@ -136,7 +136,7 @@ class SqliteStatsStore(BaseStatsStore):
         try:
             self._max_logging_queue = int(max_logging_queue)
         except Exception:
-            self._max_logging_queue = 4096
+            self._max_logging_queue = 16384
         self._query_log_retention_max_records = (
             BaseStatsStore._normalize_retention_max_records(retention_max_records)
         )

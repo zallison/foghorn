@@ -83,7 +83,7 @@ class MultiStatsStore(BaseStatsStore):
             try:
                 self._max_logging_queue = int(effective_max)
             except Exception:
-                self._max_logging_queue = 4096
+                self._max_logging_queue = 16384
 
     # Health and lifecycle -------------------------------------------------
     def health_check(self) -> bool:
