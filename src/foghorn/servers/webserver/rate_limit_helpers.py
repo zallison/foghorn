@@ -679,6 +679,43 @@ def _collect_rate_limit_stats(
             )
             continue
 
+        # Normalize global profile aliases to one deterministic row so API
+        # output cannot depend on sqlite ordering by avg_rps.
+        canonical_global_row: tuple[Any, Any, Any, Any, Any] | None = None
+        normalized_rows: list[tuple[Any, Any, Any, Any, Any]] = []
+        for row in rows:
+            key_text = str(row[0])
+            if key_text in {
+                _GLOBAL_RPS_DB_KEY,
+                _GLOBAL_RPS_API_KEY,
+                _GLOBAL_RPS_LEGACY_DB_KEY,
+            }:
+                if canonical_global_row is None:
+                    canonical_global_row = row
+                    continue
+                current_key_text = str(canonical_global_row[0])
+                if (
+                    current_key_text != _GLOBAL_RPS_DB_KEY
+                    and key_text == _GLOBAL_RPS_DB_KEY
+                ):
+                    canonical_global_row = row
+                    continue
+                if key_text == current_key_text:
+                    try:
+                        existing_last_update = int(canonical_global_row[4] or 0)
+                    except Exception:
+                        existing_last_update = 0
+                    try:
+                        new_last_update = int(row[4] or 0)
+                    except Exception:
+                        new_last_update = 0
+                    if new_last_update > existing_last_update:
+                        canonical_global_row = row
+                continue
+            normalized_rows.append(row)
+        if canonical_global_row is not None:
+            normalized_rows.append(canonical_global_row)
+
         profiles: list[Dict[str, Any]] = []
         profile_keys_seen: set[str] = set()
         max_avg = 0.0
@@ -688,8 +725,7 @@ def _collect_rate_limit_stats(
         max_current_limit = 0.0
         max_current_rps = 0.0
         max_burst_threshold = 0.0
-        global_profile_added = False
-        for key, avg_rps, max_rps, samples, last_update in rows:
+        for key, avg_rps, max_rps, samples, last_update in normalized_rows:
             key_text = str(key)
             display_key = (
                 _GLOBAL_RPS_API_KEY
@@ -701,10 +737,6 @@ def _collect_rate_limit_stats(
                 }
                 else key_text
             )
-            if display_key == _GLOBAL_RPS_API_KEY:
-                if global_profile_added:
-                    continue
-                global_profile_added = True
             profile_keys_seen.add(str(display_key))
             try:
                 avg_val = float(avg_rps)
