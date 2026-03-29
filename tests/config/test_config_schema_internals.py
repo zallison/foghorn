@@ -295,6 +295,57 @@ def test_normalize_plugin_entries_rejects_capitalized_comment_keys() -> None:
         config_schema_mod._normalize_plugin_entries_for_validation(cfg_config)
 
 
+def test_normalize_plugin_entries_rejects_unsupported_hooks_keys() -> None:
+    """Brief: _normalize_plugin_entries_for_validation rejects unknown hooks keys.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts ValueError for unsupported plugins[].hooks keys.
+    """
+
+    cfg: Dict[str, Any] = {
+        "plugins": [
+            {
+                "type": "filter",
+                "hooks": {"pre-resolve": 25},
+            }
+        ]
+    }
+
+    with pytest.raises(
+        ValueError, match=r"plugins\[0\]\.hooks contains unsupported key"
+    ):
+        config_schema_mod._normalize_plugin_entries_for_validation(cfg)
+
+
+def test_normalize_plugin_entries_rejects_unsupported_nested_hook_keys() -> None:
+    """Brief: _normalize_plugin_entries_for_validation rejects unknown nested hook keys.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts ValueError for unsupported hooks.pre_resolve.* keys.
+    """
+
+    cfg: Dict[str, Any] = {
+        "plugins": [
+            {
+                "type": "filter",
+                "hooks": {"pre_resolve": {"prio": 25}},
+            }
+        ]
+    }
+
+    with pytest.raises(
+        ValueError,
+        match=r"plugins\[0\]\.hooks\.pre_resolve contains unsupported key",
+    ):
+        config_schema_mod._normalize_plugin_entries_for_validation(cfg)
+
+
 def test_get_default_schema_path_uses_assets_in_source_tree() -> None:
     """Brief: get_default_schema_path locates assets/config-schema.json in ancestors.
 

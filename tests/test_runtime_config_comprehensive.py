@@ -109,6 +109,21 @@ def test_initialize_runtime_basic() -> None:
     assert result.generation == snap.generation
 
 
+def test_initialize_runtime_default_unknown_keys_policy_is_error() -> None:
+    """Default initialize_runtime unknown-keys policy is strict (error).
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts _UNKNOWN_KEYS_POLICY defaults to 'error'.
+    """
+    clear_runtime()
+    snap = _default_snapshot()
+    initialize_runtime(snapshot=snap, config_path="/tmp/test.yaml")
+    assert runtime_config_mod._UNKNOWN_KEYS_POLICY == "error"
+
+
 def test_clear_runtime() -> None:
     """clear_runtime resets module state."""
     clear_runtime()

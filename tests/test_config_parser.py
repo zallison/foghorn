@@ -15,6 +15,7 @@ from typing import Any, Dict, List
 import pytest
 
 from foghorn.config import config_parser as cp
+from foghorn.main_config_helpers import _build_main_arg_parser
 from foghorn.plugins.resolve.base import BasePlugin
 
 
@@ -107,6 +108,135 @@ def test_parse_config_file_non_mapping_root_raises(tmp_path, monkeypatch) -> Non
 
     with pytest.raises(ValueError, match="Configuration root must be a mapping"):
         cp.parse_config_file(str(p))
+
+
+def test_parse_config_file_rejects_invalid_plugin_hooks_key(tmp_path) -> None:
+    """Brief: parse_config_file rejects unsupported plugins[].hooks key names.
+
+    Inputs:
+      - tmp_path: pytest temporary directory fixture.
+
+    Outputs:
+      - None; asserts ValueError for hooks key typo like pre-resolve.
+    """
+
+    cfg_path = tmp_path / "cfg.yaml"
+    cfg_path.write_text(
+        "\n".join(
+            [
+                "server:",
+                "  resolver:",
+                "    mode: forward",
+                "  listen:",
+                "    udp:",
+                "      enabled: true",
+                "upstreams:",
+                "  endpoints:",
+                "    - host: 1.1.1.1",
+                "      port: 53",
+                "plugins:",
+                "  - type: filter",
+                "    hooks:",
+                "      pre-resolve: 25",
+                "    config: {}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        ValueError, match=r"plugins\[0\]\.hooks contains unsupported key"
+    ):
+        cp.parse_config_file(str(cfg_path))
+
+
+def test_parse_config_file_unknown_keys_default_is_error(tmp_path) -> None:
+    """Brief: parse_config_file treats extra schema keys as fatal by default.
+
+    Inputs:
+      - tmp_path: pytest temporary directory fixture.
+
+    Outputs:
+      - None; asserts unknown top-level keys raise ValueError without overrides.
+    """
+
+    cfg_path = tmp_path / "cfg.yaml"
+    cfg_path.write_text(
+        "\n".join(
+            [
+                "server:",
+                "  resolver:",
+                "    mode: forward",
+                "  listen:",
+                "    udp:",
+                "      enabled: true",
+                "upstreams:",
+                "  endpoints:",
+                "    - host: 1.1.1.1",
+                "      port: 53",
+                "unexpected_key: true",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match=r"unexpected_key"):
+        cp.parse_config_file(str(cfg_path))
+
+
+def test_parse_config_file_unknown_keys_warn_override_still_supported(
+    tmp_path, caplog
+) -> None:
+    """Brief: parse_config_file allows warn override for unknown extra keys.
+
+    Inputs:
+      - tmp_path: pytest temporary directory fixture.
+      - caplog: pytest log-capture fixture.
+
+    Outputs:
+      - None; asserts unknown_keys='warn' returns config instead of raising.
+    """
+
+    cfg_path = tmp_path / "cfg.yaml"
+    cfg_path.write_text(
+        "\n".join(
+            [
+                "server:",
+                "  resolver:",
+                "    mode: forward",
+                "  listen:",
+                "    udp:",
+                "      enabled: true",
+                "upstreams:",
+                "  endpoints:",
+                "    - host: 1.1.1.1",
+                "      port: 53",
+                "unexpected_key: true",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    with caplog.at_level("WARNING", logger="foghorn.config.config_schema"):
+        cfg = cp.parse_config_file(str(cfg_path), unknown_keys="warn")
+
+    assert isinstance(cfg, dict)
+    assert any("unexpected_key" in rec.getMessage() for rec in caplog.records)
+
+
+def test_main_arg_parser_defaults_config_extras_to_error() -> None:
+    """Brief: Main CLI parser defaults --config-extras policy to error.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts parsed default config_extras is 'error'.
+    """
+
+    parser = _build_main_arg_parser()
+    args = parser.parse_args([])
+    assert args.config_extras == "error"
 
 
 def test_parse_config_file_tls_ca_missing_is_fatal(tmp_path) -> None:
