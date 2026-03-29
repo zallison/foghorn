@@ -1294,9 +1294,10 @@ def _schedule_notify_axfr_refresh(zone_name: str, upstream: Dict) -> None:
 
     if not callable(submit_bg):
 
-        def submit_bg(_key: object, fn) -> None:
+        def submit_bg(_key: object, fn) -> bool:
             t = threading.Thread(target=fn, daemon=True)
             t.start()
+            return True
 
     for plugin in plugins:
         cfg = getattr(plugin, "_axfr_zones", None)
@@ -1381,8 +1382,11 @@ def _schedule_notify_axfr_refresh(zone_name: str, upstream: Dict) -> None:
                             _schedule_coalesced_refresh(delay_next)
 
                 try:
-                    submit_bg(zone_key, _wrapped)
+                    submit_result = submit_bg(zone_key, _wrapped)
+                    submitted = submit_result is not False
                 except Exception:  # pragma: no cover - defensive logging only
+                    submitted = False
+                if not submitted:
                     with _NOTIFY_BG_LOCK:
                         _NOTIFY_REFRESH_INFLIGHT.discard(zone_key)
                     logger.warning(
@@ -1440,8 +1444,11 @@ def _schedule_notify_axfr_refresh(zone_name: str, upstream: Dict) -> None:
                     _schedule_coalesced_refresh(delay_next)
 
         try:
-            submit_bg(zone_key, _wrapped)
+            submit_result = submit_bg(zone_key, _wrapped)
+            submitted = submit_result is not False
         except Exception:  # pragma: no cover - defensive logging only
+            submitted = False
+        if not submitted:
             with _NOTIFY_BG_LOCK:
                 _NOTIFY_REFRESH_INFLIGHT.discard(zone_key)
             logger.warning(

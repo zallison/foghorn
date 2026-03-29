@@ -1441,6 +1441,54 @@ def test_process_update_message_per_key_rate_window_reset(
     assert plugin._dns_update_rate_buckets["tsig:key.example.com."]["count"] == 1
 
 
+def test_process_update_message_prunes_stale_rate_buckets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Brief: Stale DNS UPDATE rate buckets are pruned to bound memory use."""
+    wire, keyring = _signed_update_wire()
+    request_msg = dns.message.from_wire(wire, keyring=keyring)
+    now = float(up.time.time())
+    plugin = SimpleNamespace(
+        records={},
+        _dns_update_config={
+            "security": {
+                "rate_limit_per_client": 10,
+                "rate_limit_per_key": 10,
+            }
+        },
+        _dns_update_rate_buckets={
+            "client:stale-a": {"start": now - 120.0, "count": 1},
+            "tsig:stale-b": {"start": now - 80.0, "count": 2},
+            "client:fresh": {"start": now - 5.0, "count": 3},
+            "client:bad-entry": "bad",
+        },
+        _dns_update_rate_buckets_last_prune=0.0,
+    )
+    monkeypatch.setattr(up, "apply_update_operations", lambda *_a, **_kw: (0, None))
+
+    response_wire = up.process_update_message(
+        wire,
+        zone_apex="example.com",
+        zone_config=_zone_cfg(
+            key_name="key.example.com.",
+            secret_b64="dGVzdHNlY3JldA==",
+        ),
+        plugin=plugin,
+        client_ip="192.0.2.1",
+    )
+    parsed = dns.message.from_wire(
+        response_wire, keyring=keyring, request_mac=request_msg.mac
+    )
+    assert parsed.rcode() == dns.rcode.NOERROR
+    assert "client:stale-a" not in plugin._dns_update_rate_buckets
+    assert "tsig:stale-b" not in plugin._dns_update_rate_buckets
+    assert "client:bad-entry" not in plugin._dns_update_rate_buckets
+    assert plugin._dns_update_rate_buckets["client:fresh"]["count"] == 3
+    assert plugin._dns_update_rate_buckets["client:192.0.2.1"]["count"] == 1
+    assert plugin._dns_update_rate_buckets["tsig:key.example.com."]["count"] == 1
+    assert float(plugin._dns_update_rate_buckets_last_prune) >= now
+
+
 def test_apply_update_operations_zone_apex_normalize_fallback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
