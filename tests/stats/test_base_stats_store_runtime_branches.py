@@ -491,6 +491,35 @@ def test_maybe_warn_queue_pressure_logs_info_and_tolerates_state_errors(
 
     assert any("bucket=0%" in rec.message for rec in caplog.records)
     assert any("drops=0" in rec.message for rec in caplog.records)
+    assert any("full=0" in rec.message for rec in caplog.records)
+    assert any("low_priority=0" in rec.message for rec in caplog.records)
+
+
+def test_maybe_warn_queue_pressure_logs_drop_reason_breakdown(caplog) -> None:
+    """Brief: Queue pressure logs include full vs low-priority drop counts.
+
+    Inputs:
+      - caplog: Captures WARNING logs.
+
+    Outputs:
+      - None; asserts pressure log message carries reason-specific counts.
+    """
+
+    store = _RuntimeStore()
+    store._op_queue = queue.Queue(maxsize=100)
+    for i in range(30):
+        store._op_queue.put_nowait(("op", (i,), {}))
+    store._op_queue_warn_last_ts = {}
+    store._op_queue_warn_last_bucket = None
+    store._op_queue_drops_total = 9
+    store._op_queue_drops_by_reason = {"full": 7, "low_priority": 2}
+
+    with caplog.at_level(logging.WARNING, logger=base_mod.__name__):
+        store._maybe_warn_queue_pressure()
+
+    assert any("drops=9" in rec.message for rec in caplog.records)
+    assert any("full=7" in rec.message for rec in caplog.records)
+    assert any("low_priority=2" in rec.message for rec in caplog.records)
 
 
 def test_maybe_warn_queue_pressure_tolerates_last_bucket_attribute_failure(
@@ -539,19 +568,24 @@ def test_record_queue_drop_handles_non_dict_and_conversion_failures() -> None:
     store = _RuntimeStore()
     store._op_queue_drops_total = 0
     store._op_queue_drops_by_op = []
-    store._record_queue_drop("insert_query_log")
+    store._op_queue_drops_by_reason = {}
+    store._record_queue_drop("insert_query_log", reason="low_priority")
     assert store._op_queue_drops_total == 1
+    assert store._op_queue_drops_by_reason == {"low_priority": 1}
 
     store._op_queue_drops_total = _BadInt()
     store._op_queue_drops_by_op = {}
+    store._op_queue_drops_by_reason = {}
     store._record_queue_drop("insert_query_log")
     assert isinstance(store._op_queue_drops_total, _BadInt)
 
     store._op_queue_drops_total = 0
     store._op_queue_drops_by_op = {"insert_query_log": _BadInt()}
-    store._record_queue_drop("insert_query_log")
+    store._op_queue_drops_by_reason = {"full": _BadInt()}
+    store._record_queue_drop("insert_query_log", reason="full")
     assert store._op_queue_drops_total == 1
     assert isinstance(store._op_queue_drops_by_op["insert_query_log"], _BadInt)
+    assert isinstance(store._op_queue_drops_by_reason["full"], _BadInt)
 
 
 def test_get_async_queue_metrics_handles_bounded_unbounded_and_bad_inputs() -> None:
@@ -567,6 +601,12 @@ def test_get_async_queue_metrics_handles_bounded_unbounded_and_bad_inputs() -> N
     store = _RuntimeStore()
     store._op_queue_drops_total = 3
     store._op_queue_drops_by_op = {"": 9, "ok": "2", "bad": _BadInt()}
+    store._op_queue_drops_by_reason = {
+        "full": "4",
+        "low_priority": "1",
+        "bad": _BadInt(),
+        "": 7,
+    }
     metrics = store.get_async_queue_metrics()
 
     assert metrics["capacity"] is None
@@ -574,6 +614,7 @@ def test_get_async_queue_metrics_handles_bounded_unbounded_and_bad_inputs() -> N
     assert metrics["pct_full"] is None
     assert metrics["drops_total"] == 3
     assert metrics["drops_by_op"] == {"ok": 2}
+    assert metrics["drops_by_reason"] == {"full": 4, "low_priority": 1}
 
     store._op_queue = queue.Queue(maxsize=10)
     for i in range(4):
@@ -598,8 +639,10 @@ def test_get_async_queue_metrics_handles_bounded_unbounded_and_bad_inputs() -> N
     assert metrics["pct_full"] is None
 
     store._op_queue_drops_by_op = ["unexpected"]
+    store._op_queue_drops_by_reason = ["unexpected"]
     metrics = store.get_async_queue_metrics()
     assert metrics["drops_by_op"] == {}
+    assert metrics["drops_by_reason"] == {}
 
 
 def test_increment_count_falls_back_to_sync_handler_when_queue_missing() -> None:
@@ -659,11 +702,304 @@ def test_insert_query_log_queue_drop_and_sync_fallback_paths() -> None:
     assert metrics["size"] == 1
     assert metrics["drops_total"] == 1
     assert metrics["drops_by_op"] == {"insert_query_log": 1}
+    assert metrics["drops_by_reason"] == {"full": 1}
 
     fallback_store = _RuntimeStore()
     fallback_store._ensure_worker = lambda: None  # type: ignore[assignment]
     fallback_store.insert_query_log(*args)
     assert fallback_store.insert_calls == [args]
+
+
+def test_insert_query_log_sheds_refused_rows_when_queue_near_full() -> None:
+    """Brief: Near-full queue sheds low-priority REFUSED query-log rows early.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts near-full REFUSED rows are dropped before queue.Full.
+    """
+
+    store = _RuntimeStore()
+    store._ensure_worker = lambda: None  # type: ignore[assignment]
+    store._op_queue = queue.Queue(maxsize=10)
+    store._op_queue_drops_total = 0
+    store._op_queue_drops_by_op = {}
+
+    for i in range(9):
+        store._op_queue.put_nowait(("existing", (i,), {}))
+
+    refused_args = (
+        1234.5,
+        "127.0.0.1",
+        "example.com.",
+        "A",
+        "8.8.8.8:53",
+        "REFUSED",
+        "error",
+        None,
+        None,
+        "{}",
+    )
+    store.insert_query_log(*refused_args)
+
+    metrics = store.get_async_queue_metrics()
+    assert metrics["size"] == 9
+    assert metrics["drops_total"] == 1
+    assert metrics["drops_by_op"] == {"insert_query_log": 1}
+    assert metrics["drops_by_reason"] == {"low_priority": 1}
+    assert metrics["drops_by_reason"] == {"low_priority": 1}
+
+
+def test_insert_query_log_keeps_noerror_rows_when_queue_near_full() -> None:
+    """Brief: Near-full queue keeps non-low-priority query-log rows.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts NOERROR rows still enqueue when capacity remains.
+    """
+
+    store = _RuntimeStore()
+    store._ensure_worker = lambda: None  # type: ignore[assignment]
+    store._op_queue = queue.Queue(maxsize=10)
+    store._op_queue_drops_total = 0
+    store._op_queue_drops_by_op = {}
+
+    for i in range(9):
+        store._op_queue.put_nowait(("existing", (i,), {}))
+
+    ok_args = _sample_insert_args()
+    store.insert_query_log(*ok_args)
+
+    metrics = store.get_async_queue_metrics()
+    assert metrics["size"] == 10
+    assert metrics["drops_total"] == 0
+    assert metrics["drops_by_op"] == {}
+    assert metrics["drops_by_reason"] == {}
+
+
+def test_insert_query_log_sheds_drop_status_rows_when_queue_near_full() -> None:
+    """Brief: Near-full queue sheds rows marked with drop status.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts status='drop' rows are shed before queue.Full.
+    """
+
+    store = _RuntimeStore()
+    store._ensure_worker = lambda: None  # type: ignore[assignment]
+    store._op_queue = queue.Queue(maxsize=10)
+    store._op_queue_drops_total = 0
+    store._op_queue_drops_by_op = {}
+
+    for i in range(9):
+        store._op_queue.put_nowait(("existing", (i,), {}))
+
+    drop_status_args = (
+        1234.5,
+        "127.0.0.1",
+        "example.com.",
+        "A",
+        "8.8.8.8:53",
+        "NOERROR",
+        "drop",
+        None,
+        None,
+        "{}",
+    )
+    store.insert_query_log(*drop_status_args)
+
+    metrics = store.get_async_queue_metrics()
+    assert metrics["size"] == 9
+    assert metrics["drops_total"] == 1
+    assert metrics["drops_by_op"] == {"insert_query_log": 1}
+
+
+def test_record_suppressed_query_log_drop_candidate_counts_under_pressure() -> None:
+    """Brief: Suppressed low-priority candidates increment queue-drop metrics under pressure.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts low-priority drop accounting for suppressed candidates.
+    """
+
+    store = _RuntimeStore()
+    store._op_queue = queue.Queue(maxsize=10)
+    store._op_queue_drops_total = 0
+    store._op_queue_drops_by_op = {}
+    for i in range(3):  # 30% full
+        store._op_queue.put_nowait(("existing", (i,), {}))
+
+    counted = store.record_suppressed_query_log_drop_candidate(
+        rcode="REFUSED",
+        status="override_pre",
+    )
+
+    metrics = store.get_async_queue_metrics()
+    assert counted is True
+    assert metrics["size"] == 3
+    assert metrics["drops_total"] == 1
+    assert metrics["drops_by_op"] == {"insert_query_log": 1}
+    assert metrics["drops_by_reason"] == {"low_priority": 1}
+
+
+def test_record_suppressed_query_log_drop_candidate_emits_debug_log(caplog) -> None:
+    """Brief: Suppressed low-priority accounting emits a debug verification message.
+
+    Inputs:
+      - caplog: Captures DEBUG logs from querylog base module.
+
+    Outputs:
+      - None; asserts a debug line is emitted when a candidate is counted.
+    """
+
+    store = _RuntimeStore()
+    store._op_queue = queue.Queue(maxsize=10)
+    for i in range(3):  # 30% full
+        store._op_queue.put_nowait(("existing", (i,), {}))
+
+    with caplog.at_level(logging.DEBUG, logger=base_mod.__name__):
+        counted = store.record_suppressed_query_log_drop_candidate(
+            rcode="REFUSED",
+            status="override_pre",
+        )
+
+    assert counted is True
+    assert any(
+        "Counted suppressed query-log row as low_priority drop" in rec.message
+        for rec in caplog.records
+    )
+
+
+def test_record_suppressed_query_log_drop_candidate_skips_non_shedding_cases() -> None:
+    """Brief: Suppressed candidate accounting skips low-pressure and non-priority rows.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts no increments when shedding criteria are not met.
+    """
+
+    store = _RuntimeStore()
+    assert (
+        store.record_suppressed_query_log_drop_candidate(
+            rcode="REFUSED",
+            status="override_pre",
+        )
+        is False
+    )
+
+    store._op_queue = queue.Queue(maxsize=10)
+    store._op_queue_drops_total = 0
+    store._op_queue_drops_by_op = {}
+    for i in range(2):  # 20% full
+        store._op_queue.put_nowait(("existing", (i,), {}))
+
+    assert (
+        store.record_suppressed_query_log_drop_candidate(
+            rcode="REFUSED",
+            status="override_pre",
+        )
+        is False
+    )
+    assert (
+        store.record_suppressed_query_log_drop_candidate(
+            rcode="NOERROR",
+            status="ok",
+        )
+        is False
+    )
+
+    metrics = store.get_async_queue_metrics()
+    assert metrics["drops_total"] == 0
+    assert metrics["drops_by_op"] == {}
+    assert metrics["drops_by_reason"] == {}
+
+
+def test_insert_query_log_does_not_shed_low_priority_below_25pct_full() -> None:
+    """Brief: Low-priority rows are kept when queue pressure is below 25%.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts low-priority rows enqueue below shedding threshold.
+    """
+
+    store = _RuntimeStore()
+    store._ensure_worker = lambda: None  # type: ignore[assignment]
+    store._op_queue = queue.Queue(maxsize=10)
+    store._op_queue_drops_total = 0
+    store._op_queue_drops_by_op = {}
+
+    for i in range(2):
+        store._op_queue.put_nowait(("existing", (i,), {}))
+
+    refused_args = (
+        1234.5,
+        "127.0.0.1",
+        "example.com.",
+        "A",
+        "8.8.8.8:53",
+        "REFUSED",
+        "error",
+        None,
+        None,
+        "{}",
+    )
+    store.insert_query_log(*refused_args)
+
+    metrics = store.get_async_queue_metrics()
+    assert metrics["size"] == 3
+    assert metrics["drops_total"] == 0
+    assert metrics["drops_by_op"] == {}
+    assert metrics["drops_by_reason"] == {}
+
+
+def test_insert_query_log_sheds_low_priority_at_25pct_full() -> None:
+    """Brief: Low-priority rows are shed when queue reaches 25% fullness.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts low-priority rows are dropped at threshold boundary.
+    """
+
+    store = _RuntimeStore()
+    store._ensure_worker = lambda: None  # type: ignore[assignment]
+    store._op_queue = queue.Queue(maxsize=4)
+    store._op_queue_drops_total = 0
+    store._op_queue_drops_by_op = {}
+
+    store._op_queue.put_nowait(("existing", (0,), {}))  # 25% full
+
+    refused_args = (
+        1234.5,
+        "127.0.0.1",
+        "example.com.",
+        "A",
+        "8.8.8.8:53",
+        "REFUSED",
+        "error",
+        None,
+        None,
+        "{}",
+    )
+    store.insert_query_log(*refused_args)
+
+    metrics = store.get_async_queue_metrics()
+    assert metrics["size"] == 1
+    assert metrics["drops_total"] == 1
+    assert metrics["drops_by_op"] == {"insert_query_log": 1}
+    assert metrics["drops_by_reason"] == {"low_priority": 1}
 
 
 def test_insert_query_log_raises_when_sync_handler_missing() -> None:
