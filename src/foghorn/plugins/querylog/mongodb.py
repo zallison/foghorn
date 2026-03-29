@@ -22,6 +22,7 @@ Notes:
 import json
 import logging
 import re
+import threading
 import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -91,6 +92,9 @@ class MongoStatsStore(BaseStatsStore):
         connect_kwargs: Optional[Dict[str, Any]] = None,
         async_logging: bool = False,
         max_logging_queue: int = 16384,
+        batch_writes: bool = False,
+        batch_time_sec: float = 15.0,
+        batch_max_size: int = 1000,
         retention_max_records: Optional[int] = None,
         retention_days: Optional[float] = None,
         retention_max_bytes: Optional[int] = None,
@@ -123,6 +127,13 @@ class MongoStatsStore(BaseStatsStore):
             self._max_logging_queue = int(max_logging_queue)
         except Exception:
             self._max_logging_queue = 16384
+        self._batch_writes = bool(batch_writes)
+        self._batch_time_sec = float(batch_time_sec)
+        self._batch_max_size = int(batch_max_size)
+        self._batch_lock = threading.RLock()
+        self._pending_query_log_docs: List[Dict[str, Any]] = []
+        self._pending_query_log_retention = False
+        self._last_flush = time.time()
         self._query_log_retention_max_records = (
             BaseStatsStore._normalize_retention_max_records(retention_max_records)
         )
@@ -201,6 +212,79 @@ class MongoStatsStore(BaseStatsStore):
     # ------------------------------------------------------------------
     # Health and lifecycle
     # ------------------------------------------------------------------
+    def _flush_pending_query_log_docs(self) -> None:
+        """Flush buffered query-log documents when batching is enabled.
+
+        Inputs:
+            None.
+
+        Outputs:
+            None.
+        """
+
+        if not self._batch_writes:
+            return
+        with self._batch_lock:
+            self._flush_pending_query_log_docs_locked()
+
+    def _maybe_flush_pending_query_log_docs_locked(self) -> None:
+        """Flush buffered query-log docs when size/time thresholds are met.
+
+        Inputs:
+            None. Caller must hold ``self._batch_lock``.
+
+        Outputs:
+            None.
+        """
+
+        if not self._batch_writes:
+            return
+        docs_len = len(self._pending_query_log_docs)
+        if docs_len == 0:
+            return
+
+        now = time.time()
+        age = now - self._last_flush
+        if docs_len >= self._batch_max_size or age >= self._batch_time_sec:
+            self._flush_pending_query_log_docs_locked()
+
+    def _flush_pending_query_log_docs_locked(self) -> None:
+        """Flush buffered query-log docs via ``insert_many``.
+
+        Inputs:
+            None. Caller must hold ``self._batch_lock``.
+
+        Outputs:
+            None.
+        """
+
+        if not self._pending_query_log_docs:
+            return
+
+        docs = list(self._pending_query_log_docs)
+        run_retention = bool(self._pending_query_log_retention)
+
+        try:
+            self._query_log.insert_many(docs)
+            self._pending_query_log_docs.clear()
+            self._pending_query_log_retention = False
+            self._last_flush = time.time()
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.error(
+                "MongoStatsStore batched query_log flush failed: %s",
+                exc,
+                exc_info=True,
+            )
+            # Best-effort behavior: drop uncertain partial batches to avoid
+            # duplicate retries.
+            self._pending_query_log_docs.clear()
+            self._pending_query_log_retention = False
+            self._last_flush = time.time()
+            return
+
+        if run_retention:
+            self._apply_query_log_retention()
+
     def health_check(self) -> bool:
         """Return True when the underlying MongoDB store is usable.
 
@@ -229,6 +313,7 @@ class MongoStatsStore(BaseStatsStore):
         """
 
         try:
+            self._flush_pending_query_log_docs()
             client = getattr(self, "_client", None)
             if client is not None:
                 client.close()
@@ -372,8 +457,15 @@ class MongoStatsStore(BaseStatsStore):
                 "first": first,
                 "result_json": result_json,
             }
-            self._query_log.insert_one(doc)
-            self._apply_query_log_retention()
+            if not self._batch_writes:
+                self._query_log.insert_one(doc)
+                self._apply_query_log_retention()
+                return
+
+            with self._batch_lock:
+                self._pending_query_log_docs.append(doc)
+                self._pending_query_log_retention = True
+                self._maybe_flush_pending_query_log_docs_locked()
         except Exception as exc:  # pragma: no cover - defensive
             logger.error(
                 "MongoStatsStore insert_query_log error: %s", exc, exc_info=True
@@ -507,6 +599,7 @@ class MongoStatsStore(BaseStatsStore):
             bool indicating whether query_log has documents.
         """
 
+        self._flush_pending_query_log_docs()
         try:
             return self._query_log.find_one({}, {"_id": 1}) is not None
         except Exception as exc:  # pragma: no cover - defensive
@@ -575,6 +668,7 @@ class MongoStatsStore(BaseStatsStore):
             if isinstance(end_ts, (int, float)):
                 ts_cond["$lt"] = float(end_ts)
             flt["ts"] = ts_cond
+        self._flush_pending_query_log_docs()
 
         try:
             total = int(self._query_log.count_documents(flt))
@@ -712,6 +806,7 @@ class MongoStatsStore(BaseStatsStore):
             if gb in mapping:
                 group_col = mapping[gb]
                 group_label = gb
+        self._flush_pending_query_log_docs()
 
         rows: List[Tuple[int, Optional[str], int]] = []
         try:
@@ -863,6 +958,7 @@ class MongoStatsStore(BaseStatsStore):
         """
 
         log = logger_obj or logger
+        self._flush_pending_query_log_docs()
 
         try:
             self._counts.delete_many({})
