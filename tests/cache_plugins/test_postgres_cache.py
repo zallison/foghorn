@@ -241,6 +241,31 @@ def test_postgres_cache_plugin_set_enforces_min_ttl() -> None:
         mock_backend.set.assert_called_with(("key2", 1), 200, b"value2")
 
 
+def test_postgres_cache_plugin_get_with_meta_delegates() -> None:
+    """Brief: get_with_meta() delegates to backend and returns tuple payload.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts backend tuple is returned unchanged.
+    """
+
+    from unittest.mock import MagicMock, patch
+
+    from foghorn.plugins.cache.postgres_cache import PostgresCache
+
+    with patch(
+        "foghorn.plugins.cache.postgres_cache.PostgresTTLCache"
+    ) as mock_backend_class:
+        mock_backend = MagicMock()
+        mock_backend_class.return_value = mock_backend
+        mock_backend.get_with_meta.return_value = (b"v", 12.5, 30)
+
+        cache = PostgresCache()
+        assert cache.get_with_meta(("example.com", 1)) == (b"v", 12.5, 30)
+
+
 def test_postgres_cache_plugin_get_returns_bytes() -> None:
     """Brief: get() method returns bytes or None.
 
@@ -279,6 +304,72 @@ def test_postgres_cache_plugin_get_returns_bytes() -> None:
         assert result == "string_not_bytes"
 
 
+def test_postgres_cache_plugin_purge_casts_to_int() -> None:
+    """Brief: purge() coerces backend return value to int.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts integer coercion for purge result.
+    """
+
+    from unittest.mock import MagicMock, patch
+
+    from foghorn.plugins.cache.postgres_cache import PostgresCache
+
+    with patch(
+        "foghorn.plugins.cache.postgres_cache.PostgresTTLCache"
+    ) as mock_backend_class:
+        mock_backend = MagicMock()
+        mock_backend_class.return_value = mock_backend
+        mock_backend.purge.return_value = "7"
+
+        cache = PostgresCache()
+        assert cache.purge() == 7
+
+
+def test_postgres_cache_plugin_config_fallbacks_for_invalid_types() -> None:
+    """Brief: Constructor applies defaults for invalid port/database/namespace/kwargs.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts fallback coercion paths in __init__.
+    """
+
+    from unittest.mock import MagicMock, patch
+
+    from foghorn.plugins.cache.postgres_cache import PostgresCache
+
+    with patch(
+        "foghorn.plugins.cache.postgres_cache.PostgresTTLCache"
+    ) as mock_backend_class:
+        mock_backend = MagicMock()
+        mock_backend_class.return_value = mock_backend
+
+        cache = PostgresCache(
+            host="db.example.com",
+            port="not-a-port",
+            user=123,
+            password=object(),
+            database="   ",
+            namespace="",
+            connect_kwargs="not-a-dict",
+        )
+        assert cache.min_cache_ttl == 0
+
+        call_kwargs = mock_backend_class.call_args[1]
+        assert call_kwargs["host"] == "db.example.com"
+        assert call_kwargs["port"] == 5432
+        assert call_kwargs["database"] == "foghorn_cache"
+        assert call_kwargs["namespace"] == "cache"
+        assert call_kwargs["user"] is None
+        assert call_kwargs["password"] is None
+        assert call_kwargs["connect_kwargs"] is None
+
+
 def test_postgres_cache_plugin_close() -> None:
     """Brief: close() method delegates to backend.
 
@@ -302,6 +393,31 @@ def test_postgres_cache_plugin_close() -> None:
         cache = PostgresCache()
         cache.close()
         mock_backend.close.assert_called_once()
+
+
+def test_postgres_cache_plugin_close_swallows_backend_errors() -> None:
+    """Brief: close() suppresses backend exceptions during cleanup.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts close() does not raise when backend close fails.
+    """
+
+    from unittest.mock import MagicMock, patch
+
+    from foghorn.plugins.cache.postgres_cache import PostgresCache
+
+    with patch(
+        "foghorn.plugins.cache.postgres_cache.PostgresTTLCache"
+    ) as mock_backend_class:
+        mock_backend = MagicMock()
+        mock_backend.close.side_effect = RuntimeError("close failed")
+        mock_backend_class.return_value = mock_backend
+
+        cache = PostgresCache()
+        cache.close()
 
 
 def test_postgres_cache_plugin_backend_initialization_error() -> None:
