@@ -1,25 +1,27 @@
 upstreams:
-  endpoints:
-  - host: 1.1.1.1
-    port: 853
-    transport: dot
-    tls:
-      server_name: cloudflare-dns.com
-      verify: true
-  - host: 8.8.8.8
-    port: 53
   strategy: failover
   max_concurrent: 1
+  endpoints:
+    - host: 1.1.1.1
+      port: 853
+      transport: dot
+      tls:
+        server_name: cloudflare-dns.com
+        verify: true
+    - host: 8.8.8.8
+      port: 53
 plugins:
-- type: docker-hosts
-  config:
-    endpoints:
-    - unix:///var/run/docker.sock
-    reload_interval_seconds: 60
-- type: etc-hosts
+  - type: docker-hosts
+    config:
+      endpoints:
+      - unix:///var/run/docker.sock
+      reload_interval_seconds: 60
+  - type: etc-hosts
+
 logging:
-  level: debug
-  stderr: true
+  python:
+    level: debug
+    stderr: true
 server:
   listen:
     udp:

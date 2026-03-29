@@ -24,5 +24,6 @@ upstreams:
 plugins: []
 
 logging:
-  level: info
-  stderr: true
+  python:
+    level: info
+    stderr: true
