@@ -636,6 +636,7 @@ def test_recalculated_allowed_rps_refreshes_seen_buckets_each_window(tmp_path):
         db_path=str(db),
         window_seconds=10,
         burst_factor=2.0,
+        min_enforce_rps=0.0,
         max_enforce_rps=0.0,
         limit_recalc_windows=3,
     )
@@ -686,6 +687,7 @@ def test_limit_recalc_windows_globally_refreshes_unseen_bucket_limits(tmp_path):
         db_path=str(db),
         window_seconds=10,
         burst_factor=2.0,
+        min_enforce_rps=0.0,
         max_enforce_rps=0.0,
         limit_recalc_windows=3,
     )
