@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 ### Recent incremental updates
+- Admin UI now includes a configurable auto-refresh interval selector (off/5s/15s/1m/5m) persisted in local storage, refreshes the active tab view (stats/query-log/config/plugins), and preserves table sort state across local/searchable/paged tables.
+- Admin stats/plugin panel rendering now rebuilds content in detached fragments before swapping into the live DOM, reducing in-place mutation churn during refreshes and making disabled-state/plugin snapshot updates more stable.
+- RateLimit bootstrap enforcement now uses `bootstrap_rps` directly (without burst-factor amplification), rollover sample flushing now avoids duplicate stale-key profile writes during concurrent window transitions, and global profile sample backfill is aligned with per-key idle-gap behavior.
+- Added regression coverage for AXFR runtime normalization/clamping (including malformed TSIG entry filtering), UDP asyncio response-size-enforcement fallback behavior, and updated RateLimit tests for bootstrap/no-burst and rollover/global sample accounting paths.
 - Config validation now defaults unknown schema keys to `error` (instead of `warn`) across CLI/runtime/parser paths, and plugin hook validation now rejects unsupported keys (including nested hook mapping typos) with explicit config-path errors.
 - Query-log backends now support configurable write batching (`batch_writes`, `batch_time_sec`, `batch_max_size`) for InfluxDB, JSON logging, MongoDB, MySQL/MariaDB, and PostgreSQL stores, with pending-write flushes on close and read/report paths to preserve visibility semantics.
 - SQLite stats/query-log helpers now flush pending batched operations before read helpers (`has_counts`, `export_counts`, `has_query_log`) for read-after-write consistency in batch mode.
