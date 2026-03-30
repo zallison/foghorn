@@ -1262,8 +1262,8 @@ def main(argv: List[str] | None = None) -> int:
 
             Notes:
               - Test stubs may not implement is_alive(); in that case we
-                conservatively treat the thread as still running so the
-                keepalive loop remains active.
+                treat the thread as already exited so tests can terminate the
+                keepalive loop promptly.
             """
 
             try:
@@ -1273,7 +1273,9 @@ def main(argv: List[str] | None = None) -> int:
                 # treat them as already exited so the keepalive loop can
                 # terminate promptly.
                 return True
-            except Exception:
+            except (
+                Exception
+            ):  # pragma: nocover - defensive: mocked thread objects may raise unexpectedly in liveness probes
                 logger.debug(
                     "Failed to check listener thread liveness; treating thread as dead",
                     exc_info=True,
@@ -1433,7 +1435,9 @@ def main(argv: List[str] | None = None) -> int:
             from foghorn import runtime_config as _runtime_config
 
             _runtime_config.clear_runtime()
-        except Exception:
+        except (
+            Exception
+        ):  # pragma: nocover - best effort: runtime cleanup should not block shutdown
             pass
 
         # Mark shutdown as complete so any pending hard-kill timers can detect
@@ -1468,7 +1472,12 @@ def start_doh_server(
       - allow_threaded_fallback: When false, refuse to start the threaded fallback.
 
     Outputs:
-      - object | None: A server handle/thread-like object, or None on failure.
+      - object | None: Server handle/thread-like object returned by the DoH
+        server factory.
+
+    Notes:
+      - Exceptions raised by the underlying DoH server factory are propagated
+        to the caller.
 
     Example use:
       In tests, monkeypatch the wrapper symbol without importing FastAPI at import time:
@@ -1511,7 +1520,12 @@ def start_webserver(
       - plugins: Optional list of active plugins.
 
     Outputs:
-      - object | None: A webserver handle/thread-like object, or None on failure.
+      - object | None: Webserver handle/thread-like object returned by the
+        webserver factory.
+
+    Notes:
+      - Exceptions raised by the underlying webserver factory are propagated
+        to the caller.
 
     Example use:
       In tests, monkeypatch the wrapper symbol without importing FastAPI at import time:
@@ -1615,7 +1629,9 @@ def _detect_docker_container_id() -> str | None:
                 m = re.search(r"/docker/containers/([0-9a-f]{12,64})/", line)
                 if m:
                     return m.group(1)
-    except Exception:
+    except (
+        Exception
+    ):  # pragma: nocover - best effort: mountinfo format/access varies by runtime and sandbox
         pass
 
     try:
@@ -1624,7 +1640,9 @@ def _detect_docker_container_id() -> str | None:
                 m = re.search(r"docker[/-]([0-9a-f]{12,64})", line)
                 if m:
                     return m.group(1)
-    except Exception:
+    except (
+        Exception
+    ):  # pragma: nocover - best effort: cgroup layout differs across container/cgroup versions
         pass
 
     return None
@@ -1649,7 +1667,9 @@ def _log_startup_banner(logger: logging.Logger, *, config_path: str) -> None:
             for byte_block in iter(lambda: f.read(4096), b""):
                 digest.update(byte_block)
         sha256_hash = digest.hexdigest()
-    except Exception:
+    except (
+        Exception
+    ):  # pragma: nocover - best effort: startup hash computation must not block process boot
         pass
     cfg_size_str = (
         f"{cfg_size} bytes ({_format_bytes(cfg_size)})"
@@ -2271,7 +2291,9 @@ def _configure_dnssec_validation_resolver(
             )
 
             _configure_dnssec_resolver(None)
-        except Exception:
+        except (
+            Exception
+        ):  # pragma: nocover - optional dependency path; safe to ignore outside local DNSSEC validation
             pass
 
     return True
