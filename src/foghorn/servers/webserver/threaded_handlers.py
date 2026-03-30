@@ -47,6 +47,7 @@ from .config_helpers import (
     sanitize_config,
 )
 from .http_helpers import (
+    _evaluate_web_auth,
     _json_safe,
     _schedule_process_signal,
     resolve_www_root,
@@ -543,38 +544,19 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         Inputs: none
         Outputs: bool indicating whether the request is authorized.
         """
-
-        web_cfg = self._web_cfg()
-        auth_cfg = web_cfg.get("auth") or {}
-        mode = str(auth_cfg.get("mode", "none")).lower()
-        if mode != "token":
+        authorized, status_code, detail, headers = _evaluate_web_auth(
+            self._web_cfg(),
+            authorization_header=self.headers.get("Authorization"),
+            api_key_header=self.headers.get("X-API-Key"),
+        )
+        if authorized:
             return True
-
-        token = auth_cfg.get("token")
-        if not token:
-            self._send_json(
-                500,
-                {
-                    "detail": "webserver.auth.token not configured",
-                    "server_time": _utc_now_iso(),
-                },
-            )
-            return False
-
-        hdr = self.headers.get("Authorization") or ""
-        api_key = self.headers.get("X-API-Key")
-        if hdr.lower().startswith("bearer "):
-            provided = hdr[7:].strip()
-        else:
-            provided = api_key.strip() if api_key else ""
-        if not provided or provided != str(token):
-            self._send_json(
-                401,
-                {"detail": "unauthorized", "server_time": _utc_now_iso()},
-                headers={"WWW-Authenticate": "Bearer"},
-            )
-            return False
-        return True
+        self._send_json(
+            int(status_code or 401),
+            {"detail": str(detail or "unauthorized"), "server_time": _utc_now_iso()},
+            headers=headers,
+        )
+        return False
 
     # ---------- Endpoint handlers ----------
 
@@ -2422,6 +2404,8 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         Outputs:
           - None (sends JSON response with a pages list).
         """
+        if not self._require_auth():
+            return
 
         plugins_list = getattr(self._server(), "plugins", []) or []
         pages = _admin_logic.collect_admin_pages_for_response(plugins_list)
@@ -3135,6 +3119,8 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         elif path == "/api/v1/upstream_status":
             self._handle_upstream_status()
         elif path == "/api/v1/ratelimit":
+            if not self._require_auth():
+                return
             # Rate-limit statistics are derived from config and sqlite profile DBs.
             cfg = getattr(self._server(), "config", None)
             plugins_list = getattr(self._server(), "plugins", None)
