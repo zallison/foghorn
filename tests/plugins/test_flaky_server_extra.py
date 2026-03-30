@@ -28,21 +28,30 @@ def _mk_query(name="example.com", qtype="A"):
     return q, q.pack()
 
 
-def test__clamp_one_in_non_int_and_lt1(caplog):
+def test__compute_probability_uses_percent_and_default():
     """
-    Brief: _clamp_one_in coerces non-int and clamps values < 1 to 1.
+    Brief: _compute_probability uses explicit percent or falls back to default.
 
     Inputs:
-      - caplog: pytest logging capture
+      - None.
     Outputs:
-      - None; asserts return 1 for bad inputs and logs warnings
+      - None; asserts probability conversion for explicit and default values.
     """
-    caplog.set_level("WARNING")
-    assert FlakyServer._clamp_one_in("notint", "k") == 1
-    assert FlakyServer._clamp_one_in(0, "k") == 1
-    # Should have at least one warning logged
-    assert any(
-        "clamping" in m.message or "non-integer" in m.message for m in caplog.records
+    assert (
+        FlakyServer._compute_probability(
+            percent=50.0,
+            percent_key="servfail_percent",
+            default_percent=25.0,
+        )
+        == 0.5
+    )
+    assert (
+        FlakyServer._compute_probability(
+            percent=None,
+            percent_key="servfail_percent",
+            default_percent=25.0,
+        )
+        == 0.25
     )
 
 
@@ -205,16 +214,31 @@ def test_clamp_percent_numeric_ranges_and_non_numeric(caplog):
     assert FlakyServer._clamp_percent(200, "k") == 100.0
 
 
-def test_clamp_one_in_positive_returns_value():
-    """Brief: _clamp_one_in returns N for positive integers >= 1.
+def test_compute_probability_clamps_percent_edges():
+    """Brief: _compute_probability clamps percent values into [0.0, 1.0].
 
     Inputs:
       - None.
     Outputs:
-      - None; asserts positive value passes through unchanged.
+      - None; asserts out-of-range percentages are clamped.
     """
 
-    assert FlakyServer._clamp_one_in(5, "k") == 5
+    assert (
+        FlakyServer._compute_probability(
+            percent=-5.0,
+            percent_key="servfail_percent",
+            default_percent=25.0,
+        )
+        == 0.0
+    )
+    assert (
+        FlakyServer._compute_probability(
+            percent=150.0,
+            percent_key="servfail_percent",
+            default_percent=25.0,
+        )
+        == 1.0
+    )
 
 
 def test_init_qtype_and_fuzz_config_edge_cases():
