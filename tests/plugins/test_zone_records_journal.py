@@ -189,6 +189,66 @@ def test_replay_journal_to_records_respects_snapshot_seq(tmp_path) -> None:
     assert last_seq >= 3
 
 
+def test_replay_journal_to_records_does_not_clobber_other_zones(tmp_path) -> None:
+    """Brief: Per-zone replay must not overwrite records for other zones.
+
+    Inputs:
+      - tmp_path: Pytest temp directory.
+
+    Outputs:
+      - None; asserts cross-zone records remain unchanged during one-zone replay.
+    """
+    base_dir = str(tmp_path)
+    target_zone = "example.net"
+    initial_records = {
+        ("newer.example.com", 1): (60, ["192.0.2.100"], ["update"]),
+        ("host.example.net", 1): (60, ["192.0.2.20"], ["update"]),
+    }
+
+    legacy_global_snapshot = {
+        ("stale.example.com", 1): (60, ["192.0.2.10"], ["update"]),
+        ("host.example.net", 1): (60, ["192.0.2.20"], ["update"]),
+    }
+    assert (
+        journal.save_snapshot(
+            target_zone,
+            base_dir,
+            legacy_global_snapshot,
+            seq=0,
+        )
+        is True
+    )
+
+    writer = journal.JournalWriter(zone_apex=target_zone, base_dir=base_dir)
+    assert writer.acquire_lock() is True
+    try:
+        writer.append_entry(
+            actions=[
+                {
+                    "type": "rr_replace",
+                    "owner": "host.example.net",
+                    "qtype": 1,
+                    "ttl": 60,
+                    "values": ["198.51.100.20"],
+                }
+            ],
+            actor={"client_ip": "192.0.2.10"},
+        )
+    finally:
+        writer.release_lock()
+        writer.close()
+
+    replayed, _last_seq = journal.replay_journal_to_records(
+        zone_apex=target_zone,
+        base_dir=base_dir,
+        records=initial_records,
+        start_seq=0,
+    )
+    assert ("newer.example.com", 1) in replayed
+    assert ("stale.example.com", 1) not in replayed
+    assert replayed[("host.example.net", 1)][1] == ["198.51.100.20"]
+
+
 def test_compact_zone_journal_rotates_and_sets_manifest(tmp_path) -> None:
     """Brief: Compaction writes snapshot, rotates journal, and updates manifest."""
     base_dir = str(tmp_path)
