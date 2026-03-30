@@ -71,12 +71,14 @@ class GreylistExample(BasePlugin):
 
         return GreylistConfig
 
-    def start(self, **config):
-        """
-        Initializes the GreylistExample.
+    def setup(self) -> None:
+        """Brief: Initialize runtime state for GreylistExample.
 
-        Args:
-            **config: Plugin-specific configuration.
+        Inputs:
+          - None (uses self.config values).
+
+        Outputs:
+          - None (sets runtime fields, DB connection, and cache handle).
         """
         self.duration_seconds = self.config.get(
             "duration_seconds", self.config.get("duration_hours", 24) * 3600
@@ -91,6 +93,21 @@ class GreylistExample(BasePlugin):
             namespace=module_namespace(__file__),
             cache_plugin=self.config.get("cache"),
         )
+
+    def start(self, **config) -> None:
+        """Brief: Backward-compatible alias that delegates initialization to setup().
+
+        Inputs:
+          - **config: Optional runtime overrides merged into self.config.
+
+        Outputs:
+          - None.
+        """
+        if config:
+            merged_config = dict(self.config)
+            merged_config.update(config)
+            self.config = merged_config
+        self.setup()
 
     def _db_init(self):
         """

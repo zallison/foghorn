@@ -927,6 +927,48 @@ class MdnsBridge(BasePlugin):
 
         log.debug("MdnsBridge: started explicit ServiceBrowser for %s", t)
 
+    def _stop_type_browser(
+        self, service_type: str
+    ) -> None:  # pragma: nocover zeroconf browser wiring
+        """Brief: Stop and detach a ServiceBrowser for a specific mDNS service type.
+
+        Inputs:
+          - service_type: Service type name (e.g., `_http._tcp.local.`). May be
+            provided without a trailing dot.
+
+        Outputs:
+          - None. Removes the browser from self._type_browsers and
+            self._browsers, then best-effort cancels it.
+        """
+
+        log = getattr(self, "logger", logger)
+        t = str(service_type or "").strip()
+        if not t:
+            return
+        if not t.endswith("."):
+            t = t + "."
+
+        browser = None
+        key = self._normalize_owner(t)
+        with self._lock:
+            browser = self._type_browsers.pop(key, None)
+            if browser is None:
+                return
+            self._browsers = [b for b in self._browsers if b is not browser]
+
+        cancel = getattr(browser, "cancel", None)
+        if callable(cancel):
+            try:
+                cancel()
+            except Exception:
+                log.debug(
+                    "MdnsBridge: failed to cancel ServiceBrowser for %s",
+                    t,
+                    exc_info=True,
+                )
+
+        log.debug("MdnsBridge: stopped ServiceBrowser for %s", t)
+
     def _on_service_type_event(self, zeroconf, service_type: str, name: str, state_change) -> None:  # type: ignore[no-untyped-def]  # pragma: nocover callback from zeroconf
         """Brief: Handle PTR events for `_services._dns-sd._udp.<domain>.`.
 
@@ -942,22 +984,21 @@ class MdnsBridge(BasePlugin):
 
         _ = service_type
         log = getattr(self, "logger", logger)
-        with self._lock:
-            if getattr(state_change, "name", "") == "Removed":
-                log.debug(
-                    "MdnsBridge: service type removed: %s (mdns_domain=%s)",
-                    name,
-                    self._mdns_domain,
-                )
+        if getattr(state_change, "name", "") == "Removed":
+            log.debug(
+                "MdnsBridge: service type removed: %s (mdns_domain=%s)",
+                name,
+                self._mdns_domain,
+            )
+            with self._lock:
                 self._ptr_remove(
                     f"_services._dns-sd._udp{self._mdns_domain}.",
                     name,
                 )
-                # Best-effort: stop tracking per-type browser state.
-                key = self._normalize_owner(name)
-                self._type_browsers.pop(key, None)
-                return
+            self._stop_type_browser(name)
+            return
 
+        with self._lock:
             log.debug(
                 "MdnsBridge: service type added/updated: %s (mdns_domain=%s)",
                 name,

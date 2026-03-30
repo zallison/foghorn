@@ -189,10 +189,6 @@ class Filter(BasePlugin):
         raw_db_path = self.config.get("db_path")
         # None/empty db_path => per-instance in-memory database.
         self.db_path: str = raw_db_path or ":memory:"
-        if self.db_path == ":memory:":
-            logger.warning(
-                "Filter: db_path is ':memory:'; data and list cache will reset each startup"
-            )
         self.strict_file_loading = bool(self.config.get("strict_file_loading", False))
         self.max_domain_labels = max(1, int(self.config.get("max_domain_labels", 32)))
         self.max_pattern_match_domain_length = max(
@@ -314,6 +310,15 @@ class Filter(BasePlugin):
 
         self.blocklist = self.config.get("blocked_domains", [])
         self.allowlist = self.config.get("allowed_domains", [])
+        if self.db_path == ":memory:" and (
+            self.blocklist_files
+            or self.allowlist_files
+            or self.blocklist
+            or self.allowlist
+        ):
+            logger.warning(
+                "Filter: db_path is ':memory:'; data and list cache will reset each startup"
+            )
 
         # Pre-resolve (domain) filtering configuration (inline first)
         self.blocked_patterns: List[re.Pattern] = []
