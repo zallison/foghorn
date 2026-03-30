@@ -637,6 +637,188 @@ def test_main_installs_cache_plugin_without_udp_listener(monkeypatch) -> None:
     assert isinstance(plugin_base.DNS_CACHE, NullCache)
 
 
+def test_main_axfr_invalid_values_and_malformed_tsig_entries(monkeypatch) -> None:
+    """Brief: AXFR invalid values are coerced and malformed TSIG entries are filtered.
+
+    Inputs:
+      - monkeypatch fixture.
+      - Config with invalid AXFR scalar types and mixed-validity tsig_keys.
+
+    Outputs:
+      - None: asserts normalized AXFR values passed into runtime snapshot setup.
+    """
+
+    import time as _time
+
+    yaml_data = (
+        "server:\n"
+        "  listen:\n"
+        "    udp:\n"
+        "      enabled: false\n"
+        "  resolver:\n"
+        "    mode: forward\n"
+        "    timeout_ms: 2000\n"
+        "  axfr:\n"
+        "    enabled: true\n"
+        '    allow_clients: "not-a-list"\n'
+        '    max_zone_rrs: "not-a-number"\n'
+        '    max_concurrent_transfers: "bad"\n'
+        '    rate_limit_per_client_per_second: "bad"\n'
+        '    rate_limit_burst: "bad"\n'
+        '    max_transfer_rate_bytes_per_second: "bad"\n'
+        '    message_max_bytes: "bad"\n'
+        "    require_tsig: true\n"
+        "    tsig_keys:\n"
+        '      - name: "key-valid"\n'
+        '        secret: "secret-valid"\n'
+        '        algorithm: "HMAC-SHA512"\n'
+        '      - name: ""\n'
+        '        secret: "missing-name"\n'
+        '      - name: "missing-secret"\n'
+        '        secret: ""\n'
+        '      - not: "a-tsig-entry"\n'
+        '      - "just-a-string"\n'
+        "upstreams:\n"
+        "  strategy: failover\n"
+        "  max_concurrent: 1\n"
+        "  endpoints:\n"
+        "    - host: 1.1.1.1\n"
+        "      port: 53\n"
+        "plugins: []\n"
+    )
+
+    captured: dict[str, Any] = {}
+
+    def _capture_runtime_snapshot(**kwargs: Any) -> None:
+        captured.update(kwargs)
+
+    monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
+    monkeypatch.setattr(main_mod, "start_webserver", lambda *a, **kw: None)
+    monkeypatch.setattr(main_mod, "run_setup_plugins", lambda *_a, **_kw: None)
+    monkeypatch.setattr(
+        main_mod,
+        "_initialize_statistics_subsystem",
+        lambda **_kw: (None, None, None),
+    )
+    monkeypatch.setattr(
+        main_mod,
+        "_initialize_runtime_snapshot",
+        _capture_runtime_snapshot,
+    )
+    monkeypatch.setattr(
+        _time,
+        "sleep",
+        lambda _s: (_ for _ in ()).throw(KeyboardInterrupt),
+    )
+
+    with patch("builtins.open", mock_open(read_data=yaml_data)):
+        rc = main_mod.main(
+            ["--config", "axfr-invalid.yaml", "--skip-schema-validation"]
+        )
+
+    assert rc == 0
+    assert captured["axfr_enabled"] is True
+    assert captured["axfr_allow_clients"] == []
+    assert captured["axfr_max_zone_rrs"] is None
+    assert captured["axfr_max_concurrent_transfers"] == 4
+    assert captured["axfr_rate_limit_per_client_per_second"] == 0.0
+    assert captured["axfr_rate_limit_burst"] == 2.0
+    assert captured["axfr_max_transfer_rate_bytes_per_second"] is None
+    assert captured["axfr_message_max_bytes"] == 64000
+    assert captured["axfr_require_tsig"] is True
+    assert captured["axfr_tsig_keys"] == [
+        {
+            "name": "key-valid",
+            "secret": "secret-valid",
+            "algorithm": "hmac-sha512",
+        }
+    ]
+
+
+def test_main_axfr_non_positive_limits_are_clamped(monkeypatch) -> None:
+    """Brief: AXFR non-positive limits are clamped to safe defaults.
+
+    Inputs:
+      - monkeypatch fixture.
+      - Config with non-positive AXFR limits and empty tsig_keys.
+
+    Outputs:
+      - None: asserts clamped AXFR values passed into runtime snapshot setup.
+    """
+
+    import time as _time
+
+    yaml_data = (
+        "server:\n"
+        "  listen:\n"
+        "    udp:\n"
+        "      enabled: false\n"
+        "  resolver:\n"
+        "    mode: forward\n"
+        "    timeout_ms: 2000\n"
+        "  axfr:\n"
+        "    enabled: true\n"
+        "    allow_clients:\n"
+        "      - 127.0.0.1\n"
+        "    max_zone_rrs: 0\n"
+        "    max_concurrent_transfers: 0\n"
+        "    rate_limit_per_client_per_second: -1\n"
+        "    rate_limit_burst: 0\n"
+        "    max_transfer_rate_bytes_per_second: -10\n"
+        "    message_max_bytes: 70000\n"
+        "    require_tsig: false\n"
+        "    tsig_keys: []\n"
+        "upstreams:\n"
+        "  strategy: failover\n"
+        "  max_concurrent: 1\n"
+        "  endpoints:\n"
+        "    - host: 1.1.1.1\n"
+        "      port: 53\n"
+        "plugins: []\n"
+    )
+
+    captured: dict[str, Any] = {}
+
+    def _capture_runtime_snapshot(**kwargs: Any) -> None:
+        captured.update(kwargs)
+
+    monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
+    monkeypatch.setattr(main_mod, "start_webserver", lambda *a, **kw: None)
+    monkeypatch.setattr(main_mod, "run_setup_plugins", lambda *_a, **_kw: None)
+    monkeypatch.setattr(
+        main_mod,
+        "_initialize_statistics_subsystem",
+        lambda **_kw: (None, None, None),
+    )
+    monkeypatch.setattr(
+        main_mod,
+        "_initialize_runtime_snapshot",
+        _capture_runtime_snapshot,
+    )
+    monkeypatch.setattr(
+        _time,
+        "sleep",
+        lambda _s: (_ for _ in ()).throw(KeyboardInterrupt),
+    )
+
+    with patch("builtins.open", mock_open(read_data=yaml_data)):
+        rc = main_mod.main(
+            ["--config", "axfr-non-positive.yaml", "--skip-schema-validation"]
+        )
+
+    assert rc == 0
+    assert captured["axfr_enabled"] is True
+    assert captured["axfr_allow_clients"] == ["127.0.0.1"]
+    assert captured["axfr_max_zone_rrs"] is None
+    assert captured["axfr_max_concurrent_transfers"] == 1
+    assert captured["axfr_rate_limit_per_client_per_second"] == 0.0
+    assert captured["axfr_rate_limit_burst"] == 1.0
+    assert captured["axfr_max_transfer_rate_bytes_per_second"] is None
+    assert captured["axfr_message_max_bytes"] == 65535
+    assert captured["axfr_require_tsig"] is False
+    assert captured["axfr_tsig_keys"] == []
+
+
 def _capture_sig_handlers() -> Dict[str, Any]:
     """Brief: Helper to capture SIGUSR1/SIGUSR2 handlers when main() registers them.
 
