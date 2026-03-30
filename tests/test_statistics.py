@@ -420,8 +420,8 @@ class TestStatsCollector:
         collector2.record_cache_stat("label")
         collector2.record_cache_pre_plugin("pre_deny_filter")
 
-        store.increment_count.assert_any_call("cache", "label")
-        store.increment_count.assert_any_call("totals", "pre_deny_filter")
+        store.increment_count.assert_any_call("cache", "label", 1)
+        store.increment_count.assert_any_call("totals", "pre_deny_filter", 1)
 
     def test_top_clients(self):
         """Top clients tracked when enabled."""
