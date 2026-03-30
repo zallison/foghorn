@@ -239,6 +239,47 @@ class _FakeStore:
         )
 
 
+class _TrackingLock:
+    """Brief: Test helper lock tracking whether the lock context is active.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - Lock-like object exposing `held` for assertions.
+    """
+
+    def __init__(self) -> None:
+        self.held = False
+
+    def __enter__(self) -> "_TrackingLock":
+        self.held = True
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.held = False
+
+
+class _LockAwareStore(_FakeStore):
+    """Brief: Fake store that records whether writes happen while lock is held.
+
+    Inputs:
+      - lock_state: `_TrackingLock` instance used by the collector.
+
+    Outputs:
+      - Store recording lock state for each increment call.
+    """
+
+    def __init__(self, lock_state: _TrackingLock) -> None:
+        super().__init__()
+        self._lock_state = lock_state
+        self.increment_locked_states: list[bool] = []
+
+    def increment_count(self, scope: str, key: str, delta: int = 1) -> None:
+        self.increment_locked_states.append(bool(self._lock_state.held))
+        super().increment_count(scope, key, delta)
+
+
 def test_stats_collector_persists_to_store():
     """Brief: StatsCollector writes core events into the attached store.
 
@@ -327,6 +368,41 @@ def test_stats_collector_persists_to_store():
     assert log_row["client_ip"] == "1.2.3.4"
     assert log_row["name"] == "www.example.com"
     assert log_row["qtype"] == "A"
+
+
+def test_stats_collector_persists_counts_outside_lock() -> None:
+    """Brief: Count persistence executes after collector lock release.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts persistent increment_count calls are not made while lock is held.
+    """
+
+    tracking_lock = _TrackingLock()
+    store = _LockAwareStore(lock_state=tracking_lock)
+    c = StatsCollector(
+        track_uniques=False,
+        include_qtype_breakdown=True,
+        include_top_clients=False,
+        include_top_domains=False,
+        track_latency=False,
+        stats_store=store,
+    )
+    c._lock = tracking_lock
+
+    c.record_query("1.2.3.4", "www.example.com", "A")
+    c.record_cache_hit("www.example.com")
+    c.record_cache_miss("www.example.com")
+    c.record_cache_null("www.example.com", status="deny_pre")
+    c.record_dnssec_status("dnssec_secure")
+    c.record_ede_code(15)
+    c.record_cache_stat("rate_limit")
+    c.record_cache_pre_plugin("cache_deny_pre")
+
+    assert store.increment_locked_states
+    assert all(state is False for state in store.increment_locked_states)
 
 
 def test_record_cache_null_pre_plugin_status_counters() -> None:
