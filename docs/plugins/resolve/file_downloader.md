@@ -130,8 +130,8 @@ plugins:
 - Otherwise, the plugin uses HTTP `HEAD` and `Last-Modified` (when available)
   to decide whether a remote copy is newer than the local one.
 - On startup, when all local files are still within their fresh window, the
-  plugin delays the first refresh check by 10 seconds in a background thread to
-  allow the rest of setup to finish.
+  plugin defers the first refresh check to post-setup background execution. The
+  deferred refresh currently runs immediately (no fixed 10-second delay).
 - Each downloaded file is validated as a "domain-per-line" list; obviously
   malformed content causes setup to fail.
 

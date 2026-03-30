@@ -243,7 +243,7 @@ Clients without DO=1 receive only the base RRsets without signatures.
     loaded records on top (no deletions).
   - `replace` rebuilds the in-memory mapping on each load/reload.
   - `first` uses the first configured source group in this order:
-    file_paths → bind_paths → axfr_zones → records (inline), and ignores the others.
+    records (inline) → axfr_zones → file_paths → bind_paths, and ignores the others.
 - `merge_policy: str`
   - `add` (default) appends unique values into an existing RRset.
   - `overwrite` replaces an existing RRset when a later source defines the same
@@ -462,12 +462,13 @@ configured under `server.axfr`:
 
 The `load_mode=replace` mode always forces a reload when the plugin starts up.
 
-#### Dynamic DNS (Future Support)
+#### Dynamic DNS Support
 
-Future updates will add Dynamic DNS (RFC 2136) update support, allowing
-in-place modifications to records from authorized clients. When enabled, records
-modified via Dynamic DNS will be tracked by source, allowing stale entries to be
-removed cleanly when their source is removed or reconfigured.
+ZoneRecords currently supports Dynamic DNS updates (RFC 2136) when
+`dns_update.enabled` is true and the queried zone matches a configured
+`dns_update.zones[]` entry.
+
+In the active UPDATE request path, request authorization is TSIG-based.
 
 ### Common BasePlugin options
 

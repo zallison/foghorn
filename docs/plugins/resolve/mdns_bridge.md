@@ -115,7 +115,8 @@ These fields are defined by `MdnsBridgeConfig` and live under the plugin
     - `"v4"` → `IPVersion.V4Only`
     - `"v6"` → `IPVersion.V6Only`
     - `"all"` → `IPVersion.All`
-  - Any other string is passed through as-is.
+  - Any other non-empty string is not mapped and the plugin initializes Zeroconf
+    with `ip_version=None` (library default behavior).
 - `zeroconf_unicast: bool`
   - Passed as `unicast=` to the Zeroconf constructor.
 - `service_types: list[str]`
