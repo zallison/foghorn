@@ -140,19 +140,20 @@ def test_verify_client_authorization_checks_allow_clients_inline() -> None:
     assert err2 is not None
 
 
-def test_verify_client_authorization_missing_files_treats_as_empty_list(
+def test_verify_client_authorization_missing_files_fails_closed(
     tmp_path,
 ) -> None:
-    # If a file-based allowlist is configured but missing/empty, combine_lists()
-    # yields an empty list and the function currently treats that as "allow all".
+    # If a file-based allowlist is configured but missing/empty, authorization
+    # should fail closed.
     missing = tmp_path / "missing.txt"
     ctx = up.UpdateContext("example.com", "198.51.100.1", None, plugin=object())
     ok, err = up.verify_client_authorization(
         ctx,
         zone_config={"allow_clients_files": [str(missing)]},
     )
-    assert ok is True
-    assert err is None
+    assert ok is False
+    assert err is not None
+    assert "resolved empty" in err
 
 
 def test_verify_name_authorization_block_then_allow() -> None:
@@ -168,6 +169,19 @@ def test_verify_name_authorization_block_then_allow() -> None:
 
 def test_verify_name_authorization_empty_allowlist_is_treated_as_allow_all() -> None:
     assert up.verify_name_authorization("anything.example", {"allow_names": []}) is True
+
+
+def test_verify_name_authorization_missing_allowlist_file_fails_closed(
+    tmp_path,
+) -> None:
+    missing = tmp_path / "missing-names.txt"
+    assert (
+        up.verify_name_authorization(
+            "anything.example",
+            {"allow_names_files": [str(missing)]},
+        )
+        is False
+    )
 
 
 def test_verify_value_authorization_non_a_aaaa_is_not_validated() -> None:
@@ -189,6 +203,20 @@ def test_verify_value_authorization_empty_allowlist_is_treated_as_allow_all() ->
     assert (
         up.verify_value_authorization("203.0.113.1", QTYPE.A, {"allow_update_ips": []})
         is True
+    )
+
+
+def test_verify_value_authorization_missing_allowlist_file_fails_closed(
+    tmp_path,
+) -> None:
+    missing = tmp_path / "missing-ips.txt"
+    assert (
+        up.verify_value_authorization(
+            "203.0.113.1",
+            QTYPE.A,
+            {"allow_update_ips_files": [str(missing)]},
+        )
+        is False
     )
 
 

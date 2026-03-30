@@ -848,8 +848,28 @@ def process_update_message(
                     resp = dns.message.make_response(request_msg)
                     resp.set_rcode(dns.rcode.REFUSED)
                     return resp.to_wire()
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning(
+            "DNS UPDATE security validation failed for zone=%s client=%s: %s",
+            apex_norm,
+            ctx.client_ip,
+            exc,
+            exc_info=True,
+        )
+        resp = dns.message.make_response(request_msg)
+        resp.set_rcode(dns.rcode.REFUSED)
+        if getattr(request_msg, "had_tsig", False) and keyring is not None:
+            try:
+                resp.use_tsig(
+                    keyring=keyring,
+                    keyname=request_msg.keyname,
+                    algorithm=request_msg.keyalgorithm,
+                )
+            except (
+                Exception
+            ):  # pragma: no cover - nocover: defensive TSIG signing failure path
+                pass
+        return resp.to_wire()
 
     # Get current records
     records_lock = getattr(plugin, "_records_lock", None)
@@ -1119,7 +1139,7 @@ def verify_client_authorization(
     )
 
     if not clients_list:
-        return True, None
+        return False, "allow_clients configured but resolved empty"
 
     if not ip_networks.ip_string_in_cidrs(ctx.client_ip, clients_list):
         return False, "Client IP not in allow_clients"
@@ -1183,7 +1203,9 @@ def verify_name_authorization(
                 files=allow_names_files,
                 loader_func=uh.load_names_list_from_file,
             )
-            if allowed_list and not uh.matches_name_pattern(name, allowed_list):
+            if not allowed_list:
+                return False
+            if not uh.matches_name_pattern(name, allowed_list):
                 return False
 
     return True
@@ -1251,7 +1273,9 @@ def verify_value_authorization(
                 files=allow_ips_files,
                 loader_func=uh.load_cidr_list_from_file,
             )
-            if allowed_list and not ip_networks.ip_string_in_cidrs(value, allowed_list):
+            if not allowed_list:
+                return False
+            if not ip_networks.ip_string_in_cidrs(value, allowed_list):
                 return False
 
     return True

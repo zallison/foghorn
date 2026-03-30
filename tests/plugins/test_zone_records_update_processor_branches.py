@@ -717,7 +717,7 @@ def test_process_update_message_rate_limits_prereq_scope_and_update_error_paths(
     parsed_bad_owner = original_from_wire(
         resp_bad_owner, keyring=keyring, request_mac=req.mac
     )
-    assert parsed_bad_owner.rcode() == dns.rcode.NOERROR
+    assert parsed_bad_owner.rcode() == dns.rcode.REFUSED
 
     class _BadIterRR:
         name = "host.example.com."
@@ -742,7 +742,8 @@ def test_process_update_message_rate_limits_prereq_scope_and_update_error_paths(
     parsed_bad_iter = original_from_wire(
         resp_bad_iter, keyring=keyring, request_mac=req.mac
     )
-    assert parsed_bad_iter.rcode() == dns.rcode.NOERROR
+    assert parsed_bad_iter.rcode() == dns.rcode.REFUSED
+    monkeypatch.setattr(dns.message, "from_wire", original_from_wire)
 
     class _ExplodingJournalWriter:
         def __init__(self, *, zone_apex: str, base_dir: str):
