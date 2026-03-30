@@ -87,7 +87,7 @@ plugins:
 	  # Per-endpoint configuration
 	  endpoints:
 		- url: unix:///var/run/docker.sock
-		  reload_interval_second: 60      # 0 => only at startup
+		  reload_interval_second: 60      # contributes to global poll interval (minimum positive wins)
 		  # Use host IPs instead of container IPs
 		  use_ipv4: 192.168.88.20
 		  # use_ipv6: 2001:db8::1
@@ -128,8 +128,12 @@ Top-level `config` keys (described by `DockerHostsConfig`):
 	  - Docker endpoint, e.g. `"unix:///var/run/docker.sock"` or
 		`"tcp://127.0.0.1:2375"`.
 	- `reload_interval_second: float`
-	  - Interval between background refreshes for this endpoint. `0` means only
-		refresh at startup.
+	  - Per-endpoint interval hint used to compute the global background poll
+		interval.
+	  - Runtime behavior: DockerHosts picks the minimum positive interval across
+		all endpoints and refreshes all endpoints on each poll cycle.
+	  - `0` means this endpoint does not lower the global poll interval; it is
+		still refreshed whenever another endpoint's poll cycle runs.
 	- `use_ipv4: str | null`, `use_ipv6: str | null`
 	  - When set, use this IPv4/IPv6 address for all containers from this
 		endpoint instead of their per-container addresses.

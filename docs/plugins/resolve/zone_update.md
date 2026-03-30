@@ -3,10 +3,13 @@
 ## Overview
 ZoneRecords supports RFC 2136 UPDATE handling with:
 - TSIG authentication
-- optional PSK authentication (DoT/DoH listeners only)
 - per-zone and per-principal allow/block scopes
 - persistent journal replay/compaction
 - replication and security limit controls
+
+Note: the active UPDATE request authorization flow is currently TSIG-only.
+`dns_update.zones[].psk` remains in the config schema but PSK verification is
+not currently applied when authorizing UPDATE requests.
 
 This document lists every `dns_update` key and default from the current config model.
 
@@ -22,7 +25,7 @@ This document lists every `dns_update` key and default from the current config m
 ### `dns_update.zones[]` (per zone)
 - `zone` (str, required)
 - `tsig` (object, default: `null`)
-- `psk` (object, default: `null`)
+- `psk` (object, default: `null`; currently not used by active request authentication path)
 - `allow_names` (list[str], default: `null`)
 - `allow_names_files` (list[str], default: `null`)
 - `block_names` (list[str], default: `null`)
@@ -119,3 +122,5 @@ make gen-psk-token
 ./scripts/generate_dns_update_keys.py --tsig --name "key.example.com" --config-snippet
 ./scripts/generate_dns_update_keys.py --psk --config-snippet
 ```
+PSK token generation commands are kept for schema compatibility and provisioning
+workflows, but runtime UPDATE authorization currently validates TSIG keys.

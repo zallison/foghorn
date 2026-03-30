@@ -78,8 +78,12 @@ plugins:
 	(subject to other plugins).
 - `deny: list[str]`
   - List of IPv4/IPv6 CIDR ranges or single IPs that are explicitly denied.
-  - Deny rules take precedence over allow rules. When matched, the plugin
-	returns a `PluginDecision(action="deny")` and no further resolution occurs.
+  - Deny rules take precedence over allow rules.
+  - When matched, the plugin uses `deny_response` behavior:
+    - default `deny_response: refused` returns `PluginDecision(action="override")` with `RCODE.REFUSED`
+    - `deny_response: nxdomain` returns `PluginDecision(action="deny")`
+    - `deny_response: drop` returns `PluginDecision(action="drop")`
+    - other supported values (`servfail`, `noerror_empty`/`nodata`, `ip`) return `action="override"`
 
 ### Behaviour
 
