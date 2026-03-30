@@ -4,12 +4,13 @@ import hashlib
 import ipaddress
 import logging
 import os
+import socket
 import tempfile
 import threading
 import time
 from datetime import datetime
 from typing import Iterable, List, Optional, Set
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import requests
 from pydantic import BaseModel, Field, ConfigDict
@@ -25,6 +26,7 @@ FAILURE_BACKOFF_BASE_SECONDS = 30
 FAILURE_BACKOFF_MAX_SECONDS = 15 * 60
 MAX_DOWNLOAD_RESPONSE_BYTES = 25 * 1024 * 1024
 DOWNLOAD_STREAM_CHUNK_BYTES = 64 * 1024
+MAX_DOWNLOAD_REDIRECT_HOPS = 5
 
 
 class FileDownloaderConfig(BaseModel):
@@ -569,9 +571,16 @@ class FileDownloader(BasePlugin):
             # If we cannot stat the file, fall back to remote checks.
             pass
 
+        res: requests.Response | None = None
         try:
             logger.info("checking upstream (HEAD) for %s", url)
-            res = requests.head(url, timeout=10)
+            res = self._request_with_safe_redirects(
+                method="HEAD",
+                url=url,
+                timeout=10,
+                stream=False,
+                source="head_check",
+            )
             lm = res.headers.get("Last-Modified")
             if lm:
                 try:
@@ -583,9 +592,12 @@ class FileDownloader(BasePlugin):
                 except Exception:
                     self._record_failure(url, now)
                     return False
-        except requests.RequestException:
+        except (requests.RequestException, ValueError):
             self._record_failure(url, now)
             return False
+        finally:
+            if res is not None:
+                res.close()
         return True
 
     @staticmethod
@@ -867,7 +879,13 @@ class FileDownloader(BasePlugin):
         response: requests.Response | None = None
         temp_path: str | None = None
         try:
-            response = requests.get(url, timeout=20, stream=True)
+            response = self._request_with_safe_redirects(
+                method="GET",
+                url=url,
+                timeout=20,
+                stream=True,
+                source="download",
+            )
             response.raise_for_status()
             content_length = maybe_parse_content_length(
                 response.headers.get("Content-Length")
@@ -1014,6 +1032,8 @@ class FileDownloader(BasePlugin):
         Behavior:
           - Allows only http/https schemes.
           - Rejects loopback/link-local/RFC1918 targets unless configured.
+          - Resolves hostname targets and rejects those resolving to private
+            addresses unless explicitly allowed.
         """
         candidate = str(url).strip()
         if not candidate:
@@ -1027,7 +1047,10 @@ class FileDownloader(BasePlugin):
         host_lc = hostname.lower().rstrip(".")
         if self._allowlist_hosts and self._is_allowlisted_host(host_lc):
             return candidate
-        if self._is_private_host(host_lc) and not self._allow_private_hosts:
+        if not self._allow_private_hosts and (
+            self._is_private_host(host_lc)
+            or self._host_resolves_to_private_address(host_lc)
+        ):
             raise ValueError(f"{source} entry points to private host: {candidate}")
         return candidate
 
@@ -1074,6 +1097,91 @@ class FileDownloader(BasePlugin):
             or ip.is_multicast
             or ip.is_unspecified
         )
+
+    def _host_resolves_to_private_address(self, host: str) -> bool:
+        """Brief: Return True when DNS resolution yields any private IP address.
+
+        Inputs:
+          - host (str): Hostname to resolve (lowercase, no trailing dot).
+
+        Outputs:
+          - (bool): True when at least one resolved address is private/loopback/
+            link-local/reserved/etc as defined by _is_private_host.
+        """
+        if self._is_private_host(host):
+            return True
+        try:
+            addrinfo = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+        except Exception:
+            return False
+        for _family, _socktype, _proto, _canonname, sockaddr in addrinfo:
+            try:
+                resolved_ip = str(sockaddr[0]).split("%", 1)[0].strip().lower()
+            except Exception:
+                continue
+            if self._is_private_host(resolved_ip):
+                return True
+        return False
+
+    def _request_with_safe_redirects(
+        self,
+        *,
+        method: str,
+        url: str,
+        timeout: int,
+        stream: bool,
+        source: str,
+        max_redirect_hops: int = MAX_DOWNLOAD_REDIRECT_HOPS,
+    ) -> requests.Response:
+        """Brief: Send HTTP request while validating every redirect target.
+
+        Inputs:
+          - method: HTTP method ('GET' or 'HEAD').
+          - url: Initial URL to request.
+          - timeout: Request timeout in seconds.
+          - stream: Whether GET responses should be streamed.
+          - source: Validation source label for error messages.
+          - max_redirect_hops: Maximum number of redirects to follow.
+
+        Outputs:
+          - requests.Response: Final non-redirect response.
+
+        Behavior:
+          - Disables automatic redirects.
+          - Validates each redirect URL using _validate_and_normalize_url().
+          - Raises ValueError when redirect chains exceed max_redirect_hops.
+        """
+        method_norm = str(method or "").strip().upper()
+        if method_norm not in {"GET", "HEAD"}:
+            raise ValueError(f"unsupported request method: {method}")
+
+        current_url = self._validate_and_normalize_url(url, source=source)
+        redirect_hops = 0
+        while True:
+            request_kwargs = {
+                "timeout": int(timeout),
+                "allow_redirects": False,
+            }
+            if method_norm == "GET":
+                response = requests.get(
+                    current_url,
+                    stream=bool(stream),
+                    **request_kwargs,
+                )
+            else:
+                response = requests.head(current_url, **request_kwargs)
+
+            location = response.headers.get("Location")
+            if response.status_code not in {301, 302, 303, 307, 308} or not location:
+                return response
+
+            response.close()
+            redirect_hops += 1
+            if redirect_hops > int(max_redirect_hops):
+                raise ValueError(f"{source} entry exceeded max redirect hops: {url}")
+
+            next_url = urljoin(current_url, str(location))
+            current_url = self._validate_and_normalize_url(next_url, source=source)
 
     def _is_valid_domain_token(self, token: str) -> bool:
         """Brief: Validate a single domain token from a list file.
