@@ -414,7 +414,7 @@ class InfluxLogging(BaseStatsStore):
             enqueues the operation on the BaseStatsStore worker queue.
         """
 
-        if getattr(self, "_async_logging", False):
+        if getattr(self, "_async_logging", True):
             super().insert_query_log(
                 ts,
                 client_ip,

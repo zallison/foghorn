@@ -178,6 +178,9 @@ def test_insert_query_log_publishes_payload_and_parses_result_json(
         first="1.2.3.4",
         result_json=json.dumps(result_payload),
     )
+    op_queue = getattr(backend, "_op_queue", None)
+    if op_queue is not None:
+        op_queue.join()
 
     client = backend._client  # type: ignore[attr-defined]
     assert isinstance(client, _FakeMqttClient)
