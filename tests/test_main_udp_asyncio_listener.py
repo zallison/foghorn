@@ -13,6 +13,7 @@ Outputs:
 from __future__ import annotations
 
 import logging
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import mock_open, patch
 
@@ -327,3 +328,123 @@ def test_main_udp_asyncio_permissionerror_exit_on_failure(
     assert rc == 1
     assert any("threaded fallback is disabled" in r.message for r in caplog.records)
     assert created == []
+
+
+def test_main_udp_size_enforcement_exception_returns_original_wire(
+    monkeypatch: Any, caplog
+) -> None:
+    """Brief: _resolve_udp returns original bytes when UDP size enforcement raises.
+
+    Inputs:
+      - monkeypatch: patches UDP startup, resolver backend, and size-enforcement helpers.
+      - caplog: captures warning log from enforcement failure branch.
+
+    Outputs:
+      - None: asserts original resolver bytes are returned and warning is logged.
+    """
+
+    yaml_data = (
+        "server:\n"
+        "  listen:\n"
+        "    udp:\n"
+        "      enabled: true\n"
+        "      host: 127.0.0.1\n"
+        "      port: 5354\n"
+        "      use_asyncio: true\n"
+        "  resolver:\n"
+        "    mode: forward\n"
+        "    timeout_ms: 2000\n"
+        "    use_asyncio: true\n"
+        "upstreams:\n"
+        "  strategy: failover\n"
+        "  max_concurrent: 1\n"
+        "  endpoints:\n"
+        "    - host: 1.1.1.1\n"
+        "      port: 53\n"
+        "plugins: []\n"
+    )
+
+    called: dict[str, object] = {"resolver_result": None, "stop": 0}
+
+    class DummyThread:
+        def is_alive(self) -> bool:
+            return False
+
+        def join(self, timeout: float | None = None) -> None:
+            return None
+
+    class DummyHandle:
+        def __init__(self) -> None:
+            self.thread = DummyThread()
+
+        def stop(self) -> None:
+            called["stop"] = int(called["stop"]) + 1
+
+    def fake_resolve_query_bytes(  # type: ignore[no-untyped-def]
+        query_bytes: bytes,
+        client_ip: str,
+        *,
+        listener: str,
+        secure: bool,
+    ) -> bytes:
+        assert query_bytes == b"\x12\x34"
+        assert client_ip == "127.0.0.1"
+        assert listener == "udp"
+        assert secure is False
+        return b"original-wire"
+
+    def fake_enforce_udp_response_size_ceiling(  # type: ignore[no-untyped-def]
+        query_wire: bytes,
+        response_wire: bytes,
+        server_max_bytes: int | None,
+    ) -> bytes:
+        assert query_wire == b"\x12\x34"
+        assert response_wire == b"original-wire"
+        assert server_max_bytes == 1232
+        raise RuntimeError("enforcement failed")
+
+    def fake_start_udp_asyncio_threaded(  # type: ignore[no-untyped-def]
+        host: str,
+        port: int,
+        resolver,
+        **kw,
+    ) -> DummyHandle:
+        assert host == "127.0.0.1"
+        assert int(port) == 5354
+        assert kw.get("thread_name") == "foghorn-udp"
+        called["resolver_result"] = resolver(b"\x12\x34", "127.0.0.1")
+        return DummyHandle()
+
+    from foghorn.servers import udp_asyncio_server as udp_mod
+
+    monkeypatch.setattr(
+        "foghorn.servers.server.resolve_query_bytes",
+        fake_resolve_query_bytes,
+    )
+    monkeypatch.setattr(
+        "foghorn.servers.udp_server.enforce_udp_response_size_ceiling",
+        fake_enforce_udp_response_size_ceiling,
+    )
+    monkeypatch.setattr(
+        "foghorn.runtime_config.get_runtime_snapshot",
+        lambda: SimpleNamespace(udp_max_response_bytes=1232),
+    )
+    monkeypatch.setattr(
+        udp_mod,
+        "start_udp_asyncio_threaded",
+        fake_start_udp_asyncio_threaded,
+    )
+    monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
+    monkeypatch.setattr(main_mod, "start_webserver", lambda *a, **k: None)
+
+    with patch("builtins.open", mock_open(read_data=yaml_data)):
+        with caplog.at_level(logging.WARNING, logger="foghorn.main"):
+            rc = main_mod.main(["--config", "cfg.yaml"])
+
+    assert rc == 0
+    assert called["resolver_result"] == b"original-wire"
+    assert called["stop"] == 1
+    assert any(
+        "UDP response size ceiling enforcement failed" in r.message
+        for r in caplog.records
+    )
