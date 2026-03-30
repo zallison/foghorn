@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import re
 import threading
 import time
 from typing import Any, Dict, Optional, Tuple
@@ -29,8 +28,11 @@ from foghorn.plugins.cache.safe_codec import (
     safe_deserialize,
     safe_serialize,
 )
+from foghorn.plugins.sql_safety import validate_sql_identifier
 
 logger = logging.getLogger(__name__)
+_POSTGRES_IDENTIFIER_MAX_LENGTH = 63
+_POSTGRES_NAMESPACE_MAX_LENGTH = 48
 
 
 def _import_postgres_driver():
@@ -124,9 +126,6 @@ class PostgresTTLCache:
         Initialized PostgresTTLCache instance with ensured schema.
     """
 
-    # Namespace pattern: alphanumeric + underscore only
-    _NAMESPACE_PATTERN = re.compile(r"^[a-z0-9_]+$", re.IGNORECASE)
-
     def __init__(
         self,
         namespace: str = "cache",
@@ -138,11 +137,23 @@ class PostgresTTLCache:
         connect_kwargs: Optional[Dict[str, Any]] = None,
         **_: Any,
     ) -> None:
-        # Validate namespace first, before any driver import
-        if not self._NAMESPACE_PATTERN.match(namespace):
-            raise ValueError(f"namespace must match [a-z0-9_]+; got: {namespace}")
-
-        self.namespace = namespace
+        # Validate identifiers before any driver import so dynamic SQL always
+        # uses allowlisted identifier tokens with bounded lengths.
+        self.namespace = validate_sql_identifier(
+            namespace,
+            field_name="namespace",
+            max_length=_POSTGRES_NAMESPACE_MAX_LENGTH,
+        )
+        self._table_name = validate_sql_identifier(
+            f"{self.namespace}_ttl",
+            field_name="table_name",
+            max_length=_POSTGRES_IDENTIFIER_MAX_LENGTH,
+        )
+        self._expiry_index_name = validate_sql_identifier(
+            f"{self._table_name}_expiry_idx",
+            field_name="expiry index name",
+            max_length=_POSTGRES_IDENTIFIER_MAX_LENGTH,
+        )
         self._lock = threading.RLock()
 
         driver = _import_postgres_driver()
@@ -172,7 +183,8 @@ class PostgresTTLCache:
             None; creates table/indexes if they do not already exist.
         """
 
-        table_name = f"{self.namespace}_ttl"
+        table_name = self._table_name
+        index_name = self._expiry_index_name
         cur = self._conn.cursor()
 
         # Key digest (SHA-256), key blob, value blob, TTL, expiry timestamp.
@@ -191,7 +203,7 @@ class PostgresTTLCache:
         )
         cur.execute(
             f"""
-            CREATE INDEX IF NOT EXISTS {table_name}_expiry_idx
+            CREATE INDEX IF NOT EXISTS {index_name}
             ON {table_name}(expiry_ts)
             """
         )
@@ -256,21 +268,22 @@ class PostgresTTLCache:
             now = time.time()
             expiry = now + float(ttl_int)
 
-            table_name = f"{self.namespace}_ttl"
+            table_name = self._table_name
             cur = self._conn.cursor()
+            upsert_sql = (
+                f"INSERT INTO {table_name} "  # noqa: S608 - table identifier validated in __init__
+                "(key_digest, key_blob, value_blob, is_pickle, ttl_secs, expiry_ts, created_ts) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s) "
+                "ON CONFLICT (key_digest) DO UPDATE SET "
+                "key_blob = EXCLUDED.key_blob, "
+                "value_blob = EXCLUDED.value_blob, "
+                "is_pickle = EXCLUDED.is_pickle, "
+                "ttl_secs = EXCLUDED.ttl_secs, "
+                "expiry_ts = EXCLUDED.expiry_ts, "
+                "created_ts = EXCLUDED.created_ts"
+            )  # noqa: S608 - table identifier validated in __init__
             cur.execute(
-                f"""
-                INSERT INTO {table_name}
-                (key_digest, key_blob, value_blob, is_pickle, ttl_secs, expiry_ts, created_ts)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (key_digest) DO UPDATE SET
-                    key_blob = EXCLUDED.key_blob,
-                    value_blob = EXCLUDED.value_blob,
-                    is_pickle = EXCLUDED.is_pickle,
-                    ttl_secs = EXCLUDED.ttl_secs,
-                    expiry_ts = EXCLUDED.expiry_ts,
-                    created_ts = EXCLUDED.created_ts
-                """,
+                upsert_sql,
                 (
                     digest,
                     key_blob,
@@ -295,14 +308,14 @@ class PostgresTTLCache:
 
         with self._lock:
             digest = _stable_digest_for_key(key)
-            table_name = f"{self.namespace}_ttl"
+            table_name = self._table_name
             cur = self._conn.cursor()
-
+            select_sql = (
+                f"SELECT value_blob, is_pickle, expiry_ts FROM {table_name} "  # noqa: S608 - table identifier validated in __init__
+                "WHERE key_digest = %s"
+            )  # noqa: S608 - table identifier validated in __init__
             cur.execute(
-                f"""
-                SELECT value_blob, is_pickle, expiry_ts FROM {table_name}
-                WHERE key_digest = %s
-                """,
+                select_sql,
                 (digest,),
             )
             row = cur.fetchone()
@@ -319,7 +332,7 @@ class PostgresTTLCache:
             if now >= expiry_f:
                 # Expired; clean up and return None
                 cur.execute(
-                    f"DELETE FROM {table_name} WHERE key_digest = %s",
+                    f"DELETE FROM {table_name} WHERE key_digest = %s",  # noqa: S608 - table identifier validated in __init__
                     (digest,),
                 )
                 self._conn.commit()
@@ -341,15 +354,14 @@ class PostgresTTLCache:
 
         with self._lock:
             digest = _stable_digest_for_key(key)
-            table_name = f"{self.namespace}_ttl"
+            table_name = self._table_name
             cur = self._conn.cursor()
-
+            select_meta_sql = (
+                f"SELECT value_blob, is_pickle, ttl_secs, expiry_ts FROM {table_name} "  # noqa: S608 - table identifier validated in __init__
+                "WHERE key_digest = %s"
+            )  # noqa: S608 - table identifier validated in __init__
             cur.execute(
-                f"""
-                SELECT value_blob, is_pickle, ttl_secs, expiry_ts
-                FROM {table_name}
-                WHERE key_digest = %s
-                """,
+                select_meta_sql,
                 (digest,),
             )
             row = cur.fetchone()
@@ -373,7 +385,7 @@ class PostgresTTLCache:
             if remaining <= 0:
                 # Expired; clean up and return miss.
                 cur.execute(
-                    f"DELETE FROM {table_name} WHERE key_digest = %s",
+                    f"DELETE FROM {table_name} WHERE key_digest = %s",  # noqa: S608 - table identifier validated in __init__
                     (digest,),
                 )
                 self._conn.commit()
@@ -392,12 +404,12 @@ class PostgresTTLCache:
         """
 
         with self._lock:
-            table_name = f"{self.namespace}_ttl"
+            table_name = self._table_name
             cur = self._conn.cursor()
             now = time.time()
 
             cur.execute(
-                f"DELETE FROM {table_name} WHERE expiry_ts <= %s",
+                f"DELETE FROM {table_name} WHERE expiry_ts <= %s",  # noqa: S608 - table identifier validated in __init__
                 (now,),
             )
             self._conn.commit()
