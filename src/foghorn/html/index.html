@@ -67,6 +67,16 @@
 			Config
 		</button>
 		<span id="plugin-tabs-root"></span>
+		<div class="fh-refresh-control">
+			<label class="fh-refresh-label" for="refresh-interval-select">Refresh</label>
+			<select id="refresh-interval-select" class="fh-refresh-select" aria-label="Auto refresh interval">
+				<option value="0">off</option>
+				<option value="5">5s</option>
+				<option value="15" selected>15s</option>
+				<option value="60">1m</option>
+				<option value="300">5m</option>
+			</select>
+		</div>
 	</div>
 	<main class="fh-main" id="page2">
 		<section class="fh-pane fh-pane-full" id="stats-details-pane" hidden>
@@ -289,10 +299,16 @@
 			var btnTabStats = document.getElementById('btn-tab-stats');
 			var btnTabQueryLog = document.getElementById('btn-tab-query-log');
 			var btnTabEdit = document.getElementById('btn-tab-edit');
+			var refreshIntervalSelectEl = document.getElementById('refresh-interval-select');
 			var pluginTabsRoot = document.getElementById('plugin-tabs-root');
 			var pluginUiPages = {};
 			var pluginRefreshTimers = {};
+			var tableSortStateStore = {};
 			var activePluginName = null;
+			var activeTab = 'stats';
+			var autoRefreshTimer = null;
+			var DEFAULT_REFRESH_SECONDS = '15';
+			var REFRESH_INTERVAL_STORAGE_KEY = 'foghorn-refresh-interval-seconds';
 			var queryLogFilters = {
 				qname: '',
 				qtype: '',
@@ -403,6 +419,50 @@
 				} else {
 					msgEl.classList.add('fh-messages-info');
 				}
+			}
+			function normalizeRefreshIntervalSeconds(value) {
+				var raw = String(value || '').trim();
+				if (
+					raw === '0' ||
+					raw === '5' ||
+					raw === '15' ||
+					raw === '60' ||
+					raw === '300'
+				) {
+					return raw;
+				}
+				return DEFAULT_REFRESH_SECONDS;
+			}
+			function stopAutoRefreshTimer() {
+				if (!autoRefreshTimer) {
+					return;
+				}
+				clearInterval(autoRefreshTimer);
+				autoRefreshTimer = null;
+			}
+			function restartAutoRefreshTimer() {
+				stopAutoRefreshTimer();
+				var seconds = Number(
+					normalizeRefreshIntervalSeconds(
+						refreshIntervalSelectEl ? refreshIntervalSelectEl.value : DEFAULT_REFRESH_SECONDS
+					)
+				);
+				if (!isFinite(seconds) || seconds <= 0) {
+					return;
+				}
+				autoRefreshTimer = setInterval(refreshActiveTabData, seconds * 1000);
+			}
+			function applyRefreshIntervalSetting(value) {
+				var normalized = normalizeRefreshIntervalSeconds(value);
+				if (refreshIntervalSelectEl) {
+					refreshIntervalSelectEl.value = normalized;
+				}
+				try {
+					if (window.localStorage) {
+						localStorage.setItem(REFRESH_INTERVAL_STORAGE_KEY, normalized);
+					}
+				} catch (e) {}
+				restartAutoRefreshTimer();
 			}
 
 			function pretty(obj) {
@@ -1583,6 +1643,17 @@
 					}
 				}
 			}
+			function replaceContainerChildren(target, source) {
+				if (!target || !source) {
+					return;
+				}
+				while (target.firstChild) {
+					target.removeChild(target.firstChild);
+				}
+				while (source.firstChild) {
+					target.appendChild(source.firstChild);
+				}
+			}
 
 			function appendDictGroup(title, mapping) {
 				if (!mapping || typeof mapping !== 'object') {
@@ -2407,26 +2478,33 @@
 			}
 
 			function renderStats(data) {
-				clearStatsGroups();
+				var liveLeft = statsGroupsEl;
+				var liveRight = statsGroupsRightEl;
+				var nextLeft = document.createDocumentFragment();
+				var nextRight = liveRight ? document.createDocumentFragment() : nextLeft;
+				statsGroupsEl = nextLeft;
+				statsGroupsRightEl = nextRight;
+				try {
+					clearStatsGroups();
 
-				if (!data || typeof data !== 'object') {
-					return;
-				}
+					if (!data || typeof data !== 'object') {
+						return;
+					}
 
-				if (data.status === 'disabled') {
-					var disabledGroup = document.createElement('section');
-					disabledGroup.className = 'fh-stats-group';
-					var heading = document.createElement('h3');
-					heading.className = 'fh-stats-group-title';
-					heading.textContent = 'Status';
-					disabledGroup.appendChild(heading);
-					var p = document.createElement('p');
-					p.className = 'fh-pane-help';
-					p.textContent = 'Statistics are disabled for this server instance.';
-					disabledGroup.appendChild(p);
-					statsGroupsEl.appendChild(disabledGroup);
-					return;
-				}
+					if (data.status === 'disabled') {
+						var disabledGroup = document.createElement('section');
+						disabledGroup.className = 'fh-stats-group';
+						var heading = document.createElement('h3');
+						heading.className = 'fh-stats-group-title';
+						heading.textContent = 'Status';
+						disabledGroup.appendChild(heading);
+						var p = document.createElement('p');
+						p.className = 'fh-pane-help';
+						p.textContent = 'Statistics are disabled for this server instance.';
+						disabledGroup.appendChild(p);
+						statsGroupsEl.appendChild(disabledGroup);
+						return;
+					}
 
 				// Prefer a created_at field from meta when present, falling back to
 				// a top-level created_at. Always format as "YYYY-MM-DD HH:MM:SS".
@@ -2561,8 +2639,16 @@
 				appendRcodeTopSubdomains(data.rcode_subdomains || {});
 
 
-				if (data.system) {
-					appendSystemGroup(data.system);
+					if (data.system) {
+						appendSystemGroup(data.system);
+					}
+				} finally {
+					statsGroupsEl = liveLeft;
+					statsGroupsRightEl = liveRight;
+					replaceContainerChildren(liveLeft, nextLeft);
+					if (liveRight && nextRight && nextRight !== nextLeft) {
+						replaceContainerChildren(liveRight, nextRight);
+					}
 				}
 
 			}
@@ -2580,6 +2666,37 @@
 							});
 					})
 					.catch(function () {});
+			}
+			function refreshActiveTabData() {
+				if (activeTab === 'stats') {
+					loadStats();
+					return;
+				}
+				if (activeTab === 'query-log') {
+					loadQueryLog();
+					return;
+				}
+				if (activeTab === 'edit') {
+					if (!isEditing) {
+						refreshDiskConfigView();
+					}
+					if (page1 && page1.style && page1.style.display !== 'none') {
+						loadConfigDiagram();
+					}
+					return;
+				}
+				if (activeTab && activeTab.indexOf('plugin:') === 0) {
+					var pluginName = activeTab.slice('plugin:'.length);
+					var info = pluginUiPages && pluginUiPages[pluginName];
+					if (!info || !info.page || !info.desc) {
+						return;
+					}
+					// Avoid duplicate polling when a plugin-specific timer exists.
+					if (pluginRefreshTimers && pluginRefreshTimers[pluginName]) {
+						return;
+					}
+					loadSnapshotPageV1(info.page, info.desc);
+				}
 			}
 
 			function loadConfigDiagram() {
@@ -2948,6 +3065,54 @@
 					return 'desc';
 				}
 				return 'asc';
+			}
+			function _serializeSortStateExtraQuery(extraQuery) {
+				if (!extraQuery || typeof extraQuery !== 'object') {
+					return '';
+				}
+				var keys = Object.keys(extraQuery).sort();
+				if (!keys.length) {
+					return '';
+				}
+				return keys
+					.map(function (k) {
+						return String(k) + '=' + String(extraQuery[k]);
+					})
+					.join('&');
+			}
+			function getTableSortStateKey(kind, section, pluginName, extraQuery) {
+				var sectionId = section && section.id ? String(section.id) : '';
+				var title = section && section.title ? String(section.title) : '';
+				var plugin = pluginName ? String(pluginName) : '';
+				var extra = _serializeSortStateExtraQuery(extraQuery);
+				return [String(kind || ''), plugin, sectionId, title, extra].join('|');
+			}
+			function readTableSortState(sortStateKey, columns) {
+				if (!sortStateKey || !tableSortStateStore) {
+					return null;
+				}
+				var state = tableSortStateStore[sortStateKey];
+				if (!state || typeof state !== 'object') {
+					return null;
+				}
+				var key = state.key ? String(state.key) : '';
+				var dir = state.dir === 'desc' ? 'desc' : 'asc';
+				if (!key) {
+					return { key: '', dir: dir };
+				}
+				if (!getTableColumnByKey(Array.isArray(columns) ? columns : [], key)) {
+					return null;
+				}
+				return { key: key, dir: dir };
+			}
+			function writeTableSortState(sortStateKey, sortState) {
+				if (!sortStateKey || !tableSortStateStore || !sortState || typeof sortState !== 'object') {
+					return;
+				}
+				tableSortStateStore[sortStateKey] = {
+					key: sortState.key ? String(sortState.key) : '',
+					dir: sortState.dir === 'desc' ? 'desc' : 'asc',
+				};
 			}
 
 			function renderSortableHeader(columns, sortState, onSort) {
@@ -3723,7 +3888,9 @@
 				var table = document.createElement('table');
 				table.className = 'fh-table fh-table-upstreams';
 				table.setAttribute('data-section-id', section && section.id ? String(section.id) : '');
-				var sortState = { key: '', dir: 'asc' };
+				var sortStateKey = getTableSortStateKey('local', section, null, null);
+				var storedSortState = readTableSortState(sortStateKey, columns);
+				var sortState = storedSortState || { key: '', dir: 'asc' };
 
 				function renderTable() {
 					var displayRows = rows.slice();
@@ -3743,6 +3910,7 @@
 									getTableColumnByKey(columns, key)
 								);
 							}
+							writeTableSortState(sortStateKey, sortState);
 							renderTable();
 						})
 					);
@@ -3798,7 +3966,9 @@
 				var table = document.createElement('table');
 				table.className = 'fh-table fh-table-upstreams';
 				group.appendChild(table);
-				var sortState = {
+				var sortStateKey = getTableSortStateKey('searchable', section, null, null);
+				var storedSortState = readTableSortState(sortStateKey, columns);
+				var sortState = storedSortState || {
 					key: '',
 					dir: 'asc',
 				};
@@ -3837,6 +4007,7 @@
 									getTableColumnByKey(columns, key)
 								);
 							}
+							writeTableSortState(sortStateKey, sortState);
 							applySearch();
 						})
 					);
@@ -3929,6 +4100,12 @@
 						hide_hash_like: true,
 					},
 				};
+				var sortStateKey = getTableSortStateKey('paged', section, pluginName, extraQuery);
+				var storedSortState = readTableSortState(sortStateKey, columns);
+				if (storedSortState && storedSortState.key) {
+					state.sortKey = storedSortState.key;
+					state.sortDir = storedSortState.dir === 'desc' ? 'desc' : 'asc';
+				}
 				var requestToken = 0;
 
 				var group = document.createElement('section');
@@ -4078,6 +4255,10 @@
 									getTableColumnByKey(columns, key)
 								);
 							}
+							writeTableSortState(sortStateKey, {
+								key: state.sortKey,
+								dir: state.sortDir,
+							});
 							state.page = 1;
 							loadPage();
 						});
@@ -4202,6 +4383,12 @@
 							state.sortKey = payload && payload.sort_key ? payload.sort_key : state.sortKey;
 							state.sortDir = payload && payload.sort_dir ? payload.sort_dir : state.sortDir;
 							state.lastItems = payload && Array.isArray(payload.items) ? payload.items : [];
+							if (state.sortKey) {
+								writeTableSortState(sortStateKey, {
+									key: state.sortKey,
+									dir: state.sortDir,
+								});
+							}
 
 							table.textContent = '';
 							table.appendChild(renderHeader());
@@ -4598,7 +4785,6 @@
 				if (!endpoint || !body) {
 					return;
 				}
-				body.textContent = '';
 				// Request table-free snapshots (when supported) so large tables are
 				// fetched via dedicated paginated endpoints.
 				var snapshotUrl = endpoint;
@@ -4609,12 +4795,15 @@
 				}
 				fetchJson(snapshotUrl)
 					.then(function (payload) {
+						var nextBody = document.createElement('div');
+						nextBody.className = body.className;
+						nextBody.setAttribute('data-role', 'plugin-snapshot-body');
 						var data = payload && payload.data ? payload.data : {};
 						var layout = desc && desc.layout ? desc.layout : {};
 						var sections = Array.isArray(layout.sections) ? layout.sections : [];
 						var pluginName = desc && desc.name ? String(desc.name) : null;
 						if (isRateLimitSnapshotDescriptor(desc)) {
-							renderRateLimitPluginSections(body, desc, pluginName, data);
+							renderRateLimitPluginSections(nextBody, desc, pluginName, data);
 						} else {
 						if (!sections.length) {
 							// Fallback: pretty-print the raw payload.
@@ -4624,10 +4813,9 @@
 							pre.className = 'fh-pre';
 							pre.textContent = pretty(data);
 							group.appendChild(pre);
-							body.appendChild(group);
-							return;
-						}
-						sections.forEach(function (section) {
+							nextBody.appendChild(group);
+						} else {
+							sections.forEach(function (section) {
 							// Plumb plugin-level metadata (like domain suffix) into the
 							// section descriptor so renderers can use it without needing
 							// to know about the full payload shape.
@@ -4640,18 +4828,23 @@
 							var type = section.type || 'kv';
 							var path = section.path || '';
 							var sectionRoot = document.createElement('div');
-							body.appendChild(sectionRoot);
+							nextBody.appendChild(sectionRoot);
 							var value = path ? resolvePath(data, path) : data;
 							if (type === 'table') {
 								renderTableSectionPaged(sectionRoot, section, desc, pluginName);
-						} else {
-							// Default to key/value rendering using section.rows
-							// against the resolved value mapping.
-							if (value && typeof value === 'object') {
-								renderKvSection(sectionRoot, value, section);
+							} else {
+								// Default to key/value rendering using section.rows
+								// against the resolved value mapping.
+								if (value && typeof value === 'object') {
+									renderKvSection(sectionRoot, value, section);
+								}
 							}
+							});
 						}
-						});
+					}
+						if (body.parentNode) {
+							body.parentNode.replaceChild(nextBody, body);
+							body = nextBody;
 						}
 
 						// After a successful render, configure optional auto-refresh
@@ -5022,6 +5215,7 @@
 			}
 
 			function applyTab(tab) {
+				activeTab = tab || 'stats';
 				// Persist the last-selected tab in localStorage so reloads return to
 				// the same view when possible.
 				try {
@@ -5052,6 +5246,9 @@
 					// When Stats is selected, page1 shows Advanced/Config; hide when Stats or a plugin tab is selected.
 					page1.style.display = isEdit ? '' : 'none';
 					if (isEdit) {
+						if (!isEditing) {
+							refreshDiskConfigView();
+						}
 						loadConfigDiagram();
 					}
 				}
@@ -5166,6 +5363,11 @@
 					applyTab('edit');
 				});
 			}
+			if (refreshIntervalSelectEl) {
+				refreshIntervalSelectEl.addEventListener('change', function () {
+					applyRefreshIntervalSetting(refreshIntervalSelectEl.value);
+				});
+			}
 			if (btnQueryLogApply) {
 				btnQueryLogApply.addEventListener('click', function () {
 					applyQueryLogFilters();
@@ -5246,10 +5448,18 @@
 					}
 				}
 			} catch (e) {}
+			var initialRefreshSeconds = DEFAULT_REFRESH_SECONDS;
+			try {
+				if (window.localStorage) {
+					initialRefreshSeconds = normalizeRefreshIntervalSeconds(
+						localStorage.getItem(REFRESH_INTERVAL_STORAGE_KEY)
+					);
+				}
+			} catch (e) {}
 			applyTab(initialTab);
 			loadStats();
 			initPluginTabs();
-			setInterval(loadStats, 15000);
+			applyRefreshIntervalSetting(initialRefreshSeconds);
 			refreshDiskConfigView();
 			})();
 		</script>

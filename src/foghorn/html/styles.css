@@ -168,6 +168,28 @@ a:visited {
     border-color: var(--accent);
 }
 
+.fh-refresh-control {
+    margin-left: auto;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0 0 0.4rem 0.6rem;
+}
+
+.fh-refresh-label {
+    font-size: 0.8rem;
+    color: var(--fg-muted);
+}
+
+.fh-refresh-select {
+    border-radius: 0.375rem;
+    border: 1px solid var(--accent-soft);
+    background: var(--bg-card-inner);
+    color: var(--fg-text);
+    padding: 0.2rem 0.45rem;
+    font-size: 0.8rem;
+}
+
 /* Main layout: two side-by-side boxes for statistics and config */
 
 .fh-main {
