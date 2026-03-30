@@ -278,6 +278,135 @@ def test_validate_and_normalize_url_allows_allowlisted_host(tmp_path):
     assert url == "http://localhost/list.txt"
 
 
+def test_validate_and_normalize_url_rejects_hostname_resolving_private(
+    monkeypatch, tmp_path
+):
+    """Brief: _validate_and_normalize_url rejects hostnames resolving to private IPs.
+
+    Inputs:
+      - monkeypatch: Pytest monkeypatch fixture.
+      - tmp_path: Temporary directory for download_path.
+
+    Outputs:
+      - None; asserts ValueError when hostname DNS resolves to 127.0.0.1.
+    """
+
+    dl = FileDownloader(download_path=str(tmp_path), urls=[], url_files=[])
+    _setup_downloader_for_tests(dl)
+
+    def fake_getaddrinfo(host, port, type=None):  # noqa: ANN001, ARG001
+        assert host == "public.example"
+        return [
+            (
+                file_downloader_mod.socket.AF_INET,
+                file_downloader_mod.socket.SOCK_STREAM,
+                6,
+                "",
+                ("127.0.0.1", 0),
+            )
+        ]
+
+    monkeypatch.setattr(file_downloader_mod.socket, "getaddrinfo", fake_getaddrinfo)
+
+    with pytest.raises(ValueError, match="private host"):
+        dl._validate_and_normalize_url(
+            "http://public.example/list.txt",
+            source="urls",
+        )
+
+
+def test_request_with_safe_redirects_rejects_private_redirect_target(
+    monkeypatch, tmp_path
+):
+    """Brief: _request_with_safe_redirects rejects redirects into private targets.
+
+    Inputs:
+      - monkeypatch: Pytest monkeypatch fixture.
+      - tmp_path: Temporary directory for download_path.
+
+    Outputs:
+      - None; asserts ValueError when redirect Location points to 127.0.0.1.
+    """
+
+    dl = FileDownloader(download_path=str(tmp_path), urls=[], url_files=[])
+    _setup_downloader_for_tests(dl)
+    calls = {"count": 0, "closed": 0}
+
+    class RedirectResp:
+        status_code = 302
+        headers = {"Location": "http://127.0.0.1/blocked.txt"}
+
+        def close(self) -> None:
+            calls["closed"] += 1
+
+    def fake_get(url, stream, timeout, allow_redirects):
+        calls["count"] += 1
+        assert url == "https://example.com/list.txt"
+        assert stream is True
+        assert timeout == 20
+        assert allow_redirects is False
+        return RedirectResp()
+
+    monkeypatch.setattr(file_downloader_mod.requests, "get", fake_get)
+
+    with pytest.raises(ValueError, match="private host"):
+        dl._request_with_safe_redirects(
+            method="GET",
+            url="https://example.com/list.txt",
+            timeout=20,
+            stream=True,
+            source="download",
+        )
+
+    assert calls["count"] == 1
+    assert calls["closed"] == 1
+
+
+def test_request_with_safe_redirects_enforces_redirect_hop_limit(monkeypatch, tmp_path):
+    """Brief: _request_with_safe_redirects enforces max redirect hops.
+
+    Inputs:
+      - monkeypatch: Pytest monkeypatch fixture.
+      - tmp_path: Temporary directory for download_path.
+
+    Outputs:
+      - None; asserts ValueError when redirects exceed configured hop limit.
+    """
+
+    dl = FileDownloader(download_path=str(tmp_path), urls=[], url_files=[])
+    _setup_downloader_for_tests(dl)
+    calls = {"count": 0, "closed": 0}
+
+    class RedirectResp:
+        status_code = 302
+        headers = {"Location": "/next"}
+
+        def close(self) -> None:
+            calls["closed"] += 1
+
+    def fake_get(url, stream, timeout, allow_redirects):
+        calls["count"] += 1
+        assert stream is True
+        assert timeout == 20
+        assert allow_redirects is False
+        return RedirectResp()
+
+    monkeypatch.setattr(file_downloader_mod.requests, "get", fake_get)
+
+    with pytest.raises(ValueError, match="exceeded max redirect hops"):
+        dl._request_with_safe_redirects(
+            method="GET",
+            url="https://example.com/list.txt",
+            timeout=20,
+            stream=True,
+            source="download",
+            max_redirect_hops=1,
+        )
+
+    assert calls["count"] == 2
+    assert calls["closed"] == 2
+
+
 def test_read_url_files_skips_invalid_urls(tmp_path, caplog):
     """Brief: _read_url_files skips invalid or private URLs and logs warnings.
 
@@ -318,13 +447,17 @@ def test_needs_update_respects_failure_backoff(monkeypatch, tmp_path):
     f = tmp_path / "list.txt"
     f.write_text("# header\n")
 
-    def failing_head(url, timeout):  # noqa: ARG001
+    def failing_head(url, timeout, allow_redirects=False):  # noqa: ARG001
+        assert allow_redirects is False
         raise requests.RequestException("boom")
 
     monkeypatch.setattr(file_downloader_mod.requests, "head", failing_head)
     assert dl._needs_update("https://example.com/a.txt", str(f)) is False
 
-    def should_not_call(url, timeout):  # pragma: no cover - backoff short-circuits
+    def should_not_call(
+        url, timeout, allow_redirects=False
+    ):  # pragma: no cover - backoff short-circuits
+        assert allow_redirects is False
         raise AssertionError("requests.head should not be called during backoff")
 
     monkeypatch.setattr(file_downloader_mod.requests, "head", should_not_call)
@@ -386,12 +519,16 @@ def test_needs_update_uses_last_modified_header(monkeypatch, tmp_path):
     os.utime(f, (local_mtime, local_mtime))
 
     class DummyResp:
+        status_code = 200
         headers = {"Last-Modified": "Sun, 05 Feb 2034 01:23:45 GMT"}
+
+        def close(self) -> None:  # pragma: no cover - trivial
+            return None
 
     calls = {}
 
-    def fake_head(url, timeout):
-        calls["args"] = (url, timeout)
+    def fake_head(url, timeout, allow_redirects=False):
+        calls["args"] = (url, timeout, allow_redirects)
         return DummyResp()
 
     monkeypatch.setattr(file_downloader_mod.requests, "head", fake_head)
@@ -399,6 +536,7 @@ def test_needs_update_uses_last_modified_header(monkeypatch, tmp_path):
     # Remote newer than local -> True
     assert dl._needs_update("https://example.com/a.txt", str(f)) is True
     assert calls["args"][0] == "https://example.com/a.txt"
+    assert calls["args"][2] is False
 
     # Remote older than local -> False
     DummyResp.headers = {"Last-Modified": "Sun, 05 Feb 2000 01:23:45 GMT"}
@@ -423,9 +561,13 @@ def test_needs_update_false_on_bad_last_modified(monkeypatch, tmp_path):
     os.utime(f, (1_700_000_000, 1_700_000_000))
 
     class DummyResp:
+        status_code = 200
         headers = {"Last-Modified": "not-a-date"}
 
-    def fake_head(url, timeout):
+        def close(self) -> None:  # pragma: no cover - trivial
+            return None
+
+    def fake_head(url, timeout, allow_redirects=False):  # noqa: ARG001
         return DummyResp()
 
     monkeypatch.setattr(file_downloader_mod.requests, "head", fake_head)
@@ -450,7 +592,7 @@ def test_needs_update_false_on_request_exception(monkeypatch, tmp_path):
     f.write_text("# header\n")
     os.utime(f, (1_700_000_000, 1_700_000_000))
 
-    def fake_head(url, timeout):
+    def fake_head(url, timeout, allow_redirects=False):  # noqa: ARG001
         raise requests.RequestException("boom")
 
     monkeypatch.setattr(file_downloader_mod.requests, "head", fake_head)
@@ -476,9 +618,13 @@ def test_needs_update_true_when_no_last_modified(monkeypatch, tmp_path):
     os.utime(f, (1_700_000_000, 1_700_000_000))
 
     class DummyResp:
+        status_code = 200
         headers = {}
 
-    def fake_head(url, timeout):
+        def close(self) -> None:  # pragma: no cover - trivial
+            return None
+
+    def fake_head(url, timeout, allow_redirects=False):  # noqa: ARG001
         return DummyResp()
 
     monkeypatch.setattr(file_downloader_mod.requests, "head", fake_head)
@@ -507,7 +653,10 @@ def test_needs_update_false_for_recent_file(monkeypatch, tmp_path):
     fresh_mtime = now - 3600
     os.utime(f, (fresh_mtime, fresh_mtime))
 
-    def fake_head(url, timeout):  # pragma: no cover - should not be called
+    def fake_head(
+        url, timeout, allow_redirects=False
+    ):  # pragma: no cover - should not be called
+        assert allow_redirects is False
         raise AssertionError("requests.head should not be called for fresh files")
 
     monkeypatch.setattr(file_downloader_mod.requests, "head", fake_head)
@@ -539,7 +688,10 @@ def test_needs_update_uses_interval_days_for_min_age(monkeypatch, tmp_path):
     fresh_mtime = now - three_days
     os.utime(f, (fresh_mtime, fresh_mtime))
 
-    def fake_head(url, timeout):  # pragma: no cover - should not be called
+    def fake_head(
+        url, timeout, allow_redirects=False
+    ):  # pragma: no cover - should not be called
+        assert allow_redirects is False
         raise AssertionError(
             "requests.head should not be called when file is newer than interval_days"
         )
@@ -660,6 +812,7 @@ def test_fetch_writes_header_and_body(monkeypatch, tmp_path):
     class DummyResp:
         def __init__(self, text: str) -> None:
             self._body = text.encode("utf-8")
+            self.status_code = 200
             self.headers = {"Content-Length": str(len(self._body))}
 
         def raise_for_status(self) -> None:  # pragma: no cover - trivial
@@ -671,10 +824,11 @@ def test_fetch_writes_header_and_body(monkeypatch, tmp_path):
         def close(self) -> None:  # pragma: no cover - trivial
             return None
 
-    def fake_get(u, timeout, stream):
+    def fake_get(u, timeout, stream, allow_redirects=False):
         assert u == url
         assert timeout == 20
         assert stream is True
+        assert allow_redirects is False
         return DummyResp("line1\nline2\n")
 
     monkeypatch.setattr(file_downloader_mod.requests, "get", fake_get)
@@ -717,6 +871,7 @@ def test_fetch_rejects_response_with_oversized_content_length(monkeypatch, tmp_p
     calls = {"iter": 0, "closed": 0}
 
     class DummyResp:
+        status_code = 200
         headers = {
             "Content-Length": str(file_downloader_mod.MAX_DOWNLOAD_RESPONSE_BYTES + 1)
         }
@@ -731,10 +886,11 @@ def test_fetch_rejects_response_with_oversized_content_length(monkeypatch, tmp_p
         def close(self) -> None:
             calls["closed"] += 1
 
-    def fake_get(u, timeout, stream):
+    def fake_get(u, timeout, stream, allow_redirects=False):
         assert u == url
         assert timeout == 20
         assert stream is True
+        assert allow_redirects is False
         return DummyResp()
 
     monkeypatch.setattr(file_downloader_mod.requests, "get", fake_get)
@@ -773,6 +929,7 @@ def test_fetch_rejects_stream_when_total_bytes_exceed_limit(monkeypatch, tmp_pat
     calls = {"closed": 0}
 
     class DummyResp:
+        status_code = 200
         headers = {"Content-Length": "0"}
 
         def raise_for_status(self) -> None:  # pragma: no cover - trivial
@@ -787,10 +944,11 @@ def test_fetch_rejects_stream_when_total_bytes_exceed_limit(monkeypatch, tmp_pat
         def close(self) -> None:
             calls["closed"] += 1
 
-    def fake_get(u, timeout, stream):
+    def fake_get(u, timeout, stream, allow_redirects=False):
         assert u == url
         assert timeout == 20
         assert stream is True
+        assert allow_redirects is False
         return DummyResp()
 
     monkeypatch.setattr(file_downloader_mod.requests, "get", fake_get)
@@ -925,7 +1083,7 @@ def test_maybe_run_respects_interval(monkeypatch, tmp_path):
         def raise_for_status(self) -> None:  # pragma: no cover - trivial
             return None
 
-    def fake_get(url, timeout):
+    def fake_get(url, timeout, allow_redirects=False):  # noqa: ARG001
         return DummyResp()
 
     monkeypatch.setattr(file_downloader_mod.requests, "get", fake_get)
@@ -978,7 +1136,7 @@ def test_maybe_run_force_ignores_interval(monkeypatch, tmp_path):
         def raise_for_status(self) -> None:  # pragma: no cover - trivial
             return None
 
-    def fake_get(url, timeout):
+    def fake_get(url, timeout, allow_redirects=False):  # noqa: ARG001
         return DummyResp()
 
     monkeypatch.setattr(file_downloader_mod.requests, "get", fake_get)
@@ -1021,7 +1179,7 @@ def test_setup_calls_maybe_run_and_returns_none(monkeypatch, tmp_path):
         def raise_for_status(self) -> None:  # pragma: no cover - trivial
             return None
 
-    def fake_get(url, timeout):
+    def fake_get(url, timeout, allow_redirects=False):  # noqa: ARG001
         return DummyResp()
 
     monkeypatch.setattr(file_downloader_mod.requests, "get", fake_get)
@@ -1210,7 +1368,7 @@ def test_setup_merges_url_files_and_logs_debug(monkeypatch, tmp_path, caplog):
         def raise_for_status(self) -> None:  # pragma: no cover - trivial
             return None
 
-    def fake_get(url, timeout):
+    def fake_get(url, timeout, allow_redirects=False):  # noqa: ARG001
         return DummyResp()
 
     monkeypatch.setattr(file_downloader_mod.requests, "get", fake_get)
@@ -1264,7 +1422,7 @@ def test_setup_invalid_interval_configuration_disables_refresh(
         def raise_for_status(self) -> None:  # pragma: no cover - trivial
             return None
 
-    def fake_get(url, timeout):
+    def fake_get(url, timeout, allow_redirects=False):  # noqa: ARG001
         return DummyResp()
 
     monkeypatch.setattr(file_downloader_mod.requests, "get", fake_get)
@@ -1306,7 +1464,7 @@ def test_setup_starts_background_thread_with_valid_interval(monkeypatch, tmp_pat
         def raise_for_status(self) -> None:  # pragma: no cover - trivial
             return None
 
-    def fake_get(url, timeout):
+    def fake_get(url, timeout, allow_redirects=False):  # noqa: ARG001
         return DummyResp()
 
     monkeypatch.setattr(file_downloader_mod.requests, "get", fake_get)
@@ -1399,9 +1557,14 @@ def test_needs_update_ignores_stat_oserror_and_uses_remote(monkeypatch, tmp_path
         raise OSError("stat-fail")
 
     class DummyResp:
+        status_code = 200
         headers = {}
 
-    def fake_head(url, timeout):  # noqa: ARG001
+        def close(self) -> None:  # pragma: no cover - trivial
+            return None
+
+    def fake_head(url, timeout, allow_redirects=False):  # noqa: ARG001
+        assert allow_redirects is False
         return DummyResp()
 
     monkeypatch.setattr(file_downloader_mod.os.path, "getmtime", fake_getmtime)
