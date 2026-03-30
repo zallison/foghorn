@@ -79,6 +79,8 @@ plugins:
 ### Plugin-specific options (`SshKeysConfig`)
 - `targets` (list[str], default: `[]`)
   - scan targets; supports IPs, CIDRs, and hostnames
+  - IP/CIDR entries also influence query-time client targeting because
+    `pre_resolve()` still calls BasePlugin `targets(ctx)`
 - `scan_threads` (int, default: `4`)
   - max concurrent scan workers
 - `ttl` (int, default: `300`)
@@ -129,7 +131,8 @@ plugins:
 ### Common BasePlugin options
 `config.logging` works as standard BasePlugin logging.
 
-`config.targets` is used by SshKeys itself for scan targets (IPs/CIDRs/hosts),
-so the usual nested BasePlugin client-targeting object is not used for this
-plugin. Use `response_allowlist` / `response_blocklist` to restrict who may
-receive SSHFP answers.
+`config.targets` is used by SshKeys for scan targets (IPs/CIDRs/hosts), and
+query handling still calls BasePlugin `targets(ctx)`. In practice, IP/CIDR
+entries in `config.targets` therefore also act as client-response filters.
+Use `response_allowlist` / `response_blocklist` for explicit response
+authorization policy.

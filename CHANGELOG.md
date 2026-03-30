@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 ### Recent incremental updates
+- Added shared SQL safety helpers for validated identifier/placeholder composition and adopted them across SQL-backed cache/query-log paths to reduce unsafe dynamic SQL interpolation risk.
+- Query-log aggregate/grouping paths now enforce a grouped-result cap (`MAX_QUERY_LOG_AGG_GROUPED_RESULTS=50000`) across admin logic and backend implementations, and grouped SQL/Mongo queries now short-circuit oversized high-cardinality result sets.
+- Query-log retention pruning for `max_records` now uses deterministic `(ts,id)` cutoff deletion in MySQL/MariaDB, PostgreSQL, SQLite, and MongoDB backends, improving bounded-retention behavior under ties and large datasets.
+- SQL/MQTT/Influx query-log backends now default to async logging, and JSON logging now applies a default prune cadence (`retention_prune_every_n_inserts=256`) when record/byte retention is enabled without an explicit prune schedule.
+- StatsCollector counter persistence now batches `increment_count` operations outside the collector lock, reducing lock hold time and contention on hot paths while preserving counter semantics.
+- DoH handling now returns HTTP 504 (instead of silent connection close) for resolver drop/timeout in threaded handlers, and DoH upstream transport now enforces bounded response-body reads with `Content-Length` prechecks and hard size caps.
+- Admin config/restart JSON endpoints now enforce a shared body-size limit (`MAX_ADMIN_JSON_BODY_BYTES=5_000_000`) in both FastAPI and threaded handlers, and aggregate API validation now applies bucket limits regardless of grouping plus grouped-result limits for grouped requests.
+- ZoneRecords DNS UPDATE journal replay now replaces only records within the target zone (preserving other zones in global maps), and compaction threshold checks now use journal sequence deltas from manifest state instead of full entry-count scans.
+- Resolver plugin behavior updates include: `EtcHosts` legacy `file_path` compatibility wiring, `GreylistExample` `setup()` lifecycle alignment with `start()` compatibility aliasing, `Filter` `:memory:` warning gating to list-backed usage, `MdnsBridge` per-type browser shutdown on service-type removal, `FlakyServer` percent-only failure-mode configuration, and `RateLimit` default deny mode moving to `nxdomain` with global-window accounting applied before per-key updates.
+- Filter plugin now only warns about `db_path=':memory:'` startup resets when allow/block data or list files are configured, avoiding noisy warnings for target-only configurations with no persisted list state.
+- Admin UI footer text was simplified to show the project GitHub link and a generic open-source label.
 - Admin UI now includes a configurable auto-refresh interval selector (off/5s/15s/1m/5m) persisted in local storage, refreshes the active tab view (stats/query-log/config/plugins), and preserves table sort state across local/searchable/paged tables.
 - Admin stats/plugin panel rendering now rebuilds content in detached fragments before swapping into the live DOM, reducing in-place mutation churn during refreshes and making disabled-state/plugin snapshot updates more stable.
 - RateLimit bootstrap enforcement now uses `bootstrap_rps` directly (without burst-factor amplification), rollover sample flushing now avoids duplicate stale-key profile writes during concurrent window transitions, and global profile sample backfill is aligned with per-key idle-gap behavior.
