@@ -1212,7 +1212,7 @@ class DockerHosts(BasePlugin):
                         {"key": "name", "label": "Name"},
                         {"key": "ipv4", "label": "IPv4", "join": ", "},
                         {"key": "ports", "label": "Ports", "join": ", "},
-                        {"key": "txt", "label": "TXT / Info", "html": True},
+                        {"key": "txt", "label": "TXT / Info", "join": " | "},
                     ],
                     # Frontend hint: expose a checkbox to hide hash-like
                     # hostnames (full/short container IDs) in the table.
