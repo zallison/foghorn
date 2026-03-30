@@ -600,7 +600,6 @@ class RateLimit(BasePlugin):
         warmup_cap = float(getattr(self, "warmup_max_rps", 0.0) or 0.0)
         hard_cap = float(getattr(self, "max_enforce_rps", 0.0) or 0.0)
         bootstrap = float(getattr(self, "bootstrap_rps", 0.0) or 0.0)
-        burst_factor = float(getattr(self, "burst_factor", 1.0) or 1.0)
         global_cap = float(getattr(self, "global_max_rps", 0.0) or 0.0)
         min_enforce = float(getattr(self, "min_enforce_rps", 0.0) or 0.0)
 
@@ -612,16 +611,13 @@ class RateLimit(BasePlugin):
                 hard_cap,
             )
 
-        if bootstrap > 0.0 and hard_cap > 0.0:
-            bootstrap_burst = float(bootstrap) * float(max(burst_factor, 1.0))
-            if bootstrap_burst > hard_cap:
-                logger.warning(
-                    "bootstrap threshold %.2f (bootstrap_rps * burst_factor) "
-                    "exceeds max_enforce_rps=%.2f; bootstrap/burst behavior will clamp "
-                    "to max_enforce_rps.",
-                    bootstrap_burst,
-                    hard_cap,
-                )
+        if bootstrap > 0.0 and hard_cap > 0.0 and bootstrap > hard_cap:
+            logger.warning(
+                "bootstrap_rps=%.2f exceeds max_enforce_rps=%.2f; "
+                "bootstrap behavior will clamp to max_enforce_rps.",
+                bootstrap,
+                hard_cap,
+            )
 
         if min_enforce > 0.0 and hard_cap > 0.0 and hard_cap < min_enforce:
             logger.warning(
@@ -1293,12 +1289,7 @@ class RateLimit(BasePlugin):
                 logger.debug("failed updating window cache for %s", key)
         # If the cache entry expired for an existing profile, infer missed windows
         # from the profile timestamp and apply them as zero-RPS samples.
-        if (
-            cache_miss
-            and prev_window_id is None
-            and prev_count is None
-            and key != _GLOBAL_RPS_DB_KEY
-        ):
+        if cache_miss and prev_window_id is None and prev_count is None:
             try:
                 last_update_ts = self._db_get_profile_last_update(key)
             except Exception:
@@ -1454,6 +1445,8 @@ class RateLimit(BasePlugin):
         ):  # pragma: no cover - defensive: config model enforces >=1
             return
         now_ts = int(time.time())
+        current_window_id = int(now_ts // float(window_seconds))
+        window_counter_ttl = max(window_seconds * 2, window_seconds + 1)
         skipped_keys = {str(k) for k in set(exclude_keys or set())}
 
         for stale_key, stale_count in stale_entries:
@@ -1462,6 +1455,41 @@ class RateLimit(BasePlugin):
                 continue
             count_i = int(stale_count)
             if count_i <= 0:
+                continue
+            should_flush = True
+            lock = self._window_lock_for_key(key_text)
+            with lock:
+                raw = self._window_cache.get((key_text, 0))
+                stored_window_id: Optional[int] = None
+                if raw is not None:
+                    try:
+                        text = raw.decode()
+                        stored_window_str, _stored_count_str = text.split(":", 1)
+                        stored_window_id = int(stored_window_str)
+                    except Exception:
+                        stored_window_id = None
+
+                # If this key already rolled into the current window (for example
+                # via a concurrent self-request), skip flush to avoid duplicate
+                # sample writes for the same completed window.
+                if stored_window_id is not None and int(stored_window_id) >= int(
+                    current_window_id
+                ):
+                    should_flush = False
+                else:
+                    try:
+                        payload = f"{current_window_id}:0".encode()
+                        self._window_cache.set(
+                            (key_text, 0),
+                            int(window_counter_ttl),
+                            payload,
+                        )
+                    except Exception:  # pragma: no cover - defensive
+                        logger.debug(
+                            "failed updating rollover marker for %s",
+                            key_text,
+                        )
+            if not should_flush:
                 continue
             rps = float(count_i) / float(window_seconds)
             try:
@@ -2379,9 +2407,15 @@ class RateLimit(BasePlugin):
         # Derive allowed RPS from learned average and refresh thresholds at the
         # configured recalculation cadence.
         if profile_is_bootstrap:
-            burst_allowed_rps, baseline_allowed_rps = (
-                self._compute_allowed_rps_thresholds(float(avg_rps))
-            )
+            # During bootstrap, enforce the configured bootstrap baseline directly
+            # without applying burst-factor amplification.
+            baseline_allowed_rps = float(avg_rps)
+            if self.max_enforce_rps > 0.0:
+                baseline_allowed_rps = min(
+                    float(baseline_allowed_rps),
+                    float(self.max_enforce_rps),
+                )
+            burst_allowed_rps = float(baseline_allowed_rps)
         else:
             burst_allowed_rps, baseline_allowed_rps = (
                 self._get_recalculated_allowed_rps(
