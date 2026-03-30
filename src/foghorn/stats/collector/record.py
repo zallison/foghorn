@@ -11,6 +11,34 @@ logger = logging.getLogger("foghorn.stats")
 
 
 class _StatsCollectorRecordUtils:
+    def _persist_increment_counts(
+        self,
+        *,
+        counts: list[tuple[str, str, int]],
+        debug_message: str,
+    ) -> None:
+        """Persist aggregated increment_count operations outside the collector lock.
+
+        Inputs:
+            counts: Sequence of (scope, key, delta) increment operations.
+            debug_message: Debug log message emitted when persistence fails.
+
+        Outputs:
+            None.
+        """
+        if not counts:
+            return
+
+        store = getattr(self, "_store", None)
+        if store is None:
+            return
+
+        try:
+            for scope, key, delta in counts:
+                store.increment_count(scope, key, int(delta))
+        except Exception:  # pragma: no cover
+            logger.debug(debug_message, exc_info=True)
+
     def record_query(self, client_ip: str, qname: str, qtype: str) -> None:
         """Record an incoming DNS query.
 
@@ -32,6 +60,7 @@ class _StatsCollectorRecordUtils:
         # This uses stats.domain._base_domain(), which handles common ccTLD patterns
         # such as example.co.uk (base = example.co.uk).
         base = _base_domain(domain)
+        persist_counts: list[tuple[str, str, int]] = []
 
         with self._lock:
             # When include_ignored_in_stats is False, ignore filters exclude
@@ -75,23 +104,22 @@ class _StatsCollectorRecordUtils:
 
             # Mirror core counters into the persistent store when available.
             if self._store is not None and not self.query_log_only:
-                try:
-                    self._store.increment_count("totals", "total_queries")
-                    if self.include_qtype_breakdown:
-                        self._store.increment_count("qtypes", qtype)
-                    self._store.increment_count("clients", client_ip)
-                    if _is_subdomain(domain):
-                        self._store.increment_count("sub_domains", domain)
-                    if base:
-                        self._store.increment_count("domains", base)
-                    if qtype and domain:
-                        qkey = f"{qtype}|{domain}"
-                        self._store.increment_count("qtype_qnames", qkey)
-                except Exception:  # pragma: no cover
-                    logger.debug(
-                        "StatsCollector: failed to persist query counters",
-                        exc_info=True,
-                    )
+                persist_counts.append(("totals", "total_queries", 1))
+                if self.include_qtype_breakdown:
+                    persist_counts.append(("qtypes", qtype, 1))
+                persist_counts.append(("clients", client_ip, 1))
+                if _is_subdomain(domain):
+                    persist_counts.append(("sub_domains", domain, 1))
+                if base:
+                    persist_counts.append(("domains", base, 1))
+                if qtype and domain:
+                    qkey = f"{qtype}|{domain}"
+                    persist_counts.append(("qtype_qnames", qkey, 1))
+
+        self._persist_increment_counts(
+            counts=persist_counts,
+            debug_message="StatsCollector: failed to persist query counters",
+        )
 
     def record_cache_hit(self, qname: str) -> None:
         """Record a cache hit.
@@ -108,6 +136,7 @@ class _StatsCollectorRecordUtils:
         """
         domain = _normalize_domain(qname)
         base = _base_domain(domain)
+        persist_counts: list[tuple[str, str, int]] = []
 
         with self._lock:
             if not self.include_ignored_in_stats:
@@ -129,16 +158,16 @@ class _StatsCollectorRecordUtils:
                 self._top_cache_hit_subdomains.add(domain)
 
             if self._store is not None and not self.query_log_only:
-                try:
-                    self._store.increment_count("totals", "cache_hits")
-                    if base:
-                        self._store.increment_count("cache_hit_domains", base)
-                        if domain and domain != base:
-                            self._store.increment_count("cache_hit_subdomains", domain)
-                except Exception:  # pragma: no cover
-                    logger.debug(
-                        "StatsCollector: failed to persist cache_hit", exc_info=True
-                    )
+                persist_counts.append(("totals", "cache_hits", 1))
+                if base:
+                    persist_counts.append(("cache_hit_domains", base, 1))
+                    if domain and domain != base:
+                        persist_counts.append(("cache_hit_subdomains", domain, 1))
+
+        self._persist_increment_counts(
+            counts=persist_counts,
+            debug_message="StatsCollector: failed to persist cache_hit",
+        )
 
     def record_cache_miss(self, qname: str) -> None:
         """Record a cache miss.
@@ -157,6 +186,7 @@ class _StatsCollectorRecordUtils:
         """
         domain = _normalize_domain(qname)
         base = _base_domain(domain)
+        persist_counts: list[tuple[str, str, int]] = []
 
         with self._lock:
             if not self.include_ignored_in_stats:
@@ -178,16 +208,16 @@ class _StatsCollectorRecordUtils:
                 self._top_cache_miss_subdomains.add(domain)
 
             if self._store is not None and not self.query_log_only:
-                try:
-                    self._store.increment_count("totals", "cache_misses")
-                    if base:
-                        self._store.increment_count("cache_miss_domains", base)
-                        if domain and domain != base:
-                            self._store.increment_count("cache_miss_subdomains", domain)
-                except Exception:  # pragma: no cover
-                    logger.debug(
-                        "StatsCollector: failed to persist cache_miss", exc_info=True
-                    )
+                persist_counts.append(("totals", "cache_misses", 1))
+                if base:
+                    persist_counts.append(("cache_miss_domains", base, 1))
+                    if domain and domain != base:
+                        persist_counts.append(("cache_miss_subdomains", domain, 1))
+
+        self._persist_increment_counts(
+            counts=persist_counts,
+            debug_message="StatsCollector: failed to persist cache_miss",
+        )
 
     def record_cache_null(self, qname: str, status: Optional[str] = None) -> None:
         """Record a response served directly by plugins without cache usage.
@@ -207,6 +237,7 @@ class _StatsCollectorRecordUtils:
         """
         domain = _normalize_domain(qname)
         base = _base_domain(domain)
+        persist_counts: list[tuple[str, str, int]] = []
 
         with self._lock:
             if not self.include_ignored_in_stats:
@@ -222,14 +253,14 @@ class _StatsCollectorRecordUtils:
                 self._totals[key] += 1
 
             if self._store is not None and not self.query_log_only:
-                try:
-                    self._store.increment_count("totals", "cache_null")
-                    if status in ("deny_pre", "override_pre"):
-                        self._store.increment_count("totals", f"cache_{status}")
-                except Exception:  # pragma: no cover
-                    logger.debug(
-                        "StatsCollector: failed to persist cache_null", exc_info=True
-                    )
+                persist_counts.append(("totals", "cache_null", 1))
+                if status in ("deny_pre", "override_pre"):
+                    persist_counts.append(("totals", f"cache_{status}", 1))
+
+        self._persist_increment_counts(
+            counts=persist_counts,
+            debug_message="StatsCollector: failed to persist cache_null",
+        )
 
     def record_dnssec_status(self, status: str) -> None:
         """Record a DNSSEC validation outcome.
@@ -251,16 +282,17 @@ class _StatsCollectorRecordUtils:
         if not totals_key:
             return
 
+        persist_counts: list[tuple[str, str, int]] = []
         with self._lock:
             self._totals[totals_key] += 1
 
             if self._store is not None and not self.query_log_only:
-                try:
-                    self._store.increment_count("totals", totals_key)
-                except Exception:  # pragma: no cover
-                    logger.debug(
-                        "StatsCollector: failed to persist dnssec_status", exc_info=True
-                    )
+                persist_counts.append(("totals", totals_key, 1))
+
+        self._persist_increment_counts(
+            counts=persist_counts,
+            debug_message="StatsCollector: failed to persist dnssec_status",
+        )
 
     def record_ede_code(self, info_code: int | str) -> None:
         """Record an Extended DNS Error (EDE) info-code.
@@ -286,16 +318,17 @@ class _StatsCollectorRecordUtils:
             return
 
         key = f"ede_{code_int}"
+        persist_counts: list[tuple[str, str, int]] = []
         with self._lock:
             self._totals[key] += 1
 
             if self._store is not None and not self.query_log_only:
-                try:
-                    self._store.increment_count("totals", key)
-                except Exception:  # pragma: no cover
-                    logger.debug(
-                        "StatsCollector: failed to persist ede_code", exc_info=True
-                    )
+                persist_counts.append(("totals", key, 1))
+
+        self._persist_increment_counts(
+            counts=persist_counts,
+            debug_message="StatsCollector: failed to persist ede_code",
+        )
 
     def record_cache_stat(self, label: str) -> None:
         """Record a cache-related classification label derived from PluginDecision.stat.
@@ -315,6 +348,7 @@ class _StatsCollectorRecordUtils:
             return
 
         key = f"cache_stat_{label}"
+        persist_counts: list[tuple[str, str, int]] = []
         with self._lock:
             try:
                 self._totals[key] += 1
@@ -322,12 +356,12 @@ class _StatsCollectorRecordUtils:
                 return
 
             if self._store is not None and not self.query_log_only:
-                try:
-                    self._store.increment_count("cache", label)
-                except Exception:  # pragma: no cover
-                    logger.debug(
-                        "StatsCollector: failed to persist cache_stat", exc_info=True
-                    )
+                persist_counts.append(("cache", label, 1))
+
+        self._persist_increment_counts(
+            counts=persist_counts,
+            debug_message="StatsCollector: failed to persist cache_stat",
+        )
 
     def record_cache_pre_plugin(self, label: str) -> None:
         """Record per-plugin pre_resolve deny/override cache classifications.
@@ -341,17 +375,17 @@ class _StatsCollectorRecordUtils:
         if not label:
             return
 
+        persist_counts: list[tuple[str, str, int]] = []
         with self._lock:
             self._totals[label] += 1
 
             if self._store is not None and not self.query_log_only:
-                try:
-                    self._store.increment_count("totals", label)
-                except Exception:  # pragma: no cover
-                    logger.debug(
-                        "StatsCollector: failed to persist cache_pre_plugin",
-                        exc_info=True,
-                    )
+                persist_counts.append(("totals", label, 1))
+
+        self._persist_increment_counts(
+            counts=persist_counts,
+            debug_message="StatsCollector: failed to persist cache_pre_plugin",
+        )
 
     def record_latency(self, seconds: float) -> None:
         """Record request latency.
