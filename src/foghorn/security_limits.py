@@ -39,6 +39,11 @@ MAX_AXFR_FRAME_BYTES: int = 65535
 # Maximum number of buckets allowed for query-log aggregate APIs.
 # This bounds memory and CPU used by dense zero-filled bucket responses.
 MAX_QUERY_LOG_AGG_BUCKETS: int = 20000
+# Maximum number of grouped rows allowed for query-log aggregate APIs.
+# This bounds memory and CPU used by high-cardinality sparse grouped responses.
+MAX_QUERY_LOG_AGG_GROUPED_RESULTS: int = 50000
+# Maximum JSON body size accepted by admin config/restart POST endpoints.
+MAX_ADMIN_JSON_BODY_BYTES: int = 5_000_000
 
 
 def is_loopback_host(host: str) -> bool:
@@ -189,6 +194,47 @@ def enforce_query_log_aggregate_bucket_limit(
         raise ValueError(
             f"requested bucket count ({count}) exceeds maximum allowed ({max_i}); "
             "reduce the time range or increase interval"
+        )
+
+    return count
+
+
+def enforce_query_log_aggregate_grouped_result_limit(
+    grouped_result_count: object,
+    *,
+    max_grouped_results: int = MAX_QUERY_LOG_AGG_GROUPED_RESULTS,
+) -> int:
+    """Brief: Validate grouped aggregate result size to prevent DoS.
+
+    Inputs:
+      - grouped_result_count: Number of grouped aggregate rows (int-like).
+      - max_grouped_results: Maximum allowed grouped row count.
+
+    Outputs:
+      - int: Computed grouped row count (0 for invalid inputs).
+
+    Raises:
+      - ValueError: When grouped_result_count exceeds max_grouped_results.
+    """
+
+    try:
+        count = int(grouped_result_count)  # type: ignore[arg-type]
+    except Exception:
+        count = 0
+    if count < 0:
+        count = 0
+
+    try:
+        max_i = int(max_grouped_results)
+    except Exception:
+        max_i = int(MAX_QUERY_LOG_AGG_GROUPED_RESULTS)
+    if max_i < 1:
+        max_i = int(MAX_QUERY_LOG_AGG_GROUPED_RESULTS)
+
+    if count > max_i:
+        raise ValueError(
+            f"requested grouped result count ({count}) exceeds maximum allowed ({max_i}); "
+            "reduce the time range, increase interval, or use a lower-cardinality group_by"
         )
 
     return count

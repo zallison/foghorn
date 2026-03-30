@@ -26,7 +26,10 @@ import threading
 import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
-from foghorn.security_limits import enforce_query_log_aggregate_bucket_limit
+from foghorn.security_limits import (
+    MAX_QUERY_LOG_AGG_GROUPED_RESULTS,
+    enforce_query_log_aggregate_bucket_limit,
+)
 
 from .base import BaseStatsStore
 from .sqlite import _is_subdomain, _normalize_domain
@@ -499,23 +502,7 @@ class MongoStatsStore(BaseStatsStore):
                 self._query_log.delete_many({"ts": {"$lt": float(cutoff_ts)}})
 
             if max_records is not None:
-                total = int(self._query_log.count_documents({}))
-                if total > int(max_records):
-                    keep_ids: list[object] = []
-                    cursor = (
-                        self._query_log.find({}, {"_id": 1})
-                        .sort([("ts", -1), ("_id", -1)])
-                        .limit(int(max_records))
-                    )
-                    for doc in cursor:
-                        doc_id = doc.get("_id")
-                        if doc_id is not None:
-                            keep_ids.append(doc_id)
-
-                    if keep_ids:
-                        self._query_log.delete_many({"_id": {"$nin": keep_ids}})
-                    else:
-                        self._query_log.delete_many({})
+                self._prune_query_log_to_max_records(int(max_records))
 
             if max_bytes is not None:
                 keep_ids_by_size: list[object] = []
@@ -556,6 +543,44 @@ class MongoStatsStore(BaseStatsStore):
             logger.error(
                 "MongoStatsStore retention prune failed: %s", exc, exc_info=True
             )
+
+    def _prune_query_log_to_max_records(self, max_records: int) -> None:
+        """Brief: Remove oldest docs beyond a max-record retention boundary.
+
+        Inputs:
+            max_records: Maximum documents to retain in query_log.
+
+        Outputs:
+            None.
+        """
+
+        if max_records <= 0:
+            return
+
+        cutoff_cursor = (
+            self._query_log.find({}, {"_id": 1, "ts": 1})
+            .sort([("ts", -1), ("_id", -1)])
+            .skip(int(max_records))
+            .limit(1)
+        )
+        cutoff_doc = next(iter(cutoff_cursor), None)
+        if not isinstance(cutoff_doc, dict):
+            return
+
+        cutoff_ts_raw = cutoff_doc.get("ts")
+        cutoff_id = cutoff_doc.get("_id")
+        if cutoff_ts_raw is None or cutoff_id is None:
+            return
+
+        cutoff_ts = float(cutoff_ts_raw)
+        self._query_log.delete_many(
+            {
+                "$or": [
+                    {"ts": {"$lt": cutoff_ts}},
+                    {"ts": cutoff_ts, "_id": {"$lte": cutoff_id}},
+                ]
+            }
+        )
 
     @staticmethod
     def _estimate_query_log_doc_bytes(doc: Dict[str, Any]) -> int:
@@ -836,6 +861,7 @@ class MongoStatsStore(BaseStatsStore):
                         }
                     },
                     {"$sort": {"_id.bucket": 1}},
+                    {"$limit": int(MAX_QUERY_LOG_AGG_GROUPED_RESULTS) + 1},
                 ]
                 for doc in self._query_log.aggregate(pipeline):
                     try:
