@@ -420,11 +420,10 @@ class _ThreadedDoHRequestHandler(http.server.BaseHTTPRequestHandler):
             self._send_empty(400)
             return
 
-        # Empty response means explicit drop/timeout from resolver; for the
-        # threaded HTTP path we simply close the connection without sending an
-        # HTTP response so DoH clients observe a network-level timeout.
+        # Empty response means explicit drop/timeout from resolver; mirror the
+        # FastAPI DoH behavior and return HTTP 504.
         if not resp:
-            self.close_connection = True
+            self._send_empty(504)
             return
 
         self._send_bytes(200, resp, _DNS_CT)
@@ -472,11 +471,10 @@ class _ThreadedDoHRequestHandler(http.server.BaseHTTPRequestHandler):
             self._send_empty(400)
             return
 
-        # Empty response -> explicit drop/timeout from resolver; close the
-        # connection without sending an HTTP response so clients see a
-        # timeout-style failure.
+        # Empty response -> explicit drop/timeout from resolver; mirror the
+        # FastAPI DoH behavior and return HTTP 504.
         if not resp:
-            self.close_connection = True
+            self._send_empty(504)
             return
 
         self._send_bytes(200, resp, _DNS_CT)

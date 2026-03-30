@@ -502,6 +502,86 @@ def test_threaded_log_message_handles_bad_format() -> None:
     assert args[0] == "%s %s"
 
 
+def test_threaded_get_empty_resolver_response_504() -> None:
+    """Brief: do_GET sends 504 when resolver returns an empty response.
+
+    Inputs:
+      - None
+
+    Outputs:
+      - _send_empty called with 504.
+    """
+
+    handler = doh_api._ThreadedDoHRequestHandler.__new__(
+        doh_api._ThreadedDoHRequestHandler
+    )
+
+    query = b"\x12\x34abcd"
+    s = base64.urlsafe_b64encode(query).decode("ascii").rstrip("=")
+    handler.path = f"/dns-query?dns={s}"  # type: ignore[assignment]
+
+    def fake_client_ip() -> str:
+        return "127.0.0.1"
+
+    def empty_resolver(
+        q: bytes, client_ip: str
+    ) -> bytes:  # pragma: no cover - exercised via handler
+        return b""
+
+    called: list[int] = []
+
+    def fake_send_empty(status: int) -> None:
+        called.append(status)
+
+    handler._client_ip = fake_client_ip  # type: ignore[assignment]
+    handler._send_empty = fake_send_empty  # type: ignore[assignment]
+    handler.resolver = empty_resolver  # type: ignore[assignment]
+
+    handler.do_GET()
+    assert called == [504]
+
+
+def test_threaded_post_empty_resolver_response_504() -> None:
+    """Brief: do_POST sends 504 when resolver returns an empty response.
+
+    Inputs:
+      - None
+
+    Outputs:
+      - _send_empty called with 504.
+    """
+
+    handler = doh_api._ThreadedDoHRequestHandler.__new__(
+        doh_api._ThreadedDoHRequestHandler
+    )
+    handler.path = "/dns-query"  # type: ignore[assignment]
+    handler.headers = {
+        "Content-Type": "application/dns-message",
+        "Content-Length": "0",
+    }  # type: ignore[assignment]
+    handler.rfile = BytesIO(b"")  # type: ignore[assignment]
+
+    def fake_client_ip() -> str:
+        return "127.0.0.1"
+
+    def empty_resolver(
+        body: bytes, client_ip: str
+    ) -> bytes:  # pragma: no cover - exercised via handler
+        return b""
+
+    called: list[int] = []
+
+    def fake_send_empty(status: int) -> None:
+        called.append(status)
+
+    handler._client_ip = fake_client_ip  # type: ignore[assignment]
+    handler._send_empty = fake_send_empty  # type: ignore[assignment]
+    handler.resolver = empty_resolver  # type: ignore[assignment]
+
+    handler.do_POST()
+    assert called == [504]
+
+
 @pytest.fixture(scope="module")
 def selfsigned(tmp_path_factory: pytest.TempPathFactory) -> tuple[str, str]:
     """Brief: Create a short-lived self-signed certificate/key pair for TLS tests.
