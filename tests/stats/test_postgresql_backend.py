@@ -78,7 +78,6 @@ class _FakeCursor:
                 # set_count path
                 self._conn.counts[(scope, key)] = value_i
             self.rowcount = 1
-            return
 
         if s.startswith("delete from counts"):
             self.rowcount = len(self._conn.counts)
@@ -253,6 +252,7 @@ def _make_backend(fake_postgres_driver) -> PostgresStatsStore:  # type: ignore[n
         password="pw",
         database="db",
         connect_kwargs={"sslmode": "require"},
+        async_logging=False,
     )
 
 
@@ -275,6 +275,29 @@ def test_constructor_builds_connection_kwargs(fake_postgres_driver) -> None:  # 
     assert conn.kwargs["user"] == "user"
     assert conn.kwargs["password"] == "pw"
     assert conn.kwargs["sslmode"] == "require"
+
+
+def test_constructor_defaults_to_async_logging(
+    fake_postgres_driver,
+) -> None:  # type: ignore[no-untyped-def]
+    """Brief: Constructor enables async logging by default for SQL write decoupling.
+
+    Inputs:
+      - fake_postgres_driver: fixture installing fake driver.
+
+    Outputs:
+      - None; asserts async logging default is enabled.
+    """
+
+    backend = PostgresStatsStore(
+        host="127.0.0.42",
+        port=55432,
+        user="user",
+        password="pw",
+        database="db",
+        connect_kwargs={"sslmode": "require"},
+    )
+    assert backend._async_logging is True
 
 
 def test_health_check_true(fake_postgres_driver) -> None:  # type: ignore[no-untyped-def]
@@ -788,10 +811,17 @@ def test_apply_query_log_retention_runs_limits_and_vacuum(
         def __init__(self) -> None:
             self.rowcount = 0
             self.executes: List[Tuple[str, Tuple[Any, ...]]] = []
+            self._last_sql = ""
 
         def execute(self, sql: str, params: Tuple[Any, ...] = ()) -> None:
             self.executes.append((sql, tuple(params)))
+            self._last_sql = str(sql).lower()
             self.rowcount = 1
+
+        def fetchone(self) -> Tuple[float, int] | None:
+            if "select ts, id from query_log" in self._last_sql:
+                return (999.0, 1234)
+            return None
 
     cur = _RetentionCursor()
     prune_calls: List[int] = []
@@ -821,7 +851,8 @@ def test_apply_query_log_retention_runs_limits_and_vacuum(
 
     joined_sql = "\n".join(sql for (sql, _params) in cur.executes).lower()
     assert "delete from query_log where ts < %s" in joined_sql
-    assert "with doomed as" in joined_sql
+    assert "select ts, id from query_log" in joined_sql
+    assert "where ts < %s or (ts = %s and id <= %s)" in joined_sql
     assert prune_calls == [128]
     assert len(vacuum_calls) == 1
 
@@ -1291,10 +1322,17 @@ def test_apply_query_log_retention_without_cutoff_uses_record_limit(
         def __init__(self) -> None:
             self.rowcount = 1
             self.executes: List[Tuple[str, Tuple[Any, ...]]] = []
+            self._last_sql = ""
 
         def execute(self, sql: str, params: Tuple[Any, ...] = ()) -> None:
             self.executes.append((sql, tuple(params)))
+            self._last_sql = str(sql).lower()
             self.rowcount = 1
+
+        def fetchone(self) -> Tuple[float, int] | None:
+            if "select ts, id from query_log" in self._last_sql:
+                return (123.0, 100)
+            return None
 
     cur = _Cursor()
     vacuum_calls: List[float] = []
@@ -1313,8 +1351,12 @@ def test_apply_query_log_retention_without_cutoff_uses_record_limit(
 
     backend._apply_query_log_retention()
     joined_sql = "\n".join(sql for (sql, _params) in cur.executes).lower()
-    assert "delete from query_log where ts < %s" not in joined_sql
-    assert "with doomed as" in joined_sql
+    assert "select ts, id from query_log" in joined_sql
+    assert "where ts < %s or (ts = %s and id <= %s)" in joined_sql
+    assert all(
+        sql.strip().lower() != "delete from query_log where ts < %s"
+        for (sql, _params) in cur.executes
+    )
     assert len(vacuum_calls) == 1
 
 
@@ -1455,6 +1497,7 @@ def test_batch_writes_flush_on_read_paths(
         batch_writes=True,
         batch_max_size=100,
         batch_time_sec=9999.0,
+        async_logging=False,
     )
     conn: _FakeConn = backend._conn  # type: ignore[assignment]
     baseline_commits = int(conn.commit_calls)
@@ -1484,6 +1527,7 @@ def test_batch_writes_defer_retention_until_flush(
         batch_writes=True,
         batch_max_size=100,
         batch_time_sec=9999.0,
+        async_logging=False,
     )
     retention_calls: List[str] = []
     monkeypatch.setattr(

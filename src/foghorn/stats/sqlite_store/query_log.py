@@ -4,7 +4,10 @@ import json
 import logging
 from typing import Any, Dict, List, Optional, Tuple
 
-from foghorn.security_limits import enforce_query_log_aggregate_bucket_limit
+from foghorn.security_limits import (
+    MAX_QUERY_LOG_AGG_GROUPED_RESULTS,
+    enforce_query_log_aggregate_bucket_limit,
+)
 from foghorn.utils import dns_names
 
 logger = logging.getLogger("foghorn.stats")
@@ -313,10 +316,16 @@ class _QueryLogUtils:
                     "COUNT(1) AS c "
                     f"FROM query_log{where_sql} "
                     "GROUP BY bucket, group_value "
-                    "ORDER BY bucket ASC"
+                    "ORDER BY bucket ASC "
+                    "LIMIT ?"
                 )
                 cur = self._conn.execute(
-                    sql, tuple([start_f, interval_i] + params)
+                    sql,
+                    tuple(
+                        [start_f, interval_i]
+                        + params
+                        + [int(MAX_QUERY_LOG_AGG_GROUPED_RESULTS) + 1]
+                    ),
                 )  # type: ignore[attr-defined]
                 for bucket, group_value, c in cur:
                     try:

@@ -280,6 +280,7 @@ def _make_backend(**kwargs: Any) -> MySqlStatsStore:
         "password": "pw",
         "database": "db",
         "connect_kwargs": {"ssl": True},
+        "async_logging": False,
     }
     base.update(kwargs)
     return MySqlStatsStore(**base)
@@ -304,6 +305,27 @@ def test_constructor_builds_connection_kwargs(fake_mysql_driver) -> None:  # typ
     assert conn.kwargs["user"] == "user"
     assert conn.kwargs["password"] == "pw"
     assert conn.kwargs["ssl"] is True
+
+
+def test_constructor_defaults_to_async_logging(fake_mysql_driver) -> None:  # type: ignore[no-untyped-def]
+    """Brief: Constructor enables async logging by default for SQL write decoupling.
+
+    Inputs:
+      - fake_mysql_driver: fixture installing fake driver.
+
+    Outputs:
+      - None; asserts async logging default is enabled.
+    """
+
+    backend = MySqlStatsStore(
+        host="127.0.0.42",
+        port=3307,
+        user="user",
+        password="pw",
+        database="db",
+        connect_kwargs={"ssl": True},
+    )
+    assert backend._async_logging is True
 
 
 def test_driver_defaults_to_mariadb_when_available(
