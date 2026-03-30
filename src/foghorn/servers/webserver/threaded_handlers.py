@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING, Any, Dict, Optional
 
 import yaml
 from ...config.config_schema import get_default_schema_path
-from ...security_limits import maybe_parse_content_length
+from ...security_limits import MAX_ADMIN_JSON_BODY_BYTES, maybe_parse_content_length
 
 from ...stats import StatsCollector, StatsSnapshot, get_process_uptime_seconds
 from ...utils.config_diagram import (
@@ -3209,8 +3209,10 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             if not self._require_auth():
                 return
             raw_body = self._read_request_body_limited(
-                max_bytes=5_000_000,
-                too_large_detail="request body too large (max 5,000,000 bytes)",
+                max_bytes=int(MAX_ADMIN_JSON_BODY_BYTES),
+                too_large_detail=(
+                    f"request body too large (max {int(MAX_ADMIN_JSON_BODY_BYTES):,} bytes)"
+                ),
             )
             if raw_body is None:
                 return
@@ -3257,8 +3259,14 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         elif path in {"/restart", "/api/v1/restart"}:
             if not self._require_auth():
                 return
-            length = int(self.headers.get("Content-Length", "0") or "0")
-            raw_body = self.rfile.read(length) if length > 0 else b""
+            raw_body = self._read_request_body_limited(
+                max_bytes=int(MAX_ADMIN_JSON_BODY_BYTES),
+                too_large_detail=(
+                    f"request body too large (max {int(MAX_ADMIN_JSON_BODY_BYTES):,} bytes)"
+                ),
+            )
+            if raw_body is None:
+                return
             delay_seconds = 1.0
             if raw_body:
                 try:
