@@ -9,9 +9,19 @@ import sys as _sys
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
-from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile, status
+from fastapi import (
+    Depends,
+    FastAPI,
+    File,
+    HTTPException,
+    Query,
+    Request,
+    UploadFile,
+    status,
+)
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from ...config.config_schema import get_default_schema_path
+from ...security_limits import MAX_ADMIN_JSON_BODY_BYTES, maybe_parse_content_length
 
 from ...stats import StatsCollector
 from ...utils.config_diagram import (
@@ -555,6 +565,90 @@ def _register_config_routes(app: FastAPI, auth_dep: Any) -> None:
 
         _schedule_process_signal(signal.SIGHUP, delay_seconds=float(delay_seconds))
 
+    async def _read_json_body_limited(
+        request: Request, *, max_bytes: int, too_large_detail: str
+    ) -> Dict[str, Any]:
+        """Brief: Read and parse a JSON-object request body with a strict byte cap.
+
+        Inputs:
+          - request: FastAPI Request object.
+          - max_bytes: Maximum accepted body size in bytes.
+          - too_large_detail: Error detail text used for 413 responses.
+
+        Outputs:
+          - Parsed JSON object as Dict[str, Any].
+
+        Notes:
+          - Uses Content-Length for early rejection when available.
+          - Enforces the same cap while streaming body chunks.
+          - Empty body is treated as {}.
+        """
+
+        max_allowed = int(max_bytes)
+        length = maybe_parse_content_length(request.headers.get("content-length"))
+        if length > max_allowed:
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail=str(too_large_detail),
+            )
+
+        chunks: list[bytes] = []
+        total = 0
+        try:
+            async for chunk in request.stream():
+                if not chunk:
+                    continue
+                total += len(chunk)
+                if total > max_allowed:
+                    raise HTTPException(
+                        status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                        detail=str(too_large_detail),
+                    )
+                chunks.append(bytes(chunk))
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"failed to read request body: {exc}",
+            ) from exc
+
+        raw_body = b"".join(chunks)
+        if not raw_body:
+            return {}
+
+        try:
+            body = json.loads(raw_body.decode("utf-8") or "{}")
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="invalid JSON body",
+            ) from exc
+
+        if not isinstance(body, dict):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="request body must be a JSON object",
+            )
+        return body
+
+    async def _read_admin_json_body(request: Request) -> Dict[str, Any]:
+        """Brief: Parse admin JSON request bodies using the shared size limit.
+
+        Inputs:
+          - request: FastAPI Request object.
+
+        Outputs:
+          - Parsed JSON object for admin config/restart endpoints.
+        """
+
+        max_bytes = int(MAX_ADMIN_JSON_BODY_BYTES)
+        return await _read_json_body_limited(
+            request,
+            max_bytes=max_bytes,
+            too_large_detail=f"request body too large (max {max_bytes:,} bytes)",
+        )
+
     def _save_config_to_disk(*, body: Dict[str, Any]) -> Dict[str, Any]:
         """Brief: Persist raw YAML to disk and validate it.
 
@@ -659,7 +753,9 @@ def _register_config_routes(app: FastAPI, auth_dep: Any) -> None:
         dependencies=[Depends(auth_dep)],
         include_in_schema=False,
     )
-    async def save_config(body: Dict[str, Any]) -> JSONResponse:
+    async def save_config(
+        body: Dict[str, Any] = Depends(_read_admin_json_body),
+    ) -> JSONResponse:
         """Brief: Persist config YAML without applying reload or restart.
 
         Inputs:
@@ -698,7 +794,9 @@ def _register_config_routes(app: FastAPI, auth_dep: Any) -> None:
         dependencies=[Depends(auth_dep)],
         include_in_schema=False,
     )
-    async def save_and_reload_config(body: Dict[str, Any]) -> JSONResponse:
+    async def save_and_reload_config(
+        body: Dict[str, Any] = Depends(_read_admin_json_body),
+    ) -> JSONResponse:
         """Brief: Persist config YAML and apply an in-process reload when possible.
 
         Inputs:
@@ -799,7 +897,9 @@ def _register_config_routes(app: FastAPI, auth_dep: Any) -> None:
         dependencies=[Depends(auth_dep)],
         include_in_schema=False,
     )
-    async def save_and_restart_config(body: Dict[str, Any]) -> JSONResponse:
+    async def save_and_restart_config(
+        body: Dict[str, Any] = Depends(_read_admin_json_body),
+    ) -> JSONResponse:
         """Brief: Persist config YAML and schedule a restart (SIGHUP).
 
         Inputs:
@@ -1027,7 +1127,9 @@ def _register_config_routes(app: FastAPI, auth_dep: Any) -> None:
         dependencies=[Depends(auth_dep)],
         include_in_schema=False,
     )
-    async def restart_process(body: Dict[str, Any] | None = None) -> JSONResponse:
+    async def restart_process(
+        body: Dict[str, Any] = Depends(_read_admin_json_body),
+    ) -> JSONResponse:
         """Brief: Schedule a process restart (SIGHUP) without saving or reloading.
 
         Inputs:
@@ -1038,11 +1140,10 @@ def _register_config_routes(app: FastAPI, auth_dep: Any) -> None:
         """
 
         delay_seconds = 1.0
-        if isinstance(body, dict):
-            try:
-                delay_seconds = float(body.get("delay_seconds", delay_seconds))
-            except Exception:
-                delay_seconds = 1.0
+        try:
+            delay_seconds = float(body.get("delay_seconds", delay_seconds))
+        except Exception:
+            delay_seconds = 1.0
 
         _schedule_restart(delay_seconds=delay_seconds)
 
