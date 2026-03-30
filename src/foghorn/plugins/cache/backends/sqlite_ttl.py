@@ -12,8 +12,10 @@ from foghorn.plugins.cache.safe_codec import (
     safe_deserialize,
     safe_serialize,
 )
+from foghorn.plugins.sql_safety import validate_sql_identifier
 
 _logger = logging.getLogger(__name__)
+_SQLITE_NAMESPACE_MAX_LENGTH = 63
 
 
 class SQLite3TTLCache:
@@ -77,8 +79,14 @@ class SQLite3TTLCache:
         """
 
         self.db_path = str(db_path)
-
-        self.namespace = str(namespace or "ttl_cache")
+        # namespace/table is interpolated into SQL text and therefore must be a
+        # validated identifier token instead of user-controlled raw text.
+        table_name = table if table is not None else namespace
+        self.namespace = validate_sql_identifier(
+            str(table_name or "ttl_cache"),
+            field_name="namespace",
+            max_length=_SQLITE_NAMESPACE_MAX_LENGTH,
+        )
         self.journal_mode = str(journal_mode or "WAL")
         self.create_dir = bool(create_dir)
 
@@ -206,7 +214,7 @@ class SQLite3TTLCache:
 
             cur = self._conn.cursor()
             cur.execute(
-                f"SELECT value_blob, value_is_pickle, expiry FROM {table} WHERE key_blob=? AND key_is_pickle=?",
+                f"SELECT value_blob, value_is_pickle, expiry FROM {table} WHERE key_blob=? AND key_is_pickle=?",  # noqa: S608 - table identifier validated in __init__
                 (key_blob, int(key_is_pickle)),
             )
             row = cur.fetchone()
@@ -222,7 +230,7 @@ class SQLite3TTLCache:
             # Malformed row: drop it and treat as a miss for diagnostics.
             cur = self._conn.cursor()
             cur.execute(
-                f"DELETE FROM {table} WHERE key_blob=? AND key_is_pickle=?",
+                f"DELETE FROM {table} WHERE key_blob=? AND key_is_pickle=?",  # noqa: S608 - table identifier validated in __init__
                 (key_blob, int(key_is_pickle)),
             )
             self._conn.commit()
@@ -232,7 +240,7 @@ class SQLite3TTLCache:
         if now >= expiry_f:
             cur = self._conn.cursor()
             cur.execute(
-                f"DELETE FROM {table} WHERE key_blob=? AND key_is_pickle=?",
+                f"DELETE FROM {table} WHERE key_blob=? AND key_is_pickle=?",  # noqa: S608 - table identifier validated in __init__
                 (key_blob, int(key_is_pickle)),
             )
             self._conn.commit()
@@ -257,7 +265,7 @@ class SQLite3TTLCache:
         except Exception:
             cur = self._conn.cursor()
             cur.execute(
-                f"DELETE FROM {table} WHERE key_blob=? AND key_is_pickle=?",
+                f"DELETE FROM {table} WHERE key_blob=? AND key_is_pickle=?",  # noqa: S608 - table identifier validated in __init__
                 (key_blob, int(key_is_pickle)),
             )
             self._conn.commit()
@@ -290,7 +298,7 @@ class SQLite3TTLCache:
             self.calls_total += 1
             cur = self._conn.cursor()
             cur.execute(
-                f"SELECT value_blob, value_is_pickle, expiry, ttl FROM {table} WHERE key_blob=? AND key_is_pickle=?",
+                f"SELECT value_blob, value_is_pickle, expiry, ttl FROM {table} WHERE key_blob=? AND key_is_pickle=?",  # noqa: S608 - table identifier validated in __init__
                 (key_blob, int(key_is_pickle)),
             )
             row = cur.fetchone()
@@ -348,7 +356,9 @@ class SQLite3TTLCache:
         table = self.namespace
         try:
             cur = self._conn.cursor()
-            cur.execute(f"SELECT COUNT(*) FROM {table}")
+            cur.execute(  # noqa: S608 - table identifier validated in __init__
+                f"SELECT COUNT(*) FROM {table}",  # noqa: S608 - table identifier validated in __init__
+            )
             row = cur.fetchone()
             count = int(row[0]) if row and row[0] is not None else 0
         except Exception:
@@ -361,7 +371,7 @@ class SQLite3TTLCache:
         try:
             cur2 = self._conn.cursor()
             cur2.execute(
-                f"SELECT key_blob, key_is_pickle FROM {table} ORDER BY expiry ASC LIMIT ?",
+                f"SELECT key_blob, key_is_pickle FROM {table} ORDER BY expiry ASC LIMIT ?",  # noqa: S608 - table identifier validated in __init__
                 (int(over),),
             )
             victims = list(cur2.fetchall() or [])
@@ -375,7 +385,7 @@ class SQLite3TTLCache:
         try:
             cur3 = self._conn.cursor()
             cur3.executemany(
-                f"DELETE FROM {table} WHERE key_blob=? AND key_is_pickle=?",
+                f"DELETE FROM {table} WHERE key_blob=? AND key_is_pickle=?",  # noqa: S608 - table identifier validated in __init__
                 [(v[0], int(v[1])) for v in victims],
             )
             removed = int(cur3.rowcount or 0)
@@ -411,7 +421,7 @@ class SQLite3TTLCache:
         table = self.namespace
         with self._lock:
             self._conn.execute(
-                f"INSERT OR REPLACE INTO {table} (key_blob, key_is_pickle, expiry, ttl, value_blob, value_is_pickle) "
+                f"INSERT OR REPLACE INTO {table} (key_blob, key_is_pickle, expiry, ttl, value_blob, value_is_pickle) "  # noqa: S608 - table identifier validated in __init__
                 "VALUES (?, ?, ?, ?, ?, ?)",
                 (
                     key_blob,
@@ -446,7 +456,7 @@ class SQLite3TTLCache:
         with self._lock:
             cur = self._conn.cursor()
             cur.execute(
-                f"DELETE FROM {table} WHERE key_blob=? AND key_is_pickle=?",
+                f"DELETE FROM {table} WHERE key_blob=? AND key_is_pickle=?",  # noqa: S608 - table identifier validated in __init__
                 (key_blob, int(key_is_pickle)),
             )
             removed = int(cur.rowcount or 0)
@@ -467,7 +477,10 @@ class SQLite3TTLCache:
         table = self.namespace
         with self._lock:
             cur = self._conn.cursor()
-            cur.execute(f"DELETE FROM {table} WHERE expiry <= ?", (float(now),))
+            cur.execute(  # noqa: S608 - table identifier validated in __init__
+                f"DELETE FROM {table} WHERE expiry <= ?",  # noqa: S608 - table identifier validated in __init__
+                (float(now),),
+            )
             removed = int(cur.rowcount or 0)
             self._conn.commit()
         if removed > 0:

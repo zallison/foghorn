@@ -11,8 +11,10 @@ from foghorn.plugins.cache.safe_codec import (
     safe_deserialize,
     safe_serialize,
 )
+from foghorn.plugins.sql_safety import validate_sql_identifier, validate_sql_placeholder
 
 _logger = logging.getLogger(__name__)
+_MYSQL_NAMESPACE_MAX_LENGTH = 53
 
 
 def _normalize_mysql_driver_name(raw: object) -> str | None:
@@ -269,20 +271,18 @@ class MySQLTTLCache:
             driver=driver, driver_fallback=driver_fallback
         )
         self._param_style = param_style
-        self._placeholder = "%s" if param_style == "format" else "?"
+        self._placeholder = validate_sql_placeholder(
+            "%s" if param_style == "format" else "?",
+            allowed_placeholders={"%s", "?"},
+        )
 
-        # Validate namespace/table name
-        if not isinstance(namespace, str) or not namespace.strip():
-            raise ValueError("namespace must be a non-empty string")
-
-        import re
-
-        if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", namespace):
-            raise ValueError(
-                f"namespace {namespace!r} must match ^[A-Za-z_][A-Za-z0-9_]*$"
-            )
-
-        self.namespace = str(namespace)
+        # namespace is later interpolated into SQL text and cannot be bound as a
+        # value parameter; enforce strict identifier validation up front.
+        self.namespace = validate_sql_identifier(
+            namespace,
+            field_name="namespace",
+            max_length=_MYSQL_NAMESPACE_MAX_LENGTH,
+        )
 
         # Per-cache access counters used by admin snapshots.
         self.calls_total: int = 0
@@ -407,7 +407,7 @@ class MySQLTTLCache:
 
             cur = self._conn.cursor()
             cur.execute(
-                f"SELECT value_blob, value_is_pickle, expiry FROM {table} WHERE key_digest={self._placeholder}",
+                f"SELECT value_blob, value_is_pickle, expiry FROM {table} WHERE key_digest={self._placeholder}",  # noqa: S608 - table/placeholder validated in __init__
                 (key_digest,),
             )
             row = cur.fetchone()
@@ -422,7 +422,7 @@ class MySQLTTLCache:
         except Exception:  # pragma: nocover - defensive
             cur = self._conn.cursor()
             cur.execute(
-                f"DELETE FROM {table} WHERE key_digest={self._placeholder}",
+                f"DELETE FROM {table} WHERE key_digest={self._placeholder}",  # noqa: S608 - table/placeholder validated in __init__
                 (key_digest,),
             )
             self._conn.commit()
@@ -432,7 +432,7 @@ class MySQLTTLCache:
         if now >= expiry_f:
             cur = self._conn.cursor()
             cur.execute(
-                f"DELETE FROM {table} WHERE key_digest={self._placeholder}",
+                f"DELETE FROM {table} WHERE key_digest={self._placeholder}",  # noqa: S608 - table/placeholder validated in __init__
                 (key_digest,),
             )
             self._conn.commit()
@@ -449,7 +449,7 @@ class MySQLTTLCache:
         except Exception:  # pragma: nocover - defensive
             cur = self._conn.cursor()
             cur.execute(
-                f"DELETE FROM {table} WHERE key_digest={self._placeholder}",
+                f"DELETE FROM {table} WHERE key_digest={self._placeholder}",  # noqa: S608 - table/placeholder validated in __init__
                 (key_digest,),
             )
             self._conn.commit()
@@ -482,7 +482,7 @@ class MySQLTTLCache:
             self.calls_total += 1
             cur = self._conn.cursor()
             cur.execute(
-                f"SELECT value_blob, value_is_pickle, expiry, ttl FROM {table} WHERE key_digest={self._placeholder}",
+                f"SELECT value_blob, value_is_pickle, expiry, ttl FROM {table} WHERE key_digest={self._placeholder}",  # noqa: S608 - table/placeholder validated in __init__
                 (key_digest,),
             )
             row = cur.fetchone()
@@ -540,19 +540,20 @@ class MySQLTTLCache:
         placeholder = self._placeholder
         with self._lock:
             cur = self._conn.cursor()
+            upsert_sql = (
+                f"INSERT INTO {table} "  # noqa: S608 - table/placeholder validated in __init__
+                "(key_digest, key_blob, key_is_pickle, expiry, ttl, value_blob, value_is_pickle) "
+                f"VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}) "
+                "ON DUPLICATE KEY UPDATE "
+                "key_blob=VALUES(key_blob), "
+                "key_is_pickle=VALUES(key_is_pickle), "
+                "expiry=VALUES(expiry), "
+                "ttl=VALUES(ttl), "
+                "value_blob=VALUES(value_blob), "
+                "value_is_pickle=VALUES(value_is_pickle)"
+            )  # noqa: S608 - table/placeholder validated in __init__
             cur.execute(
-                f"""
-                INSERT INTO {table}
-                (key_digest, key_blob, key_is_pickle, expiry, ttl, value_blob, value_is_pickle)
-                VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})
-                ON DUPLICATE KEY UPDATE
-                key_blob=VALUES(key_blob),
-                key_is_pickle=VALUES(key_is_pickle),
-                expiry=VALUES(expiry),
-                ttl=VALUES(ttl),
-                value_blob=VALUES(value_blob),
-                value_is_pickle=VALUES(value_is_pickle)
-                """,
+                upsert_sql,
                 (
                     key_digest,
                     key_blob,
@@ -580,7 +581,7 @@ class MySQLTTLCache:
         with self._lock:
             cur = self._conn.cursor()
             cur.execute(
-                f"DELETE FROM {table} WHERE expiry <= {self._placeholder}",
+                f"DELETE FROM {table} WHERE expiry <= {self._placeholder}",  # noqa: S608 - table/placeholder validated in __init__
                 (float(now),),
             )
             removed = int(cur.rowcount or 0)
