@@ -9,6 +9,7 @@ All notable changes to this project will be documented in this file.
 - Admin web auth evaluation is now centralized and shared across FastAPI and threaded handlers, token checks use constant-time comparison, unsupported auth modes now fail closed with explicit 500 errors, and threaded `/api/v1/plugin_pages` plus `/api/v1/ratelimit` now enforce auth consistently.
 - Added fallback/admin auth parity coverage comparing FastAPI and threaded responses for token-mode success/failure and missing-token error paths, plus targeted coverage for the newly protected threaded endpoints.
 - DockerHosts admin snapshot table metadata now renders TXT/Info values as a joined text list (`' | '`) rather than HTML-marked content.
+- RateLimit burst-threshold recalculation now applies `min_enforce_rps` as a floor before max-clamping, aligning derived burst limits with enforcement threshold computations.
 - Added shared SQL safety helpers for validated identifier/placeholder composition and adopted them across SQL-backed cache/query-log paths to reduce unsafe dynamic SQL interpolation risk.
 - Query-log aggregate/grouping paths now enforce a grouped-result cap (`MAX_QUERY_LOG_AGG_GROUPED_RESULTS=50000`) across admin logic and backend implementations, and grouped SQL/Mongo queries now short-circuit oversized high-cardinality result sets.
 - Query-log retention pruning for `max_records` now uses deterministic `(ts,id)` cutoff deletion in MySQL/MariaDB, PostgreSQL, SQLite, and MongoDB backends, improving bounded-retention behavior under ties and large datasets.
