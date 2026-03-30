@@ -8,7 +8,14 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from .base import BaseStatsStore
-from foghorn.security_limits import enforce_query_log_aggregate_bucket_limit
+from foghorn.plugins.sql_safety import (
+    resolve_query_log_group_column,
+    validate_sql_placeholder,
+)
+from foghorn.security_limits import (
+    MAX_QUERY_LOG_AGG_GROUPED_RESULTS,
+    enforce_query_log_aggregate_bucket_limit,
+)
 from foghorn.utils import dns_names
 from .sqlite import _is_subdomain, _normalize_domain
 
@@ -246,7 +253,7 @@ class MySqlStatsStore(BaseStatsStore):
         password: Optional[str] = None,
         database: str = "foghorn_stats",
         connect_kwargs: Optional[Dict[str, Any]] = None,
-        async_logging: bool = False,
+        async_logging: bool = True,
         max_logging_queue: int = 16384,
         batch_writes: bool = False,
         batch_time_sec: float = 15.0,
@@ -279,10 +286,13 @@ class MySqlStatsStore(BaseStatsStore):
             kwargs.update(dict(connect_kwargs))
 
         self._driver = driver_mod
-        self._placeholder = str(placeholder)
+        self._placeholder = validate_sql_placeholder(
+            placeholder,
+            allowed_placeholders={"%s", "?"},
+        )
         self._conn = driver_mod.connect(**kwargs)
 
-        # Use synchronous logging by default for SQL stats backends.
+        # Use async logging by default for SQL stats backends.
         self._async_logging = bool(async_logging)
         # BaseStatsStore worker queue capacity
         try:
@@ -715,9 +725,9 @@ class MySqlStatsStore(BaseStatsStore):
 
         ph = self._placeholder
         sql = (
-            "INSERT INTO query_log (ts, client_ip, name, qtype, upstream_id, rcode, "
+            "INSERT INTO query_log (ts, client_ip, name, qtype, upstream_id, rcode, "  # noqa: S608 - placeholder token validated in __init__
             "status, error, first, result_json) "
-            f"VALUES ({ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph})"
+            f"VALUES ({ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph})"  # noqa: S608 - placeholder token validated in __init__
         )
         self._execute(
             sql,
@@ -766,23 +776,15 @@ class MySqlStatsStore(BaseStatsStore):
             changed = False
             if cutoff_ts is not None:
                 cur.execute(
-                    f"DELETE FROM query_log WHERE ts < {ph}",
+                    f"DELETE FROM query_log WHERE ts < {ph}",  # noqa: S608 - placeholder token validated in __init__
                     (float(cutoff_ts),),
                 )
                 changed = changed or bool(getattr(cur, "rowcount", 0))
 
             if max_records is not None:
-                cur.execute(
-                    (
-                        "DELETE FROM query_log WHERE id NOT IN ("
-                        "SELECT id FROM ("
-                        f"SELECT id FROM query_log ORDER BY ts DESC, id DESC LIMIT {ph}"
-                        ") AS retained"
-                        ")"
-                    ),
-                    (int(max_records),),
+                changed = (
+                    self._prune_query_log_to_max_records(int(max_records)) or changed
                 )
-                changed = changed or bool(getattr(cur, "rowcount", 0))
 
             if max_bytes is not None:
                 changed = self._prune_query_log_to_max_bytes(int(max_bytes)) or changed
@@ -794,6 +796,40 @@ class MySqlStatsStore(BaseStatsStore):
             logger.error(
                 "MySqlStatsStore retention prune failed: %s", exc, exc_info=True
             )
+
+    def _prune_query_log_to_max_records(self, max_records: int) -> bool:
+        """Brief: Remove oldest rows beyond a max-record retention boundary.
+
+        Inputs:
+            max_records: Maximum rows to retain in query_log.
+
+        Outputs:
+            bool: True when one or more rows were deleted.
+        """
+
+        if max_records <= 0:
+            return False
+
+        ph = self._placeholder
+        cur_cutoff = self._conn.cursor()
+        cutoff_sql = f"SELECT ts, id FROM query_log ORDER BY ts DESC, id DESC LIMIT 1 OFFSET {ph}"  # noqa: S608 - placeholder token validated in __init__
+        cur_cutoff.execute(
+            cutoff_sql,
+            (int(max_records),),
+        )
+        cutoff_row = cur_cutoff.fetchone()
+        if cutoff_row is None:
+            return False
+
+        cutoff_ts = float(cutoff_row[0])
+        cutoff_id = int(cutoff_row[1])
+        cur = self._conn.cursor()
+        delete_sql = f"DELETE FROM query_log WHERE ts < {ph} OR (ts = {ph} AND id <= {ph})"  # noqa: S608 - placeholder token validated in __init__
+        cur.execute(
+            delete_sql,
+            (cutoff_ts, cutoff_ts, cutoff_id),
+        )
+        return bool(getattr(cur, "rowcount", 0))
 
     def _prune_query_log_to_max_bytes(self, max_bytes: int) -> bool:
         """Brief: Remove oldest rows until estimated query_log bytes fit a cap.
@@ -846,14 +882,15 @@ class MySqlStatsStore(BaseStatsStore):
             rows_to_delete = max(1, min(total_rows, int(math.ceil(ratio * total_rows))))
 
             cur_del = self._conn.cursor()
+            prune_sql = (
+                "DELETE FROM query_log WHERE id IN ("  # noqa: S608 - placeholder token validated in __init__
+                "SELECT id FROM ("
+                f"SELECT id FROM query_log ORDER BY ts ASC, id ASC LIMIT {ph}"  # noqa: S608 - placeholder token validated in __init__
+                ") AS doomed"
+                ")"
+            )
             cur_del.execute(
-                (
-                    "DELETE FROM query_log WHERE id IN ("
-                    "SELECT id FROM ("
-                    f"SELECT id FROM query_log ORDER BY ts ASC, id ASC LIMIT {ph}"
-                    ") AS doomed"
-                    ")"
-                ),
+                prune_sql,
                 (int(rows_to_delete),),
             )
             if not bool(getattr(cur_del, "rowcount", 0)):
@@ -976,17 +1013,20 @@ class MySqlStatsStore(BaseStatsStore):
 
         self._flush_pending_writes()
         cur = self._conn.cursor()
-        cur.execute(f"SELECT COUNT(1) FROM query_log{where_sql}", tuple(params))
+        cur.execute(
+            f"SELECT COUNT(1) FROM query_log{where_sql}",  # noqa: S608 - where_sql contains only fixed allowlisted clauses with bound params
+            tuple(params),
+        )
         row = cur.fetchone()
         total = int(row[0]) if row else 0
 
         offset = (page_i - 1) * page_size_i
         ph = self._placeholder
         sql = (
-            "SELECT id, ts, client_ip, name, qtype, upstream_id, rcode, status, "
+            "SELECT id, ts, client_ip, name, qtype, upstream_id, rcode, status, "  # noqa: S608 - where_sql clauses and placeholder token are validated
             "error, first, result_json "
             f"FROM query_log{where_sql} "
-            f"ORDER BY ts DESC, id DESC LIMIT {ph} OFFSET {ph}"
+            f"ORDER BY ts DESC, id DESC LIMIT {ph} OFFSET {ph}"  # noqa: S608 - where_sql clauses and placeholder token are validated
         )
         cur2 = self._conn.cursor()
         cur2.execute(sql, tuple(params + [page_size_i, offset]))
@@ -1098,19 +1138,7 @@ class MySqlStatsStore(BaseStatsStore):
 
         where_sql = " WHERE " + " AND ".join(where)
 
-        group_col = None
-        group_label = None
-        if group_by:
-            gb = str(group_by).strip().lower()
-            mapping = {
-                "client_ip": "client_ip",
-                "qtype": "qtype",
-                "qname": "name",
-                "rcode": "rcode",
-            }
-            if gb in mapping:
-                group_col = mapping[gb]
-                group_label = gb
+        group_col, group_label = resolve_query_log_group_column(group_by)
 
         self._flush_pending_writes()
         cur = self._conn.cursor()
@@ -1118,12 +1146,19 @@ class MySqlStatsStore(BaseStatsStore):
         if group_col:
             ph = self._placeholder
             sql = (
-                f"SELECT FLOOR((ts - {ph}) / {ph}) AS bucket, "
+                f"SELECT FLOOR((ts - {ph}) / {ph}) AS bucket, "  # noqa: S608 - group_col and where_sql are allowlisted; placeholder token validated
                 f"{group_col} AS group_value, COUNT(1) AS c "
                 f"FROM query_log{where_sql} "
-                "GROUP BY bucket, group_value ORDER BY bucket ASC"
+                f"GROUP BY bucket, group_value ORDER BY bucket ASC LIMIT {ph}"  # noqa: S608 - group_col and where_sql are allowlisted; placeholder token validated
             )
-            cur.execute(sql, tuple([start_f, interval_i] + params))
+            cur.execute(
+                sql,
+                tuple(
+                    [start_f, interval_i]
+                    + params
+                    + [int(MAX_QUERY_LOG_AGG_GROUPED_RESULTS) + 1]
+                ),
+            )
             for bucket, group_value, c in cur:
                 try:
                     b_i = int(bucket)
@@ -1136,9 +1171,9 @@ class MySqlStatsStore(BaseStatsStore):
         else:
             ph = self._placeholder
             sql = (
-                f"SELECT FLOOR((ts - {ph}) / {ph}) AS bucket, COUNT(1) AS c "
+                f"SELECT FLOOR((ts - {ph}) / {ph}) AS bucket, COUNT(1) AS c "  # noqa: S608 - where_sql contains only fixed allowlisted clauses
                 f"FROM query_log{where_sql} "
-                "GROUP BY bucket ORDER BY bucket ASC"
+                "GROUP BY bucket ORDER BY bucket ASC"  # noqa: S608 - where_sql contains only fixed allowlisted clauses
             )
             cur.execute(sql, tuple([start_f, interval_i] + params))
             for bucket, c in cur:

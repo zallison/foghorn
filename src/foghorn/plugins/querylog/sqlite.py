@@ -27,7 +27,11 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from foghorn.plugins.querylog.base import BaseStatsStore
-from foghorn.security_limits import enforce_query_log_aggregate_bucket_limit
+from foghorn.plugins.sql_safety import resolve_query_log_group_column
+from foghorn.security_limits import (
+    MAX_QUERY_LOG_AGG_GROUPED_RESULTS,
+    enforce_query_log_aggregate_bucket_limit,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -497,11 +501,12 @@ class SqliteStatsStore(BaseStatsStore):
                         changed = changed or bool(getattr(cur, "rowcount", 0))
 
                     if max_records is not None:
-                        cur = self._conn.execute(
-                            "DELETE FROM query_log WHERE id NOT IN (SELECT id FROM query_log ORDER BY ts DESC, id DESC LIMIT ?)",
-                            (int(max_records),),
+                        changed = (
+                            self._prune_query_log_to_max_records_locked(
+                                int(max_records)
+                            )
+                            or changed
                         )
-                        changed = changed or bool(getattr(cur, "rowcount", 0))
 
                 if max_bytes is not None:
                     changed = (
@@ -515,6 +520,37 @@ class SqliteStatsStore(BaseStatsStore):
             logger.error(
                 "SqliteStatsStore retention prune failed: %s", exc, exc_info=True
             )
+
+    def _prune_query_log_to_max_records_locked(self, max_records: int) -> bool:
+        """Brief: Remove oldest rows beyond a max-record retention boundary.
+
+        Inputs:
+            max_records: Maximum rows to retain in query_log.
+
+        Outputs:
+            bool: True when one or more rows were deleted.
+        """
+
+        if max_records <= 0:
+            return False
+
+        cutoff_row = self._conn.execute(
+            (
+                "SELECT ts, id FROM query_log "
+                "ORDER BY ts DESC, id DESC LIMIT 1 OFFSET ?"
+            ),
+            (int(max_records),),
+        ).fetchone()
+        if cutoff_row is None:
+            return False
+
+        cutoff_ts = float(cutoff_row[0])
+        cutoff_id = int(cutoff_row[1])
+        cur = self._conn.execute(
+            ("DELETE FROM query_log " "WHERE ts < ? OR (ts = ? AND id <= ?)"),
+            (cutoff_ts, cutoff_ts, cutoff_id),
+        )
+        return bool(getattr(cur, "rowcount", 0))
 
     def _prune_query_log_to_max_bytes_locked(self, max_bytes: int) -> bool:
         """Brief: Remove oldest query-log rows until estimated bytes fit a cap.
@@ -683,7 +719,8 @@ class SqliteStatsStore(BaseStatsStore):
         total = 0
         try:
             cur = self._conn.execute(
-                f"SELECT COUNT(1) FROM query_log{where_sql}", tuple(params)
+                f"SELECT COUNT(1) FROM query_log{where_sql}",  # noqa: S608 - where_sql contains only fixed allowlisted clauses with bound params
+                tuple(params),
             )  # type: ignore[attr-defined]
             row = cur.fetchone()
             total = int(row[0]) if row else 0
@@ -699,10 +736,10 @@ class SqliteStatsStore(BaseStatsStore):
         items: List[Dict[str, Any]] = []
         try:
             sql = (
-                "SELECT id, ts, client_ip, name, qtype, upstream_id, rcode, status, error, first, result_json "
+                "SELECT id, ts, client_ip, name, qtype, upstream_id, rcode, status, error, first, result_json "  # noqa: S608 - where_sql contains only fixed allowlisted clauses
                 f"FROM query_log{where_sql} "
                 "ORDER BY ts DESC, id DESC "
-                "LIMIT ? OFFSET ?"
+                "LIMIT ? OFFSET ?"  # noqa: S608 - where_sql contains only fixed allowlisted clauses
             )
             cur2 = self._conn.execute(
                 sql, tuple(params + [page_size_i, offset])
@@ -822,19 +859,7 @@ class SqliteStatsStore(BaseStatsStore):
 
         where_sql = " WHERE " + " AND ".join(where)
 
-        group_col = None
-        group_label = None
-        if group_by:
-            gb = str(group_by).strip().lower()
-            mapping = {
-                "client_ip": "client_ip",
-                "qtype": "qtype",
-                "qname": "name",
-                "rcode": "rcode",
-            }
-            if gb in mapping:
-                group_col = mapping[gb]
-                group_label = gb
+        group_col, group_label = resolve_query_log_group_column(group_by)
 
         # Reads should include any queued batched ops.
         if self._batch_writes:
@@ -845,15 +870,21 @@ class SqliteStatsStore(BaseStatsStore):
         try:
             if group_col:
                 sql = (
-                    "SELECT CAST(((ts - ?) / ?) AS INTEGER) AS bucket, "
+                    "SELECT CAST(((ts - ?) / ?) AS INTEGER) AS bucket, "  # noqa: S608 - group_col and where_sql are allowlisted
                     f"{group_col} AS group_value, "
                     "COUNT(1) AS c "
                     f"FROM query_log{where_sql} "
                     "GROUP BY bucket, group_value "
-                    "ORDER BY bucket ASC"
+                    "ORDER BY bucket ASC "
+                    "LIMIT ?"  # noqa: S608 - group_col and where_sql are allowlisted
                 )
                 cur = self._conn.execute(
-                    sql, tuple([start_f, interval_i] + params)
+                    sql,
+                    tuple(
+                        [start_f, interval_i]
+                        + params
+                        + [int(MAX_QUERY_LOG_AGG_GROUPED_RESULTS) + 1]
+                    ),
                 )  # type: ignore[attr-defined]
                 for bucket, group_value, c in cur:
                     try:
@@ -873,10 +904,10 @@ class SqliteStatsStore(BaseStatsStore):
                     )
             else:
                 sql = (
-                    "SELECT CAST(((ts - ?) / ?) AS INTEGER) AS bucket, COUNT(1) AS c "
+                    "SELECT CAST(((ts - ?) / ?) AS INTEGER) AS bucket, COUNT(1) AS c "  # noqa: S608 - where_sql contains only fixed allowlisted clauses
                     f"FROM query_log{where_sql} "
                     "GROUP BY bucket "
-                    "ORDER BY bucket ASC"
+                    "ORDER BY bucket ASC"  # noqa: S608 - where_sql contains only fixed allowlisted clauses
                 )
                 cur = self._conn.execute(
                     sql, tuple([start_f, interval_i] + params)

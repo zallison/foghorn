@@ -16,7 +16,10 @@ from functools import cmp_to_key
 from typing import Any, Dict, Iterable, List, Optional
 
 from ...plugins.resolve.base import AdminPageSpec
-from ...security_limits import enforce_query_log_aggregate_bucket_limit
+from ...security_limits import (
+    enforce_query_log_aggregate_bucket_limit,
+    enforce_query_log_aggregate_grouped_result_limit,
+)
 from ...stats import StatsCollector
 from .config_helpers import _ts_to_utc_iso
 
@@ -140,15 +143,14 @@ def build_query_log_aggregate_payload(
         Each dict item may get bucket_start/bucket_end ISO fields when *_ts keys exist.
     """
     group_by_text = str(group_by).strip() if group_by is not None else ""
-    if not group_by_text:
-        try:
-            enforce_query_log_aggregate_bucket_limit(
-                start_dt.timestamp(),
-                end_dt.timestamp(),
-                interval_seconds,
-            )
-        except ValueError as exc:
-            raise AdminLogicHttpError(status_code=400, detail=str(exc)) from exc
+    try:
+        enforce_query_log_aggregate_bucket_limit(
+            start_dt.timestamp(),
+            end_dt.timestamp(),
+            interval_seconds,
+        )
+    except ValueError as exc:
+        raise AdminLogicHttpError(status_code=400, detail=str(exc)) from exc
 
     res = store.aggregate_query_log_counts(
         start_ts=start_dt.timestamp(),
@@ -161,8 +163,15 @@ def build_query_log_aggregate_payload(
         group_by=group_by,
     )
 
+    raw_items = res.get("items", []) or []
+    if group_by_text:
+        try:
+            enforce_query_log_aggregate_grouped_result_limit(len(raw_items))
+        except ValueError as exc:
+            raise AdminLogicHttpError(status_code=400, detail=str(exc)) from exc
+
     items: list[dict[str, Any]] = []
-    for item in res.get("items", []) or []:
+    for item in raw_items:
         if not isinstance(item, dict):
             continue
         out = dict(item)
