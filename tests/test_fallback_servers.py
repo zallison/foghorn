@@ -135,6 +135,159 @@ def test_doh_fallback_threaded_server_roundtrip(monkeypatch: Any) -> None:
     handle.stop()
 
 
+def test_admin_webserver_auth_parity_fastapi_and_threaded(monkeypatch: Any) -> None:
+    """Brief: FastAPI and threaded admin /stats auth must match for token-mode cases.
+
+    Inputs:
+      - monkeypatch: used to force threaded fallback by breaking asyncio loop creation.
+
+    Outputs:
+      - Asserts status code, detail/status payload fields, and WWW-Authenticate
+        header are identical across FastAPI and threaded handlers for the same
+        request headers.
+    """
+
+    try:
+        from fastapi.testclient import TestClient
+    except ModuleNotFoundError:
+        pytest.skip("fastapi not installed; skipping auth parity test")
+
+    cfg = {
+        "server": {
+            "http": {
+                "enabled": True,
+                "host": "127.0.0.1",
+                "port": 0,
+                "auth": {"mode": "token", "token": "secret-token"},
+            }
+        },
+    }
+
+    app = web_mod.create_app(stats=None, config=cfg, log_buffer=RingBuffer())
+    client = TestClient(app)
+
+    cases: list[dict[str, Any]] = [
+        {"headers": {}},
+        {"headers": {"Authorization": "Bearer wrong-token"}},
+        {"headers": {"X-API-Key": "wrong-token"}},
+        {"headers": {"Authorization": "Bearer secret-token"}},
+        {"headers": {"X-API-Key": "secret-token"}},
+    ]
+
+    fastapi_expected: list[dict[str, Any]] = []
+    for case in cases:
+        headers = case["headers"]
+        response = client.get("/stats", headers=headers)
+        payload = response.json()
+        fastapi_expected.append(
+            {
+                "headers": headers,
+                "status_code": response.status_code,
+                "detail": payload.get("detail"),
+                "status": payload.get("status"),
+                "www_authenticate": response.headers.get("www-authenticate"),
+            }
+        )
+
+    def boom_new_loop(*_a: Any, **_kw: Any) -> asyncio.AbstractEventLoop:
+        raise PermissionError("no self-pipe")
+
+    monkeypatch.setattr(asyncio, "new_event_loop", boom_new_loop, raising=True)
+
+    handle = start_webserver(stats=None, config=cfg, log_buffer=RingBuffer())
+    assert isinstance(handle, WebServerHandle)
+
+    server = handle._server  # type: ignore[attr-defined]
+    assert server is not None
+    host, port = server.server_address
+
+    time.sleep(0.05)
+
+    try:
+        for expected in fastapi_expected:
+            conn = http.client.HTTPConnection(host, port, timeout=1)
+            try:
+                conn.request("GET", "/stats", headers=expected["headers"])
+                response = conn.getresponse()
+                body = response.read()
+                payload = json.loads(body.decode("utf-8"))
+                assert response.status == expected["status_code"]
+                assert payload.get("detail") == expected["detail"]
+                assert payload.get("status") == expected["status"]
+                assert (response.getheader("WWW-Authenticate") or "").lower() == (
+                    expected["www_authenticate"] or ""
+                ).lower()
+            finally:
+                conn.close()
+    finally:
+        handle.stop()
+
+
+def test_admin_webserver_missing_token_parity_fastapi_and_threaded(
+    monkeypatch: Any,
+) -> None:
+    """Brief: FastAPI and threaded /stats must both return 500 when token mode lacks token.
+
+    Inputs:
+      - monkeypatch: used to force threaded fallback by breaking asyncio loop creation.
+
+    Outputs:
+      - Asserts status and detail fields are identical across FastAPI and
+        threaded implementations for auth.mode=token without auth.token.
+    """
+
+    try:
+        from fastapi.testclient import TestClient
+    except ModuleNotFoundError:
+        pytest.skip("fastapi not installed; skipping auth parity test")
+
+    cfg = {
+        "server": {
+            "http": {
+                "enabled": True,
+                "host": "127.0.0.1",
+                "port": 0,
+                "auth": {"mode": "token"},
+            }
+        },
+    }
+
+    app = web_mod.create_app(stats=None, config=cfg, log_buffer=RingBuffer())
+    client = TestClient(app)
+    fastapi_response = client.get("/stats")
+    fastapi_payload = fastapi_response.json()
+
+    def boom_new_loop(*_a: Any, **_kw: Any) -> asyncio.AbstractEventLoop:
+        raise PermissionError("no self-pipe")
+
+    monkeypatch.setattr(asyncio, "new_event_loop", boom_new_loop, raising=True)
+
+    handle = start_webserver(stats=None, config=cfg, log_buffer=RingBuffer())
+    assert isinstance(handle, WebServerHandle)
+    server = handle._server  # type: ignore[attr-defined]
+    assert server is not None
+    host, port = server.server_address
+
+    time.sleep(0.05)
+
+    try:
+        conn = http.client.HTTPConnection(host, port, timeout=1)
+        try:
+            conn.request("GET", "/stats")
+            threaded_response = conn.getresponse()
+            body = threaded_response.read()
+            threaded_payload = json.loads(body.decode("utf-8"))
+            assert threaded_response.status == fastapi_response.status_code
+            assert threaded_payload.get("detail") == fastapi_payload.get("detail")
+            assert (threaded_response.getheader("WWW-Authenticate") or "").lower() == (
+                fastapi_response.headers.get("www-authenticate") or ""
+            ).lower()
+        finally:
+            conn.close()
+    finally:
+        handle.stop()
+
+
 def test_admin_fallback_disabled_returns_none(monkeypatch: Any, tmp_path) -> None:
     """Brief: start_webserver returns None when threaded fallback is disabled.
 

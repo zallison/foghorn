@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hmac
 import json
 import logging
 import os
@@ -95,6 +96,76 @@ def resolve_www_root(config: Dict[str, Any] | None = None) -> str:
     return str(pkg_html.resolve())
 
 
+def _extract_provided_auth_token(
+    authorization_header: str | None,
+    api_key_header: str | None,
+) -> str:
+    """Brief: Extract a provided auth token from bearer or API key headers.
+
+    Inputs:
+      - authorization_header: Raw Authorization header value.
+      - api_key_header: Raw X-API-Key header value.
+
+    Outputs:
+      - Token string when present; empty string when absent.
+    """
+
+    auth_value = str(authorization_header or "")
+    if auth_value.lower().startswith("bearer "):
+        return auth_value[7:].strip()
+    if api_key_header is None:
+        return ""
+    return str(api_key_header).strip()
+
+
+def _evaluate_web_auth(
+    web_cfg: Dict[str, Any] | None,
+    *,
+    authorization_header: str | None,
+    api_key_header: str | None,
+) -> tuple[bool, int | None, str | None, Dict[str, str] | None]:
+    """Brief: Evaluate configured web auth for a single request.
+
+    Inputs:
+      - web_cfg: webserver config dict from YAML (or {}).
+      - authorization_header: Raw Authorization header value.
+      - api_key_header: Raw X-API-Key header value.
+
+    Outputs:
+      - Tuple of:
+          - authorized: True when request is allowed.
+          - status_code: HTTP status for denied requests; None when authorized.
+          - detail: Error detail for denied requests; None when authorized.
+          - headers: Optional response headers for denied requests.
+
+    Behaviour:
+      - ``mode=none`` allows all requests.
+      - ``mode=token`` enforces a static bearer/API key token.
+      - Unknown auth modes fail closed.
+    """
+
+    auth_cfg = (web_cfg.get("auth") or {}) if isinstance(web_cfg, dict) else {}
+    mode = str(auth_cfg.get("mode", "none")).strip().lower()
+    if mode in {"", "none"}:
+        return True, None, None, None
+    if mode != "token":
+        return False, 500, f"unsupported webserver.auth.mode: {mode}", None
+
+    token = auth_cfg.get("token")
+    if not token:
+        return False, 500, "webserver.auth.token not configured", None
+
+    provided = _extract_provided_auth_token(
+        authorization_header=authorization_header,
+        api_key_header=api_key_header,
+    )
+    token_text = str(token)
+    if not provided or not hmac.compare_digest(provided, token_text):
+        return False, 401, "unauthorized", {"WWW-Authenticate": "Bearer"}
+
+    return True, None, None, None
+
+
 def _build_auth_dependency(web_cfg: Dict[str, Any]):
     """Build a FastAPI dependency enforcing optional admin auth.
 
@@ -110,38 +181,21 @@ def _build_auth_dependency(web_cfg: Dict[str, Any]):
       - basic: require HTTP Basic credentials (not implemented yet; reserved).
     """
 
-    auth_cfg = (web_cfg.get("auth") or {}) if isinstance(web_cfg, dict) else {}
-    mode = str(auth_cfg.get("mode", "none")).lower()
-    token = auth_cfg.get("token")
+    async def _auth(request: Request) -> None:
+        authorized, status_code, detail, headers = _evaluate_web_auth(
+            web_cfg,
+            authorization_header=request.headers.get("authorization"),
+            api_key_header=request.headers.get("x-api-key"),
+        )
+        if authorized:
+            return None
+        raise HTTPException(
+            status_code=int(status_code or status.HTTP_401_UNAUTHORIZED),
+            detail=str(detail or "unauthorized"),
+            headers=headers,
+        )
 
-    async def _no_auth(_request: Request) -> None:  # noqa: D401
-        """FastAPI dependency that performs no authentication."""
-
-        return None
-
-    async def _token_auth(request: Request) -> None:
-        if not token:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="webserver.auth.token not configured",
-            )
-        hdr = request.headers.get("authorization") or ""
-        api_key = request.headers.get("x-api-key")
-        if hdr.lower().startswith("bearer "):
-            provided = hdr[7:].strip()
-        else:
-            provided = api_key.strip() if api_key else ""
-        if not provided or provided != str(token):
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="unauthorized",
-                headers={"WWW-Authenticate": "Bearer"},
-            )
-
-    if mode == "token":
-        return _token_auth
-    # basic or unknown -> treat as none for now; can be expanded later.
-    return _no_auth
+    return _auth
 
 
 def _schedule_process_signal(
