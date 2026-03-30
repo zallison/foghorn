@@ -558,6 +558,44 @@ def test_threaded_ratelimit_and_upstream_status_endpoints() -> None:
     assert "items" in data2
 
 
+def test_threaded_plugin_pages_and_ratelimit_require_auth_in_token_mode() -> None:
+    """Brief: Threaded /api/v1/plugin_pages and /api/v1/ratelimit enforce token auth.
+
+    Inputs:
+      - Token-auth webserver config and optional Authorization header.
+
+    Outputs:
+      - Both endpoints return 401 without token and 200 with valid token.
+    """
+
+    cfg = {
+        "webserver": {
+            "auth": {
+                "mode": "token",
+                "token": "secret-token",
+            }
+        }
+    }
+
+    for endpoint in ("/api/v1/plugin_pages", "/api/v1/ratelimit"):
+        st_unauth, _h_unauth, b_unauth = _one_shot_http_request(
+            method="GET",
+            path=endpoint,
+            config=cfg,
+        )
+        assert st_unauth == 401
+        payload_unauth = json.loads(b_unauth.decode("utf-8"))
+        assert payload_unauth.get("detail") == "unauthorized"
+
+        st_auth, _h_auth, _b_auth = _one_shot_http_request(
+            method="GET",
+            path=endpoint,
+            config=cfg,
+            headers={"Authorization": "Bearer secret-token"},
+        )
+        assert st_auth == 200
+
+
 def test_threaded_config_schema_paths_match() -> None:
     """Brief: Threaded /api/v1/config/schema matches /config/schema payload.
 

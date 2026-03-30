@@ -2438,6 +2438,35 @@ def test_token_auth_500_when_token_missing() -> None:
     assert body["detail"] == "webserver.auth.token not configured"
 
 
+def test_auth_mode_unsupported_fails_closed() -> None:
+    """Brief: Unsupported web auth mode returns HTTP 500 on protected endpoints.
+
+    Inputs:
+      - server.http.auth.mode set to an unsupported value.
+
+    Outputs:
+      - /stats responds with 500 and an unsupported-mode detail.
+    """
+
+    cfg = {
+        "server": {
+            "http": {
+                "enabled": True,
+                "auth": {"mode": "basic"},
+            }
+        }
+    }
+    collector = StatsCollector(track_uniques=False)
+
+    app = create_app(stats=collector, config=cfg, log_buffer=RingBuffer())
+    client = TestClient(app)
+
+    resp = client.get("/stats")
+    assert resp.status_code == 500
+    detail = str((resp.json() or {}).get("detail", ""))
+    assert "unsupported webserver.auth.mode" in detail
+
+
 def test_fastapi_cors_headers_when_enabled(monkeypatch) -> None:
     """Brief: FastAPI admin app applies CORS headers when webserver.cors.enabled is true.
 
