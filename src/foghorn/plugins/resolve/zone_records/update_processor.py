@@ -2009,7 +2009,7 @@ def apply_update_operations(
 
     if journal_writer is not None and journal_entry is not None:
         try:
-            from .journal import JournalReader, compact_zone_journal
+            from .journal import JournalReader, compact_zone_journal, load_manifest
 
             persistence_cfg = (
                 getattr(plugin, "_dns_update_persistence_config", {}) or {}
@@ -2024,12 +2024,19 @@ def apply_update_operations(
             )
             if max_journal_bytes > 0 and reader.get_size_bytes() > max_journal_bytes:
                 should_compact = True
-            if (
-                not should_compact
-                and max_journal_entries > 0
-                and reader.get_entry_count() > max_journal_entries
-            ):
-                should_compact = True
+            if not should_compact and max_journal_entries > 0:
+                entry_seq = int(getattr(journal_entry, "seq", 0) or 0)
+                compacted_seq = 0
+                try:
+                    manifest = load_manifest(
+                        zone_apex=apex_norm,
+                        base_dir=journal_writer.base_dir,
+                    )
+                    compacted_seq = int(getattr(manifest, "last_compacted_seq", 0) or 0)
+                except Exception:
+                    compacted_seq = 0
+                if max(0, entry_seq - compacted_seq) > max_journal_entries:
+                    should_compact = True
             if should_compact:
                 compacted = compact_zone_journal(
                     zone_apex=apex_norm,

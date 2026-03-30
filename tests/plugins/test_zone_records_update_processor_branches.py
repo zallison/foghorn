@@ -1525,6 +1525,93 @@ def test_apply_update_operations_zone_apex_normalize_fallback(
     assert ("host.example.com", int(dns.rdatatype.A)) in plugin.records
 
 
+def test_apply_update_operations_compaction_entries_uses_manifest_delta(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Brief: max_journal_entries compaction uses sequence delta, not line scans.
+
+    Inputs:
+      - monkeypatch: Pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts compaction can trigger without get_entry_count usage.
+    """
+    plugin = SimpleNamespace(
+        records={
+            ("example.com", int(QTYPE.SOA)): (
+                300,
+                ["ns1.example.com. hostmaster.example.com. 1 3600 600 604800 300"],
+                ["src"],
+            )
+        },
+        _records_lock=threading.RLock(),
+        _name_index={},
+        _wildcard_owners=[],
+        _update_managed_owners=set(),
+        _records_generation=0,
+        _dns_update_config={"replication": {"notify_on_update": False}},
+        _dns_update_persistence_config={"max_journal_entries": 1},
+        _dns_update_compact_count=0,
+    )
+
+    class _FakeJournalWriter:
+        base_dir = "/tmp"
+
+        def append_entry(self, **_kwargs):
+            return SimpleNamespace(seq=5)
+
+    class _ReaderNoLineScan:
+        def __init__(self, *, zone_apex: str, base_dir: str):
+            self.zone_apex = zone_apex
+            self.base_dir = base_dir
+
+        def get_size_bytes(self) -> int:
+            return 1
+
+        def get_entry_count(self) -> int:
+            raise AssertionError("get_entry_count must not be called")
+
+    compacted_calls: list[tuple[str, str, int]] = []
+
+    def _compact_zone_journal(
+        zone_apex: str,
+        base_dir: str,
+        records,
+        *,
+        seq: int,
+    ) -> bool:
+        compacted_calls.append((zone_apex, base_dir, int(seq)))
+        return True
+
+    import foghorn.plugins.resolve.zone_records.journal as journal_mod
+
+    monkeypatch.setattr(journal_mod, "JournalReader", _ReaderNoLineScan)
+    monkeypatch.setattr(
+        journal_mod,
+        "load_manifest",
+        lambda *_a, **_kw: SimpleNamespace(last_compacted_seq=0),
+    )
+    monkeypatch.setattr(journal_mod, "compact_zone_journal", _compact_zone_journal)
+
+    rcode, err = up.apply_update_operations(
+        [
+            _RRset(
+                name="compact-delta.example.com",
+                rdtype=int(dns.rdatatype.A),
+                rdclass=int(dns.rdataclass.IN),
+                values=["198.51.100.60"],
+            )
+        ],
+        plugin=plugin,
+        zone_apex="example.com",
+        journal_writer=_FakeJournalWriter(),
+        actor={"client_ip": "192.0.2.1"},
+    )
+    assert rcode == 0
+    assert err is None
+    assert compacted_calls == [("example.com", "/tmp", 5)]
+
+
 def test_apply_update_operations_existing_rrset_adds_value_and_tracks_update_source(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

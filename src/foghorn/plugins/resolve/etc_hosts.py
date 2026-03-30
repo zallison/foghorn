@@ -104,6 +104,16 @@ class EtcHosts(BasePlugin):
 
         # Normalize configuration into a list of paths. Default to /etc/hosts.
         provided = self.config.get("file_paths")
+        legacy_path = self.config.get("file_path")
+        if legacy_path:
+            logger.info(
+                "EtcHosts: using legacy config key 'file_path'; prefer 'file_paths'"
+            )
+            if provided is None:
+                provided = [legacy_path]
+            else:
+                provided = list(provided) + [legacy_path]
+
         self.file_paths: List[str] = self._normalize_paths(provided)
 
         # Internal synchronization and state

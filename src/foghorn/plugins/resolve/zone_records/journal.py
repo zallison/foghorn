@@ -66,6 +66,103 @@ def _normalize_zone_apex(zone_apex: str) -> str:
     return zone_norm
 
 
+def _is_owner_in_zone(owner: str, zone_apex: str) -> bool:
+    """Brief: Determine whether an owner belongs to a zone apex.
+
+    Inputs:
+      - owner: Owner name to check.
+      - zone_apex: Zone apex.
+
+    Outputs:
+      - bool: True when owner is equal to apex or a descendant.
+    """
+    owner_norm = dns_names.normalize_name(owner)
+    zone_norm = _normalize_zone_apex(zone_apex)
+    return owner_norm == zone_norm or owner_norm.endswith(f".{zone_norm}")
+
+
+def filter_records_for_zone(
+    records: Dict[tuple[str, int], tuple[int, List[str], List[str]]],
+    zone_apex: str,
+) -> Dict[tuple[str, int], tuple[int, List[str], List[str]]]:
+    """Brief: Return a detached copy of records that belong to one zone.
+
+    Inputs:
+      - records: Source records mapping.
+      - zone_apex: Zone apex to select.
+
+    Outputs:
+      - Dict containing only RRsets whose owner is within zone_apex.
+    """
+    zone_records: Dict[tuple[str, int], tuple[int, List[str], List[str]]] = {}
+    for (owner, qtype), entry in dict(records or {}).items():
+        try:
+            owner_norm = dns_names.normalize_name(owner)
+        except Exception:
+            continue
+        if not _is_owner_in_zone(owner_norm, zone_apex):
+            continue
+        try:
+            ttl, values, sources = entry
+        except (TypeError, ValueError):
+            try:
+                ttl, values = entry
+                sources = []
+            except (TypeError, ValueError):
+                continue
+        zone_records[(owner_norm, int(qtype))] = (
+            int(ttl),
+            [str(v) for v in list(values or [])],
+            [str(s) for s in list(sources or [])],
+        )
+    return zone_records
+
+
+def replace_zone_records(
+    records: Dict[tuple[str, int], tuple[int, List[str], List[str]]],
+    zone_apex: str,
+    zone_records: Dict[tuple[str, int], tuple[int, List[str], List[str]]],
+) -> Dict[tuple[str, int], tuple[int, List[str], List[str]]]:
+    """Brief: Replace one zone's records in a global map.
+
+    Inputs:
+      - records: Existing global records mapping.
+      - zone_apex: Zone apex whose RRsets should be replaced.
+      - zone_records: Replacement RRsets for that zone.
+
+    Outputs:
+      - New mapping with only zone_apex RRsets replaced.
+    """
+    updated: Dict[tuple[str, int], tuple[int, List[str], List[str]]] = {}
+    for (owner, qtype), entry in dict(records or {}).items():
+        try:
+            owner_norm = dns_names.normalize_name(owner)
+        except Exception:
+            continue
+        if _is_owner_in_zone(owner_norm, zone_apex):
+            continue
+        try:
+            ttl, values, sources = entry
+        except (TypeError, ValueError):
+            try:
+                ttl, values = entry
+                sources = []
+            except (TypeError, ValueError):
+                continue
+        updated[(owner_norm, int(qtype))] = (
+            int(ttl),
+            [str(v) for v in list(values or [])],
+            [str(s) for s in list(sources or [])],
+        )
+    for (owner, qtype), (ttl, values, sources) in dict(zone_records or {}).items():
+        updated[(dns_names.normalize_name(owner), int(qtype))] = (
+            int(ttl),
+            [str(v) for v in list(values or [])],
+            [str(s) for s in list(sources or [])],
+        )
+    return updated
+
+
 def _sanitize_actor(
     actor: Dict[str, Any], max_value_length: int = DEFAULT_MAX_ACTOR_VALUE_LENGTH
 ) -> Dict[str, str]:
@@ -967,7 +1064,11 @@ def replay_journal_to_records(
     snapshot_records, snapshot_seq = load_snapshot(zone_apex, base_dir)
     updated = dict(records or {})
     if snapshot_records:
-        updated = dict(snapshot_records)
+        updated = replace_zone_records(
+            records=updated,
+            zone_apex=zone_apex,
+            zone_records=filter_records_for_zone(snapshot_records, zone_apex),
+        )
     effective_start_seq = max(int(start_seq), int(snapshot_seq) + 1, 1)
     reader = JournalReader(zone_apex=zone_apex, base_dir=base_dir)
     last_seq = max(int(start_seq), int(snapshot_seq))
@@ -1123,7 +1224,8 @@ def compact_zone_journal(
     journal_path = os.path.join(zone_dir, "journal.ndjson")
     old_path = os.path.join(zone_dir, "journal.old")
 
-    if not save_snapshot(zone, base_dir, records, seq=seq):
+    zone_records = filter_records_for_zone(records, zone)
+    if not save_snapshot(zone, base_dir, zone_records, seq=seq):
         return False
 
     try:
