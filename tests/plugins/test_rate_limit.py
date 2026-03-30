@@ -171,10 +171,45 @@ def test_hard_cap_enforces_when_avg_below_min_enforce_rps(tmp_path, monkeypatch)
                 assert decision.action == "deny"
                 denied += 1
 
-        # avg_rps/bootstrap is 10 while min_enforce_rps defaults to 50; the
-        # configured hard cap should still deny once current_rps exceeds 10.
-        assert denied > 0
-        assert denied < total
+    # avg_rps/bootstrap is 10 while min_enforce_rps defaults to 50; the
+    # configured hard cap should still deny once current_rps exceeds 10.
+    assert denied > 0
+    assert denied < total
+
+
+def test_bootstrap_enforcement_does_not_apply_burst_factor(tmp_path, monkeypatch):
+    """Brief: Bootstrap enforcement uses bootstrap_rps directly (no burst amplification).
+
+    Inputs:
+      - tmp_path: temporary directory for sqlite DB.
+      - monkeypatch: pytest monkeypatch fixture to keep traffic in one window.
+
+    Outputs:
+      - None: asserts requests are denied once current_rps exceeds bootstrap_rps.
+    """
+
+    db = tmp_path / "rl-bootstrap-no-burst.db"
+    plugin = RateLimit(
+        db_path=str(db),
+        window_seconds=1,
+        warmup_windows=0,
+        bootstrap_rps=10.0,
+        burst_factor=5.0,
+        min_enforce_rps=0.0,
+        max_enforce_rps=0.0,
+        deny_response="nxdomain",
+    )
+    plugin.setup()
+    ctx = PluginContext(client_ip="1.2.3.4", listener="tcp")
+
+    with closing(plugin._conn):
+        _set_time(monkeypatch, 0.0)
+        decisions = [
+            plugin.pre_resolve("example.com", QTYPE.A, b"", ctx) for _ in range(12)
+        ]
+
+    assert all(decision is None for decision in decisions[:10])
+    assert decisions[10] is not None
 
 
 def test_cache_none_falls_back_to_stateful_window_counters(tmp_path, monkeypatch):
@@ -2257,6 +2292,107 @@ def test_flush_completed_active_window_keys_filters_and_updates(tmp_path, monkey
     assert not any(call for call in calls if call[1] in {"", "skip", "zero"})
 
 
+def test_rollover_flush_does_not_double_count_samples_for_stale_keys(
+    tmp_path,
+    monkeypatch,
+):
+    """Brief: Stale-key rollover flushes are counted once and stay aligned with global.
+
+    Inputs:
+      - tmp_path: pytest temporary path.
+      - monkeypatch: pytest monkeypatch fixture for deterministic window rollover.
+
+    Outputs:
+      - None: asserts stale-key sample count is not double-incremented after rollover.
+    """
+
+    plugin = RateLimit(
+        db_path=str(tmp_path / "rl-rollover-dedupe.db"),
+        window_seconds=10,
+        warmup_windows=0,
+        min_enforce_rps=0.0,
+        bootstrap_rps=0.0,
+    )
+    plugin.setup()
+
+    ctx_a = PluginContext(client_ip="1.1.1.1", listener="tcp")
+    ctx_b = PluginContext(client_ip="2.2.2.2", listener="tcp")
+
+    _set_time(monkeypatch, 0.0)
+    for _ in range(3):
+        plugin.pre_resolve("a.example.com", QTYPE.A, b"", ctx_a)
+    for _ in range(5):
+        plugin.pre_resolve("b.example.com", QTYPE.A, b"", ctx_b)
+
+    # First key in the new window flushes stale entries for prior-window keys.
+    _set_time(monkeypatch, 10.0)
+    plugin.pre_resolve("a.example.com", QTYPE.A, b"", ctx_a)
+    plugin.pre_resolve("b.example.com", QTYPE.A, b"", ctx_b)
+
+    cur = plugin._conn.cursor()
+    cur.execute(
+        "SELECT samples FROM rate_profiles WHERE key=?",
+        ("2.2.2.2",),
+    )
+    row_b = cur.fetchone()
+    cur.execute(
+        "SELECT samples FROM rate_profiles WHERE key=?",
+        ("global",),
+    )
+    row_global = cur.fetchone()
+
+    assert row_b is not None
+    assert row_global is not None
+    assert int(row_b[0]) == 1
+    assert int(row_global[0]) == 1
+
+
+def test_global_samples_backfill_missed_windows_like_per_key(tmp_path, monkeypatch):
+    """Brief: Global profile applies missed-window backfill on cache-miss gaps.
+
+    Inputs:
+      - tmp_path: pytest temporary path.
+      - monkeypatch: pytest monkeypatch fixture for deterministic time windows.
+
+    Outputs:
+      - None: asserts global and per-key sample counts stay aligned after idle gaps.
+    """
+
+    plugin = RateLimit(
+        db_path=str(tmp_path / "rl-global-backfill.db"),
+        window_seconds=10,
+        warmup_windows=0,
+        min_enforce_rps=0.0,
+        bootstrap_rps=0.0,
+    )
+    plugin.setup()
+    ctx = PluginContext(client_ip="1.1.1.1", listener="tcp")
+
+    _set_time(monkeypatch, 0.0)
+    plugin.pre_resolve("a.example.com", QTYPE.A, b"", ctx)
+    _set_time(monkeypatch, 10.0)
+    plugin.pre_resolve("a.example.com", QTYPE.A, b"", ctx)
+    _set_time(monkeypatch, 100.0)
+    plugin.pre_resolve("a.example.com", QTYPE.A, b"", ctx)
+
+    cur = plugin._conn.cursor()
+    cur.execute(
+        "SELECT samples FROM rate_profiles WHERE key=?",
+        ("1.1.1.1",),
+    )
+    row_key = cur.fetchone()
+    cur.execute(
+        "SELECT samples FROM rate_profiles WHERE key=?",
+        ("global",),
+    )
+    row_global = cur.fetchone()
+
+    assert row_key is not None
+    assert row_global is not None
+    assert int(row_key[0]) == int(row_global[0])
+    assert int(row_global[0]) > 1
+
+
 def test_update_burst_counter_covers_reset_advance_and_cap_paths(tmp_path, monkeypatch):
     """Brief: Burst-counter updates reset, advance, and cap count across profile states.
 
@@ -2705,7 +2841,7 @@ def test_setup_warns_when_limit_precedence_is_conflicting(
 
     text = caplog.text
     assert "warmup_max_rps=100.00 exceeds max_enforce_rps=10.00" in text
-    assert "bootstrap threshold 60.00" in text
+    assert "bootstrap_rps=20.00 exceeds max_enforce_rps=10.00" in text
     assert "max_enforce_rps=10.00 is below min_enforce_rps=50.00" in text
     assert "global_max_rps=5.00 is below warmup_max_rps=100.00" in text
     assert "global_max_rps=5.00 is below max_enforce_rps=10.00" in text
