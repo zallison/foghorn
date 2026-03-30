@@ -152,7 +152,7 @@ class RateLimitConfig(BaseModel):
         bootstrap seeding.
 
       - deny_response: Policy for limited queries ('nxdomain', 'refused', 'servfail',
-        'noerror_empty'/'nodata', 'ip', or 'drop'). Defaults to 'refused'.
+        'noerror_empty'/'nodata', 'ip', or 'drop'). Defaults to 'nxdomain'.
       - deny_response_ip4 / deny_response_ip6: Optional IPs used when deny_response=='ip'.
       - ttl: Optional TTL used when synthesizing IP responses.
       - stats_log_interval_seconds: Interval for periodic rate-limit summary logs
@@ -200,7 +200,7 @@ class RateLimitConfig(BaseModel):
     warmup_max_rps: float = Field(default=0.0, ge=0.0)
     bootstrap_rps: float = Field(default=50.0, ge=0.0)
 
-    deny_response: str = Field(default="refused")
+    deny_response: str = Field(default="nxdomain")
     deny_response_ip4: Optional[str] = None
     deny_response_ip6: Optional[str] = None
     ttl: int = Field(default=60, ge=0)
@@ -517,7 +517,7 @@ class RateLimit(BasePlugin):
 
         # Deny policy configuration
         deny_resp = str(
-            self.config.get("deny_response", "refused") or "refused"
+            self.config.get("deny_response", "nxdomain") or "nxdomain"
         ).lower()
         valid_deny = {
             "nxdomain",
@@ -530,10 +530,10 @@ class RateLimit(BasePlugin):
         }
         if deny_resp not in valid_deny:
             logger.warning(
-                "unknown deny_response %r; defaulting to 'refused'",
+                "unknown deny_response %r; defaulting to 'nxdomain'",
                 deny_resp,
             )
-            deny_resp = "refused"
+            deny_resp = "nxdomain"
         self.deny_response: str = deny_resp
         self.deny_response_ip4: Optional[str] = self.config.get("deny_response_ip4")
         self.deny_response_ip6: Optional[str] = self.config.get("deny_response_ip6")
@@ -1337,7 +1337,13 @@ class RateLimit(BasePlugin):
         # Record a best-effort in-memory snapshot of active current-window
         # counters so admin views can include keys before profile persistence
         # catches up at the next window rollover.
-        self._record_active_window_count(str(key), int(window_id), int(count))
+        #
+        # Skip global key tracking here: global is surfaced via
+        # _get_current_window_rps('global') and tracking it in the active-window
+        # rollover path can flush stale per-key entries before their own update
+        # path runs, which can skew per-key missed-window sample backfill.
+        if str(key) != str(_GLOBAL_RPS_DB_KEY):
+            self._record_active_window_count(str(key), int(window_id), int(count))
 
         return window_id, count
 
@@ -2181,7 +2187,7 @@ class RateLimit(BasePlugin):
             returned decisions.
         """
 
-        mode = (getattr(self, "deny_response", "refused") or "refused").lower()
+        mode = (getattr(self, "deny_response", "nxdomain") or "nxdomain").lower()
         if mode == "drop":
             # Drop responses are never logged (no response is sent to the client).
             return self._decision(
@@ -2267,7 +2273,7 @@ class RateLimit(BasePlugin):
                         suppress_query_log=suppress_query_log,
                     )
 
-        # Fallback: simple deny (refused by default)
+        # Fallback: simple deny (nxdomain by default)
         return self._decision(
             action="deny",
             stat="rate_limit",
@@ -2306,11 +2312,14 @@ class RateLimit(BasePlugin):
         key = self._make_key(qname, ctx)
         now = time.time()
 
-        # Update per-window counters and learn from the previous window if complete.
-        _, count = self._increment_window(key, now=now)
-        current_rps = float(count) / float(self.window_seconds)
+        # Update per-window counters and learn from the previous window if
+        # complete. We increment the global key first so an abrupt interruption
+        # between the two updates cannot leave per-key samples ahead of global
+        # samples over time.
         _, global_count = self._increment_window(_GLOBAL_RPS_DB_KEY, now=now)
         global_rps = float(global_count) / float(self.window_seconds)
+        _, count = self._increment_window(key, now=now)
+        current_rps = float(count) / float(self.window_seconds)
         self._maybe_log_stats(now)
 
         if float(getattr(self, "global_max_rps", 0.0) or 0.0) > 0.0:
@@ -2715,7 +2724,7 @@ class RateLimit(BasePlugin):
             ),
             "deny_response": str(
                 getattr(
-                    self, "deny_response", self.config.get("deny_response", "refused")
+                    self, "deny_response", self.config.get("deny_response", "nxdomain")
                 )
             ),
             "psl_available": bool(getattr(self, "_psl_available", False)),

@@ -260,6 +260,54 @@ def test_cache_none_falls_back_to_stateful_window_counters(tmp_path, monkeypatch
     assert denied < total
 
 
+def test_pre_resolve_increments_global_counter_before_per_key_counter(
+    tmp_path,
+    monkeypatch,
+):
+    """Brief: pre_resolve updates global window counters before per-key counters.
+
+    Inputs:
+      - tmp_path: pytest temporary path for sqlite DB.
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None: asserts _increment_window is called for the global key first.
+    """
+
+    db = tmp_path / "rl-global-first.db"
+    plugin = RateLimit(
+        db_path=str(db),
+        window_seconds=10,
+        warmup_windows=0,
+        min_enforce_rps=0.0,
+        bootstrap_rps=0.0,
+    )
+    plugin.setup()
+    ctx = PluginContext(client_ip="1.2.3.4", listener="tcp")
+    expected_key = plugin._make_key("example.com", ctx)
+    call_order: list[str] = []
+    real_increment_window = plugin._increment_window
+
+    def _record_order_increment_window(
+        key: str,
+        now: float | None = None,
+    ) -> tuple[int, int]:
+        call_order.append(str(key))
+        return real_increment_window(str(key), now=now)
+
+    monkeypatch.setattr(
+        plugin,
+        "_increment_window",
+        _record_order_increment_window,
+    )
+
+    with closing(plugin._conn):
+        _set_time(monkeypatch, 0.0)
+        plugin.pre_resolve("example.com", QTYPE.A, b"", ctx)
+
+    assert call_order[:2] == ["global", str(expected_key)]
+
+
 def test_per_domain_mode_uses_base_domain_key(tmp_path, monkeypatch):
     """Brief: mode='per_domain' keys profiles by base domain only.
 
@@ -699,13 +747,13 @@ def test_invalid_mode_defaults_to_per_client(tmp_path):
     assert plugin.mode == "per_client"
 
 
-def test_invalid_deny_response_defaults_to_refused(tmp_path):
-    """Brief: Unknown deny_response falls back to 'refused'.\n\n    Inputs:\n      - tmp_path: pytest tmp path for sqlite db.\n\n    Outputs:\n      - None: asserts deny_response attribute is normalized.\n"""
+def test_invalid_deny_response_defaults_to_nxdomain(tmp_path):
+    """Brief: Unknown deny_response falls back to 'nxdomain'.\n\n    Inputs:\n      - tmp_path: pytest tmp path for sqlite db.\n\n    Outputs:\n      - None: asserts deny_response attribute is normalized.\n"""
 
     db = tmp_path / "rl-deny.db"
     plugin = RateLimit(db_path=str(db), deny_response="bogus")
     plugin.setup()
-    assert plugin.deny_response == "refused"
+    assert plugin.deny_response == "nxdomain"
 
 
 def test_int_config_parsing_and_clamping(tmp_path):

@@ -78,7 +78,7 @@ def test_servfail_precedence_over_nxdomain():
 def test_qtype_filtering_only_A():
     p = FlakyServer(
         targets=["192.0.2.55"],
-        servfail_one_in=1,
+        servfail_percent=100.0,
         apply_to_qtypes=["A"],
         seed=4,
     )
