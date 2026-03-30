@@ -1756,6 +1756,7 @@ class RateLimit(BasePlugin):
             return
 
         threshold = float(avg_rps) * float(self.burst_factor)
+        threshold = max(threshold, float(self.min_enforce_rps))
         if self.max_enforce_rps > 0.0:
             threshold = min(threshold, float(self.max_enforce_rps))
 
@@ -1778,11 +1779,13 @@ class RateLimit(BasePlugin):
 
         Outputs:
           - tuple[float, float]:
-              * burst_allowed_rps: avg_rps * burst_factor (clamped by max_enforce_rps).
+              * burst_allowed_rps: avg_rps * burst_factor (floored by
+                min_enforce_rps, then clamped by max_enforce_rps).
               * baseline_allowed_rps: avg_rps (clamped by max_enforce_rps).
         """
 
         burst_allowed_rps = float(avg_rps) * float(self.burst_factor)
+        burst_allowed_rps = max(burst_allowed_rps, float(self.min_enforce_rps))
         baseline_allowed_rps = float(avg_rps)
         if float(self.max_enforce_rps) > 0.0:
             burst_allowed_rps = min(burst_allowed_rps, float(self.max_enforce_rps))
