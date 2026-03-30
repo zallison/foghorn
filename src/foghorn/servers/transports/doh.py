@@ -4,6 +4,8 @@ import importlib
 import ssl
 import urllib.parse
 from typing import Dict, Optional, Tuple
+
+from foghorn.security_limits import MAX_DOH_DNS_MESSAGE_BYTES
 from foghorn.utils.register_caches import registered_lru_cache
 
 try:
@@ -72,6 +74,50 @@ def _build_ssl_ctx(
     )
 
 
+def _read_response_body_with_limit(
+    resp: http.client.HTTPResponse, *, max_response_bytes: int
+) -> bytes:
+    """
+    Brief: Read a DoH HTTP response body with a strict size limit.
+
+    Inputs:
+    - resp: HTTPResponse object returned by http.client.
+    - max_response_bytes: Maximum response body bytes allowed.
+
+    Outputs:
+    - bytes: Response body when size is within limit.
+
+    Notes:
+    - Enforces an early Content-Length check when present.
+    - Reads at most (limit + 1) bytes to detect overflow without unbounded
+      buffering.
+    """
+    try:
+        limit = int(max_response_bytes)
+    except Exception as e:
+        raise DoHError(f"Invalid max_response_bytes: {max_response_bytes!r}") from e
+    if limit < 1:
+        raise DoHError(f"Invalid max_response_bytes: {limit!r}")
+
+    content_length = resp.getheader("Content-Length")
+    if content_length is not None:
+        try:
+            declared_len = int(str(content_length).strip())
+        except Exception as e:
+            raise DoHError("Invalid HTTP Content-Length header") from e
+        if declared_len < 0:
+            raise DoHError("Invalid HTTP Content-Length header")
+        if declared_len > limit:
+            raise DoHError(
+                f"HTTP response body too large: {declared_len} > {limit} bytes"
+            )
+
+    data = resp.read(limit + 1)
+    if len(data) > limit:
+        raise DoHError(f"HTTP response body exceeds max_response_bytes={limit}")
+    return data
+
+
 def doh_query(
     url: str,
     query: bytes,
@@ -81,6 +127,7 @@ def doh_query(
     timeout_ms: int = 1500,
     verify: bool = True,
     ca_file: Optional[str] = None,
+    max_response_bytes: int = MAX_DOH_DNS_MESSAGE_BYTES,
 ) -> Tuple[bytes, Dict[str, str]]:
     """
     Brief: Perform a DNS-over-HTTPS query (RFC 8484) using the standard library.
@@ -93,6 +140,7 @@ def doh_query(
     - timeout_ms: Total timeout per request
     - verify: Verify TLS certificates (HTTPS only)
     - ca_file: Optional CA bundle path for verification
+    - max_response_bytes: Maximum HTTP response body size in bytes
 
     Outputs:
     - (body, resp_headers): tuple containing response body bytes and headers
@@ -158,9 +206,11 @@ def doh_query(
         try:
             conn.request(method.upper(), target, body=body, headers=hdrs)
             resp = conn.getresponse()
-            data = resp.read()
             if resp.status != 200:
                 raise DoHError(f"HTTP {resp.status}: {resp.reason}")
+            data = _read_response_body_with_limit(
+                resp, max_response_bytes=max_response_bytes
+            )
             # Return raw body; caller decides how to parse
             headers_out = {k.lower(): v for k, v in resp.getheaders()}
             return data, headers_out

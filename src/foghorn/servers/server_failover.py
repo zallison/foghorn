@@ -13,6 +13,7 @@ from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from typing import Dict, List, Optional, Set, Tuple, Final
 
 from dnslib import QTYPE, RCODE, DNSRecord
+from foghorn.security_limits import MAX_DOH_DNS_MESSAGE_BYTES
 
 from foghorn.servers.transports.dot import DoTError, get_dot_pool
 from foghorn.servers.transports.tcp import TCPError, get_tcp_pool, tcp_query
@@ -692,6 +693,8 @@ def _send_query_with_failover_impl(
                 doh_query,
             )
 
+            doh_max_response_bytes = int(MAX_DOH_DNS_MESSAGE_BYTES)
+
             body, _ = doh_query(
                 doh_url,
                 query.pack(),
@@ -700,6 +703,7 @@ def _send_query_with_failover_impl(
                 timeout_ms=timeout_ms,
                 verify=verify,
                 ca_file=ca_file,
+                max_response_bytes=doh_max_response_bytes,
             )
             return body
 
