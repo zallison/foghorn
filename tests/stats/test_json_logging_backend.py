@@ -265,6 +265,7 @@ def test_json_logging_retention_max_records(tmp_path: Path) -> None:
         file_path=str(log_file),
         async_logging=False,
         retention_max_records=2,
+        retention_prune_every_n_inserts=1,
     )
 
     backend._insert_query_log(  # type: ignore[attr-defined]
@@ -328,6 +329,7 @@ def test_json_logging_retention_max_bytes_keeps_latest_record(tmp_path: Path) ->
         file_path=str(log_file),
         async_logging=False,
         retention_max_bytes=10_000_000,
+        retention_prune_every_n_inserts=1,
     )
 
     backend._insert_query_log(  # type: ignore[attr-defined]
@@ -515,6 +517,7 @@ def test_json_logging_retention_days_and_max_records(
         async_logging=False,
         retention_days=4.0,
         retention_max_records=2,
+        retention_prune_every_n_inserts=1,
     )
     backend._insert_query_log(  # type: ignore[attr-defined]
         ts=now_ts - (10.0 * 86400.0),
@@ -640,6 +643,7 @@ def test_json_logging_retention_max_records_without_header_marker(
         file_path=str(log_file),
         async_logging=False,
         retention_max_records=2,
+        retention_prune_every_n_inserts=1,
     )
 
     lines_in = [
@@ -767,6 +771,7 @@ def test_json_logging_retention_returns_early_for_empty_log_file(
         file_path=str(log_file),
         async_logging=False,
         retention_max_records=1,
+        retention_prune_every_n_inserts=1,
     )
 
     log_file.write_text("", encoding="utf-8")
@@ -795,6 +800,7 @@ def test_json_logging_retention_max_records_tolerates_malformed_first_line(
         file_path=str(log_file),
         async_logging=False,
         retention_max_records=2,
+        retention_prune_every_n_inserts=1,
     )
 
     malformed_line = '{"name":"broken-first-line"'
