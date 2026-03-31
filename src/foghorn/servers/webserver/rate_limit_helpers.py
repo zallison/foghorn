@@ -15,6 +15,29 @@ logger = _stats_logger
 _GLOBAL_RPS_DB_KEY = "global"
 _GLOBAL_RPS_LEGACY_DB_KEY = "__global__"
 _GLOBAL_RPS_API_KEY = "global"
+_INVARIANT_WARN_TTL_SECONDS = 60.0
+_invariant_warn_cache: Dict[str, float] = {}
+
+
+def _should_emit_invariant_warning(cache_key: str, now_ts: float) -> bool:
+    """Brief: Return True when an invariant warning should be emitted now.
+
+    Inputs:
+      - cache_key: Stable warning fingerprint key.
+      - now_ts: Current epoch seconds.
+
+    Outputs:
+      - bool: True when warning should be logged, False when suppressed by TTL.
+    """
+
+    try:
+        last_ts = float(_invariant_warn_cache.get(cache_key, 0.0) or 0.0)
+    except Exception:
+        last_ts = 0.0
+    if float(now_ts) - float(last_ts) < float(_INVARIANT_WARN_TTL_SECONDS):
+        return False
+    _invariant_warn_cache[cache_key] = float(now_ts)
+    return True
 
 
 def _resolve_rate_limit_effective_config(entry: dict[str, Any]) -> Dict[str, Any]:
@@ -155,6 +178,7 @@ def _find_rate_limit_db_limit_settings_from_config(
           * burst_factor
           * burst_windows
           * min_enforce_rps
+          * min_burst_threshold
           * max_enforce_rps
           * global_max_rps
           * limit_recalc_windows
@@ -180,6 +204,18 @@ def _find_rate_limit_db_limit_settings_from_config(
             db_path = entry.get("db_path")
         if not db_path:
             continue
+        min_enforce_rps = _coerce_nonnegative_float(
+            cfg.get("min_enforce_rps"),
+            default=50.0,
+        )
+        min_boot_rps = _coerce_nonnegative_float(
+            cfg.get("min_boot_rps"),
+            default=float(min_enforce_rps),
+        )
+        min_boost_rps = _coerce_nonnegative_float(
+            cfg.get("min_boost_rps"),
+            default=float(min_boot_rps),
+        )
         out[str(db_path)] = {
             "warmup_windows": _coerce_nonnegative_int(
                 cfg.get("warmup_windows"),
@@ -197,9 +233,10 @@ def _find_rate_limit_db_limit_settings_from_config(
                 cfg.get("burst_windows"),
                 default=6,
             ),
-            "min_enforce_rps": _coerce_nonnegative_float(
-                cfg.get("min_enforce_rps"),
-                default=50.0,
+            "min_enforce_rps": float(min_enforce_rps),
+            "min_burst_threshold": _coerce_nonnegative_float(
+                cfg.get("min_burst_threshold"),
+                default=float(min_boost_rps),
             ),
             "max_enforce_rps": _coerce_nonnegative_float(
                 cfg.get("max_enforce_rps"),
@@ -243,7 +280,8 @@ def _compute_current_limit_rps(
       - Tuple[float|None, str, float|None, bool]:
           * current_limit_rps: Active numeric limit when enforceable, else None.
           * current_limit_source: Origin label describing how limit was derived.
-          * burst_threshold_rps: Unclamped avg_rps * burst_factor value.
+          * burst_threshold_rps: Burst threshold after applying min_burst_threshold
+            floor and max_enforce_rps cap.
           * enforcement_active: True when current_rps exceeds the active limit
             (or the hard max_enforce_rps cap in below-min-enforce mode).
 
@@ -268,6 +306,18 @@ def _compute_current_limit_rps(
         settings.get("min_enforce_rps"),
         default=50.0,
     )
+    min_boot_rps = _coerce_nonnegative_float(
+        settings.get("min_boot_rps"),
+        default=float(min_enforce_rps),
+    )
+    min_boost_rps = _coerce_nonnegative_float(
+        settings.get("min_boost_rps"),
+        default=float(min_boot_rps),
+    )
+    min_burst_threshold = _coerce_nonnegative_float(
+        settings.get("min_burst_threshold"),
+        default=float(min_boost_rps),
+    )
     max_enforce_rps = _coerce_nonnegative_float(
         settings.get("max_enforce_rps"),
         default=5000.0,
@@ -287,7 +337,12 @@ def _compute_current_limit_rps(
         limit = float(global_max_rps)
         return limit, "global_max_rps", None, float(current_rps) > float(limit)
 
-    burst_threshold_rps = float(avg_rps) * float(burst_factor)
+    burst_threshold_rps = max(
+        float(avg_rps) * float(burst_factor),
+        float(min_burst_threshold),
+    )
+    if max_enforce_rps > 0.0:
+        burst_threshold_rps = min(float(burst_threshold_rps), float(max_enforce_rps))
 
     if int(samples) < int(warmup_windows):
         if warmup_max_rps <= 0.0:
@@ -694,23 +749,25 @@ def _collect_rate_limit_stats(
                     canonical_global_row = row
                     continue
                 current_key_text = str(canonical_global_row[0])
+                try:
+                    existing_last_update = int(canonical_global_row[4] or 0)
+                except Exception:
+                    existing_last_update = 0
+                try:
+                    new_last_update = int(row[4] or 0)
+                except Exception:
+                    new_last_update = 0
+                if new_last_update > existing_last_update:
+                    canonical_global_row = row
+                    continue
+                if new_last_update < existing_last_update:
+                    continue
+                # Tie-break identical timestamps by preferring canonical key text.
                 if (
                     current_key_text != _GLOBAL_RPS_DB_KEY
                     and key_text == _GLOBAL_RPS_DB_KEY
                 ):
                     canonical_global_row = row
-                    continue
-                if key_text == current_key_text:
-                    try:
-                        existing_last_update = int(canonical_global_row[4] or 0)
-                    except Exception:
-                        existing_last_update = 0
-                    try:
-                        new_last_update = int(row[4] or 0)
-                    except Exception:
-                        new_last_update = 0
-                    if new_last_update > existing_last_update:
-                        canonical_global_row = row
                 continue
             normalized_rows.append(row)
         if canonical_global_row is not None:
@@ -968,6 +1025,131 @@ def _collect_rate_limit_stats(
                     "samples": 0,
                     "last_update": None,
                 }
+            )
+        global_profile = None
+        non_global_profiles: list[Dict[str, Any]] = []
+        for profile in profiles:
+            key_name = str(profile.get("key", ""))
+            if key_name == _GLOBAL_RPS_API_KEY and global_profile is None:
+                global_profile = profile
+            elif key_name != _GLOBAL_RPS_API_KEY:
+                non_global_profiles.append(profile)
+
+        if global_profile is not None and non_global_profiles:
+            now_for_warn = float(time.time())
+            max_non_global_samples = -1
+            max_non_global_samples_key = ""
+            for profile in non_global_profiles:
+                profile_samples = int(profile.get("samples", 0) or 0)
+                if profile_samples > max_non_global_samples:
+                    max_non_global_samples = profile_samples
+                    max_non_global_samples_key = str(profile.get("key", ""))
+            global_samples = int(global_profile.get("samples", 0) or 0)
+            if global_samples < max_non_global_samples:
+                # A one-sample skew is expected occasionally because global/key
+                # profile rows are updated in separate commits.
+                if int(max_non_global_samples - global_samples) > 1:
+                    warn_key = (
+                        f"{path}|samples|{global_samples}|{max_non_global_samples}|"
+                        f"{max_non_global_samples_key}|{global_profile.get('last_update', '')}"
+                    )
+                    if _should_emit_invariant_warning(warn_key, now_for_warn):
+                        logger.warning(
+                            "rate_limit invariant violated db_path=%s field=samples global=%s global_key=%s max_key_value=%s max_key_name=%s global_last_update=%s key_last_update=%s; normalizing global samples",
+                            path,
+                            global_samples,
+                            str(global_profile.get("key", "")),
+                            max_non_global_samples,
+                            max_non_global_samples_key,
+                            str(global_profile.get("last_update", "")),
+                            str(
+                                next(
+                                    (
+                                        p.get("last_update", "")
+                                        for p in non_global_profiles
+                                        if str(p.get("key", ""))
+                                        == max_non_global_samples_key
+                                    ),
+                                    "",
+                                )
+                            ),
+                        )
+                global_profile["samples"] = int(max_non_global_samples)
+
+            invariant_metrics = (
+                ("current_rps", "current_rps"),
+                ("max_rps", "max_rps_overall"),
+                ("window_max_rps", "max_rps_interval"),
+            )
+            for canonical_metric, alias_metric in invariant_metrics:
+                fresh_non_global_profiles = non_global_profiles
+                if int(lookback_seconds) > 0:
+                    try:
+                        global_last_update = int(
+                            global_profile.get("last_update", 0) or 0
+                        )
+                    except Exception:
+                        global_last_update = 0
+                    if global_last_update > 0:
+                        cutoff_last_update = int(global_last_update) - int(
+                            lookback_seconds
+                        )
+                        fresh_non_global_profiles = [
+                            p
+                            for p in non_global_profiles
+                            if int(p.get("last_update", 0) or 0)
+                            >= int(cutoff_last_update)
+                        ]
+                if not fresh_non_global_profiles:
+                    continue
+                max_non_global_value = 0.0
+                max_non_global_key = ""
+                for profile in fresh_non_global_profiles:
+                    candidate = _coerce_nonnegative_float(
+                        profile.get(canonical_metric), default=0.0
+                    )
+                    if candidate > max_non_global_value:
+                        max_non_global_value = float(candidate)
+                        max_non_global_key = str(profile.get("key", ""))
+                global_value = _coerce_nonnegative_float(
+                    global_profile.get(canonical_metric),
+                    default=0.0,
+                )
+                if global_value >= max_non_global_value:
+                    continue
+                warn_key = (
+                    f"{path}|{canonical_metric}|{global_value:.4f}|{max_non_global_value:.4f}|"
+                    f"{max_non_global_key}|{global_profile.get('last_update', '')}"
+                )
+                if _should_emit_invariant_warning(warn_key, now_for_warn):
+                    logger.warning(
+                        "rate_limit invariant violated db_path=%s field=%s global=%.4f global_key=%s max_key_value=%.4f max_key_name=%s global_last_update=%s key_last_update=%s; normalizing global value",
+                        path,
+                        canonical_metric,
+                        global_value,
+                        str(global_profile.get("key", "")),
+                        max_non_global_value,
+                        max_non_global_key,
+                        str(global_profile.get("last_update", "")),
+                        str(
+                            next(
+                                (
+                                    p.get("last_update", "")
+                                    for p in fresh_non_global_profiles
+                                    if str(p.get("key", "")) == max_non_global_key
+                                ),
+                                "",
+                            )
+                        ),
+                    )
+                global_profile[canonical_metric] = float(max_non_global_value)
+                if alias_metric != canonical_metric:
+                    global_profile[alias_metric] = float(max_non_global_value)
+        elif global_profile is None and non_global_profiles:
+            logger.warning(
+                "rate_limit invariant violated db_path=%s field=global_profile missing while %d key profiles exist",
+                path,
+                len(non_global_profiles),
             )
 
         summaries.append(

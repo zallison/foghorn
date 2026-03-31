@@ -516,6 +516,33 @@ def test_compute_current_limit_rps_additional_fallback_paths() -> None:
     assert burst_no_recalc[0] == 100.0
     assert burst_no_recalc[1] == "burst_threshold"
 
+    below_min_floor = helpers._compute_current_limit_rps(
+        avg_rps=2.0,
+        samples=20,
+        current_rps=1.0,
+        limit_settings={
+            "min_enforce_rps": 10.0,
+            "burst_factor": 2.0,
+            "max_enforce_rps": 0.0,
+        },
+    )
+    assert below_min_floor[1] == "below_min_enforce_rps"
+    assert below_min_floor[2] == 10.0
+
+    below_min_custom_floor = helpers._compute_current_limit_rps(
+        avg_rps=1.0,
+        samples=20,
+        current_rps=1.0,
+        limit_settings={
+            "min_enforce_rps": 10.0,
+            "min_burst_threshold": 3.0,
+            "burst_factor": 2.0,
+            "max_enforce_rps": 0.0,
+        },
+    )
+    assert below_min_custom_floor[1] == "below_min_enforce_rps"
+    assert below_min_custom_floor[2] == 3.0
+
 
 def test_collect_rate_limit_stats_handles_reader_fallback_exceptions(
     tmp_path,
@@ -708,6 +735,45 @@ def test_collect_rate_limit_stats_appends_fallback_global_row_additional(
     summary = data["databases"][0]
     keys = {row["key"] for row in summary["profiles"]}
     assert "global" in keys
+
+
+def test_collect_rate_limit_stats_prefers_freshest_global_alias_row_additional(
+    tmp_path,
+) -> None:
+    """Brief: Global alias dedupe prefers freshest row over key-name preference.
+
+    Inputs:
+      - tmp_path: pytest temp directory for sqlite DB.
+
+    Outputs:
+      - Asserts displayed global row uses the most recent alias values.
+    """
+
+    db_path = tmp_path / "global_alias_freshness.db"
+    now = int(time.time())
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "CREATE TABLE rate_profiles (key TEXT, avg_rps REAL, max_rps REAL, samples INTEGER, last_update INTEGER)"
+        )
+        conn.executemany(
+            "INSERT INTO rate_profiles (key, avg_rps, max_rps, samples, last_update) VALUES (?, ?, ?, ?, ?)",
+            [
+                ("global", 10.0, 10.0, 2, now - 120),
+                ("__global__", 11.0, 11.0, 25, now),
+                ("client-a", 5.0, 5.0, 9, now),
+            ],
+        )
+        conn.commit()
+
+    _reset_rate_limit_cache()
+    cfg = {"plugins": [{"module": "rate_limit", "config": {"db_path": str(db_path)}}]}
+    data = helpers._collect_rate_limit_stats(cfg, plugins=None)
+    summary = data["databases"][0]
+    profiles_by_key = {row["key"]: row for row in summary["profiles"]}
+
+    assert "global" in profiles_by_key
+    assert profiles_by_key["global"]["samples"] == 25
+    assert profiles_by_key["global"]["last_update"] == now
 
 
 def test_collect_rate_limit_stats_window_conversion_and_query_error_paths_additional(
