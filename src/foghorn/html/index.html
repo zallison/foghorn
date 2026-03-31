@@ -951,7 +951,7 @@
 				wrap.className = 'fh-query-log-filter-control';
 
 				var textBtn = document.createElement('button');
-				textBtn.type = 'button';
+textBtn.type = 'button';
 				textBtn.className = 'fh-query-log-filter-main';
 				textBtn.textContent = text;
 				textBtn.title = 'Replace filters with ' + key + '=' + value;
@@ -1407,7 +1407,6 @@
 					return;
 				}
 				renderQueryLogFilterChips();
-				renderQueryLogRows([]);
 				setQueryLogError('');
 				if (queryLogSummaryEl) {
 					queryLogSummaryEl.textContent = 'Loading query-log rows...';
@@ -1647,12 +1646,14 @@
 				if (!target || !source) {
 					return;
 				}
+				if (typeof target.replaceChildren === 'function') {
+					target.replaceChildren(source);
+					return;
+				}
 				while (target.firstChild) {
 					target.removeChild(target.firstChild);
 				}
-				while (source.firstChild) {
-					target.appendChild(source.firstChild);
-				}
+				target.appendChild(source);
 			}
 
 			function appendDictGroup(title, mapping) {
@@ -3756,13 +3757,16 @@
 						});
 					// Render cleaned TXT lines with indentation, as before.
 					var cleanedLines = g.cleanedLines || [];
-					var txtHtml = escapeHtml((cleanedLines[0] || ''));
-					for (var ci = 1; ci < cleanedLines.length; ci++) {
+					var txtHtml = '';
+					for (var ci = 0; ci < cleanedLines.length; ci++) {
 						var seg = cleanedLines[ci];
 						if (!seg) {
 							continue;
 						}
-						txtHtml += '<br>&nbsp;&nbsp;&nbsp;&nbsp;' + escapeHtml(seg);
+						if (txtHtml) {
+							txtHtml += '<br>';
+						}
+						txtHtml += escapeHtml(seg);
 					}
 					// Add a small spacer at the bottom of each row so Docker entries
 					// do not visually run together in the admin table.
@@ -4632,6 +4636,9 @@
 				body.appendChild(runtimeRoot);
 				renderKvSection(runtimeRoot, {
 					current_rps: formatRateLimitRps(settingsObj.current_rps),
+				rps_1m: formatRateLimitRps(settingsObj.rps_1m),
+				rps_5m: formatRateLimitRps(settingsObj.rps_5m),
+				rps_10m: formatRateLimitRps(settingsObj.rps_10m),
 				}, {
 					id: 'summary',
 					title: 'Runtime',
@@ -4639,6 +4646,9 @@
 					align: 'right',
 					rows: [
 						{ key: 'current_rps', label: 'Current RPS' },
+					{ key: 'rps_1m', label: 'Global RPS (1m)' },
+					{ key: 'rps_5m', label: 'Global RPS (5m)' },
+					{ key: 'rps_10m', label: 'Global RPS (10m)' },
 					],
 				});
 
@@ -4843,8 +4853,37 @@
 						}
 					}
 						if (body.parentNode) {
-							body.parentNode.replaceChild(nextBody, body);
-							body = nextBody;
+							var scrollX = window.pageXOffset != null ? window.pageXOffset : window.scrollX;
+							var scrollY = window.pageYOffset != null ? window.pageYOffset : window.scrollY;
+							var previousMinHeight = body.style.minHeight || '';
+							var previousBodyHeight = body.offsetHeight;
+							if (previousBodyHeight > 0) {
+								body.style.minHeight = String(previousBodyHeight) + 'px';
+							}
+							if (typeof body.replaceChildren === 'function') {
+								body.replaceChildren.apply(body, Array.prototype.slice.call(nextBody.childNodes));
+							} else {
+								while (body.firstChild) {
+									body.removeChild(body.firstChild);
+								}
+								while (nextBody.firstChild) {
+									body.appendChild(nextBody.firstChild);
+								}
+							}
+							if (typeof window.scrollTo === 'function') {
+								var restoreScroll = function () {
+									window.scrollTo(scrollX, scrollY);
+								};
+								if (typeof window.requestAnimationFrame === 'function') {
+									window.requestAnimationFrame(restoreScroll);
+								} else {
+									restoreScroll();
+								}
+								window.setTimeout(restoreScroll, 250);
+							}
+							window.setTimeout(function () {
+								body.style.minHeight = previousMinHeight;
+							}, 900);
 						}
 
 						// After a successful render, configure optional auto-refresh
