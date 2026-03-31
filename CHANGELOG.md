@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 ### Recent incremental updates
+- RateLimit now supports `min_burst_threshold` (with compatibility aliases `min_boot_rps` / `min_boost_rps`) as the floor for burst-threshold derivation, defaults that floor to `min_enforce_rps` when unset, and caps non-global profile sample counts to global samples to keep per-key/global profile progression aligned.
+- RateLimit runtime/admin snapshots now include recent global RPS lookbacks (`rps_1m`, `rps_5m`, `rps_10m`), and webserver rate-limit helper aggregation now applies global-versus-per-key invariant normalization with TTL-throttled warning emission when sampled/profile maxima drift out of expected bounds.
+- RateLimit active-window tracking now guards against late-window thread updates regressing `_active_window_id`, and additional regression tests cover late-thread races plus the invariant that global `max_rps` must not fall below per-key maxima.
+- Admin UI/plugin snapshot rendering now surfaces 1m/5m/10m global RPS in RateLimit views, improves table/fragment replacement behavior (including scroll restoration), and DockerHosts TXT/Info table cells are explicitly marked as HTML-renderable for richer display formatting.
+- Example rate-limit profile config comments were simplified to avoid embedding stale numeric defaults while retaining profile-selection guidance.
 - FileDownloader now validates resolved destination IPs for configured URLs and redirect targets (rejecting private/loopback/link-local/reserved destinations unless explicitly allowed), follows redirects with manual per-hop URL validation, and enforces a bounded redirect hop limit during HEAD/GET checks.
 - ZoneRecords DNS UPDATE authorization now fails closed when configured allowlist sources resolve empty, and DNS UPDATE security-validation exceptions now return `REFUSED` (with best-effort TSIG signing) instead of silently continuing.
 - Admin web auth evaluation is now centralized and shared across FastAPI and threaded handlers, token checks use constant-time comparison, unsupported auth modes now fail closed with explicit 500 errors, and threaded `/api/v1/plugin_pages` plus `/api/v1/ratelimit` now enforce auth consistently.
