@@ -740,6 +740,44 @@ def test_limit_recalc_windows_globally_refreshes_unseen_bucket_limits(tmp_path):
     assert unseen_base_2 == pytest.approx(30.0)
 
 
+def test_min_burst_threshold_defaults_and_override(tmp_path):
+    """Brief: min_burst_threshold defaults to min_enforce_rps and supports override.
+
+    Inputs:
+      - tmp_path: pytest tmp path for sqlite db.
+
+    Outputs:
+      - None: asserts burst-threshold floor follows default and explicit override.
+    """
+
+    db_default = tmp_path / "rl-min-burst-default.db"
+    plugin_default = RateLimit(
+        db_path=str(db_default),
+        min_enforce_rps=12.0,
+        burst_factor=1.0,
+        max_enforce_rps=0.0,
+    )
+    plugin_default.setup()
+    burst_default, _base_default = plugin_default._compute_allowed_rps_thresholds(1.0)
+    assert plugin_default.min_burst_threshold == pytest.approx(12.0)
+    assert burst_default == pytest.approx(12.0)
+
+    db_override = tmp_path / "rl-min-burst-override.db"
+    plugin_override = RateLimit(
+        db_path=str(db_override),
+        min_enforce_rps=12.0,
+        min_burst_threshold=4.0,
+        burst_factor=1.0,
+        max_enforce_rps=0.0,
+    )
+    plugin_override.setup()
+    burst_override, _base_override = plugin_override._compute_allowed_rps_thresholds(
+        1.0
+    )
+    assert plugin_override.min_burst_threshold == pytest.approx(4.0)
+    assert burst_override == pytest.approx(4.0)
+
+
 def test_invalid_mode_defaults_to_per_client(tmp_path):
     """Brief: Unknown mode falls back to 'per_client'.\n\n    Inputs:\n      - tmp_path: pytest tmp path for sqlite db.\n\n    Outputs:\n      - None: asserts plugin.mode is 'per_client'.\n"""
 
@@ -868,6 +906,46 @@ def test_get_http_snapshot_includes_current_rps(tmp_path, monkeypatch):
     settings = snapshot.get("settings")
     assert isinstance(settings, dict)
     assert float(settings.get("current_rps", -1.0)) == pytest.approx(2.5)
+    assert float(settings.get("rps_1m", -1.0)) == pytest.approx(0.0)
+    assert float(settings.get("rps_5m", -1.0)) == pytest.approx(0.0)
+    assert float(settings.get("rps_10m", -1.0)) == pytest.approx(0.0)
+
+
+def test_get_http_snapshot_includes_recent_global_rps_metrics(tmp_path, monkeypatch):
+    """Brief: Snapshot includes recent global RPS metrics over 1m/5m/10m windows.
+
+    Inputs:
+      - tmp_path: pytest temporary path for sqlite DB.
+      - monkeypatch: fixture used to advance deterministic request windows.
+
+    Outputs:
+      - None: asserts recent global RPS fields are populated after completed windows.
+    """
+
+    db = tmp_path / "rl-snapshot-recent-rps.db"
+    plugin = RateLimit(
+        db_path=str(db),
+        window_seconds=10,
+        warmup_windows=0,
+    )
+    plugin.setup()
+    ctx = PluginContext(client_ip="1.2.3.4", listener="tcp")
+
+    with closing(plugin._conn):
+        _set_time(monkeypatch, 0.0)
+        for _ in range(20):
+            plugin.pre_resolve("example.com", QTYPE.A, b"", ctx)
+
+        _set_time(monkeypatch, 10.0)
+        plugin.pre_resolve("example.com", QTYPE.A, b"", ctx)
+
+        snapshot = plugin.get_http_snapshot()
+
+    settings = snapshot.get("settings")
+    assert isinstance(settings, dict)
+    assert float(settings.get("rps_1m", 0.0)) > 0.0
+    assert float(settings.get("rps_5m", 0.0)) > 0.0
+    assert float(settings.get("rps_10m", 0.0)) > 0.0
 
 
 def test_increment_window_is_atomic_under_concurrency(tmp_path):
@@ -2246,6 +2324,51 @@ def test_db_apply_zero_windows_covers_validation_and_decay_branches(tmp_path):
     assert samples_after_zero == 4
 
 
+def test_db_apply_zero_windows_caps_non_global_samples_to_global(tmp_path):
+    """Brief: Zero-window backfill for non-global keys cannot exceed global samples.
+
+    Inputs:
+      - tmp_path: pytest temporary path.
+
+    Outputs:
+      - None: asserts non-global sample count is capped to global sample count.
+    """
+
+    plugin = RateLimit(db_path=str(tmp_path / "rl-zero-windows-cap.db"))
+    plugin.setup()
+
+    plugin._seed_profile(
+        rate_limit_module._GLOBAL_RPS_DB_KEY, rps=10.0, now_ts=0, samples=5
+    )
+    plugin._seed_profile("client-cap", rps=8.0, now_ts=0, samples=2)
+    plugin.alpha_down = 0.5
+    plugin._db_apply_zero_windows("client-cap", windows=10, now_ts=100)
+    _avg_cap, _max_cap, samples_cap = plugin._db_get_profile("client-cap")
+    assert samples_cap == 5
+
+
+def test_db_update_profile_caps_non_global_samples_to_global(tmp_path):
+    """Brief: Regular profile updates cannot persist non-global samples above global.
+
+    Inputs:
+      - tmp_path: pytest temporary path.
+
+    Outputs:
+      - None: asserts non-global samples are capped during _db_update_profile.
+    """
+
+    plugin = RateLimit(db_path=str(tmp_path / "rl-update-cap.db"))
+    plugin.setup()
+
+    plugin._seed_profile(
+        rate_limit_module._GLOBAL_RPS_DB_KEY, rps=10.0, now_ts=0, samples=5
+    )
+    plugin._seed_profile("client-update-cap", rps=8.0, now_ts=0, samples=20)
+    plugin._db_update_profile("client-update-cap", rps=3.0, now_ts=200)
+    _avg_cap, _max_cap, samples_cap = plugin._db_get_profile("client-update-cap")
+    assert samples_cap == 5
+
+
 def test_increment_window_handles_missed_window_profile_branches(tmp_path, monkeypatch):
     """Brief: Missed-window handling resets or advances burst state based on profile state.
 
@@ -2930,4 +3053,206 @@ def test_setup_no_precedence_warnings_for_non_conflicting_limits(
     assert "bootstrap threshold" not in text
     assert "global_max_rps=" not in text
     assert "hard-cap enforcement may trigger" not in text
+    plugin.shutdown()
+
+
+def test_late_arriving_thread_does_not_regress_active_window_id(tmp_path):
+    """Brief: Late-arriving threads from older windows cannot regress _active_window_id.
+
+    Inputs:
+      - tmp_path: pytest temporary path.
+
+    Outputs:
+      - None: asserts _active_window_id only advances forward, never regresses.
+
+    Notes:
+      - This tests the fix for a race condition where a thread processing a
+        request from Window N could overwrite _active_window_id after a thread
+        from Window N+1 had already advanced it, causing inconsistent state.
+    """
+
+    plugin = RateLimit(
+        db_path=str(tmp_path / "rl-late-thread.db"),
+        window_seconds=10,
+    )
+    plugin.setup()
+
+    # Simulate Thread B advancing to window 5
+    plugin._record_active_window_count("client-b", window_id=5, count=1)
+    assert plugin._active_window_id == 5
+    assert plugin._active_window_counts.get("client-b") == (5, 1)
+
+    # Simulate Thread A (late-arriving from window 4) trying to update
+    # This should return early without modifying _active_window_id
+    plugin._record_active_window_count("client-a", window_id=4, count=10)
+
+    # Verify _active_window_id was NOT regressed
+    assert plugin._active_window_id == 5
+    # The stale entry should NOT have been recorded
+    assert "client-a" not in plugin._active_window_counts
+    # The newer entry from Thread B should still be intact
+    assert plugin._active_window_counts.get("client-b") == (5, 1)
+
+    plugin.shutdown()
+
+
+def test_global_max_rps_never_lower_than_per_key_max_rps(tmp_path, monkeypatch):
+    """Brief: Global profile max_rps must always be >= any per-key max_rps.
+
+    Inputs:
+      - tmp_path: pytest temporary path.
+      - monkeypatch: pytest monkeypatch fixture for deterministic time control.
+
+    Outputs:
+      - None: asserts the invariant global.max_rps >= max(per_key.max_rps) holds.
+
+    Notes:
+      - This is a regression test for a bug where concurrent window rollovers
+        could cause per-key profiles to record higher max_rps values than the
+        global profile, violating the invariant that global is the sum of all
+        per-key traffic.
+    """
+
+    plugin = RateLimit(
+        db_path=str(tmp_path / "rl-global-invariant.db"),
+        window_seconds=5,
+        warmup_windows=0,
+        min_enforce_rps=0.0,
+        bootstrap_rps=0.0,
+    )
+    plugin.setup()
+
+    ctx_a = PluginContext(client_ip="192.168.88.30", listener="tcp")
+    ctx_b = PluginContext(client_ip="192.168.88.40", listener="tcp")
+
+    # Window 0: Generate traffic from multiple clients
+    _set_time(monkeypatch, 0.0)
+    for _ in range(20):
+        plugin.pre_resolve("example.com", QTYPE.A, b"", ctx_a)
+    for _ in range(5):
+        plugin.pre_resolve("example.com", QTYPE.A, b"", ctx_b)
+
+    # Window 1: Trigger rollover with more traffic
+    _set_time(monkeypatch, 5.0)
+    for _ in range(24):
+        plugin.pre_resolve("example.com", QTYPE.A, b"", ctx_a)
+    for _ in range(3):
+        plugin.pre_resolve("example.com", QTYPE.A, b"", ctx_b)
+
+    # Window 2: Another rollover
+    _set_time(monkeypatch, 10.0)
+    for _ in range(15):
+        plugin.pre_resolve("example.com", QTYPE.A, b"", ctx_a)
+
+    # Window 3: Final rollover to flush all profiles
+    _set_time(monkeypatch, 15.0)
+    plugin.pre_resolve("example.com", QTYPE.A, b"", ctx_a)
+
+    # Verify the invariant: global.max_rps >= max(per_key.max_rps)
+    cur = plugin._conn.cursor()
+    cur.execute(
+        "SELECT max_rps FROM rate_profiles WHERE key = ?",
+        (rate_limit_module._GLOBAL_RPS_DB_KEY,),
+    )
+    global_row = cur.fetchone()
+    assert global_row is not None, "Global profile should exist"
+    global_max_rps = float(global_row[0])
+
+    cur.execute(
+        "SELECT key, max_rps FROM rate_profiles WHERE key != ?",
+        (rate_limit_module._GLOBAL_RPS_DB_KEY,),
+    )
+    per_key_rows = cur.fetchall()
+    assert per_key_rows, "Per-key profiles should exist"
+
+    for key, max_rps in per_key_rows:
+        per_key_max = float(max_rps)
+        assert global_max_rps >= per_key_max, (
+            f"Invariant violated: global.max_rps ({global_max_rps:.4f}) < "
+            f"{key}.max_rps ({per_key_max:.4f})"
+        )
+
+    plugin.shutdown()
+
+
+def test_global_max_rps_invariant_with_simulated_late_thread_race(
+    tmp_path, monkeypatch
+):
+    """Brief: Global max_rps invariant holds even when simulating late-thread race.
+
+    Inputs:
+      - tmp_path: pytest temporary path.
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None: asserts invariant holds after simulating the exact race condition.
+
+    Notes:
+      - This test directly simulates the race condition scenario where a thread
+        from Window N tries to update _active_window_counts after a thread from
+        Window N+1 has already advanced the window. Without the fix, this would
+        cause _active_window_id to regress and potentially corrupt profile data.
+    """
+
+    plugin = RateLimit(
+        db_path=str(tmp_path / "rl-race-invariant.db"),
+        window_seconds=10,
+        warmup_windows=0,
+        min_enforce_rps=0.0,
+        bootstrap_rps=0.0,
+    )
+    plugin.setup()
+
+    ctx = PluginContext(client_ip="10.0.0.1", listener="tcp")
+
+    # Window 0: Generate baseline traffic
+    _set_time(monkeypatch, 0.0)
+    for _ in range(50):
+        plugin.pre_resolve("example.com", QTYPE.A, b"", ctx)
+
+    # Simulate the race condition at window boundary:
+    # 1. Thread B (window 1) runs first and advances _active_window_id
+    # 2. Thread A (window 0, late) tries to update with stale data
+
+    # First, manually trigger window 1 rollover
+    _set_time(monkeypatch, 10.0)
+    plugin.pre_resolve("example.com", QTYPE.A, b"", ctx)
+
+    # Now simulate a late-arriving thread from window 0 trying to corrupt state
+    # This should be rejected by the fix
+    plugin._record_active_window_count("10.0.0.1", window_id=0, count=999)
+
+    # Verify the stale data was rejected
+    assert plugin._active_window_id == 1
+    # The corrupted count should NOT have been recorded
+    entry = plugin._active_window_counts.get("10.0.0.1")
+    if entry is not None:
+        assert entry[0] == 1, "Entry should be from window 1, not window 0"
+        assert entry[1] != 999, "Corrupted count should not have been recorded"
+
+    # Continue with more windows to ensure profiles are flushed
+    _set_time(monkeypatch, 20.0)
+    plugin.pre_resolve("example.com", QTYPE.A, b"", ctx)
+
+    # Verify the invariant
+    cur = plugin._conn.cursor()
+    cur.execute(
+        "SELECT max_rps FROM rate_profiles WHERE key = ?",
+        (rate_limit_module._GLOBAL_RPS_DB_KEY,),
+    )
+    global_row = cur.fetchone()
+    assert global_row is not None
+    global_max_rps = float(global_row[0])
+
+    cur.execute(
+        "SELECT key, max_rps FROM rate_profiles WHERE key != ?",
+        (rate_limit_module._GLOBAL_RPS_DB_KEY,),
+    )
+    for key, max_rps in cur.fetchall():
+        per_key_max = float(max_rps)
+        assert global_max_rps >= per_key_max, (
+            f"Invariant violated: global.max_rps ({global_max_rps:.4f}) < "
+            f"{key}.max_rps ({per_key_max:.4f})"
+        )
+
     plugin.shutdown()

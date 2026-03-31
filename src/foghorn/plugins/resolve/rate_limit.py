@@ -123,6 +123,11 @@ class RateLimitConfig(BaseModel):
       - burst_reset_windows: Number of consecutive completed windows at or below
         threshold required to reset burst state back to zero.
       - min_enforce_rps: Minimum RPS threshold for enforcement.
+      - min_burst_threshold: Minimum burst-threshold floor used when deriving
+        avg_rps * burst_factor; defaults to min_boot_rps/min_boost_rps when
+        provided, otherwise defaults to min_enforce_rps.
+      - min_boot_rps: Deprecated alias for min_burst_threshold.
+      - min_boost_rps: Deprecated alias for min_burst_threshold.
       - max_enforce_rps: Hard upper bound on allowed RPS per key (0 disables).
       - global_max_rps: Optional hard upper bound on total RPS across all keys
         (0 disables).
@@ -184,6 +189,7 @@ class RateLimitConfig(BaseModel):
     burst_windows: int = Field(default=6, ge=0)
     burst_reset_windows: int = Field(default=20, ge=1)
     min_enforce_rps: float = Field(default=50.0, ge=0.0)
+    min_burst_threshold: Optional[float] = Field(default=None, ge=0.0)
     max_enforce_rps: float = Field(default=5000.0, ge=0.0)
     global_max_rps: float = Field(default=0.0, ge=0.0)
     db_path: str = Field(default="./config/var/dbs/rate_limit.db")
@@ -209,6 +215,30 @@ class RateLimitConfig(BaseModel):
     deny_log_interval_seconds: int = Field(default=60, ge=0)
     deny_log_first_n: int = Field(default=3, ge=0)
     psl_strict: bool = Field(default=False)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_min_boot_rps_alias(cls, data: object) -> object:
+        """Brief: Map deprecated min_boot_rps/min_boost_rps to min_burst_threshold.
+
+        Inputs:
+          - data: Raw configuration payload before field validation.
+
+        Outputs:
+          - object: Configuration payload with min_burst_threshold populated
+            from min_boot_rps/min_boost_rps when min_burst_threshold is unset.
+        """
+
+        if not isinstance(data, Mapping):
+            return data
+        if "min_burst_threshold" in data:
+            return data
+        if "min_boot_rps" not in data and "min_boost_rps" not in data:
+            return data
+
+        out = dict(data)
+        out["min_burst_threshold"] = data.get("min_boot_rps", data.get("min_boost_rps"))
+        return out
 
     @model_validator(mode="before")
     @classmethod
@@ -262,14 +292,14 @@ class RateLimitConfig(BaseModel):
         return out
 
     @model_validator(mode="after")
-    def _default_bootstrap_rps_to_global_max(self) -> "RateLimitConfig":
-        """Brief: Default bootstrap_rps from explicit global_max_rps or fallback.
+    def _default_dynamic_thresholds(self) -> "RateLimitConfig":
+        """Brief: Populate dependent defaults from already-parsed fields.
 
         Inputs:
           - self: Fully parsed RateLimitConfig model instance.
 
         Outputs:
-          - RateLimitConfig: Model with bootstrap_rps defaulted when unset.
+          - RateLimitConfig: Model with dependent defaults populated when unset.
         """
 
         if "bootstrap_rps" not in self.model_fields_set:
@@ -277,6 +307,8 @@ class RateLimitConfig(BaseModel):
                 self.bootstrap_rps = float(self.global_max_rps)
             else:
                 self.bootstrap_rps = 50.0
+        if "min_burst_threshold" not in self.model_fields_set:
+            self.min_burst_threshold = float(self.min_enforce_rps)
         return self
 
     model_config = ConfigDict(extra="allow")
@@ -466,6 +498,21 @@ class RateLimit(BasePlugin):
         )
         self.min_enforce_rps = self._parse_float_config(
             "min_enforce_rps", 50.0, minimum=0.0
+        )
+        min_boot_rps = self._parse_float_config(
+            "min_boot_rps",
+            float(self.min_enforce_rps),
+            minimum=0.0,
+        )
+        min_boost_rps = self._parse_float_config(
+            "min_boost_rps",
+            float(min_boot_rps),
+            minimum=0.0,
+        )
+        self.min_burst_threshold = self._parse_float_config(
+            "min_burst_threshold",
+            float(min_boost_rps),
+            minimum=0.0,
         )
         self.warmup_max_rps = self._parse_float_config(
             "warmup_max_rps", 0.0, minimum=0.0
@@ -833,6 +880,45 @@ class RateLimit(BasePlugin):
             )
             return None
 
+    def _cap_non_global_samples(
+        self,
+        cursor: sqlite3.Cursor,
+        profile_key: str,
+        sample_count: int,
+    ) -> int:
+        """Brief: Cap non-global sample_count to current global samples.
+
+        Inputs:
+          - cursor: sqlite cursor on the rate-limit profile DB.
+          - profile_key: Profile key being updated.
+          - sample_count: Candidate sample count for this profile update.
+
+        Outputs:
+          - int: Possibly capped sample count.
+        """
+
+        bounded_samples = int(sample_count)
+        if str(profile_key) == str(_GLOBAL_RPS_DB_KEY):
+            return int(bounded_samples)
+        try:
+            cursor.execute(
+                "SELECT samples FROM rate_profiles WHERE key=?",
+                (str(_GLOBAL_RPS_DB_KEY),),
+            )
+            global_row = cursor.fetchone()
+            global_samples = (
+                int(global_row[0]) if global_row and global_row[0] is not None else None
+            )
+        except Exception:
+            global_samples = None
+        if (
+            global_samples is not None
+            and int(global_samples) >= 0
+            and int(bounded_samples) > int(global_samples)
+        ):
+            return int(global_samples)
+        return int(bounded_samples)
+
     def _db_get_profile_last_update(self, key: str) -> Optional[int]:
         """Brief: Return last_update epoch seconds for a profile key.
 
@@ -966,7 +1052,8 @@ class RateLimit(BasePlugin):
 
         Outputs:
           - None (persists updated avg_rps, max_rps, samples, and optional
-            per-window sample rows used by stats_window_seconds summaries).
+            per-window sample rows used by stats_window_seconds summaries;
+            global window samples are always persisted for admin runtime metrics).
         """
 
         with self._db_lock:
@@ -979,10 +1066,11 @@ class RateLimit(BasePlugin):
             if not row or row[0] is None or row[1] is None or row[2] is None:
                 # Treat missing or partially-null rows as if they do not exist,
                 # resetting the profile based on the current observation.
+                capped_samples = self._cap_non_global_samples(cur, str(key), 1)
                 cur.execute(
                     "INSERT OR REPLACE INTO rate_profiles (key, avg_rps, max_rps, samples, last_update) "
                     "VALUES (?, ?, ?, ?, ?)",
-                    (key, float(rps), float(rps), 1, int(now_ts)),
+                    (key, float(rps), float(rps), int(capped_samples), int(now_ts)),
                 )
             else:
                 try:
@@ -993,10 +1081,11 @@ class RateLimit(BasePlugin):
                     )
                 except Exception:
                     # Malformed existing row; reset it using the current observation.
+                    capped_samples = self._cap_non_global_samples(cur, str(key), 1)
                     cur.execute(
                         "INSERT OR REPLACE INTO rate_profiles (key, avg_rps, max_rps, samples, last_update) "
                         "VALUES (?, ?, ?, ?, ?)",
-                        (key, float(rps), float(rps), 1, int(now_ts)),
+                        (key, float(rps), float(rps), int(capped_samples), int(now_ts)),
                     )
                 else:
                     # Use asymmetric smoothing so we can ramp up and down at different rates.
@@ -1006,13 +1095,17 @@ class RateLimit(BasePlugin):
                         alpha = float(getattr(self, "alpha_down", self.alpha))
                     new_avg = (1.0 - alpha) * avg_rps + alpha * float(rps)
                     new_max = max(max_rps, float(rps))
-                    new_samples = samples + 1
+                    new_samples = self._cap_non_global_samples(
+                        cur, str(key), int(samples + 1)
+                    )
                     cur.execute(
                         "UPDATE rate_profiles SET avg_rps=?, max_rps=?, samples=?, last_update=? "
                         "WHERE key=?",
                         (new_avg, new_max, new_samples, int(now_ts), key),
                     )
-            if int(getattr(self, "stats_window_seconds", 0) or 0) > 0:
+            if int(getattr(self, "stats_window_seconds", 0) or 0) > 0 or str(
+                key
+            ) == str(_GLOBAL_RPS_DB_KEY):
                 cur.execute(
                     "INSERT INTO rate_profile_windows (key, rps, last_update) "
                     "VALUES (?, ?, ?)",
@@ -1071,6 +1164,27 @@ class RateLimit(BasePlugin):
                 new_avg = 0.0
             else:
                 new_avg = avg_rps * ((1.0 - alpha_down) ** missed_windows)
+            new_samples = int(samples + missed_windows)
+            if str(key) != str(_GLOBAL_RPS_DB_KEY):
+                try:
+                    cur.execute(
+                        "SELECT samples FROM rate_profiles WHERE key=?",
+                        (str(_GLOBAL_RPS_DB_KEY),),
+                    )
+                    global_row = cur.fetchone()
+                    global_samples = (
+                        int(global_row[0])
+                        if global_row and global_row[0] is not None
+                        else None
+                    )
+                except Exception:
+                    global_samples = None
+                if (
+                    global_samples is not None
+                    and int(global_samples) >= 0
+                    and int(new_samples) > int(global_samples)
+                ):
+                    new_samples = int(global_samples)
 
             cur.execute(
                 "UPDATE rate_profiles SET avg_rps=?, max_rps=?, samples=?, last_update=? "
@@ -1078,7 +1192,7 @@ class RateLimit(BasePlugin):
                 (
                     float(new_avg),
                     float(max_rps),
-                    int(samples + missed_windows),
+                    int(new_samples),
                     int(now_ts),
                     key,
                 ),
@@ -1375,10 +1489,19 @@ class RateLimit(BasePlugin):
         with self._active_window_lock:
             # Keep only the active window to avoid unbounded growth under
             # high-cardinality traffic.
-            if (
-                self._active_window_id is None
-                or int(self._active_window_id) != window_i
+            #
+            # IMPORTANT: Only advance _active_window_id forward, never regress.
+            # Late-arriving threads from older windows must not reset the window
+            # ID backwards, as this causes stale entry collection to incorrectly
+            # include entries from the current (newer) window, leading to
+            # duplicate or inconsistent profile updates.
+            if self._active_window_id is not None and int(window_i) < int(
+                self._active_window_id
             ):
+                # Stale data from a late-arriving thread; skip tracking entirely
+                # to avoid corrupting the active window state.
+                return
+            if self._active_window_id is None or int(self._active_window_id) < window_i:
                 previous_window_id = self._active_window_id
                 self._active_window_id = int(window_i)
                 rollover_happened = previous_window_id is not None
@@ -1756,7 +1879,7 @@ class RateLimit(BasePlugin):
             return
 
         threshold = float(avg_rps) * float(self.burst_factor)
-        threshold = max(threshold, float(self.min_enforce_rps))
+        threshold = max(threshold, float(self.min_burst_threshold))
         if self.max_enforce_rps > 0.0:
             threshold = min(threshold, float(self.max_enforce_rps))
 
@@ -1780,12 +1903,12 @@ class RateLimit(BasePlugin):
         Outputs:
           - tuple[float, float]:
               * burst_allowed_rps: avg_rps * burst_factor (floored by
-                min_enforce_rps, then clamped by max_enforce_rps).
+                min_burst_threshold, then clamped by max_enforce_rps).
               * baseline_allowed_rps: avg_rps (clamped by max_enforce_rps).
         """
 
         burst_allowed_rps = float(avg_rps) * float(self.burst_factor)
-        burst_allowed_rps = max(burst_allowed_rps, float(self.min_enforce_rps))
+        burst_allowed_rps = max(burst_allowed_rps, float(self.min_burst_threshold))
         baseline_allowed_rps = float(avg_rps)
         if float(self.max_enforce_rps) > 0.0:
             burst_allowed_rps = min(burst_allowed_rps, float(self.max_enforce_rps))
@@ -2531,11 +2654,18 @@ class RateLimit(BasePlugin):
                         {"key": "bootstrap_rps", "label": "Bootstrap RPS"},
                         {"key": "min_enforce_rps", "label": "Min enforce RPS"},
                         {
+                            "key": "min_burst_threshold",
+                            "label": "Min burst threshold",
+                        },
+                        {
                             "key": "max_enforce_rps",
                             "label": "Per-bucket max RPS",
                         },
                         {"key": "global_max_rps", "label": "Global max RPS"},
                         {"key": "current_rps", "label": "Current RPS"},
+                        {"key": "rps_1m", "label": "RPS (1m)"},
+                        {"key": "rps_5m", "label": "RPS (5m)"},
+                        {"key": "rps_10m", "label": "RPS (10m)"},
                         {
                             "key": "stats_log_interval_seconds",
                             "label": "Stats log interval (s)",
@@ -2617,6 +2747,9 @@ class RateLimit(BasePlugin):
 
         db_path = str(getattr(self, "db_path", self.config.get("db_path", "")) or "")
         rps_snapshot = self._get_snapshot_rps_stats()
+        recent_rps_1m = float(self._get_recent_global_rps(60))
+        recent_rps_5m = float(self._get_recent_global_rps(5 * 60))
+        recent_rps_10m = float(self._get_recent_global_rps(10 * 60))
         snapshot["settings"] = {
             "mode": str(getattr(self, "mode", self.config.get("mode", "per_client"))),
             "window_seconds": int(
@@ -2675,6 +2808,17 @@ class RateLimit(BasePlugin):
                 )
                 or 0.0
             ),
+            "min_burst_threshold": float(
+                getattr(
+                    self,
+                    "min_burst_threshold",
+                    self.config.get(
+                        "min_burst_threshold",
+                        getattr(self, "min_enforce_rps", 50.0),
+                    ),
+                )
+                or 0.0
+            ),
             "max_enforce_rps": float(
                 getattr(
                     self, "max_enforce_rps", self.config.get("max_enforce_rps", 5000.0)
@@ -2686,6 +2830,9 @@ class RateLimit(BasePlugin):
                 or 0.0
             ),
             "current_rps": float(self._get_current_window_rps(_GLOBAL_RPS_DB_KEY)),
+            "rps_1m": float(recent_rps_1m),
+            "rps_5m": float(recent_rps_5m),
+            "rps_10m": float(recent_rps_10m),
             "stats_log_interval_seconds": int(
                 getattr(
                     self,
@@ -2760,6 +2907,47 @@ class RateLimit(BasePlugin):
 
         # Keep the snapshot JSON-safe for admin UI transport.
         return snapshot
+
+    def _get_recent_global_rps(self, lookback_seconds: int) -> float:
+        """Brief: Return average global RPS over recent completed windows.
+
+        Inputs:
+          - lookback_seconds: Lookback window size in seconds.
+
+        Outputs:
+          - float: Average global RPS from rate_profile_windows over the
+            lookback window, or 0.0 when unavailable.
+        """
+
+        try:
+            lookback = int(lookback_seconds)
+        except Exception:
+            return 0.0
+        if lookback <= 0:
+            return 0.0
+
+        conn = getattr(self, "_conn", None)
+        if conn is None:
+            return 0.0
+
+        cutoff = int(time.time()) - int(lookback)
+        with self._db_lock:
+            cur = conn.cursor()
+            try:
+                cur.execute(
+                    "SELECT AVG(rps) FROM rate_profile_windows "
+                    "WHERE key = ? AND last_update >= ?",
+                    (_GLOBAL_RPS_DB_KEY, int(cutoff)),
+                )
+                row = cur.fetchone()
+            except Exception:
+                return 0.0
+        if not row:
+            return 0.0
+        try:
+            return float(row[0] or 0.0)
+        except Exception:
+            return 0.0
 
     def _get_snapshot_rps_stats(self) -> dict[str, float]:
         """Brief: Compute total and windowed RPS aggregates for admin snapshots.
