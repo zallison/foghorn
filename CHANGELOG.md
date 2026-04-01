@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 ### Recent incremental updates
+- RateLimit sqlite profile writes now enforce a global floor row/window invariant so non-global buckets cannot persist stronger `max_rps`/sample history than the global key, including pre-seeding when non-global rollover updates arrive before a global row exists.
+- Upstream health state classification now treats entries as unhealthy only while `down_until` is in the future; the intermediate `degraded` state based only on `fail_count` was removed from failover/runtime health payloads.
+- Admin uvicorn startup now derives conservative `limit_concurrency`/`backlog` settings from process `RLIMIT_NOFILE` (or explicit override when configured), and logs the applied limits for easier runtime diagnostics.
+- Config persistence helper coverage was expanded with a dedicated test module for backup listing/pruning, copy-vs-replace writes, and safe-write cleanup/fallback semantics; helper docstrings now clarify best-effort behavior on pruning/listing/cleanup failures.
+- Expanded cache/query-log backend regression coverage for Memcached and MySQL-family helpers (driver normalization/order/fallback and malformed payload handling paths), and refreshed README test coverage badges to 89%.
 - RateLimit now supports `min_burst_threshold` (with compatibility aliases `min_boot_rps` / `min_boost_rps`) as the floor for burst-threshold derivation, defaults that floor to `min_enforce_rps` when unset, and caps non-global profile sample counts to global samples to keep per-key/global profile progression aligned.
 - RateLimit runtime/admin snapshots now include recent global RPS lookbacks (`rps_1m`, `rps_5m`, `rps_10m`), and webserver rate-limit helper aggregation now applies global-versus-per-key invariant normalization with TTL-throttled warning emission when sampled/profile maxima drift out of expected bounds.
 - RateLimit active-window tracking now guards against late-window thread updates regressing `_active_window_id`, and additional regression tests cover late-thread races plus the invariant that global `max_rps` must not fall below per-key maxima.
