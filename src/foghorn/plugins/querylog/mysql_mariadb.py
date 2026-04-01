@@ -112,7 +112,7 @@ def _normalize_driver_fallbacks(raw: object) -> list[str] | None:
     if isinstance(raw, list):
         out: list[str] = []
         for item in raw:
-            if item is None:
+            if item is None:  # pragma: nocover - trivial null-list element skip
                 continue
             name = _normalize_mysql_driver_name(item)
             if name is None:
@@ -162,7 +162,7 @@ def _driver_order_from_config(
     seen: set[str] = set()
     out: list[str] = []
     for item in order:
-        if item in seen:
+        if item in seen:  # pragma: nocover - trivial dedupe guard
             continue
         seen.add(item)
         out.append(item)
@@ -753,8 +753,9 @@ class MySqlStatsStore(BaseStatsStore):
             None.
 
         Outputs:
-            None; deletes rows older than the cutoff and/or rows beyond the
-            configured max-record count.
+            None; applies any configured retention limits by age, max-records,
+            and/or estimated total bytes, then optionally optimizes query_log
+            when pruning changed table contents.
         """
 
         cutoff_ts = BaseStatsStore._retention_cutoff_ts(

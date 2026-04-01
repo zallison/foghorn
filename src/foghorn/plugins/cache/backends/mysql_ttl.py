@@ -262,6 +262,8 @@ class MySQLTTLCache:
           - database: Database name.
           - namespace: Table name.
           - connect_kwargs: Additional connection kwargs.
+          - driver: Preferred DB driver import choice.
+          - driver_fallback: Driver fallback policy.
 
         Outputs:
           - None.
@@ -607,11 +609,11 @@ class MySQLTTLCache:
         with self._lock:
             try:
                 self._conn.close()
-            except Exception:
+            except Exception:  # pragma: nocover - defensive cleanup
                 pass
 
     def __del__(self) -> None:
         try:
             self.close()
-        except Exception:
+        except Exception:  # pragma: nocover - defensive cleanup
             pass

@@ -16,7 +16,13 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import pytest
 
-from foghorn.plugins.querylog.mysql_mariadb import MySqlStatsStore
+from foghorn.plugins.querylog.mysql_mariadb import (
+    MySqlStatsStore,
+    _driver_order_from_config,
+    _import_mysql_driver,
+    _normalize_driver_fallbacks,
+    _normalize_mysql_driver_name,
+)
 
 
 class _FakeCursor:
@@ -356,6 +362,97 @@ def test_driver_can_be_forced_to_mysql_alias(
     backend = _make_backend(driver="mysql")
     assert backend._driver is fake_mysql_driver  # type: ignore[attr-defined]
     assert backend._placeholder == "%s"  # type: ignore[attr-defined]
+
+
+def test_driver_name_normalization_edges() -> None:
+    """Brief: Driver-name normalization handles aliases, auto, and invalid input.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts canonicalization and validation errors.
+    """
+
+    assert _normalize_mysql_driver_name(None) is None
+    assert _normalize_mysql_driver_name(" auto ") is None
+    assert _normalize_mysql_driver_name("maria_db") == "mariadb"
+    assert _normalize_mysql_driver_name("mysql.connector") == "mysql-connector-python"
+    assert _normalize_mysql_driver_name("connector") == "mysql-connector-python"
+    assert _normalize_mysql_driver_name(123) is None
+
+    with pytest.raises(ValueError):
+        _normalize_mysql_driver_name("unknown-driver")
+
+
+def test_driver_fallback_normalization_edges() -> None:
+    """Brief: Driver fallback normalization handles strings, lists, and disables.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts canonical fallback parsing behaviour.
+    """
+
+    assert _normalize_driver_fallbacks(None) is None
+    assert _normalize_driver_fallbacks("auto") is None
+    assert _normalize_driver_fallbacks("none") == []
+    assert _normalize_driver_fallbacks("mysql") == ["mysql-connector-python"]
+    assert _normalize_driver_fallbacks(["mariadb", None, "mysql"]) == [
+        "mariadb",
+        "mysql-connector-python",
+    ]
+    assert _normalize_driver_fallbacks(42) is None
+
+
+def test_driver_order_computation_edges() -> None:
+    """Brief: Driver-order helper applies explicit preference and deduplication.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts order for auto/default and explicit fallback policies.
+    """
+
+    assert _driver_order_from_config() == ["mariadb", "mysql-connector-python"]
+    assert _driver_order_from_config(driver_fallback="none") == ["mariadb"]
+    assert _driver_order_from_config(driver="mysql") == [
+        "mysql-connector-python",
+        "mariadb",
+    ]
+    assert _driver_order_from_config(
+        driver="mysql",
+        driver_fallback=["mysql", "mariadb", "mysql"],
+    ) == ["mysql-connector-python", "mariadb"]
+
+
+def test_import_driver_raises_when_none_available(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Brief: Driver import helper raises RuntimeError when imports fail.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts RuntimeError from import exhaustion.
+    """
+
+    import builtins
+
+    real_import = builtins.__import__
+
+    def fake_import(name, globals=None, locals=None, fromlist=(), level=0):  # type: ignore[no-untyped-def]
+        if name in {"mariadb", "mysql.connector"}:
+            raise ImportError(name)
+        return real_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
+    with pytest.raises(RuntimeError):
+        _import_mysql_driver(driver="auto", driver_fallback="none")
 
 
 def test_health_check_true_and_false(fake_mysql_driver, monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -745,3 +842,102 @@ def test_batch_writes_defer_retention_until_flush(
 
     assert backend.has_query_log() is True
     assert retention_calls == ["called"]
+
+
+def test_prune_query_log_to_max_records_branches(fake_mysql_driver) -> None:  # type: ignore[no-untyped-def]
+    """Brief: max-record pruning handles invalid cap, empty cutoff, and deletion.
+
+    Inputs:
+      - fake_mysql_driver: fixture installing fake driver.
+
+    Outputs:
+      - None; asserts branch behavior for key pruning paths.
+    """
+
+    backend = _make_backend()
+    assert backend._prune_query_log_to_max_records(0) is False
+
+    class _Cursor:
+        def __init__(
+            self,
+            *,
+            fetchone_value: Optional[Tuple[Any, ...]] = None,
+            rowcount: int = 0,
+        ) -> None:
+            self._fetchone_value = fetchone_value
+            self.rowcount = rowcount
+
+        def execute(self, _sql: str, _params: Tuple[Any, ...]) -> None:
+            return None
+
+        def fetchone(self) -> Optional[Tuple[Any, ...]]:
+            return self._fetchone_value
+
+    class _Conn:
+        def __init__(self, cursors: List[_Cursor]) -> None:
+            self._cursors = list(cursors)
+
+        def cursor(self) -> _Cursor:
+            return self._cursors.pop(0)
+
+    backend._conn = _Conn([_Cursor(fetchone_value=None)])  # type: ignore[assignment]
+    assert backend._prune_query_log_to_max_records(5) is False
+
+    backend._conn = _Conn(  # type: ignore[assignment]
+        [
+            _Cursor(fetchone_value=(100.0, 7)),
+            _Cursor(rowcount=2),
+        ]
+    )
+    assert backend._prune_query_log_to_max_records(5) is True
+
+
+def test_prune_query_log_to_max_bytes_branches(fake_mysql_driver) -> None:  # type: ignore[no-untyped-def]
+    """Brief: max-bytes pruning exits early and deletes oldest rows iteratively.
+
+    Inputs:
+      - fake_mysql_driver: fixture installing fake driver.
+
+    Outputs:
+      - None; asserts early return and changed=True iteration path.
+    """
+
+    backend = _make_backend()
+    assert backend._prune_query_log_to_max_bytes(0) is False
+
+    class _AggCursor:
+        def __init__(self, row: Optional[Tuple[Any, ...]]) -> None:
+            self._row = row
+
+        def execute(
+            self,
+            _sql: str,
+            _params: Optional[Tuple[Any, ...]] = None,
+        ) -> None:
+            return None
+
+        def fetchone(self) -> Optional[Tuple[Any, ...]]:
+            return self._row
+
+    class _DeleteCursor:
+        def __init__(self, rowcount: int) -> None:
+            self.rowcount = rowcount
+
+        def execute(self, _sql: str, _params: Tuple[Any, ...]) -> None:
+            return None
+
+    class _Conn:
+        def __init__(self, cursors: List[Any]) -> None:
+            self._cursors = list(cursors)
+
+        def cursor(self) -> Any:
+            return self._cursors.pop(0)
+
+    backend._conn = _Conn(  # type: ignore[assignment]
+        [
+            _AggCursor((200, 10)),
+            _DeleteCursor(3),
+            _AggCursor((80, 7)),
+        ]
+    )
+    assert backend._prune_query_log_to_max_bytes(100) is True
