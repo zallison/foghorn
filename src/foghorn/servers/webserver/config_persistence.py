@@ -58,7 +58,9 @@ def list_timestamped_backups_for_path(dst_path: str) -> list[str]:
       - dst_path: Destination config file path (e.g. /cfg/config.yaml).
 
     Outputs:
-      - List of existing backup paths matching /cfg/config.yaml.bak.*.
+      - Unordered list of existing backup file paths matching
+        /cfg/config.yaml.bak.*.
+      - Returns [] when the parent directory cannot be listed.
     """
 
     dst_abs = os.path.abspath(str(dst_path))
@@ -67,7 +69,7 @@ def list_timestamped_backups_for_path(dst_path: str) -> list[str]:
 
     try:
         names = os.listdir(base_dir)
-    except Exception:
+    except Exception:  # pragma: nocover - best-effort filesystem listing fallback
         return []
 
     out: list[str] = []
@@ -102,7 +104,7 @@ def prune_timestamped_backups(*, dst_path: str, keep_count: int) -> None:
     def _sort_key(path: str) -> tuple[float, str]:
         try:
             ts = float(os.path.getmtime(path))
-        except Exception:
+        except Exception:  # pragma: nocover - mtime may race with file deletion
             ts = 0.0
         return (ts, path)
 
@@ -110,7 +112,7 @@ def prune_timestamped_backups(*, dst_path: str, keep_count: int) -> None:
     for old_path in ordered[keep:]:
         try:
             os.remove(old_path)
-        except Exception:
+        except Exception:  # pragma: nocover - prune must ignore delete failures
             pass
 
 
@@ -132,7 +134,7 @@ def write_raw_yaml_via_copy(
 
     Notes:
       - This mirrors the FastAPI implementation's historic behaviour.
-      - tmp_path is left on disk only if an exception is raised before cleanup.
+      - This helper does not remove tmp_path; caller-managed cleanup is expected.
     """
 
     write_text_file(tmp_path, raw_yaml)
@@ -189,6 +191,7 @@ def safe_write_raw_yaml(
 
     Raises:
       - Propagates any underlying OSError/IOError exceptions.
+      - Raises ValueError when strategy is not 'copy' or 'replace'.
 
     Example:
       >>> safe_write_raw_yaml(dst_path='config.yaml', raw_yaml='a: 1\n', backup_path=None, tmp_path='config.yaml.new', strategy='replace')
@@ -219,12 +222,12 @@ def safe_write_raw_yaml(
                     dst_path=dst_path,
                     keep_count=int(backup_retention_count),
                 )
-            except Exception:
+            except Exception:  # pragma: nocover - retention pruning is best-effort
                 pass
         if cleanup_tmp:
             # Best-effort cleanup: remove tmp_path if it still exists.
             try:
                 if os.path.exists(tmp_path):
                     os.remove(tmp_path)
-            except Exception:
+            except Exception:  # pragma: nocover - cleanup failures are non-fatal
                 pass
