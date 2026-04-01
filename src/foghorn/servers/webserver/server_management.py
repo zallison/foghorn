@@ -9,6 +9,7 @@ This module contains server startup and management functions including:
 from __future__ import annotations
 
 import http.server
+import inspect
 import logging
 import os
 import socket
@@ -29,6 +30,113 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger("foghorn.webserver")
+
+
+def _get_soft_nofile_limit() -> int | None:
+    """Brief: Return the process soft nofile limit when available.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - int | None: Positive RLIMIT_NOFILE soft limit, else None when unavailable.
+    """
+
+    try:
+        import resource  # Unix-only; imported lazily for portability.
+
+        soft_limit, _hard_limit = resource.getrlimit(resource.RLIMIT_NOFILE)
+        if soft_limit in (None, resource.RLIM_INFINITY):
+            return None
+        soft = int(soft_limit)
+        if soft <= 0:
+            return None
+        return soft
+    except Exception:
+        return None
+
+
+def _derive_uvicorn_limit_concurrency(web_cfg: Dict[str, Any]) -> int:
+    """Brief: Derive a safe uvicorn concurrency cap for admin HTTP.
+
+    Inputs:
+      - web_cfg: server.http configuration mapping.
+
+    Outputs:
+      - int: Positive concurrency cap used for uvicorn limit_concurrency.
+    """
+
+    # Optional explicit override when provided by callers.
+    raw_override = web_cfg.get("limit_concurrency")
+    try:
+        override = int(raw_override)
+        if override > 0:
+            return override
+    except Exception:
+        pass
+
+    # Keep a conservative default under small fd limits (for example, 1024).
+    soft_nofile = _get_soft_nofile_limit()
+    if soft_nofile is None:
+        return 256
+    return max(64, min(512, int(soft_nofile) // 2))
+
+
+def _build_uvicorn_config(
+    *,
+    uvicorn_module: Any,
+    app: "FastAPI",
+    host: str,
+    port: int,
+    web_cfg: Dict[str, Any],
+) -> Any:
+    """Brief: Build uvicorn.Config with optional hardening args when supported.
+
+    Inputs:
+      - uvicorn_module: Imported uvicorn module exposing Config.
+      - app: FastAPI application instance.
+      - host: Listen host.
+      - port: Listen port.
+      - web_cfg: server.http configuration mapping.
+
+    Outputs:
+      - uvicorn.Config instance.
+    """
+
+    config_kwargs: Dict[str, Any] = {
+        "app": app,
+        "host": host,
+        "port": port,
+        "log_level": "warning",
+    }
+
+    try:
+        params = inspect.signature(uvicorn_module.Config).parameters
+    except Exception:
+        params = {}
+
+    limit_concurrency = _derive_uvicorn_limit_concurrency(web_cfg)
+    backlog = max(64, min(2048, int(limit_concurrency)))
+
+    if "limit_concurrency" in params:
+        config_kwargs["limit_concurrency"] = int(limit_concurrency)
+    if "backlog" in params:
+        config_kwargs["backlog"] = int(backlog)
+    if "timeout_keep_alive" in params:
+        config_kwargs["timeout_keep_alive"] = 5
+
+    logger.info(
+        "Admin webserver uvicorn limits: limit_concurrency=%s backlog=%s soft_nofile=%s",
+        (
+            config_kwargs.get("limit_concurrency")
+            if "limit_concurrency" in config_kwargs
+            else "default"
+        ),
+        config_kwargs.get("backlog", "default"),
+        _get_soft_nofile_limit(),
+    )
+
+    return uvicorn_module.Config(**config_kwargs)
 
 
 class _AdminHTTPServer(http.server.ThreadingHTTPServer):
@@ -389,7 +497,13 @@ def start_webserver(
         plugins=plugins,
     )
 
-    config_uvicorn = uvicorn.Config(app, host=host, port=port, log_level="warning")
+    config_uvicorn = _build_uvicorn_config(
+        uvicorn_module=uvicorn,
+        app=app,
+        host=host,
+        port=port,
+        web_cfg=web_cfg,
+    )
     server = uvicorn.Server(config_uvicorn)
 
     def _runner() -> None:
