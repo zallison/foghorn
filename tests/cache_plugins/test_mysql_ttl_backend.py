@@ -190,6 +190,18 @@ def _init_cache_with_fake_conn(
     password: Optional[str] = "p",
     connect_kwargs: Optional[dict] = None,
 ):
+    """Brief: Build a MySQLTTLCache bound to fake driver/connection objects.
+
+    Inputs:
+      - monkeypatch: pytest fixture used to patch driver import.
+      - namespace: SQL table namespace to use.
+      - user: Optional user name.
+      - password: Optional password.
+      - connect_kwargs: Additional connect kwargs.
+
+    Outputs:
+      - tuple[MySQLTTLCache, FakeConn, FakeDriver].
+    """
     conn = FakeConn()
     driver = FakeDriver(conn)
     monkeypatch.setattr(
@@ -205,6 +217,20 @@ def _init_cache_with_fake_conn(
         connect_kwargs=connect_kwargs or {"autocommit": True},
     )
     return cache, conn, driver
+
+
+def _bind_single_cursor(conn: FakeConn, cursor: FakeCursor) -> None:
+    """Brief: Force a fake connection to reuse one cursor for all operations.
+
+    Inputs:
+      - conn: Fake connection whose cursor method is replaced.
+      - cursor: Cursor instance to return for each cursor() call.
+
+    Outputs:
+      - None.
+    """
+
+    conn.cursor = lambda: cursor  # type: ignore[method-assign]
 
 
 def test_init_builds_kwargs_and_creates_schema(monkeypatch) -> None:
@@ -281,3 +307,136 @@ def test_close(monkeypatch) -> None:
     cache, conn, _ = _init_cache_with_fake_conn(monkeypatch)
     cache.close()
     assert conn.closed is True
+
+
+def test_normalize_mysql_driver_name_variants() -> None:
+    assert mysql_mod._normalize_mysql_driver_name(None) is None
+    assert mysql_mod._normalize_mysql_driver_name(1) is None
+    assert mysql_mod._normalize_mysql_driver_name(" auto ") is None
+    assert mysql_mod._normalize_mysql_driver_name("maria_db") == "mariadb"
+    assert (
+        mysql_mod._normalize_mysql_driver_name("mysql.connector")
+        == "mysql-connector-python"
+    )
+    assert (
+        mysql_mod._normalize_mysql_driver_name(" connector ")
+        == "mysql-connector-python"
+    )
+
+    with pytest.raises(ValueError):
+        mysql_mod._normalize_mysql_driver_name("postgres")
+
+
+def test_normalize_driver_fallbacks_variants() -> None:
+    assert mysql_mod._normalize_driver_fallbacks(None) is None
+    assert mysql_mod._normalize_driver_fallbacks("auto") is None
+    assert mysql_mod._normalize_driver_fallbacks("none") == []
+    assert mysql_mod._normalize_driver_fallbacks("mysql") == ["mysql-connector-python"]
+    assert mysql_mod._normalize_driver_fallbacks(["mariadb", None, "mysql"]) == [
+        "mariadb",
+        "mysql-connector-python",
+    ]
+    assert mysql_mod._normalize_driver_fallbacks(123) is None
+
+
+def test_driver_order_from_config_deduplicates_and_honors_none() -> None:
+    assert mysql_mod._driver_order_from_config() == [
+        "mariadb",
+        "mysql-connector-python",
+    ]
+    assert mysql_mod._driver_order_from_config(
+        driver="mariadb", driver_fallback="none"
+    ) == ["mariadb"]
+    assert mysql_mod._driver_order_from_config(
+        driver="mysql",
+        driver_fallback=["mysql", "mariadb", "mariadb"],
+    ) == ["mysql-connector-python", "mariadb"]
+
+
+def test_get_hit_returns_value_and_counts_hit(monkeypatch) -> None:
+    cache, conn, _ = _init_cache_with_fake_conn(monkeypatch)
+    future = time.time() + 60
+    cur = FakeCursor()
+    cur.queue_rows([(b"payload", mysql_mod.RAW_BYTES_FLAG, future)])
+    _bind_single_cursor(conn, cur)
+
+    val = cache.get("key-hit")
+    assert val == b"payload"
+    assert cache.cache_hits == 1
+    assert cache.cache_misses == 0
+
+
+def test_get_invalid_expiry_deletes_and_misses(monkeypatch) -> None:
+    cache, conn, _ = _init_cache_with_fake_conn(monkeypatch)
+    cur = FakeCursor()
+    cur.queue_rows([(b"payload", mysql_mod.RAW_BYTES_FLAG, "bad-expiry")])
+    _bind_single_cursor(conn, cur)
+
+    val = cache.get("key-bad-expiry")
+    assert val is None
+    assert cache.cache_misses == 1
+    assert any("DELETE FROM" in sql for sql, _ in cur.executes)
+
+
+def test_get_decode_failure_deletes_and_misses(monkeypatch) -> None:
+    cache, conn, _ = _init_cache_with_fake_conn(monkeypatch)
+    future = time.time() + 60
+    cur = FakeCursor()
+    cur.queue_rows([(b"payload", 999, future)])
+    _bind_single_cursor(conn, cur)
+
+    val = cache.get("key-bad-decode")
+    assert val is None
+    assert cache.cache_misses == 1
+    assert any("DELETE FROM" in sql for sql, _ in cur.executes)
+
+
+def test_get_with_meta_hit_and_expired_paths(monkeypatch) -> None:
+    cache, conn, _ = _init_cache_with_fake_conn(monkeypatch)
+    now = time.time()
+    cur = FakeCursor()
+    cur.queue_rows(
+        [
+            (b"hit", mysql_mod.RAW_BYTES_FLAG, now + 5, 30),
+            (b"stale", mysql_mod.RAW_BYTES_FLAG, now - 1, 30),
+        ]
+    )
+    _bind_single_cursor(conn, cur)
+
+    value_hit, remaining_hit, ttl_hit = cache.get_with_meta("meta-hit")
+    value_stale, remaining_stale, ttl_stale = cache.get_with_meta("meta-stale")
+
+    assert value_hit == b"hit"
+    assert remaining_hit is not None and remaining_hit >= 0
+    assert ttl_hit == 30
+    assert value_stale == b"stale"
+    assert remaining_stale is not None and remaining_stale < 0
+    assert ttl_stale == 30
+    assert cache.cache_hits == 1
+    assert cache.cache_misses == 1
+
+
+def test_get_with_meta_handles_bad_ttl_or_decode(monkeypatch) -> None:
+    cache, conn, _ = _init_cache_with_fake_conn(monkeypatch)
+    cur = FakeCursor()
+    cur.queue_rows(
+        [
+            (b"v1", mysql_mod.RAW_BYTES_FLAG, time.time() + 10, "bad-ttl"),
+            (b"v2", 999, time.time() + 10, 5),
+        ]
+    )
+    _bind_single_cursor(conn, cur)
+
+    assert cache.get_with_meta("meta-bad-ttl") == (None, None, None)
+    assert cache.get_with_meta("meta-bad-decode") == (None, None, None)
+    assert cache.cache_misses >= 2
+
+
+def test_set_clamps_negative_ttl(monkeypatch) -> None:
+    cache, conn, _ = _init_cache_with_fake_conn(monkeypatch)
+    cur = FakeCursor()
+    _bind_single_cursor(conn, cur)
+
+    cache.set("akey", -100, "value")
+    params = cur.executes[-1][1]
+    assert int(params[4]) == 0
