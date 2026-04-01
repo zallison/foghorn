@@ -31,7 +31,7 @@ def _import_pymemcache() -> Any:
 
     try:
         return importlib.import_module("pymemcache.client.base")
-    except Exception as exc:  # pragma: no cover
+    except Exception as exc:  # pragma: nocover - optional dependency import guard
         raise ImportError(
             "MemcachedCache requires the optional 'pymemcache' dependency. "
             "Install it with: pip install pymemcache"
@@ -62,9 +62,10 @@ def _encode_value(value: Any) -> Tuple[bytes, int]:
       - value: Any Python object.
 
     Outputs:
-      - (payload, is_pickle):
+      - (payload, encoding_flag):
           - payload: bytes to store.
-          - is_pickle: 1 when payload is pickle-encoded, 0 otherwise.
+          - encoding_flag: RAW_BYTES_FLAG for bytes-like input, otherwise
+            SAFE_SERIALIZED_FLAG.
     """
 
     if isinstance(value, (bytes, bytearray, memoryview)):
@@ -77,7 +78,7 @@ def _decode_value(payload: bytes, is_pickle: int) -> Any:
 
     Inputs:
       - payload: Stored bytes.
-      - is_pickle: 1 if payload is a pickle.
+      - is_pickle: Encoding flag (RAW_BYTES_FLAG or SAFE_SERIALIZED_FLAG).
 
     Outputs:
       - Any: Decoded object.
@@ -209,7 +210,7 @@ class MemcachedCache(CachePlugin):
             # Corrupted entry: treat as miss and best-effort delete.
             try:
                 self._client.delete(mem_key)
-            except Exception:
+            except Exception:  # pragma: nocover - best-effort cleanup path
                 pass
             return None, None, None
 
@@ -235,7 +236,7 @@ class MemcachedCache(CachePlugin):
                     # Treat as expired and best-effort delete.
                     try:
                         self._client.delete(mem_key)
-                    except Exception:
+                    except Exception:  # pragma: nocover - best-effort cleanup path
                         pass
                     return None, None, None
                 seconds_remaining = float(delta)
@@ -250,7 +251,7 @@ class MemcachedCache(CachePlugin):
         except Exception:
             try:
                 self._client.delete(mem_key)
-            except Exception:
+            except Exception:  # pragma: nocover - best-effort cleanup path
                 pass
             return None, None, None
 
@@ -266,6 +267,9 @@ class MemcachedCache(CachePlugin):
 
         Outputs:
           - None.
+
+        Notes:
+          - ttl values less than or equal to zero are treated as no-op writes.
         """
 
         ttl_int = max(0, int(ttl))
