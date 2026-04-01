@@ -4551,7 +4551,7 @@ textBtn.type = 'button';
 							lastText = formatTimestamp(lastRaw) || String(lastRaw);
 						}
 						var rpsLimitText = '';
-						var rpsLimitRaw = -1;
+						var rpsLimitRaw = 0;
 						if (isFinite(rpsLimit)) {
 							rpsLimitText = formatRateLimitRps(rpsLimit);
 							rpsLimitRaw = rpsLimit;
@@ -4699,6 +4699,7 @@ textBtn.type = 'button';
 						},
 						{
 							key: 'avg_rps_overall',
+							sort_key: 'avg_rps_overall_raw',
 							label: 'Avg RPS\n(overall)',
 							align: 'right',
 							default_sort_dir: 'desc',
@@ -4706,6 +4707,7 @@ textBtn.type = 'button';
 						},
 						{
 							key: 'max_rps_overall',
+							sort_key: 'max_rps_overall_raw',
 							label: 'Max RPS\n(overall)',
 							align: 'right',
 							default_sort_dir: 'desc',
@@ -4713,6 +4715,7 @@ textBtn.type = 'button';
 						},
 						{
 							key: 'avg_rps_interval',
+							sort_key: 'avg_rps_interval_raw',
 							label: 'Avg RPS\n(interval)',
 							align: 'right',
 							default_sort_dir: 'desc',
@@ -4720,6 +4723,7 @@ textBtn.type = 'button';
 						},
 						{
 							key: 'max_rps_interval',
+							sort_key: 'max_rps_interval_raw',
 							label: 'Max RPS\n(interval)',
 							align: 'right',
 							default_sort_dir: 'desc',
