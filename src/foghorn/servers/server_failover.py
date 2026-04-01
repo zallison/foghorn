@@ -328,8 +328,6 @@ def _upstream_health_context(upstream: Dict, now_ts: Optional[float] = None) -> 
 
     if down_until > now:
         state = "down"
-    elif fail_count > 0:
-        state = "degraded"
 
     if down_until > now:
         retry_in_s = max(0.0, down_until - now)

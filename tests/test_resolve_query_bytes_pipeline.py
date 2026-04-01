@@ -338,6 +338,65 @@ def test_resolve_query_bytes_skips_backup_when_any_primary_healthy(
         DNSRuntimeState.upstream_health.clear()
 
 
+def test_resolve_query_bytes_uses_primary_after_backoff_expires_with_backup_present(
+    monkeypatch: pytest.MonkeyPatch,
+    set_runtime_snapshot,
+) -> None:
+    """Brief: Expired backoff returns primaries to service even when backups exist.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts primary upstream is selected after down_until has expired.
+    """
+
+    q = DNSRecord.question("primary-recovers.example", "A")
+    primary = {"host": "1.1.1.1", "port": 53}
+    backup = {"host": "9.9.9.9", "port": 53}
+    chosen = {"host": None}
+    r_ok = q.reply()
+
+    monkeypatch.setattr(server_mod.random, "random", lambda: 1.0)
+
+    def _forward_capture(
+        req,
+        upstreams,
+        timeout_ms,
+        qname,
+        qtype,
+        max_concurrent=None,
+        on_attempt_result=None,
+    ):
+        assert upstreams, "expected at least one upstream candidate"
+        chosen["host"] = upstreams[0].get("host")
+        return r_ok.pack(), upstreams[0], "ok"
+
+    monkeypatch.setattr(server_mod, "send_query_with_failover", _forward_capture)
+    set_runtime_snapshot(
+        plugins=[],
+        upstream_addrs=[primary],
+        upstream_backup_addrs=[backup],
+    )
+
+    primary_id = DNSRuntimeState._upstream_id(primary)
+    DNSRuntimeState.upstream_health.clear()
+    try:
+        import time as _time
+
+        DNSRuntimeState.upstream_health[primary_id] = {
+            "fail_count": 7.0,
+            "down_until": _time.time() - 1.0,
+        }
+
+        wire = resolve_query_bytes(q.pack(), "127.0.0.1")
+        resp = DNSRecord.parse(wire)
+        assert resp.header.rcode == RCODE.NOERROR
+        assert chosen["host"] == "1.1.1.1"
+    finally:
+        DNSRuntimeState.upstream_health.clear()
+
+
 def test_resolve_query_bytes_probes_unhealthy_primary_by_probe_percent(
     monkeypatch: pytest.MonkeyPatch,
     set_runtime_snapshot,
