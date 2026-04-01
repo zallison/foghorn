@@ -81,17 +81,92 @@ class FakeMemcachedClient:
         self.store.pop(key, None)
 
 
-def _fake_pymemcache_module() -> object:
-    """Brief: Build a minimal module-like object exposing FakeMemcachedClient.
+class RaisingGetMemcachedClient(FakeMemcachedClient):
+    """Brief: Fake client that raises on get() calls.
 
     Inputs:
-      - None.
+      - Inherits FakeMemcachedClient constructor inputs.
 
     Outputs:
-      - Object with a Client attribute pointing to FakeMemcachedClient.
+      - RaisingGetMemcachedClient instance.
     """
 
-    return type("FakeMemcacheModule", (), {"Client": FakeMemcachedClient})()
+    def get(self, key: str) -> bytes | None:
+        """Brief: Raise RuntimeError for every read attempt.
+
+        Inputs:
+          - key: Memcached key string.
+
+        Outputs:
+          - Never returns; raises RuntimeError.
+        """
+
+        raise RuntimeError(f"forced get failure for key={key}")
+
+
+class RaisingSetMemcachedClient(FakeMemcachedClient):
+    """Brief: Fake client that raises on set() calls.
+
+    Inputs:
+      - Inherits FakeMemcachedClient constructor inputs.
+
+    Outputs:
+      - RaisingSetMemcachedClient instance.
+    """
+
+    def set(self, key: str, value: bytes, expire: int | None = None) -> None:
+        """Brief: Raise RuntimeError for every write attempt.
+
+        Inputs:
+          - key: Memcached key string.
+          - value: Blob to store.
+          - expire: Expiry in seconds.
+
+        Outputs:
+          - Never returns; raises RuntimeError.
+        """
+
+        raise RuntimeError(f"forced set failure for key={key}, expire={expire}")
+
+
+def _fake_pymemcache_module(
+    client_cls: type[FakeMemcachedClient] = FakeMemcachedClient,
+) -> object:
+    """Brief: Build a minimal module-like object exposing a fake client class.
+
+    Inputs:
+      - client_cls: Class exposed via the module's Client attribute.
+
+    Outputs:
+      - Object with a Client attribute pointing to client_cls.
+    """
+
+    return type("FakeMemcacheModule", (), {"Client": client_cls})()
+
+
+def _make_plugin(
+    monkeypatch,
+    *,
+    client_cls: type[FakeMemcachedClient] = FakeMemcachedClient,
+    **config: Any,
+) -> memcached_cache_mod.MemcachedCache:
+    """Brief: Instantiate MemcachedCache with a chosen fake client class.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+      - client_cls: Fake client class for _import_pymemcache().Client.
+      - **config: MemcachedCache kwargs.
+
+    Outputs:
+      - MemcachedCache bound to a fake in-memory client.
+    """
+
+    monkeypatch.setattr(
+        memcached_cache_mod,
+        "_import_pymemcache",
+        lambda: _fake_pymemcache_module(client_cls),
+    )
+    return memcached_cache_mod.MemcachedCache(**config)
 
 
 def test_registry_resolves_memcached_aliases_to_plugin_class() -> None:
@@ -169,6 +244,274 @@ def test_encode_decode_roundtrip_bytes_and_safe_serialized() -> None:
     payload2, is_pickle2 = memcached_cache_mod._encode_value(obj)
     assert is_pickle2 == 2
     assert memcached_cache_mod._decode_value(payload2, is_pickle2) == obj
+
+
+def test_decode_value_rejects_unknown_encoding_flag() -> None:
+    """Brief: _decode_value raises for unsupported encoding flags.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts ValueError is raised for unknown encoding flags.
+    """
+
+    with pytest.raises(ValueError):
+        _ = memcached_cache_mod._decode_value(b"payload", 999)
+
+
+def test_memcached_cache_invalid_port_falls_back_to_default(monkeypatch) -> None:
+    """Brief: Constructor falls back to default port when config port is invalid.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts fake client receives default Memcached port.
+    """
+
+    plugin = _make_plugin(monkeypatch, port="not-an-int")
+    client = plugin._client
+    assert isinstance(client, FakeMemcachedClient)
+    assert client.server[1] == 11211
+
+
+def test_memcached_cache_get_with_meta_handles_client_get_failure(monkeypatch) -> None:
+    """Brief: get_with_meta() treats backend read exceptions as cache misses.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts read errors map to (None, None, None).
+    """
+
+    plugin = _make_plugin(monkeypatch, client_cls=RaisingGetMemcachedClient)
+    assert plugin.get_with_meta(("error.example", 1)) == (None, None, None)
+
+
+def test_memcached_cache_get_with_meta_treats_empty_blob_as_miss(monkeypatch) -> None:
+    """Brief: get_with_meta() returns miss tuple for falsey stored blobs.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts empty bytes are treated as cache miss.
+    """
+
+    plugin = _make_plugin(monkeypatch)
+    key = ("empty.example", 1)
+    mem_key = plugin._mem_key(key)
+    plugin._client.store[mem_key] = b""
+    assert plugin.get_with_meta(key) == (None, None, None)
+
+
+def test_memcached_cache_get_with_meta_deletes_corrupt_blob(monkeypatch) -> None:
+    """Brief: Corrupt envelope blobs are treated as miss and removed.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts corrupt entry is deleted after failed decode.
+    """
+
+    plugin = _make_plugin(monkeypatch)
+    key = ("corrupt.example", 1)
+    mem_key = plugin._mem_key(key)
+    plugin._client.store[mem_key] = b"not-json"
+
+    assert plugin.get_with_meta(key) == (None, None, None)
+    assert mem_key not in plugin._client.store
+
+
+def test_memcached_cache_get_with_meta_handles_ttl_parse_errors(monkeypatch) -> None:
+    """Brief: Invalid ttl metadata yields unknown ttl/remaining while returning value.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts value survives malformed ttl metadata.
+    """
+
+    plugin = _make_plugin(monkeypatch)
+    monkeypatch.setattr(memcached_cache_mod.time, "time", lambda: 1000.0)
+
+    key = ("invalid-ttl.example", 1)
+    mem_key = plugin._mem_key(key)
+    blob = memcached_cache_mod.safe_serialize(
+        {
+            "v": b"wire-data",
+            "p": memcached_cache_mod.RAW_BYTES_FLAG,
+            "ttl": "not-an-int",
+            "created_at": 998.0,
+        }
+    )
+    plugin._client.store[mem_key] = blob
+
+    value, remaining, ttl_original = plugin.get_with_meta(key)
+    assert value == b"wire-data"
+    assert remaining is None
+    assert ttl_original is None
+
+
+def test_memcached_cache_get_with_meta_handles_missing_ttl_field(monkeypatch) -> None:
+    """Brief: Missing ttl metadata still allows value retrieval with unknown meta.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts missing ttl results in remaining=None and ttl=None.
+    """
+
+    plugin = _make_plugin(monkeypatch)
+    monkeypatch.setattr(memcached_cache_mod.time, "time", lambda: 1000.0)
+
+    key = ("missing-ttl.example", 1)
+    mem_key = plugin._mem_key(key)
+    blob = memcached_cache_mod.safe_serialize(
+        {
+            "v": b"wire-data",
+            "p": memcached_cache_mod.RAW_BYTES_FLAG,
+            "created_at": 999.0,
+        }
+    )
+    plugin._client.store[mem_key] = blob
+
+    value, remaining, ttl_original = plugin.get_with_meta(key)
+    assert value == b"wire-data"
+    assert remaining is None
+    assert ttl_original is None
+
+
+def test_memcached_cache_get_with_meta_handles_created_at_parse_error(
+    monkeypatch,
+) -> None:
+    """Brief: Invalid created_at metadata keeps ttl but clears remaining seconds.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts created_at parse failure returns remaining=None.
+    """
+
+    plugin = _make_plugin(monkeypatch)
+    key = ("bad-created-at.example", 1)
+    mem_key = plugin._mem_key(key)
+    blob = memcached_cache_mod.safe_serialize(
+        {
+            "v": b"wire-data",
+            "p": memcached_cache_mod.RAW_BYTES_FLAG,
+            "ttl": 9,
+            "created_at": "not-a-float",
+        }
+    )
+    plugin._client.store[mem_key] = blob
+
+    value, remaining, ttl_original = plugin.get_with_meta(key)
+    assert value == b"wire-data"
+    assert remaining is None
+    assert ttl_original == 9
+
+
+def test_memcached_cache_get_with_meta_handles_missing_payload(monkeypatch) -> None:
+    """Brief: Missing payload returns metadata tuple with None value.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts payload None returns (None, remaining, ttl).
+    """
+
+    plugin = _make_plugin(monkeypatch)
+    monkeypatch.setattr(memcached_cache_mod.time, "time", lambda: 1000.0)
+
+    key = ("missing-payload.example", 1)
+    mem_key = plugin._mem_key(key)
+    blob = memcached_cache_mod.safe_serialize(
+        {
+            "v": None,
+            "p": memcached_cache_mod.RAW_BYTES_FLAG,
+            "ttl": 5,
+            "created_at": 999.0,
+        }
+    )
+    plugin._client.store[mem_key] = blob
+
+    value, remaining, ttl_original = plugin.get_with_meta(key)
+    assert value is None
+    assert remaining is not None and remaining == pytest.approx(4.0)
+    assert ttl_original == 5
+
+
+def test_memcached_cache_get_with_meta_drops_undecodable_payload(monkeypatch) -> None:
+    """Brief: Invalid encoding flags are treated as miss and trigger delete.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts undecodable entry is removed and missed.
+    """
+
+    plugin = _make_plugin(monkeypatch)
+    monkeypatch.setattr(memcached_cache_mod.time, "time", lambda: 1000.0)
+
+    key = ("bad-payload.example", 1)
+    mem_key = plugin._mem_key(key)
+    blob = memcached_cache_mod.safe_serialize(
+        {
+            "v": b"wire-data",
+            "p": 777,
+            "ttl": 5,
+            "created_at": 999.0,
+        }
+    )
+    plugin._client.store[mem_key] = blob
+
+    assert plugin.get_with_meta(key) == (None, None, None)
+    assert mem_key not in plugin._client.store
+
+
+def test_memcached_cache_set_ttl_noop_and_backend_failure_paths(monkeypatch) -> None:
+    """Brief: set() no-ops for ttl<=0 and suppresses backend write failures.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts no exception and no writes on guarded paths.
+    """
+
+    plugin = _make_plugin(monkeypatch)
+    key = ("no-store.example", 1)
+    plugin.set(key, 0, b"wire-data")
+    assert plugin._client.store == {}
+
+    plugin_with_set_error = _make_plugin(
+        monkeypatch,
+        client_cls=RaisingSetMemcachedClient,
+    )
+    plugin_with_set_error.set(("set-error.example", 1), 60, b"wire-data")
+
+
+def test_memcached_cache_purge_returns_zero(monkeypatch) -> None:
+    """Brief: purge() reports zero because Memcached handles expiry itself.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts purge() return value is 0.
+    """
+
+    plugin = _make_plugin(monkeypatch)
+    assert plugin.purge() == 0
 
 
 def test_memcached_cache_roundtrip_bytes_and_metadata_with_fake_client(
