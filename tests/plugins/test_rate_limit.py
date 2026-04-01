@@ -3256,3 +3256,109 @@ def test_global_max_rps_invariant_with_simulated_late_thread_race(
         )
 
     plugin.shutdown()
+
+
+def test_db_update_profile_creates_global_floor_when_missing(tmp_path):
+    """Brief: Non-global profile writes must synthesize a global floor row.
+
+    Inputs:
+      - tmp_path: pytest temporary path.
+
+    Outputs:
+      - None: asserts a non-global update creates a matching global profile and
+        window sample floor when the DB started without a global row.
+    """
+
+    plugin = RateLimit(
+        db_path=str(tmp_path / "rl-global-floor.db"),
+        stats_window_seconds=3600,
+    )
+    plugin.setup()
+
+    plugin._db_update_profile("client-a", rps=5.0, now_ts=123)
+
+    cur = plugin._conn.cursor()
+    cur.execute(
+        "SELECT avg_rps, max_rps, samples, last_update FROM rate_profiles WHERE key=?",
+        (rate_limit_module._GLOBAL_RPS_DB_KEY,),
+    )
+    global_row = cur.fetchone()
+    assert global_row is not None
+    assert float(global_row[1]) >= 5.0
+    assert int(global_row[2]) >= 1
+    assert int(global_row[3]) == 123
+
+    cur.execute(
+        "SELECT MAX(rps) FROM rate_profile_windows WHERE key=? AND last_update=?",
+        (rate_limit_module._GLOBAL_RPS_DB_KEY, 123),
+    )
+    global_window_row = cur.fetchone()
+    assert global_window_row is not None
+    assert float(global_window_row[0]) >= 5.0
+
+    plugin.shutdown()
+
+
+def test_flush_completed_active_window_keys_creates_global_floor_when_missing(
+    tmp_path,
+    monkeypatch,
+):
+    """Brief: Stale-key flushes must not create per-key history without global history.
+
+    Inputs:
+      - tmp_path: pytest temporary path.
+      - monkeypatch: pytest monkeypatch fixture for deterministic rollover time.
+
+    Outputs:
+      - None: asserts stale flushes create or advance a global floor row/window
+        sample together with the per-key row.
+    """
+
+    plugin = RateLimit(
+        db_path=str(tmp_path / "rl-stale-flush-global-floor.db"),
+        window_seconds=10,
+        stats_window_seconds=3600,
+    )
+    plugin.setup()
+
+    monkeypatch.setattr(rate_limit_module.time, "time", lambda: 20.0)
+    plugin._flush_completed_active_window_keys(
+        stale_entries=[("client-b", 25)],
+        exclude_keys=set(),
+    )
+
+    cur = plugin._conn.cursor()
+    cur.execute(
+        "SELECT max_rps, samples, last_update FROM rate_profiles WHERE key=?",
+        (rate_limit_module._GLOBAL_RPS_DB_KEY,),
+    )
+    global_row = cur.fetchone()
+    cur.execute(
+        "SELECT max_rps, samples, last_update FROM rate_profiles WHERE key=?",
+        ("client-b",),
+    )
+    key_row = cur.fetchone()
+
+    assert global_row is not None
+    assert key_row is not None
+    assert float(global_row[0]) >= float(key_row[0])
+    assert int(global_row[1]) >= int(key_row[1])
+    assert int(global_row[2]) == 20
+    assert int(key_row[2]) == 20
+
+    cur.execute(
+        "SELECT MAX(rps) FROM rate_profile_windows WHERE key=? AND last_update=?",
+        (rate_limit_module._GLOBAL_RPS_DB_KEY, 20),
+    )
+    global_window_row = cur.fetchone()
+    cur.execute(
+        "SELECT MAX(rps) FROM rate_profile_windows WHERE key=? AND last_update=?",
+        ("client-b", 20),
+    )
+    key_window_row = cur.fetchone()
+
+    assert global_window_row is not None
+    assert key_window_row is not None
+    assert float(global_window_row[0]) >= float(key_window_row[0])
+
+    plugin.shutdown()
