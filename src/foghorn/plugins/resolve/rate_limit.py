@@ -943,6 +943,139 @@ class RateLimit(BasePlugin):
         except Exception:
             return None
 
+    def _ensure_global_profile_floor(
+        self,
+        cursor: sqlite3.Cursor,
+        *,
+        floor_avg_rps: float,
+        floor_max_rps: float,
+        floor_samples: int,
+        now_ts: int,
+        window_rps: Optional[float] = None,
+    ) -> None:
+        """Brief: Ensure non-global writes cannot outrun the global DB row.
+
+        Inputs:
+          - cursor: sqlite cursor on the rate-limit profile DB.
+          - floor_avg_rps: Avg-RPS value used when synthesizing a missing
+            global profile row.
+          - floor_max_rps: Minimum max_rps the global row must expose.
+          - floor_samples: Minimum samples count the global row must expose.
+          - now_ts: Epoch seconds for last_update / optional window sample time.
+          - window_rps: Optional window RPS floor to persist for the global
+            rate_profile_windows row at now_ts.
+
+        Outputs:
+          - None. Creates or updates the global profile/window rows so a
+            non-global key cannot persist stronger history than the global key.
+        """
+
+        try:
+            avg_floor = max(0.0, float(floor_avg_rps))
+        except Exception:
+            avg_floor = 0.0
+        try:
+            max_floor = max(0.0, float(floor_max_rps))
+        except Exception:
+            max_floor = 0.0
+        try:
+            sample_floor = max(0, int(floor_samples))
+        except Exception:
+            sample_floor = 0
+        try:
+            now_i = int(now_ts)
+        except Exception:
+            now_i = 0
+
+        cursor.execute(
+            "SELECT avg_rps, max_rps, samples, last_update FROM rate_profiles WHERE key=?",
+            (str(_GLOBAL_RPS_DB_KEY),),
+        )
+        row = cursor.fetchone()
+        if (
+            not row
+            or row[0] is None
+            or row[1] is None
+            or row[2] is None
+            or row[3] is None
+        ):
+            cursor.execute(
+                "INSERT OR REPLACE INTO rate_profiles (key, avg_rps, max_rps, samples, last_update) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (
+                    str(_GLOBAL_RPS_DB_KEY),
+                    float(avg_floor),
+                    float(max_floor),
+                    int(sample_floor),
+                    int(now_i),
+                ),
+            )
+        else:
+            try:
+                global_max = float(row[1])
+                global_samples = int(row[2])
+                global_last_update = int(row[3])
+            except Exception:
+                cursor.execute(
+                    "INSERT OR REPLACE INTO rate_profiles (key, avg_rps, max_rps, samples, last_update) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (
+                        str(_GLOBAL_RPS_DB_KEY),
+                        float(avg_floor),
+                        float(max_floor),
+                        int(sample_floor),
+                        int(now_i),
+                    ),
+                )
+            else:
+                new_global_max = max(float(global_max), float(max_floor))
+                new_global_samples = max(int(global_samples), int(sample_floor))
+                new_global_last_update = max(int(global_last_update), int(now_i))
+                if (
+                    float(new_global_max) != float(global_max)
+                    or int(new_global_samples) != int(global_samples)
+                    or int(new_global_last_update) != int(global_last_update)
+                ):
+                    cursor.execute(
+                        "UPDATE rate_profiles SET max_rps=?, samples=?, last_update=? "
+                        "WHERE key=?",
+                        (
+                            float(new_global_max),
+                            int(new_global_samples),
+                            int(new_global_last_update),
+                            str(_GLOBAL_RPS_DB_KEY),
+                        ),
+                    )
+
+        if window_rps is None:
+            return
+
+        try:
+            window_floor = max(0.0, float(window_rps))
+        except Exception:
+            window_floor = 0.0
+        cursor.execute(
+            "SELECT MAX(rps) FROM rate_profile_windows WHERE key=? AND last_update=?",
+            (str(_GLOBAL_RPS_DB_KEY), int(now_i)),
+        )
+        row = cursor.fetchone()
+        existing_window_rps = float(row[0]) if row and row[0] is not None else None
+        if existing_window_rps is None:
+            cursor.execute(
+                "INSERT INTO rate_profile_windows (key, rps, last_update) "
+                "VALUES (?, ?, ?)",
+                (str(_GLOBAL_RPS_DB_KEY), float(window_floor), int(now_i)),
+            )
+        elif float(existing_window_rps) < float(window_floor):
+            cursor.execute(
+                "UPDATE rate_profile_windows SET rps=? WHERE key=? AND last_update=?",
+                (
+                    float(window_floor),
+                    str(_GLOBAL_RPS_DB_KEY),
+                    int(now_i),
+                ),
+            )
+
     def _maybe_prune_db(self, *, now_ts: int) -> None:
         """Brief: Best-effort pruning to bound sqlite3 growth.
 
@@ -1063,10 +1196,71 @@ class RateLimit(BasePlugin):
                 (key,),
             )
             row = cur.fetchone()
+            global_row_present = True
+            global_max_rps: Optional[float] = None
+            global_samples: Optional[int] = None
+            if str(key) != str(_GLOBAL_RPS_DB_KEY):
+                try:
+                    cur.execute(
+                        "SELECT avg_rps, max_rps, samples, last_update FROM rate_profiles WHERE key=?",
+                        (str(_GLOBAL_RPS_DB_KEY),),
+                    )
+                    global_row = cur.fetchone()
+                except Exception:
+                    global_row_present = False
+                else:
+                    global_row_present = bool(
+                        global_row
+                        and global_row[0] is not None
+                        and global_row[1] is not None
+                        and global_row[2] is not None
+                        and global_row[3] is not None
+                    )
+                    if global_row_present:
+                        global_max_rps = float(global_row[1])
+                        global_samples = int(global_row[2])
+            global_floor_samples = 0
+            can_preseed_global = not global_row_present
+            if (
+                str(key) != str(_GLOBAL_RPS_DB_KEY)
+                and not can_preseed_global
+                and row
+                and row[1] is not None
+                and row[2] is not None
+                and global_max_rps is not None
+                and global_samples is not None
+            ):
+                try:
+                    can_preseed_global = (
+                        int(global_samples) == int(row[2])
+                        and abs(float(global_max_rps) - float(row[1])) < 1e-9
+                    )
+                except Exception:
+                    can_preseed_global = False
+            if str(key) != str(_GLOBAL_RPS_DB_KEY) and can_preseed_global:
+                proposed_samples = 1
+                if row and row[2] is not None:
+                    try:
+                        proposed_samples = max(1, int(row[2]) + 1)
+                    except Exception:
+                        proposed_samples = 1
+                self._ensure_global_profile_floor(
+                    cur,
+                    floor_avg_rps=float(rps),
+                    floor_max_rps=float(rps),
+                    floor_samples=int(proposed_samples),
+                    now_ts=int(now_ts),
+                    window_rps=(
+                        float(rps)
+                        if int(getattr(self, "stats_window_seconds", 0) or 0) > 0
+                        else None
+                    ),
+                )
             if not row or row[0] is None or row[1] is None or row[2] is None:
                 # Treat missing or partially-null rows as if they do not exist,
                 # resetting the profile based on the current observation.
                 capped_samples = self._cap_non_global_samples(cur, str(key), 1)
+                global_floor_samples = int(capped_samples)
                 cur.execute(
                     "INSERT OR REPLACE INTO rate_profiles (key, avg_rps, max_rps, samples, last_update) "
                     "VALUES (?, ?, ?, ?, ?)",
@@ -1082,6 +1276,7 @@ class RateLimit(BasePlugin):
                 except Exception:
                     # Malformed existing row; reset it using the current observation.
                     capped_samples = self._cap_non_global_samples(cur, str(key), 1)
+                    global_floor_samples = int(capped_samples)
                     cur.execute(
                         "INSERT OR REPLACE INTO rate_profiles (key, avg_rps, max_rps, samples, last_update) "
                         "VALUES (?, ?, ?, ?, ?)",
@@ -1098,11 +1293,25 @@ class RateLimit(BasePlugin):
                     new_samples = self._cap_non_global_samples(
                         cur, str(key), int(samples + 1)
                     )
+                    global_floor_samples = int(new_samples)
                     cur.execute(
                         "UPDATE rate_profiles SET avg_rps=?, max_rps=?, samples=?, last_update=? "
                         "WHERE key=?",
                         (new_avg, new_max, new_samples, int(now_ts), key),
                     )
+            if str(key) != str(_GLOBAL_RPS_DB_KEY):
+                self._ensure_global_profile_floor(
+                    cur,
+                    floor_avg_rps=float(rps),
+                    floor_max_rps=float(rps),
+                    floor_samples=int(global_floor_samples),
+                    now_ts=int(now_ts),
+                    window_rps=(
+                        float(rps)
+                        if int(getattr(self, "stats_window_seconds", 0) or 0) > 0
+                        else None
+                    ),
+                )
             if int(getattr(self, "stats_window_seconds", 0) or 0) > 0 or str(
                 key
             ) == str(_GLOBAL_RPS_DB_KEY):
@@ -1185,6 +1394,13 @@ class RateLimit(BasePlugin):
                     and int(new_samples) > int(global_samples)
                 ):
                     new_samples = int(global_samples)
+                self._ensure_global_profile_floor(
+                    cur,
+                    floor_avg_rps=float(new_avg),
+                    floor_max_rps=float(max_rps),
+                    floor_samples=int(new_samples),
+                    now_ts=int(now_ts),
+                )
 
             cur.execute(
                 "UPDATE rate_profiles SET avg_rps=?, max_rps=?, samples=?, last_update=? "
