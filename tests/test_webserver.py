@@ -3155,6 +3155,72 @@ def test_start_webserver_other_asyncio_error_keeps_async_path(monkeypatch) -> No
     assert state2.get("ran") is True
 
 
+def test_start_webserver_sets_uvicorn_limits_from_nofile(monkeypatch) -> None:
+    """Brief: start_webserver forwards fd-derived uvicorn hardening kwargs.
+
+    Inputs:
+      - monkeypatch fixture for uvicorn module replacement and nofile limit helper.
+
+    Outputs:
+      - Dummy uvicorn.Config receives limit_concurrency/backlog/timeout_keep_alive.
+    """
+
+    import sys
+    import time
+    import types
+
+    import foghorn.servers.webserver.server_management as web_mgmt
+
+    # Simulate a constrained process fd budget and assert derived limits are
+    # forwarded into uvicorn.Config when that signature supports them.
+    monkeypatch.setattr(web_mgmt, "_get_soft_nofile_limit", lambda: 1000, raising=True)
+
+    state: dict[str, object] = {}
+
+    class DummyConfig:
+        def __init__(
+            self,
+            app,  # noqa: ANN001
+            host,  # noqa: ANN001
+            port,  # noqa: ANN001
+            log_level,  # noqa: ANN001
+            limit_concurrency=None,  # noqa: ANN001
+            backlog=None,  # noqa: ANN001
+            timeout_keep_alive=None,  # noqa: ANN001
+        ) -> None:
+            self.app = app
+            self.host = host
+            self.port = port
+            self.log_level = log_level
+            self.limit_concurrency = limit_concurrency
+            self.backlog = backlog
+            self.timeout_keep_alive = timeout_keep_alive
+
+    class DummyServer:
+        def __init__(self, config):  # noqa: ANN001
+            state["config"] = config
+
+        def run(self) -> None:
+            state["ran"] = True
+
+    dummy_uvicorn = types.SimpleNamespace(Config=DummyConfig, Server=DummyServer)
+    monkeypatch.setitem(sys.modules, "uvicorn", dummy_uvicorn)
+
+    cfg = {"server": {"http": {"enabled": True, "host": "127.0.0.1", "port": 0}}}
+    handle = start_webserver(stats=None, config=cfg, log_buffer=RingBuffer())
+    assert isinstance(handle, WebServerHandle)
+
+    time.sleep(0.05)
+
+    assert state.get("ran") is True
+    cfg_obj = state.get("config")
+    assert isinstance(cfg_obj, DummyConfig)
+    # 1000 // 2 => 500, clamped to [64, 512].
+    assert cfg_obj.limit_concurrency == 500
+    assert cfg_obj.backlog == 500
+    assert cfg_obj.timeout_keep_alive == 5
+
+
 def test_start_webserver_warns_when_public_host_without_auth(
     monkeypatch, caplog
 ) -> None:
