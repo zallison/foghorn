@@ -181,8 +181,6 @@ class _UpstreamHealth:
             if raw_down_until and raw_down_until > float(now):
                 down_until = raw_down_until
                 state = "down"
-            elif fail_count > 0:
-                state = "degraded"
             if raw_last_error_ts > 0:
                 last_error_ts = raw_last_error_ts
             if raw_last_error is not None:

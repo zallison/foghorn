@@ -1561,14 +1561,10 @@ def _resolve_core(
                     if not isinstance(entry, dict):
                         return False
                     try:
-                        fail_count = float(entry.get("fail_count", 0.0) or 0.0)
-                    except Exception:
-                        fail_count = 0.0
-                    try:
                         down_until = float(entry.get("down_until", 0.0) or 0.0)
                     except Exception:
                         down_until = 0.0
-                    if fail_count <= 0.0 and down_until <= now:
+                    if down_until <= now:
                         return False
                 return True if saw_primary else True
 

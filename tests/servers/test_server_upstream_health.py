@@ -225,7 +225,7 @@ def test_describe_upstream_infers_doh_transport_from_url() -> None:
     ("health_entry", "expected_state", "expected_down_until"),
     [
         ({"fail_count": 3.0, "down_until": 1010.0}, "down", 1010.0),
-        ({"fail_count": 2.0, "down_until": 999.0}, "degraded", None),
+        ({"fail_count": 2.0, "down_until": 999.0}, "up", None),
     ],
 )
 def test_describe_upstream_health_state_transitions(
@@ -233,7 +233,7 @@ def test_describe_upstream_health_state_transitions(
     expected_state: str,
     expected_down_until: float | None,
 ) -> None:
-    """Brief: describe_upstream() computes down/degraded from health entry.
+    """Brief: describe_upstream() computes down/up from health entry.
 
     Inputs:
       - health_entry with fail_count/down_until values.
