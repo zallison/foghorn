@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
 import sqlite3
 import threading
@@ -1312,14 +1313,13 @@ class RateLimit(BasePlugin):
                         else None
                     ),
                 )
-            if int(getattr(self, "stats_window_seconds", 0) or 0) > 0 or str(
-                key
-            ) == str(_GLOBAL_RPS_DB_KEY):
-                cur.execute(
-                    "INSERT INTO rate_profile_windows (key, rps, last_update) "
-                    "VALUES (?, ?, ?)",
-                    (key, float(rps), int(now_ts)),
-                )
+            # Always write per-key RPS to rate_profile_windows for historical aggregation
+            # (e.g., computing 1m/5m/10m averages in the admin UI).
+            cur.execute(
+                "INSERT INTO rate_profile_windows (key, rps, last_update) "
+                "VALUES (?, ?, ?)",
+                (key, float(rps), int(now_ts)),
+            )
             self._conn.commit()
 
         # Best-effort pruning outside of the DB lock critical path.
@@ -3133,6 +3133,9 @@ class RateLimit(BasePlugin):
         Outputs:
           - float: Average global RPS from rate_profile_windows over the
             lookback window, or 0.0 when unavailable.
+        Notes:
+          - Uses zero-fill averaging across expected completed windows in the
+            lookback interval so idle periods naturally decay toward 0.0.
         """
 
         try:
@@ -3141,6 +3144,16 @@ class RateLimit(BasePlugin):
             return 0.0
         if lookback <= 0:
             return 0.0
+        try:
+            window_seconds = int(getattr(self, "window_seconds", 10) or 10)
+        except Exception:
+            window_seconds = 10
+        if window_seconds <= 0:
+            window_seconds = 10
+        expected_windows = max(
+            1,
+            int(math.ceil(float(lookback) / float(window_seconds))),
+        )
 
         conn = getattr(self, "_conn", None)
         if conn is None:
@@ -3151,7 +3164,7 @@ class RateLimit(BasePlugin):
             cur = conn.cursor()
             try:
                 cur.execute(
-                    "SELECT AVG(rps) FROM rate_profile_windows "
+                    "SELECT COALESCE(SUM(rps), 0.0) FROM rate_profile_windows "
                     "WHERE key = ? AND last_update >= ?",
                     (_GLOBAL_RPS_DB_KEY, int(cutoff)),
                 )
@@ -3161,7 +3174,7 @@ class RateLimit(BasePlugin):
         if not row:
             return 0.0
         try:
-            return float(row[0] or 0.0)
+            return float(row[0] or 0.0) / float(expected_windows)
         except Exception:
             return 0.0
 
