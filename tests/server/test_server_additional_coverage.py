@@ -360,6 +360,60 @@ def test_handle_all_failed_with_stats_records_upstream_rcode(
     kinds = [k for k, _ in stats.calls]
     assert "record_upstream_result" in kinds
     assert "record_upstream_rcode" in kinds
+    query_result_entries = [
+        payload for kind, payload in stats.calls if kind == "record_query_result"
+    ]
+    assert query_result_entries
+    _, query_kwargs = query_result_entries[-1]
+    result_ctx = query_kwargs.get("result") or {}
+    assert result_ctx.get("source") == "upstream"
+    assert result_ctx.get("upstream") == "https://resolver/dns-query"
+    assert result_ctx.get("upstream_url") == "https://resolver/dns-query"
+
+
+def test_handle_upstream_success_records_query_result_upstream_id_and_url(
+    monkeypatch, set_runtime_snapshot
+):
+    """Brief: Successful upstream responses persist upstream id/url in result context.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts query_log result.source=upstream includes upstream/upstream_url.
+    """
+
+    q = DNSRecord.question("upstream-context.example", "A")
+
+    monkeypatch.setattr(
+        srv,
+        "send_query_with_failover",
+        lambda request, upstreams, timeout_ms, qname, qtype, max_concurrent=1, on_attempt_result=None: (
+            _mk_ok_reply(q),
+            {"transport": "doh", "url": "https://resolver/dns-query"},
+            "ok",
+        ),
+    )
+
+    stats = _Stats()
+    set_runtime_snapshot(
+        plugins=[],
+        upstream_addrs=[{"transport": "doh", "url": "https://resolver/dns-query"}],
+        stats_collector=stats,
+    )
+
+    h, _sock = _mk_handler(q.pack())
+    h.handle()
+
+    query_result_entries = [
+        payload for kind, payload in stats.calls if kind == "record_query_result"
+    ]
+    assert query_result_entries
+    _, query_kwargs = query_result_entries[-1]
+    result_ctx = query_kwargs.get("result") or {}
+    assert result_ctx.get("source") == "upstream"
+    assert result_ctx.get("upstream") == "https://resolver/dns-query"
+    assert result_ctx.get("upstream_url") == "https://resolver/dns-query"
 
 
 # ---- DNSSEC validate branches ----

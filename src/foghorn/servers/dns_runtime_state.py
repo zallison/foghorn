@@ -74,16 +74,22 @@ class DNSRuntimeState:
         """Brief: Compute a stable identifier string for an upstream config.
 
         Inputs:
-          - up: Upstream mapping (may contain 'url' for DoH or 'host'/'port').
+          - up: Upstream mapping (may contain explicit 'id', 'url' for DoH, or 'host'/'port').
 
         Outputs:
           - str: Identifier suitable for indexing upstream health state.
         """
         if not isinstance(up, dict):
             return ""
+        # Prefer explicit config 'id' field when available.
+        config_id = up.get("id")
+        if config_id:
+            return str(config_id)
+        # Fall back to URL (DoH).
         url = up.get("url")
         if url:
             return str(url)
+        # Fall back to host:port or host.
         host = up.get("host")
         port = up.get("port")
         if host is None and port is None:

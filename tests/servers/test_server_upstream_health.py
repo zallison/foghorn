@@ -91,6 +91,32 @@ def test_upstream_id_returns_empty_for_non_dict() -> None:
     assert _UPSTREAM_HEALTH.upstream_id("not-a-dict") == ""
 
 
+def test_upstream_id_prefers_config_id_field() -> None:
+    """Brief: DNSRuntimeState._upstream_id() prefers explicit config 'id' field.
+
+    Inputs:
+      - Upstream config with explicit 'id', 'url', 'host:port' fields.
+
+    Outputs:
+      - Explicit 'id' field is returned when present.
+    """
+
+    # Config id takes precedence over everything.
+    assert (
+        DNSRuntimeState._upstream_id(
+            {"id": "my-resolver", "host": "1.1.1.1", "port": 53}
+        )
+        == "my-resolver"
+    )
+    # URL is used as fallback when id is missing.
+    assert (
+        DNSRuntimeState._upstream_id({"url": "https://resolver.example/dns"})
+        == "https://resolver.example/dns"
+    )
+    # host:port used when id and url both missing.
+    assert DNSRuntimeState._upstream_id({"host": "1.1.1.1", "port": 53}) == "1.1.1.1:53"
+
+
 def test_upstream_id_prefers_dns_udp_handler_id(monkeypatch) -> None:
     """Brief: upstream_id() returns DNSRuntimeState._upstream_id result when set.
 
@@ -408,3 +434,51 @@ def test_describe_upstream_raises_for_unparseable_port() -> None:
             now=1000.0,
             cfg=None,
         )
+
+
+def test_describe_upstream_migrates_health_data_from_old_key() -> None:
+    """Brief: describe_upstream() migrates health data from old host-port keys to new id keys.
+
+    Inputs:
+      - Upstream with explicit 'id' field.
+      - Health data stored under old key (host:port) from before id-based keying.
+
+    Outputs:
+      - Health data is found and migrated to new key.
+      - Record reflects the migrated health state.
+    """
+
+    upstream = {"id": "resolver1", "host": "1.1.1.1", "port": 53}
+    old_key = "1.1.1.1:53"  # Old key format (before id-based keying).
+    new_key = "resolver1"  # New key (based on explicit id).
+
+    # Store health data under the old key (simulating data from before the id field was prioritized).
+    old_health_entry = {
+        "fail_count": 2.0,
+        "down_until": 2000.0,
+        "last_error": "connection timeout",
+        "last_error_ts": 1500.0,
+    }
+    DNSRuntimeState.upstream_health[old_key] = old_health_entry
+
+    # Describe the upstream; it should find and migrate the health data.
+    record = _UPSTREAM_HEALTH.describe_upstream(
+        role="primary",
+        upstream=upstream,
+        now=1000.0,
+        cfg=None,
+    )
+
+    assert record is not None
+    assert record["id"] == new_key
+    # Health data should be migrated and reflected in the record.
+    assert record["fail_count"] == 2.0
+    assert record["down_until"] == 2000.0
+    assert record["state"] == "down"  # down_until > now
+    assert record["last_error"] == "connection timeout"
+    assert record["last_error_ts"] == 1500.0
+
+    # Verify the old key was cleaned up.
+    assert old_key not in DNSRuntimeState.upstream_health
+    # Verify the new key now holds the data.
+    assert new_key in DNSRuntimeState.upstream_health

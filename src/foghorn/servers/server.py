@@ -1649,6 +1649,14 @@ def _resolve_core(
                 qtype,
                 max_concurrent=max_concurrent,
             )
+            upstream_url = ""
+            if isinstance(used_upstream, dict):
+                try:
+                    raw_upstream_url = str(used_upstream.get("url", "")).strip()
+                except Exception:
+                    raw_upstream_url = ""
+                if raw_upstream_url:
+                    upstream_url = _sanitize_upstream_url(raw_upstream_url)
             # Keep upstream health state in sync for admin/status payloads.
             # The UDP handler delegates to this shared resolver path, so health
             # updates must happen here as well.
@@ -1678,9 +1686,9 @@ def _resolve_core(
                 port = int(used_upstream.get("port", 0))
                 # For DoH-style upstreams identified by URL, prefer that as the
                 # upstream_id so stats can distinguish endpoints consistently.
-                url = str(used_upstream.get("url", "")).strip()
+                url = str(upstream_url or "").strip()
                 if url:
-                    upstream_id = _sanitize_upstream_url(url)
+                    upstream_id = url
                 else:
                     upstream_id = (
                         f"{host}:{port}" if host or port else host or "unknown"
@@ -1734,6 +1742,10 @@ def _resolve_core(
                         "ede_code": int(ede_code),
                         "ede_text": str(ede_text),
                     }
+                    if upstream_id:
+                        result_ctx["upstream"] = str(upstream_id)
+                    if upstream_url:
+                        result_ctx["upstream_url"] = str(upstream_url)
                     if listener is not None:
                         result_ctx["listener"] = listener
                     if secure is not None:
@@ -2029,6 +2041,10 @@ def _resolve_core(
                 ]
                 first = answers[0]["rdata"] if answers else None
                 result_ctx = {"source": "upstream", "answers": answers}
+                if upstream_id:
+                    result_ctx["upstream"] = str(upstream_id)
+                if upstream_url:
+                    result_ctx["upstream_url"] = str(upstream_url)
                 if dnssec_status is not None:
                     result_ctx["dnssec_status"] = dnssec_status
                 if (
