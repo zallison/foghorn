@@ -59,6 +59,39 @@ class _UpstreamHealth:
       - Callers must enforce admin authorization before exposing this payload.
     """
 
+    def _compute_old_upstream_key(self, upstream: Dict) -> str:
+        """Brief: Compute upstream key using old scheme (pre-id-field) for migration.
+
+        Inputs:
+          - upstream: Upstream configuration mapping.
+
+        Outputs:
+          - str old-style identifier (URL or host:port, never config id).
+        """
+        if not isinstance(upstream, dict):
+            return ""
+        # Old scheme: URL first, then host:port.
+        try:
+            url = upstream.get("url") or upstream.get("endpoint")
+        except Exception:
+            url = None
+        if url:
+            return str(url)
+        try:
+            host = upstream.get("host")
+        except Exception:
+            host = None
+        try:
+            port = upstream.get("port")
+        except Exception:
+            port = None
+        if host or port:
+            try:
+                return f"{host}:{int(port) if port is not None else 0}"
+            except Exception:
+                return str(host) if host is not None else ""
+        return ""
+
     def upstream_id(self, upstream: Dict) -> str:
         """Brief: Compute a stable upstream identifier.
 
@@ -155,6 +188,16 @@ class _UpstreamHealth:
         entry = None
         if upstream_id:
             entry = DNSRuntimeState.upstream_health.get(upstream_id)
+            # Migrate health data from old key (host:port) to new key (id) if needed.
+            if not entry:
+                old_key = self._compute_old_upstream_key(upstream)
+                if old_key and old_key != upstream_id:
+                    old_entry = DNSRuntimeState.upstream_health.get(old_key)
+                    if old_entry:
+                        # Move the health data to the new key.
+                        DNSRuntimeState.upstream_health[upstream_id] = old_entry
+                        DNSRuntimeState.upstream_health.pop(old_key, None)
+                        entry = old_entry
 
         fail_count = 0.0
         down_until = None
