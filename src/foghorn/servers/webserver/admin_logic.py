@@ -58,6 +58,45 @@ def _get_store_from_collector(collector: StatsCollector | None) -> Any | None:
     return getattr(collector, "_store", None)
 
 
+def _derive_query_log_error_value(item: Dict[str, Any]) -> Any | None:
+    """Brief: Resolve query-log error text with nested and EDE fallbacks.
+
+    Inputs:
+      - item: Query-log row mapping from a stats backend.
+
+    Outputs:
+      - Existing item.error when present.
+      - Else result.error when present.
+      - Else synthesized EDE text using result.ede_code/result.ede_text.
+      - None when no error details are available.
+    """
+
+    top_level_error = item.get("error")
+    if top_level_error is not None:
+        return top_level_error
+
+    result = item.get("result")
+    if not isinstance(result, dict):
+        return None
+
+    nested_error = result.get("error")
+    if nested_error is not None:
+        return nested_error
+
+    ede_code_raw = result.get("ede_code")
+    ede_text_raw = result.get("ede_text")
+    ede_code = str(ede_code_raw).strip() if ede_code_raw is not None else ""
+    ede_text = str(ede_text_raw).strip() if ede_text_raw is not None else ""
+
+    if ede_code and ede_text:
+        return f"EDE {ede_code}: {ede_text}"
+    if ede_code:
+        return f"EDE {ede_code}"
+    if ede_text:
+        return ede_text
+    return None
+
+
 def build_query_log_payload(
     store: Any,
     *,
@@ -71,6 +110,7 @@ def build_query_log_payload(
     end_ts: float | None,
     page: int,
     page_size: int,
+    ede_code: str | None = None,
 ) -> Dict[str, Any]:
     """Brief: Build the query-log list payload from a store result.
 
@@ -78,6 +118,7 @@ def build_query_log_payload(
       - store: Stats store object that exposes select_query_log(**kwargs).
       - client_ip/qtype/qname/rcode: Optional filters.
       - status/source: Optional filters for query status and result source.
+      - ede_code: Optional filter for result.ede_code in query-log rows.
       - start_ts/end_ts: Optional unix timestamps in seconds (UTC).
       - page: 1-indexed page number.
       - page_size: page size (already clamped).
@@ -85,6 +126,8 @@ def build_query_log_payload(
     Outputs:
       - Dict with keys: total, page, page_size, total_pages, items.
         Each dict item with a 'ts' key is copied and gets a 'timestamp' field.
+        The item error value follows precedence:
+        item.error -> result.error -> EDE details.
     """
 
     res = store.select_query_log(
@@ -94,6 +137,7 @@ def build_query_log_payload(
         rcode=rcode,
         status=status,
         source=source,
+        ede_code=ede_code,
         start_ts=start_ts,
         end_ts=end_ts,
         page=page,
@@ -105,6 +149,9 @@ def build_query_log_payload(
         if isinstance(item, dict) and "ts" in item:
             out = dict(item)
             out["timestamp"] = _ts_to_utc_iso(float(out.get("ts") or 0.0))
+            resolved_error = _derive_query_log_error_value(out)
+            if resolved_error is not None:
+                out["error"] = resolved_error
             items.append(out)
         else:
             items.append(item)
@@ -450,6 +497,72 @@ def build_upstream_status_payload(
             }
         return counts
 
+    def _legacy_upstream_key(upstream: Any) -> str:
+        """Brief: Build the pre-id upstream key shape used by older stats snapshots.
+
+        Inputs:
+          - upstream: Upstream configuration mapping.
+
+        Outputs:
+          - str legacy key (url/endpoint, else host:port, else host), or empty.
+        """
+
+        if not isinstance(upstream, dict):
+            return ""
+        try:
+            url = upstream.get("url") or upstream.get("endpoint")
+        except Exception:
+            url = None
+        if url:
+            return str(url)
+        try:
+            host = upstream.get("host")
+        except Exception:
+            host = None
+        try:
+            port = upstream.get("port")
+        except Exception:
+            port = None
+        if host or port:
+            try:
+                return f"{host}:{int(port) if port is not None else 0}"
+            except Exception:
+                return str(host) if host is not None else ""
+        return ""
+
+    def _resolve_run_count(
+        run_counts_map: Dict[str, Dict[str, int]],
+        *,
+        upstream: Any,
+        record_id: Any,
+    ) -> Dict[str, int]:
+        """Brief: Resolve run counters for an upstream with legacy-key fallback.
+
+        Inputs:
+          - run_counts_map: Per-upstream counters from _collect_run_upstream_counts.
+          - upstream: Upstream configuration mapping used to derive legacy key.
+          - record_id: Current upstream id used in upstream_status payload.
+
+        Outputs:
+          - Dict with run_query_count/run_failed_count, or empty dict.
+        """
+
+        rec_key = str(record_id or "")
+        if rec_key:
+            direct = run_counts_map.get(rec_key)
+            if isinstance(direct, dict):
+                return direct
+        legacy_key = _legacy_upstream_key(upstream)
+        if legacy_key:
+            legacy = run_counts_map.get(legacy_key)
+            if isinstance(legacy, dict):
+                # Best-effort in-request migration so subsequent lookups in this
+                # payload build use the current id key.
+                if rec_key and rec_key != legacy_key:
+                    run_counts_map[rec_key] = legacy
+                return legacy
+        return {}
+
     try:
         from foghorn.runtime_config import get_runtime_snapshot
 
@@ -486,7 +599,9 @@ def build_upstream_status_payload(
                 role="primary", upstream=up, now=now, cfg=health_cfg
             )
             if rec:
-                run_count = run_counts.get(str(rec.get("id") or ""), {})
+                run_count = _resolve_run_count(
+                    run_counts, upstream=up, record_id=rec.get("id")
+                )
                 rec["run_query_count"] = _safe_int(run_count.get("run_query_count"))
                 rec["run_failed_count"] = _safe_int(run_count.get("run_failed_count"))
                 items.append(rec)
@@ -497,7 +612,9 @@ def build_upstream_status_payload(
                 role="backup", upstream=up, now=now, cfg=health_cfg
             )
             if rec:
-                run_count = run_counts.get(str(rec.get("id") or ""), {})
+                run_count = _resolve_run_count(
+                    run_counts, upstream=up, record_id=rec.get("id")
+                )
                 rec["run_query_count"] = _safe_int(run_count.get("run_query_count"))
                 rec["run_failed_count"] = _safe_int(run_count.get("run_failed_count"))
                 items.append(rec)

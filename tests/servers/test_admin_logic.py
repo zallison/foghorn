@@ -220,6 +220,7 @@ class TestBuildQueryLogPayload:
             rcode="NOERROR",
             status="cache_hit",
             source="cache",
+            ede_code="15",
             start_ts=1000.0,
             end_ts=2000.0,
             page=2,
@@ -233,6 +234,7 @@ class TestBuildQueryLogPayload:
             rcode="NOERROR",
             status="cache_hit",
             source="cache",
+            ede_code="15",
             start_ts=1000.0,
             end_ts=2000.0,
             page=2,
@@ -497,6 +499,47 @@ class TestBuildUpstreamStatusPayload:
         assert items_by_id["8.8.8.8:53"]["run_failed_count"] == 3
         assert items_by_id["1.1.1.1:53"]["run_query_count"] == 3
         assert items_by_id["1.1.1.1:53"]["run_failed_count"] == 0
+        mock_collector.snapshot.assert_called_once_with(reset=False)
+
+    def test_upstream_payload_resolves_run_counts_from_legacy_key_with_config_id(
+        self, set_runtime_snapshot
+    ) -> None:
+        """Brief: Resolve run counters when upstream payload id differs from legacy stats key.
+
+        Inputs:
+          - set_runtime_snapshot: Fixture helper.
+          - Upstream config with explicit id field.
+          - Stats snapshot keyed by legacy host:port ids.
+
+        Outputs:
+          - Assert run_query_count/run_failed_count are populated via fallback.
+        """
+
+        upstreams = [
+            {"id": "resolver-a", "host": "8.8.8.8", "port": 53},
+            {"id": "resolver-b", "host": "1.1.1.1", "port": 53},
+        ]
+        mock_snapshot = Mock()
+        mock_snapshot.upstreams = {
+            "8.8.8.8:53": {"success": 5, "timeout": 1},
+            "1.1.1.1:53": {"success": 4, "servfail": 2},
+        }
+        mock_collector = Mock()
+        mock_collector.snapshot.return_value = mock_snapshot
+
+        set_runtime_snapshot(
+            upstream_addrs=upstreams,
+            upstream_backup_addrs=[],
+            stats_collector=mock_collector,
+        )
+
+        payload = build_upstream_status_payload({}, now_ts=1707752400.0)
+        items_by_id = {str(item.get("id")): item for item in payload["items"]}
+
+        assert items_by_id["resolver-a"]["run_query_count"] == 6
+        assert items_by_id["resolver-a"]["run_failed_count"] == 1
+        assert items_by_id["resolver-b"]["run_query_count"] == 6
+        assert items_by_id["resolver-b"]["run_failed_count"] == 2
         mock_collector.snapshot.assert_called_once_with(reset=False)
 
     def test_health_only_upstreams(self, set_runtime_snapshot) -> None:

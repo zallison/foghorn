@@ -64,9 +64,6 @@ def _import_mongo_driver():
 class MongoStatsStore(BaseStatsStore):
     """MongoDB-backed persistent statistics and query-log backend.
 
-    # Aliases used by the stats backend registry.
-    aliases = ("mongo", "mongodb")
-
     This backend stores the same logical ``counts`` and ``query_log`` data as
     the SQLite implementation, but in MongoDB collections.
 
@@ -79,10 +76,25 @@ class MongoStatsStore(BaseStatsStore):
         database: Database name (default "foghorn_stats").
         connect_kwargs: Optional mapping of additional keyword arguments passed
             through to MongoClient (for example, tls, replicaSet).
+        async_logging: When True, enqueue writes on the BaseStatsStore worker
+            queue.
+        max_logging_queue: Maximum queued operations when async logging is on.
+        batch_writes: Whether to batch query-log writes via ``insert_many``.
+        batch_time_sec: Max age of pending query-log batch before flush.
+        batch_max_size: Max pending query-log docs before forced flush.
+        retention_max_records: Optional cap on retained query-log documents.
+        retention_days: Optional age limit (in days) for query-log documents.
+        retention_max_bytes: Optional estimated byte cap for query-log docs.
+        retention_prune_interval_seconds: Optional prune interval gate.
+        retention_prune_every_n_inserts: Optional prune cadence by insert count.
+        retention_native_ttl: Whether to create a MongoDB TTL index on ts_dt.
 
     Outputs:
         Initialized MongoStatsStore instance with ensured collections/indexes.
     """
+
+    # Aliases used by the stats backend registry.
+    aliases = ("mongo", "mongodb")
 
     def __init__(
         self,
@@ -318,7 +330,7 @@ class MongoStatsStore(BaseStatsStore):
         try:
             self._flush_pending_query_log_docs()
             client = getattr(self, "_client", None)
-            if client is not None:
+            if client is not None:  # pragma: nocover - _client is normally present
                 client.close()
         except Exception:  # pragma: no cover - defensive
             logger.exception("Error while closing MongoStatsStore client")
@@ -524,7 +536,7 @@ class MongoStatsStore(BaseStatsStore):
                 ).sort([("ts", -1), ("_id", -1)])
                 for doc in cursor:
                     doc_id = doc.get("_id")
-                    if doc_id is None:
+                    if doc_id is None:  # pragma: nocover - Mongo documents include _id
                         continue
 
                     doc_bytes = self._estimate_query_log_doc_bytes(doc)
@@ -564,12 +576,12 @@ class MongoStatsStore(BaseStatsStore):
             .limit(1)
         )
         cutoff_doc = next(iter(cutoff_cursor), None)
-        if not isinstance(cutoff_doc, dict):
+        if not isinstance(cutoff_doc, dict):  # pragma: nocover - defensive
             return
 
         cutoff_ts_raw = cutoff_doc.get("ts")
         cutoff_id = cutoff_doc.get("_id")
-        if cutoff_ts_raw is None or cutoff_id is None:
+        if cutoff_ts_raw is None or cutoff_id is None:  # pragma: nocover - defensive
             return
 
         cutoff_ts = float(cutoff_ts_raw)
@@ -639,6 +651,7 @@ class MongoStatsStore(BaseStatsStore):
         rcode: Optional[str] = None,
         status: Optional[str] = None,
         source: Optional[str] = None,
+        ede_code: Optional[str] = None,
         start_ts: Optional[float] = None,
         end_ts: Optional[float] = None,
         page: int = 1,
@@ -653,6 +666,7 @@ class MongoStatsStore(BaseStatsStore):
             rcode: Optional rcode filter.
             status: Optional status filter.
             source: Optional result.source filter.
+            ede_code: Optional result.ede_code filter.
             start_ts: Optional inclusive start timestamp.
             end_ts: Optional exclusive end timestamp.
             page: 1-based page index.
@@ -677,15 +691,74 @@ class MongoStatsStore(BaseStatsStore):
             status_s = status.strip()
             if status_s:
                 flt["status"] = {"$regex": f"^{re.escape(status_s)}$", "$options": "i"}
+        source_or: List[Dict[str, Any]] | None = None
         if source:
             source_s = source.strip().lower()
             if source_s:
                 compact = re.escape(f'"source":"{source_s}"')
                 spaced = re.escape(f'"source": "{source_s}"')
-                flt["$or"] = [
+                source_or = [
                     {"result_json": {"$regex": compact, "$options": "i"}},
                     {"result_json": {"$regex": spaced, "$options": "i"}},
                 ]
+        ede_or: List[Dict[str, Any]] | None = None
+        if ede_code is not None and str(ede_code).strip():
+            ede_code_s = str(ede_code).strip()
+            try:
+                ede_code_i = int(ede_code_s)
+            except Exception:
+                flt["_id"] = {"$exists": False}
+            else:
+                if ede_code_i < 0:
+                    flt["_id"] = {"$exists": False}
+                else:
+                    ede_code_txt = str(ede_code_i)
+                    ede_or = [
+                        {
+                            "result_json": {
+                                "$regex": re.escape(f'"ede_code":{ede_code_txt},'),
+                                "$options": "i",
+                            }
+                        },
+                        {
+                            "result_json": {
+                                "$regex": re.escape(f'"ede_code":{ede_code_txt}' + "}"),
+                                "$options": "i",
+                            }
+                        },
+                        {
+                            "result_json": {
+                                "$regex": re.escape(f'"ede_code":"{ede_code_txt}"'),
+                                "$options": "i",
+                            }
+                        },
+                        {
+                            "result_json": {
+                                "$regex": re.escape(
+                                    f'"ede_code": {ede_code_txt}' + "}"
+                                ),
+                                "$options": "i",
+                            }
+                        },
+                        {
+                            "result_json": {
+                                "$regex": re.escape(f'"ede_code":"{ede_code_txt}"'),
+                                "$options": "i",
+                            }
+                        },
+                        {
+                            "result_json": {
+                                "$regex": re.escape(f'"ede_code": "{ede_code_txt}"'),
+                                "$options": "i",
+                            }
+                        },
+                    ]
+        if source_or and ede_or:
+            flt["$and"] = [{"$or": source_or}, {"$or": ede_or}]
+        elif source_or:
+            flt["$or"] = source_or
+        elif ede_or:
+            flt["$or"] = ede_or
         if isinstance(start_ts, (int, float)) or isinstance(end_ts, (int, float)):
             ts_cond: Dict[str, Any] = {}
             if isinstance(start_ts, (int, float)):

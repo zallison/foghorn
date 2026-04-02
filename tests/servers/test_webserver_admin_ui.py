@@ -267,8 +267,9 @@ def test_admin_index_html_includes_ede_tooltips_and_section_title() -> None:
       - None; reads the packaged html/index.html resolved via resolve_www_root.
 
     Outputs:
-      - Asserts that STATS_TOOLTIPS defines ede_* entries and that an
-        "Extended DNS Errors (EDE)" section title is present in the markup.
+      - Asserts that STATS_TOOLTIPS defines ede_* entries, that an
+        "Extended DNS Errors (EDE)" section title is present in the markup,
+        and that EDE rows can drill down into query-log filtering.
     """
 
     from foghorn.servers import webserver as ws
@@ -284,3 +285,16 @@ def test_admin_index_html_includes_ede_tooltips_and_section_title() -> None:
     # surface helpful hover text for per-code counters.
     for key in ["ede_0", "ede_6", "ede_14", "ede_15", "ede_23"]:
         assert f"{key}:" in text
+
+    # Query-log filter control for EDE codes and the EDE drilldown wiring.
+    assert "query-log-filter-ede-code" in text
+    assert "openQueryLogWithFilters({ ede_code: edeCodeValue });" in text
+
+    # Query-log source formatting should include upstream id/url context when
+    # source=upstream.
+    assert (
+        "normalizeQueryLogSourceDisplayWithUpstream(sourceRaw, result, upstreamValue);"
+        in text
+    )
+    assert "sourceText === 'upstream'" in text
+    assert "upstreamBits.join(' | ')" in text
