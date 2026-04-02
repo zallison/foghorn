@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 import os
 import sqlite3
 import time
@@ -173,6 +175,7 @@ def _find_rate_limit_db_limit_settings_from_config(
 
     Outputs:
       - Dict[str, Dict[str, float | int]] keyed by db_path with fields:
+          * window_seconds
           * warmup_windows
           * warmup_max_rps
           * burst_factor
@@ -217,6 +220,13 @@ def _find_rate_limit_db_limit_settings_from_config(
             default=float(min_boot_rps),
         )
         out[str(db_path)] = {
+            "window_seconds": max(
+                1,
+                _coerce_nonnegative_int(
+                    cfg.get("window_seconds"),
+                    default=10,
+                ),
+            ),
             "warmup_windows": _coerce_nonnegative_int(
                 cfg.get("warmup_windows"),
                 default=6,
@@ -546,6 +556,75 @@ def _find_rate_limit_burst_count_readers(
     return readers
 
 
+def _compute_per_key_rolling_averages(
+    conn: Any,
+    key: str,
+    now_ts: float,
+    window_seconds: int = 10,
+) -> tuple[float, float, float]:
+    """Brief: Compute 1m, 5m, 10m rolling-average RPS for a single profile key.
+
+    Inputs:
+      - conn: sqlite3 connection to rate-limit DB.
+      - key: Profile key string.
+      - now_ts: Current epoch seconds.
+      - window_seconds: Rate-limit window size used to infer expected window
+        counts for zero-filled averages.
+
+    Outputs:
+      - tuple[float, float, float]: (avg_rps_1m, avg_rps_5m, avg_rps_10m).
+        Returns 0.0 for any window with no data.
+
+    Notes:
+      - Averages are zero-filled across expected completed windows in each
+        lookback interval so silent periods decay naturally.
+    """
+
+    try:
+        window_s = int(window_seconds)
+        if window_s <= 0:
+            window_s = 10
+        cur = conn.cursor()
+        now_i = int(now_ts)
+        cutoff_1m = int(now_i - 60)
+        cutoff_5m = int(now_i - 300)
+        cutoff_10m = int(now_i - 600)
+        expected_1m = max(1, int(math.ceil(60.0 / float(window_s))))
+        expected_5m = max(1, int(math.ceil(300.0 / float(window_s))))
+        expected_10m = max(1, int(math.ceil(600.0 / float(window_s))))
+
+        # Single query to fetch all samples for all three windows in one pass.
+        cur.execute(
+            "SELECT last_update, rps FROM rate_profile_windows WHERE key = ? AND last_update >= ?",
+            (str(key), int(cutoff_10m)),
+        )
+        rows = cur.fetchall()
+
+        sum_1m = 0.0
+        sum_5m = 0.0
+        sum_10m = 0.0
+        for ts, rps in rows:
+            try:
+                ts_i = int(ts)
+                rps_f = float(rps)
+            except Exception:
+                continue
+            if ts_i >= cutoff_10m:
+                sum_10m += rps_f
+            if ts_i >= cutoff_5m:
+                sum_5m += rps_f
+            if ts_i >= cutoff_1m:
+                sum_1m += rps_f
+
+        avg_1m = float(sum_1m) / float(expected_1m)
+        avg_5m = float(sum_5m) / float(expected_5m)
+        avg_10m = float(sum_10m) / float(expected_10m)
+
+        return float(avg_1m), float(avg_5m), float(avg_10m)
+    except Exception:
+        return 0.0, 0.0, 0.0
+
+
 def _collect_rate_limit_stats(
     config: Dict[str, Any] | None,
     plugins: list[object] | None = None,
@@ -603,6 +682,12 @@ def _collect_rate_limit_stats(
     for path in db_paths:
         lookback_seconds = _coerce_nonnegative_int(db_lookbacks.get(path), default=0)
         limit_settings = db_limit_settings.get(path, {})
+        window_seconds = _coerce_nonnegative_int(
+            limit_settings.get("window_seconds"),
+            default=10,
+        )
+        if window_seconds <= 0:
+            window_seconds = 10
         current_rps_reader = db_current_rps_readers.get(path)
         if current_rps_reader is None:
             try:
@@ -895,6 +980,13 @@ def _collect_rate_limit_stats(
                     max_burst_threshold,
                     float(burst_threshold_rps),
                 )
+            # Compute per-key rolling averages for 1m/5m/10m windows.
+            avg_rps_1m, avg_rps_5m, avg_rps_10m = _compute_per_key_rolling_averages(
+                conn,
+                str(key_text),
+                float(now),
+                window_seconds=window_seconds,
+            )
             profiles.append(
                 {
                     "key": str(display_key),
@@ -924,6 +1016,9 @@ def _collect_rate_limit_stats(
                     "enforcement_active": bool(enforcement_active),
                     "current_rps": float(current_rps),
                     "current_limit_source": str(current_limit_source),
+                    "avg_rps_1m": float(avg_rps_1m),
+                    "avg_rps_5m": float(avg_rps_5m),
+                    "avg_rps_10m": float(avg_rps_10m),
                     "samples": samples_val,
                     "last_update": last_val,
                 }
@@ -993,6 +1088,13 @@ def _collect_rate_limit_stats(
                     float(burst_threshold_rps),
                 )
 
+            # Compute rolling averages for snapshot-only keys.
+            avg_rps_1m, avg_rps_5m, avg_rps_10m = _compute_per_key_rolling_averages(
+                conn,
+                str(key_text),
+                float(now),
+                window_seconds=window_seconds,
+            )
             profiles.append(
                 {
                     "key": str(display_key),
@@ -1022,6 +1124,9 @@ def _collect_rate_limit_stats(
                     "enforcement_active": bool(enforcement_active),
                     "current_rps": float(current_rps),
                     "current_limit_source": str(current_limit_source),
+                    "avg_rps_1m": float(avg_rps_1m),
+                    "avg_rps_5m": float(avg_rps_5m),
+                    "avg_rps_10m": float(avg_rps_10m),
                     "samples": 0,
                     "last_update": None,
                 }
