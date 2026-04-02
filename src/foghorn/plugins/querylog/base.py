@@ -803,6 +803,7 @@ class BaseStatsStore:
         rcode: Optional[str] = None,
         status: Optional[str] = None,
         source: Optional[str] = None,
+        ede_code: Optional[str] = None,
         start_ts: Optional[float] = None,
         end_ts: Optional[float] = None,
         page: int = 1,
@@ -817,6 +818,7 @@ class BaseStatsStore:
           - rcode: Optional rcode filter (case-insensitive).
           - status: Optional high-level status filter (case-insensitive).
           - source: Optional result.source filter (case-insensitive).
+          - ede_code: Optional result.ede_code filter.
           - start_ts: Optional inclusive start timestamp (Unix seconds).
           - end_ts: Optional exclusive end timestamp (Unix seconds).
           - page: 1-based page number.

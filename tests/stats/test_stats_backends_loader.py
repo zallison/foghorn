@@ -97,6 +97,7 @@ class DummyBackend(BaseStatsStore):
         rcode: Optional[str] = None,
         status: Optional[str] = None,
         source: Optional[str] = None,
+        ede_code: Optional[str] = None,
         start_ts: Optional[float] = None,
         end_ts: Optional[float] = None,
         page: int = 1,
@@ -286,6 +287,71 @@ def test_loader_respects_primary_backend_hint(monkeypatch) -> None:
     assert secondary_dummy.calls.get("export_counts", 0) == 1
     assert secondary_dummy.calls.get("select_query_log", 0) == 1
     assert secondary_dummy.calls.get("aggregate_query_log_counts", 0) == 1
+
+
+def test_multi_stats_store_select_query_log_forwards_ede_code(monkeypatch) -> None:
+    """Brief: MultiStatsStore forwards ede_code when selecting query-log rows.
+
+    Inputs:
+      - monkeypatch fixture.
+
+    Outputs:
+      - Asserts that select_query_log accepts ede_code and passes it through
+        to the primary backend call.
+    """
+
+    created: list[DummyBackend] = []
+
+    def _dummy_ctor(cfg: StatsStoreBackendConfig) -> BaseStatsStore:
+        name = cfg.name or cfg.backend
+        b = DummyBackend(name=name)
+        created.append(b)
+        return b
+
+    from foghorn.plugins import querylog as qlb
+
+    monkeypatch.setattr(qlb, "_build_backend_from_config", _dummy_ctor)
+
+    persistence_cfg = {
+        "backends": [
+            {"backend": "primary", "config": {}},
+            {"backend": "secondary", "config": {}},
+        ]
+    }
+
+    backend = load_stats_store_backend(persistence_cfg)
+    assert isinstance(backend, MultiStatsStore)
+    assert len(created) == 2
+
+    captured_kwargs: Dict[str, Any] = {}
+
+    def _capture_select_query_log(**kwargs: Any) -> Dict[str, Any]:
+        captured_kwargs.update(kwargs)
+        return {
+            "total": 0,
+            "page": int(kwargs.get("page", 1)),
+            "page_size": int(kwargs.get("page_size", 100)),
+            "total_pages": 0,
+            "items": [],
+        }
+
+    created[0].select_query_log = _capture_select_query_log  # type: ignore[method-assign]
+
+    result = backend.select_query_log(
+        source="upstream",
+        ede_code="15",
+        page=2,
+        page_size=25,
+    )
+
+    assert captured_kwargs.get("source") == "upstream"
+    assert captured_kwargs.get("ede_code") == "15"
+    assert captured_kwargs.get("page") == 2
+    assert captured_kwargs.get("page_size") == 25
+    assert result["page"] == 2
+    assert result["page_size"] == 25
+    # Reads should still use only the primary backend.
+    assert created[1].calls.get("select_query_log", 0) == 0
 
 
 def test_multi_stats_store_insert_query_log_processed_in_worker_thread(

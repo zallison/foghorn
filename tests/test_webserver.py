@@ -1305,7 +1305,7 @@ def test_query_log_endpoint_paginates_and_filters(tmp_path) -> None:
         status="error",
         error=None,
         first=None,
-        result={"source": "upstream"},
+        result={"source": "upstream", "ede_code": 15, "ede_text": "blocked by policy"},
         ts=1001.0,
     )
     collector.record_query_result(
@@ -1317,7 +1317,7 @@ def test_query_log_endpoint_paginates_and_filters(tmp_path) -> None:
         status="error",
         error=None,
         first=None,
-        result={"source": "upstream"},
+        result={"source": "upstream", "ede_code": 23},
         ts=1002.0,
     )
 
@@ -1363,6 +1363,16 @@ def test_query_log_endpoint_paginates_and_filters(tmp_path) -> None:
     assert data4["total"] == 1
     assert len(data4["items"]) == 1
     assert data4["items"][0]["qname"] == "example.com"
+
+    # Filter by result ede_code
+    resp5 = client.get("/api/v1/query_log", params={"ede_code": "15"})
+    assert resp5.status_code == 200
+    data5 = resp5.json()
+    assert data5["total"] == 1
+    assert len(data5["items"]) == 1
+    assert data5["items"][0]["qname"] == "example.com"
+    assert data5["items"][0]["result"].get("ede_code") == 15
+    assert data5["items"][0]["error"] == "EDE 15: blocked by policy"
 
 
 def test_query_log_aggregate_fills_zero_buckets(tmp_path) -> None:

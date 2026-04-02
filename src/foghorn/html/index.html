@@ -12,6 +12,13 @@
 			outline: 1px solid var(--accent);
 			outline-offset: 0;
 		}
+		.fh-txt-kv-value {
+			color: #6495ed;
+			font-weight: 600;
+		}
+		:root[data-theme='light'] .fh-txt-kv-value {
+			color: #4169e1;
+		}
 	</style>
 	<!-- Ajv JSON Schema validator for client-side config checks -->
 	<script src="https://cdn.jsdelivr.net/npm/ajv@8.12.0/dist/ajv7.min.js"></script>
@@ -194,6 +201,10 @@
 						<input id="query-log-filter-source" class="fh-query-log-input" type="text" />
 					</label>
 					<label class="fh-query-log-field">
+						<span>ede_code</span>
+						<input id="query-log-filter-ede-code" class="fh-query-log-input" type="text" />
+					</label>
+					<label class="fh-query-log-field">
 						<span>start (UTC)</span>
 						<input id="query-log-filter-start" class="fh-query-log-input" type="datetime-local" />
 					</label>
@@ -316,6 +327,7 @@
 				client_ip: '',
 				status: '',
 				source: '',
+				ede_code: '',
 				start: '',
 				end: '',
 			};
@@ -332,6 +344,7 @@
 			var queryLogFilterClientIpEl = document.getElementById('query-log-filter-client-ip');
 			var queryLogFilterStatusEl = document.getElementById('query-log-filter-status');
 			var queryLogFilterSourceEl = document.getElementById('query-log-filter-source');
+			var queryLogFilterEdeCodeEl = document.getElementById('query-log-filter-ede-code');
 			var queryLogFilterStartEl = document.getElementById('query-log-filter-start');
 			var queryLogFilterEndEl = document.getElementById('query-log-filter-end');
 			var btnQueryLogApply = document.getElementById('btn-query-log-apply');
@@ -347,6 +360,7 @@
 				'client_ip',
 				'status',
 				'source',
+				'ede_code',
 				'start',
 				'end',
 			];
@@ -357,6 +371,7 @@
 				client_ip: { label: 'client_ip' },
 				status: { label: 'status' },
 				source: { label: 'source' },
+				ede_code: { label: 'ede_code' },
 				start: { label: 'start' },
 				end: { label: 'end' },
 			};
@@ -400,6 +415,54 @@
 				ede_15: 'Extended DNS Error code 15 (Blocked); query was blocked by policy.',
 				ede_23: 'Extended DNS Error code 23 (Network Error); all configured upstreams failed.',
 			};
+			var EDE_CODE_LABELS = {
+				'0': 'Other',
+				'1': 'Unsupported DNSKEY Algorithm',
+				'2': 'Unsupported DS Digest Type',
+				'3': 'Stale Answer',
+				'4': 'Forged Answer',
+				'5': 'DNSSEC Indeterminate',
+				'6': 'DNSSEC Bogus',
+				'7': 'Signature Expired',
+				'8': 'Signature Not Yet Valid',
+				'9': 'DNSKEY Missing',
+				'10': 'RRSIGs Missing',
+				'11': 'No Zone Key Bit Set',
+				'12': 'NSEC Missing',
+				'13': 'Cached Error',
+				'14': 'Not Ready',
+				'15': 'Blocked',
+				'16': 'Censored',
+				'17': 'Filtered',
+				'18': 'Prohibited',
+				'19': 'Stale NXDOMAIN Answer',
+				'20': 'Not Authoritative',
+				'21': 'Not Supported',
+				'22': 'No Reachable Authority',
+				'23': 'Network Error',
+				'24': 'Invalid Data',
+			};
+
+			function formatStatsKeyForDisplay(rawKey) {
+				var key = String(rawKey || '');
+				if (key.indexOf('ede_') !== 0) {
+					return key;
+				}
+				var code = key.slice(4);
+				if (!Object.prototype.hasOwnProperty.call(EDE_CODE_LABELS, code)) {
+					return key;
+				}
+				return EDE_CODE_LABELS[code] + ' (' + key + ')';
+			}
+
+			function getEdeCodeFromStatsKey(rawKey) {
+				var key = String(rawKey || '');
+				var match = key.match(/^ede_(\d+)$/);
+				if (!match || !match[1]) {
+					return null;
+				}
+				return String(match[1]);
+			}
 
 			function setMessage(text, level) {
 				if (!msgEl) {
@@ -678,7 +741,7 @@
 				return 'anomaly';
 			}
 
-			function normalizeQueryLogSourceDisplay(sourceValue, resultObj) {
+            function normalizeQueryLogSourceDisplay(sourceValue, resultObj, upstreamIdValue) {
 				var sourceText = sourceValue != null ? String(sourceValue) : '';
 				if (sourceText !== 'pre_plugin_override') {
 					return sourceText;
@@ -698,7 +761,40 @@
 				return sourceText;
 			}
 
-			function isOverridePreDeniedWithIp(statusToken, firstValue) {
+            function normalizeQueryLogSourceDisplayWithUpstream(sourceValue, resultObj, upstreamIdValue) {
+    var sourceText = sourceValue != null ? String(sourceValue) : '';
+    if (sourceText === 'upstream') {
+        var upstreamBits = [];
+        var resultUpstream = '';
+        var resultUpstreamUrl = '';
+        if (resultObj && typeof resultObj === 'object') {
+            if (resultObj.upstream != null) {
+                resultUpstream = String(resultObj.upstream).trim();
+            } else if (resultObj.upstream_id != null) {
+                resultUpstream = String(resultObj.upstream_id).trim();
+            }
+            if (resultObj.upstream_url != null) {
+                resultUpstreamUrl = String(resultObj.upstream_url).trim();
+            }
+        }
+        var topLevelUpstream = upstreamIdValue != null ? String(upstreamIdValue).trim() : '';
+        if (resultUpstream) {
+            upstreamBits.push(resultUpstream);
+        } else if (topLevelUpstream) {
+            upstreamBits.push(topLevelUpstream);
+        }
+        if (resultUpstreamUrl && upstreamBits.indexOf(resultUpstreamUrl) === -1) {
+            upstreamBits.push(resultUpstreamUrl);
+        }
+        if (upstreamBits.length) {
+            return sourceText + ' (' + upstreamBits.join(' | ') + ')';
+        }
+        return sourceText;
+    }
+    return normalizeQueryLogSourceDisplay(sourceValue, resultObj, upstreamIdValue);
+}
+
+            function isOverridePreDeniedWithIp(statusToken, firstValue) {
 				if (statusToken !== 'OVERRIDE_PRE') {
 					return false;
 				}
@@ -1051,6 +1147,7 @@ textBtn.type = 'button';
 					client_ip: queryLogFilterClientIpEl,
 					status: queryLogFilterStatusEl,
 					source: queryLogFilterSourceEl,
+					ede_code: queryLogFilterEdeCodeEl,
 					start: queryLogFilterStartEl,
 					end: queryLogFilterEndEl,
 				};
@@ -1272,7 +1369,7 @@ textBtn.type = 'button';
 						? statusSeverity
 						: classifyQueryLogQtype(qtypeValue);
 					var sourceTooltipParts = [];
-					var sourceDisplay = normalizeQueryLogSourceDisplay(sourceRaw, result);
+                    var sourceDisplay = normalizeQueryLogSourceDisplayWithUpstream(sourceRaw, result, upstreamValue);
 					if (sourceDisplay) {
 						sourceTooltipParts.push('source: ' + sourceDisplay);
 					}
@@ -1773,7 +1870,7 @@ textBtn.type = 'button';
 						return;
 					}
 					var dt = document.createElement('dt');
-					dt.textContent = key;
+					dt.textContent = formatStatsKeyForDisplay(key);
 					if (Object.prototype.hasOwnProperty.call(STATS_TOOLTIPS, key)) {
 						dt.title = STATS_TOOLTIPS[key];
 					}
@@ -1785,6 +1882,18 @@ textBtn.type = 'button';
 								openQueryLogWithFilters({ qtype: qtypeValue });
 							});
 						})(String(key));
+					}
+					if (title === 'Extended DNS Errors (EDE)') {
+						(function (edeCodeValue) {
+							if (!edeCodeValue) {
+								return;
+							}
+							dt.classList.add('fh-stats-group-title-link');
+							dt.title = (dt.title ? dt.title + ' ' : '') + 'Open related query-log rows.';
+							dt.addEventListener('click', function () {
+								openQueryLogWithFilters({ ede_code: edeCodeValue });
+							});
+						})(getEdeCodeFromStatsKey(key));
 					}
 					var dd = document.createElement('dd');
 					dd.textContent = formatNumber(entry.value);
@@ -1974,7 +2083,7 @@ textBtn.type = 'button';
 				rows.forEach(function (rowData) {
 					var mainRow = document.createElement('tr');
 					var mainUpstreamCell = document.createElement('td');
-					mainUpstreamCell.textContent = rowData.id;
+					mainUpstreamCell.textContent = rowData.label || rowData.id;
 					var mainBlankCell = document.createElement('td');
 					mainBlankCell.textContent = '';
 					var mainTotalParts = getNumberParts(rowData.total);
@@ -2013,8 +2122,45 @@ textBtn.type = 'button';
 					});
 				});
 			}
+			function buildUpstreamDisplayLabel(id, endpoint) {
+				var idText = id != null ? String(id).trim() : '';
+				var endpointText = endpoint != null ? String(endpoint).trim() : '';
+				if (idText && endpointText && idText !== endpointText) {
+					return idText + ' (' + endpointText + ')';
+				}
+				return idText || endpointText;
+			}
 
-			function appendUpstreamsGroup(upstreams, upstreamRcodes) {
+			function buildUpstreamLabelMapFromStatus(status) {
+				var map = {};
+				if (!status || typeof status !== 'object') {
+					return map;
+				}
+				var items = Array.isArray(status.items) ? status.items : [];
+				items.forEach(function (item) {
+					if (!item || typeof item !== 'object') {
+						return;
+					}
+					var id = item.id != null ? String(item.id).trim() : '';
+					var url = item.url != null ? String(item.url).trim() : '';
+					var host = item.host != null ? String(item.host).trim() : '';
+					var port = item.port != null ? String(item.port).trim() : '';
+					var endpoint = url || (host && port ? host + ':' + port : host);
+					var label = buildUpstreamDisplayLabel(id, endpoint);
+					if (!label) {
+						return;
+					}
+					if (id) {
+						map[id] = label;
+					}
+					if (endpoint) {
+						map[endpoint] = label;
+					}
+				});
+				return map;
+			}
+
+			function appendUpstreamsGroup(upstreams, upstreamRcodes, upstreamStatus) {
 				if (!upstreams || typeof upstreams !== 'object') {
 					return;
 				}
@@ -2037,6 +2183,7 @@ textBtn.type = 'button';
 				var tbody = document.createElement('tbody');
 				var upstreamRows = [];
 				upstreamRcodes = upstreamRcodes || {};
+				var upstreamLabelMap = buildUpstreamLabelMapFromStatus(upstreamStatus);
 
 				upstreamIds.forEach(function (upstreamId) {
 					var outcomes = upstreams[upstreamId];
@@ -2086,6 +2233,7 @@ textBtn.type = 'button';
 
 					upstreamRows.push({
 						id: upstreamId,
+						label: upstreamLabelMap[upstreamId] || upstreamId,
 						total: total,
 						detailEntries: detailEntries,
 					});
@@ -2420,7 +2568,11 @@ textBtn.type = 'button';
 						tr.title = hoverDetails.join('\n');
 					}
 					var tdId = document.createElement('td');
-					tdId.textContent = id;
+					var displayId = id || (host && port ? host + ':' + port : host || '');
+					tdId.textContent = displayId;
+					if (!id && displayId) {
+						tdId.title = 'Constructed from host/port because no upstream id was available.';
+					}
 					var tdRole = document.createElement('td');
 					tdRole.textContent = role;
 					var tdState = document.createElement('td');
@@ -2478,7 +2630,7 @@ textBtn.type = 'button';
 				}
 			}
 
-			function renderStats(data) {
+			function renderStats(data, upstreamStatus) {
 				var liveLeft = statsGroupsEl;
 				var liveRight = statsGroupsRightEl;
 				var nextLeft = document.createDocumentFragment();
@@ -2566,6 +2718,7 @@ textBtn.type = 'button';
 				// peel off DNSSEC- and EDE-specific counters into their own mappings so
 				// they can be displayed in dedicated sections.
 				var totalsForDisplay = {};
+				var loggingQueueForDisplay = {};
 				var dnssecTotalsFromTotals = {};
 				var edeTotalsFromTotals = {};
 				if (data.totals && typeof data.totals === 'object') {
@@ -2585,6 +2738,15 @@ textBtn.type = 'button';
 							edeTotalsFromTotals[key] = data.totals[key];
 							return;
 						}
+						if (
+							key === 'logging_queue_drops' ||
+							key === 'logging_queue_pct' ||
+							key === 'logging_queue_size' ||
+							key === 'logging_queue_capacity'
+						) {
+							loggingQueueForDisplay[key] = data.totals[key];
+							return;
+						}
 						totalsForDisplay[key] = data.totals[key];
 					});
 				}
@@ -2592,6 +2754,9 @@ textBtn.type = 'button';
 				// Surface unique client/domain counts only via Meta; Totals intentionally
 				// omits clients/domains so they are not duplicated.
 				appendDictGroup('Totals', totalsForDisplay);
+				if (Object.keys(loggingQueueForDisplay).length) {
+					appendDictGroup('Logging queue', loggingQueueForDisplay);
+				}
 
 				// Prefer a dedicated dnssec object from the API when present; fall
 				// back to DNSSEC counters discovered under totals.
@@ -2617,7 +2782,12 @@ textBtn.type = 'button';
 					appendDictGroup('Extended DNS Errors (EDE)', edeMapping);
 				}
 
-				appendUpstreamsGroup(data.upstreams || {}, data.upstream_rcodes || {});
+				appendUpstreamsGroup(
+					data.upstreams || {},
+					data.upstream_rcodes || {},
+					upstreamStatus || null
+				);
+				appendUpstreamStatusGroup(upstreamStatus || null);
 				appendDictGroup('Query types', data.qtypes || {});
 				appendDictGroup('Response codes', data.rcodes || {});
 				appendDictGroup('Recent latency', data.latency_recent || {});
@@ -2657,13 +2827,13 @@ textBtn.type = 'button';
 			function loadStats() {
 				fetchJson('/api/v1/stats')
 					.then(function (data) {
-						renderStats(data);
 						return fetchJson('/api/v1/upstream_status')
 							.then(function (ustatus) {
-								appendUpstreamStatusGroup(ustatus);
+								renderStats(data, ustatus);
 							})
 							.catch(function () {
-								// Upstream status is optional; ignore errors here.
+								// Upstream status is optional; still render core stats.
+								renderStats(data, null);
 							});
 					})
 					.catch(function () {});
@@ -3429,8 +3599,7 @@ textBtn.type = 'button';
 				}
 				// Optional domain suffix (e.g. "docker.zaa") provided by the backend
 				// via data.summary.suffix and plumbed into section._domainSuffix so
-				// that we can hide it from display names while still showing it in
-				// the Summary table.
+				// we can render bare names as FQDNs for consistency.
 				var domainSuffix = '';
 				if (section && section._domainSuffix) {
 					var raw = String(section._domainSuffix).toLowerCase().trim();
@@ -3448,178 +3617,84 @@ textBtn.type = 'button';
 						}
 					}
 				}
-				function stripSuffix(name) {
-					if (!domainSuffix) {
-						return name;
-					}
+				function withDefaultDomain(name) {
 					var text = String(name || '').trim();
 					if (!text) {
 						return text;
 					}
-					var lower = text.toLowerCase();
-					var suf = '.' + domainSuffix;
-					if (lower.endsWith(suf)) {
-						return text.slice(0, text.length - suf.length) || text;
+					if (text.charAt(0) === '/') {
+						text = text.substring(1);
 					}
+					if (!text) {
+						return text;
+					}
+					if (!domainSuffix) {
+						return text;
+					}
+					// Keep already-qualified names unchanged.
+					if (text.indexOf('.') !== -1) {
+						return text;
+					}
+					// Keep hash-like labels unchanged.
+					if (isHashLikeLabel(text)) {
+						return text;
+					}
+					text = text + '.' + domainSuffix;
 					return text;
 				}
-				// First, group rows by identical TXT payload so that aliases for the
-				// same TXT summary are collapsed. Later we will further aggregate by
-				// short (non-hash) names so that only one visual row appears per
-				// logical name.
-				var groups = Object.create(null);
-				rows.forEach(function (row) {
-					if (!row || typeof row !== 'object') {
-						return;
+				function renderDockerTxtLine(text) {
+					var line = String(text || '');
+					if (!line) {
+						return '';
 					}
-					var txt = row.txt;
-					var key;
-					if (Array.isArray(txt)) {
-						try {
-							key = JSON.stringify(txt);
-						} catch (e) {
-							key = String(txt);
-						}
-					} else {
-						key = String(txt);
-					}
-					if (!groups[key]) {
-						groups[key] = { rows: [], txt: Array.isArray(txt) ? txt.slice() : (txt != null ? [String(txt)] : []) };
-					}
-					groups[key].rows.push(row);
-				});
-				// Build a per-TXT group descriptor with display name, aliases, tooltip,
-				// and a containers count (parsed from the header line). These group
-				// objects will then be aggregated by short name so that only one
-				// visual row appears per short name.
-				var groupObjects = [];
-				Object.keys(groups).forEach(function (gkey) {
-					var group = groups[gkey];
-					var txtLines = group.txt;
-					if (!txtLines.length) {
-						// No TXT/Info; just collapse to first row.
-						groupObjects.push({
-							base: group.rows[0],
-							primaryName: group.rows[0] && group.rows[0].name ? String(group.rows[0].name) : '',
-							aliases: [],
-							fullIds: [],
-							cleanedLines: [],
-							containersCount: 0,
-						});
-						return;
-					}
-					// Tooltip starts as the full TXT payload joined with newlines; we
-					// will append any full container IDs so they are still visible even
-					// when not rendered in the alias list.
-					var primaryName = '';
-					var aliasSet = Object.create(null);
-					var fullIdAliases = [];
-					var containersCount = 0;
-					// Parse containers= header when present so that when an alias points
-					// to multiple servers, we can treat the TXT with the highest
-					// container count as the "main".
-					for (var hi = 0; hi < txtLines.length; hi++) {
-						var headerLine = String(txtLines[hi] || '');
-						if (headerLine.indexOf('containers=') === 0) {
-							var numStr = headerLine.substring('containers='.length).trim();
-							var numVal = parseInt(numStr, 10);
-							if (!isNaN(numVal) && numVal > 0) {
-								containersCount = numVal;
-							}
-							break;
-						}
-					}
-					function isFullId(name) {
-						var token = String(name).split('.', 1)[0].toLowerCase().trim();
-						if (token.length !== 64) {
-							return false;
-						}
-						for (var i = 0; i < token.length; i++) {
-							var ch = token.charAt(i);
-							if ('0123456789abcdef'.indexOf(ch) === -1) {
-								return false;
-							}
-						}
-						return true;
-					}
-					// Helper to record alias names (deduplicated). Full 64-char IDs are
-					// not added to aliasSet; instead they are only exposed via tooltip.
-					function addAlias(name) {
-						if (!name) {
-							return;
-						}
-						var k = String(name).trim();
-						// Normalise docker-style names like "/calibre-web" by
-						// removing a single leading slash so that UI display names
-						// match the TXT/Info summaries and DNS labels.
-						if (k.charAt(0) === '/') {
-							k = k.substring(1);
-						}
-						if (!k) {
-							return;
-						}
-						if (isFullId(k)) {
-							if (fullIdAliases.indexOf(k) === -1) {
-								fullIdAliases.push(k);
-							}
-							return;
-						}
-						aliasSet[k] = true;
-					}
-					// Parse name=/aliases= from the first non-header line.
-					for (var i = 0; i < txtLines.length; i++) {
-						var line = String(txtLines[i]);
-						if (!line || line.indexOf('=') === -1) {
+					var parts = line.split(/\s+/);
+					var htmlParts = [];
+					for (var i = 0; i < parts.length; i++) {
+						var part = parts[i];
+						if (!part) {
 							continue;
 						}
-						if (line.indexOf('containers=') === 0 || line.indexOf('hosts=') === 0) {
+						var eq = part.indexOf('=');
+						if (eq <= 0) {
+							htmlParts.push(escapeHtml(part));
 							continue;
 						}
-						var parts = line.split(/\s+/);
-						for (var j = 0; j < parts.length; j++) {
-							var part = parts[j];
-							if (part.indexOf('name=') === 0 && !primaryName) {
-								primaryName = part.substring('name='.length);
-								// Normalise docker-style names like "/foghorn" to
-								// "foghorn" so the primary display name never begins
-								// with a leading slash even when provided via
-								// txt_fields.
-								if (primaryName.charAt(0) === '/') {
-									primaryName = primaryName.substring(1);
-								}
-							} else if (part.indexOf('aliases=') === 0) {
-								var rawAliases = part.substring('aliases='.length).split(',');
-								rawAliases.forEach(function (a) {
-									addAlias(a);
-								});
-							}
-						}
-						if (primaryName) {
-							break;
-						}
+						var key = part.slice(0, eq);
+						var value = part.slice(eq + 1);
+						htmlParts.push(
+							escapeHtml(key) +
+							'=' +
+							'<span class="fh-txt-kv-value">' +
+							escapeHtml(value) +
+							'</span>'
+						);
 					}
-					// Also treat the per-row display names as aliases.
-					group.rows.forEach(function (row) {
-						if (row && row.name) {
-							addAlias(row.name);
-						}
-					});
-					if (!primaryName && group.rows[0] && group.rows[0].name) {
-						primaryName = String(group.rows[0].name);
-						if (primaryName.charAt(0) === '/') {
-							primaryName = primaryName.substring(1);
-						}
+					return htmlParts.join(' ');
+				}
+				function splitCoreAndSuffix(fullName) {
+					var text = String(fullName || '').trim();
+					if (!text) {
+						return { core: '', suffix: '' };
 					}
-					// Clean TXT text for display: strip name=/aliases= tokens but keep others.
-					var cleanedLines = [];
+					var dotIdx = text.indexOf('.');
+					if (dotIdx === -1) {
+						return { core: text, suffix: '' };
+					}
+					return {
+						core: text.substring(0, dotIdx),
+						suffix: text.substring(dotIdx),
+					};
+				}
+				function cleanedTxtLines(rawTxt) {
+					var txtLines = Array.isArray(rawTxt) ? rawTxt : (rawTxt != null ? [String(rawTxt)] : []);
+					var out = [];
 					txtLines.forEach(function (line) {
 						var text = String(line || '');
 						if (!text) {
 							return;
 						}
 						if (text.indexOf('containers=') === 0 || text.indexOf('hosts=') === 0) {
-							// Keep header line as-is.
-							cleanedLines.push(text);
+							out.push(text);
 							return;
 						}
 						var parts = text.split(/\s+/);
@@ -3631,158 +3706,105 @@ textBtn.type = 'button';
 							}
 							kept.push(part);
 						}
-						cleanedLines.push(kept.join(' '));
+						out.push(kept.join(' '));
 					});
-					groupObjects.push({
-						base: group.rows[0],
-						primaryName: primaryName,
-						aliases: Object.keys(aliasSet),
-						fullIds: fullIdAliases.slice(),
-						cleanedLines: cleanedLines,
-						containersCount: containersCount,
-						allTxtLines: txtLines.slice(),
-					});
-				});
-				// Next, aggregate by short (non-hash) name. When an alias maps to
-				// multiple TXT groups, choose the group with the largest containers
-				// count as the "main". Hash-like labels (short/long hex) are never
-				// chosen as the primary when a non-hash alternative exists.
-				var bestByShortName = Object.create(null);
-				groupObjects.forEach(function (g) {
-					// Candidate keys: primaryName plus all aliases.
-					var candidates = [];
-					if (g.primaryName) {
-						candidates.push(g.primaryName);
-					}
-					g.aliases.forEach(function (a) {
-						if (candidates.indexOf(a) === -1) {
-							candidates.push(a);
-						}
-					});
-					candidates.forEach(function (rawName) {
-						if (!rawName) {
-							return;
-						}
-						// Normalise away a single leading slash from docker-style
-						// names before computing shortName keys.
-						if (rawName.charAt(0) === '/') {
-							rawName = rawName.substring(1);
-						}
-						// Prefer non-hash labels; hash-like labels become aliases.
-						if (isHashLikeLabel(rawName)) {
-							return;
-						}
-						var shortName = stripSuffix(rawName);
-						if (!shortName) {
-							return;
-						}
-						var existing = bestByShortName[shortName];
-						if (!existing || (g.containersCount || 0) > (existing.containersCount || 0)) {
-							bestByShortName[shortName] = g;
-						}
-					});
-				});
-				// Any groups that are only referenced by hash-like names (no
-				// non-hash alias) should still be visible; treat their primary name
-				// (possibly hash-like) as the key.
-				groupObjects.forEach(function (g) {
-					if (!g.primaryName) {
+					return out;
+				}
+				var groupedByCore = Object.create(null);
+				rows.forEach(function (row) {
+					if (!row || typeof row !== 'object') {
 						return;
 					}
-					var shortName = stripSuffix(g.primaryName);
-					if (!shortName) {
+					var fullName = withDefaultDomain(row.name || '');
+					if (!fullName) {
 						return;
 					}
-					if (!bestByShortName[shortName]) {
-						bestByShortName[shortName] = g;
+					var parsed = splitCoreAndSuffix(fullName);
+					if (!parsed.core) {
+						return;
 					}
+					var txtSig = '';
+					try {
+						txtSig = JSON.stringify(row.txt || []);
+					} catch (e) {
+						txtSig = String(row.txt || '');
+					}
+					var uniqueKey = fullName + '|' + txtSig;
+					if (!groupedByCore[parsed.core]) {
+						groupedByCore[parsed.core] = { seen: Object.create(null), items: [] };
+					}
+					if (groupedByCore[parsed.core].seen[uniqueKey]) {
+						return;
+					}
+					groupedByCore[parsed.core].seen[uniqueKey] = true;
+					groupedByCore[parsed.core].items.push({
+						fullName: fullName,
+						suffix: parsed.suffix,
+						row: row,
+					});
 				});
-				// Finally, materialize rows: one visual row per short name, with the
-				// chosen main group providing TXT/Info and aliases.
 				var result = [];
-				Object.keys(bestByShortName).forEach(function (shortName) {
-					var g = bestByShortName[shortName];
-					// Build multiline text for the Name column: main short name, then
-					// aliases (including hash-like) indented. We keep the name value as
-					// plain text (not HTML) so it is safe and copy/paste friendly.
-					var nameLines = [];
-					nameLines.push(stripSuffix(shortName));
-					// Merge aliases from *all* TXT groups that share this short
-					// name so that per-container short hashes (sha1[:12]) for every
-					// backend appear as aliases, not just those from the chosen main
-					// group.
-					var aliasSet = Object.create(null);
-					groupObjects.forEach(function (g2) {
-						// Determine whether this group contributes to this shortName.
-						var candidates2 = [];
-						if (g2.primaryName) {
-							candidates2.push(g2.primaryName);
-						}
-						g2.aliases.forEach(function (a) {
-							if (candidates2.indexOf(a) === -1) {
-								candidates2.push(a);
-							}
-						});
-						var contributes = false;
-						candidates2.forEach(function (rawName2) {
-							if (!rawName2) {
-								return;
-							}
-							var sn2 = stripSuffix(rawName2);
-							if (sn2 && sn2 === shortName) {
-								contributes = true;
-							}
-						});
-						if (!contributes) {
-							return;
-						}
-						// Collect this group's aliases (including hash-like ones) as
-						// display aliases for the shortName.
-						g2.aliases.forEach(function (a) {
-							if (!a) {
-								return;
-							}
-							var disp = stripSuffix(a);
-							if (!disp || disp === shortName) {
-								return;
-							}
-							aliasSet[disp] = true;
-						});
+				Object.keys(groupedByCore).sort().forEach(function (core) {
+					var group = groupedByCore[core];
+					var items = Array.isArray(group.items) ? group.items.slice() : [];
+					items.sort(function (a, b) {
+						var as = String(a.suffix || '');
+						var bs = String(b.suffix || '');
+						if (as < bs) return -1;
+						if (as > bs) return 1;
+						return String(a.fullName || '').localeCompare(String(b.fullName || ''));
 					});
-					var aliasPrefix = '    ';
-					Object.keys(aliasSet)
-						.sort()
-						.forEach(function (alias) {
-							nameLines.push(aliasPrefix + String(alias));
-						});
-					// Render cleaned TXT lines with indentation, as before.
-					var cleanedLines = g.cleanedLines || [];
-					var txtHtml = '';
-					for (var ci = 0; ci < cleanedLines.length; ci++) {
-						var seg = cleanedLines[ci];
-						if (!seg) {
-							continue;
+					items.forEach(function (entry, idx) {
+						var base = Object.assign({}, entry.row);
+						var suffixLabel = entry.suffix || '';
+						base.name = core;
+						base.domain = suffixLabel ? suffixLabel.replace(/^\./, '') : '';
+						var lines = cleanedTxtLines(base.txt);
+						var txtHtml = '';
+						for (var ci = 0; ci < lines.length; ci++) {
+							var seg = lines[ci];
+							if (!seg) {
+								continue;
+							}
+							if (txtHtml) {
+								txtHtml += '<br>';
+							}
+							txtHtml += renderDockerTxtLine(seg);
 						}
-						if (txtHtml) {
-							txtHtml += '<br>';
-						}
-						txtHtml += escapeHtml(seg);
-					}
-					// Add a small spacer at the bottom of each row so Docker entries
-					// do not visually run together in the admin table.
-					txtHtml += '<br>&nbsp;';
-					var base = Object.assign({}, g.base);
-					base.name = nameLines.join('\n');
-					base.txt = txtHtml;
-					// Tooltip: original TXT plus any full 64-char IDs.
-					var tooltipParts = (g.allTxtLines || []).slice();
-					(g.fullIds || []).forEach(function (fid) {
-						tooltipParts.push('full_id=' + String(fid));
+						txtHtml += '<br>&nbsp;';
+						base.txt = txtHtml;
+						base._txtTooltip = Array.isArray(entry.row.txt) ? entry.row.txt.join('\n') : String(entry.row.txt || '');
+						result.push(base);
 					});
-					base._txtTooltip = tooltipParts.join('\n');
-					result.push(base);
 				});
 				return result;
+			}
+			function normalizeDockerColumns(columns) {
+				columns = Array.isArray(columns) ? columns.slice() : [];
+				var hasDomain = false;
+				for (var i = 0; i < columns.length; i++) {
+					if (columns[i] && String(columns[i].key || '') === 'domain') {
+						hasDomain = true;
+						break;
+					}
+				}
+				if (hasDomain) {
+					return columns;
+				}
+				var out = [];
+				var inserted = false;
+				for (var j = 0; j < columns.length; j++) {
+					var col = columns[j];
+					out.push(col);
+					if (!inserted && col && String(col.key || '') === 'name') {
+						out.push({ key: 'domain', label: 'Domain' });
+						inserted = true;
+					}
+				}
+				if (!inserted) {
+					out.unshift({ key: 'domain', label: 'Domain' });
+				}
+				return out;
 			}
 
 			function renderTableSection(root, rows, section) {
@@ -3815,6 +3837,9 @@ textBtn.type = 'button';
 					});
 				}
 				var columns = Array.isArray(section && section.columns) ? section.columns : [];
+				if (section && section.style === 'docker_group_by_txt') {
+					columns = normalizeDockerColumns(columns);
+				}
 				var title = section && section.title ? section.title : 'Items';
 				if (!columns.length) {
 					return;
@@ -4083,6 +4108,9 @@ textBtn.type = 'button';
 				var sectionId = section.id || '';
 				var tableUrl = _getTableSectionUrl(desc, pluginName, sectionId);
 				var columns = Array.isArray(section.columns) ? section.columns : [];
+				if (section && section.style === 'docker_group_by_txt') {
+					columns = normalizeDockerColumns(columns);
+				}
 				var title = section.title ? section.title : 'Items';
 				if (!columns.length || !tableUrl) {
 					return;
@@ -4537,6 +4565,9 @@ textBtn.type = 'button';
 							item.burst_threshold_rps,
 						]);
 						var enforcementActive = item.enforcement_active === true;
+						var avgRps1m = firstFiniteNumber([item.avg_rps_1m]);
+						var avgRps5m = firstFiniteNumber([item.avg_rps_5m]);
+						var avgRps10m = firstFiniteNumber([item.avg_rps_10m]);
 						var samples = Number(item.samples);
 						var lastRaw = item.last_update;
 						var lastUpdateTs = null;
@@ -4576,6 +4607,12 @@ textBtn.type = 'button';
 							burst_threshold_rps_raw: isFinite(burstThresholdRps) ? burstThresholdRps : 0,
 							enforcement_active: enforcementActive ? 'yes' : '',
 							enforcement_active_raw: enforcementActive ? 1 : 0,
+							avg_rps_1m: formatRateLimitRps(avgRps1m),
+							avg_rps_1m_raw: isFinite(avgRps1m) ? avgRps1m : 0,
+							avg_rps_5m: formatRateLimitRps(avgRps5m),
+							avg_rps_5m_raw: isFinite(avgRps5m) ? avgRps5m : 0,
+							avg_rps_10m: formatRateLimitRps(avgRps10m),
+							avg_rps_10m_raw: isFinite(avgRps10m) ? avgRps10m : 0,
 							lookback_seconds: lookbackValue,
 							lookback_seconds_raw: isFinite(dbLookback) ? dbLookback : 0,
 							samples: isFinite(samples) ? samples : 0,
@@ -4682,17 +4719,25 @@ textBtn.type = 'button';
 							nowrap: true,
 						},
 						{
-							key: 'burst_threshold_rps',
-							sort_key: 'burst_threshold_rps_raw',
-							label: 'Burst threshold',
+							key: 'avg_rps_1m',
+							sort_key: 'avg_rps_1m_raw',
+							label: '1m Avg',
 							align: 'right',
 							default_sort_dir: 'desc',
 							nowrap: true,
 						},
 						{
-							key: 'enforcement_active',
-							sort_key: 'enforcement_active_raw',
-							label: 'Enforcing',
+							key: 'avg_rps_5m',
+							sort_key: 'avg_rps_5m_raw',
+							label: '5m Avg',
+							align: 'right',
+							default_sort_dir: 'desc',
+							nowrap: true,
+						},
+						{
+							key: 'avg_rps_10m',
+							sort_key: 'avg_rps_10m_raw',
+							label: '10m Avg',
 							align: 'right',
 							default_sort_dir: 'desc',
 							nowrap: true,
@@ -4833,8 +4878,8 @@ textBtn.type = 'button';
 							// Plumb plugin-level metadata (like domain suffix) into the
 							// section descriptor so renderers can use it without needing
 							// to know about the full payload shape.
-							if (section && layout && layout.summary && layout.summary.suffix && !section._domainSuffix) {
-								section._domainSuffix = layout.summary.suffix;
+							if (section && data && data.summary && data.summary.suffix && !section._domainSuffix) {
+								section._domainSuffix = data.summary.suffix;
 							}
 							if (!section || typeof section !== 'object') {
 								return;

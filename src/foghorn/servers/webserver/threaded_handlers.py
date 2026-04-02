@@ -1561,6 +1561,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         rcode = (params.get("rcode") or [None])[0]
         status = (params.get("status") or [None])[0]
         source = (params.get("source") or [None])[0]
+        ede_code = (params.get("ede_code") or [None])[0]
         start = (params.get("start") or [None])[0]
         end = (params.get("end") or [None])[0]
 
@@ -1612,6 +1613,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             rcode=str(rcode) if rcode is not None else None,
             status=str(status) if status is not None else None,
             source=str(source) if source is not None else None,
+            ede_code=str(ede_code) if ede_code is not None else None,
             start_ts=start_ts,
             end_ts=end_ts,
             page=page,

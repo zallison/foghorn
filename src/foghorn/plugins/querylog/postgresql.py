@@ -826,6 +826,7 @@ class PostgresStatsStore(BaseStatsStore):
         rcode: Optional[str] = None,
         status: Optional[str] = None,
         source: Optional[str] = None,
+        ede_code: Optional[str] = None,
         start_ts: Optional[float] = None,
         end_ts: Optional[float] = None,
         page: int = 1,
@@ -840,6 +841,7 @@ class PostgresStatsStore(BaseStatsStore):
             rcode: Optional rcode filter.
             status: Optional status filter.
             source: Optional result.source filter.
+            ede_code: Optional result.ede_code filter.
             start_ts: Optional inclusive start timestamp.
             end_ts: Optional exclusive end timestamp.
             page: 1-based page index.
@@ -874,6 +876,33 @@ class PostgresStatsStore(BaseStatsStore):
             where.append("(LOWER(result_json) LIKE %s OR LOWER(result_json) LIKE %s)")
             params.append(f'%"source":"{source_s}"%')
             params.append(f'%"source": "{source_s}"%')
+        if ede_code is not None and str(ede_code).strip():
+            ede_code_s = str(ede_code).strip()
+            try:
+                ede_code_i = int(ede_code_s)
+            except Exception:
+                where.append("1 = 0")
+            else:
+                if ede_code_i < 0:
+                    where.append("1 = 0")
+                else:
+                    ede_code_txt = str(ede_code_i)
+                    where.append(
+                        "("
+                        "LOWER(result_json) LIKE %s OR "
+                        "LOWER(result_json) LIKE %s OR "
+                        "LOWER(result_json) LIKE %s OR "
+                        "LOWER(result_json) LIKE %s OR "
+                        "LOWER(result_json) LIKE %s OR "
+                        "LOWER(result_json) LIKE %s"
+                        ")"
+                    )
+                    params.append(f'%"ede_code":{ede_code_txt},%')
+                    params.append(f'%"ede_code":{ede_code_txt}' + "}%")
+                    params.append(f'%"ede_code": {ede_code_txt},%')
+                    params.append(f'%"ede_code": {ede_code_txt}' + "}%")
+                    params.append(f'%"ede_code":"{ede_code_txt}"%')
+                    params.append(f'%"ede_code": "{ede_code_txt}"%')
         if isinstance(start_ts, (int, float)):
             where.append("ts >= %s")
             params.append(float(start_ts))

@@ -22,6 +22,7 @@ class _QueryLogUtils:
         rcode: Optional[str] = None,
         status: Optional[str] = None,
         source: Optional[str] = None,
+        ede_code: Optional[str] = None,
         start_ts: Optional[float] = None,
         end_ts: Optional[float] = None,
         page: int = 1,
@@ -40,6 +41,7 @@ class _QueryLogUtils:
             rcode: Optional rcode filter (case-insensitive; stored values are typically uppercase).
             status: Optional status filter (case-insensitive exact match).
             source: Optional result.source filter (case-insensitive match against result_json).
+            ede_code: Optional EDE info-code filter. Matches result_json.ede_code.
             start_ts: Optional inclusive start timestamp (Unix seconds).
             end_ts: Optional exclusive end timestamp (Unix seconds).
             page: 1-based page number (defaults to 1).
@@ -78,6 +80,7 @@ class _QueryLogUtils:
         rcode_s = str(rcode).strip().upper() if rcode is not None else None
         status_s = str(status).strip().lower() if status is not None else None
         source_s = str(source).strip().lower() if source is not None else None
+        ede_code_s = str(ede_code).strip() if ede_code is not None else None
         qname_s = None
         if qname is not None:
             qname_s = dns_names.normalize_name(qname)
@@ -107,6 +110,35 @@ class _QueryLogUtils:
             where.append("(LOWER(result_json) LIKE ? OR LOWER(result_json) LIKE ?)")
             params.append(f'%"source":"{source_s}"%')
             params.append(f'%"source": "{source_s}"%')
+        if ede_code_s:
+            try:
+                ede_code_i = int(ede_code_s)
+            except Exception:
+                where.append("1 = 0")
+            else:
+                if ede_code_i < 0:
+                    where.append("1 = 0")
+                else:
+                    # result_json is stored as text; avoid JSON extension
+                    # requirements by matching compact/spaced forms with
+                    # numeric and string-encoded values.
+                    ede_code_txt = str(ede_code_i)
+                    where.append(
+                        "("
+                        "LOWER(result_json) LIKE ? OR "
+                        "LOWER(result_json) LIKE ? OR "
+                        "LOWER(result_json) LIKE ? OR "
+                        "LOWER(result_json) LIKE ? OR "
+                        "LOWER(result_json) LIKE ? OR "
+                        "LOWER(result_json) LIKE ?"
+                        ")"
+                    )
+                    params.append(f'%"ede_code":{ede_code_txt},%')
+                    params.append(f'%"ede_code":{ede_code_txt}' + "}%")
+                    params.append(f'%"ede_code": {ede_code_txt},%')
+                    params.append(f'%"ede_code": {ede_code_txt}' + "}%")
+                    params.append(f'%"ede_code":"{ede_code_txt}"%')
+                    params.append(f'%"ede_code": "{ede_code_txt}"%')
         if isinstance(start_ts, (int, float)):
             where.append("ts >= ?")
             params.append(float(start_ts))
