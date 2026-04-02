@@ -130,6 +130,7 @@ Creating new plugins is simple. You can implement custom DNS logic without writi
 - [Developer notes and contribution guide](docs/README-DEV.md)
 - [Makefile targets and build helpers](docs/MAKEFILE.md)
 - [Pi-hole replacement example configuration](docs/PiholeConfig.md)
+- [Query-log hardening and sampling](docs/query-log-hardening.md)
 - [OpenSSL make targets (certificate helpers)](docs/open-ssl-make-easy.md)
 - [DNS RFC compliance, EDNS/EDE, and AXFR/IXFR notes](docs/RFCs.md)
 - [SSH host keys, SSHFP records, and DNSSEC integration](docs/openssh-key-records.md)
@@ -525,10 +526,16 @@ Recommended controls:
   not set `<= 0` unless you explicitly want unbounded memory growth).
 - `logging.query_log_only`: when true, skip mirroring aggregate counters to the
   persistence backend and keep only raw query-log rows.
+- `logging.query_log_sampling.enabled`: when false, suppress persistent
+  query-log writes from the stats collector.
 - `logging.query_log_sampling.sample_rate`: keep only a fraction of query-log
   rows (for example `0.1` for ~10%).
+- `logging.query_log_sampling.rate`: compatibility alias for `sample_rate`.
+- `logging.query_log_sample_rate`: legacy compatibility alias.
 - `logging.query_log_dedupe.window_seconds`: suppress repeated identical
   query-log rows inside a short window.
+- Full hardening profile: `example_configs/logging/query_log_hardening.yaml`.
+- Detailed guide: `docs/query-log-hardening.md`.
 
 Rate-limit integration:
 

@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 ### Recent incremental updates
+- Query-log filtering now accepts `ede_code` across API routes, threaded handlers, admin payload helpers, and SQLite/MySQL/PostgreSQL/MongoDB backends, with UI filter controls and EDE drilldowns wired into the admin page.
+- Query-log payload shaping now derives an `error` value using fallback precedence (`item.error` → `result.error` → synthesized EDE text), and upstream-sourced rows now surface upstream identifier/URL context for clearer operator diagnostics.
+- Upstream identity resolution now prefers explicit upstream `id` values, and upstream health/admin payload paths migrate legacy health/run-count keys (`host:port`/URL) to current ids to preserve continuity across config transitions.
+- RateLimit now always records per-key window samples for `rate_profile_windows`, computes zero-filled lookback averages from sampled windows, and exposes per-key rolling `avg_rps_1m` / `avg_rps_5m` / `avg_rps_10m` in admin rate-limit snapshots.
+- Built-in RateLimit profile presets were retuned again (`localhost`, `home`/`lan`, `smb`, `enterprise`, `public`) and profile-resolution tests were updated for the active defaults (including `home.min_enforce_rps=4`).
+- Added dedicated query-log hardening documentation (`docs/query-log-hardening.md`) plus a full example config (`example_configs/logging/query_log_hardening.yaml`), and linked both from the README query-log section.
 - RateLimit sqlite profile writes now enforce a global floor row/window invariant so non-global buckets cannot persist stronger `max_rps`/sample history than the global key, including pre-seeding when non-global rollover updates arrive before a global row exists.
 - Upstream health state classification now treats entries as unhealthy only while `down_until` is in the future; the intermediate `degraded` state based only on `fail_count` was removed from failover/runtime health payloads.
 - Admin uvicorn startup now derives conservative `limit_concurrency`/`backlog` settings from process `RLIMIT_NOFILE` (or explicit override when configured), and logs the applied limits for easier runtime diagnostics.
