@@ -14,6 +14,8 @@ import types
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import pytest
+import foghorn.plugins.querylog.mongodb as mongo_mod
+from foghorn.plugins.querylog.base import BaseStatsStore
 
 from foghorn.plugins.querylog.mongodb import MongoStatsStore
 
@@ -37,6 +39,12 @@ class _FakeCollection:
         # For query_log, we track number of rows for presence checks.
         self.query_log_rows: int = 0
         self.insert_many_calls: int = 0
+        self.created_indexes: List[Tuple[Tuple[Any, ...], Dict[str, Any]]] = []
+        self.deleted_filters: List[Dict[str, Any]] = []
+        self.last_count_filter: Dict[str, Any] | None = None
+        self.last_find_filter: Dict[str, Any] | None = None
+        self.last_find_projection: Dict[str, Any] | None = None
+        self.last_aggregate_pipeline: List[Dict[str, Any]] | None = None
         # Pre-baked rows for select_query_log tests.
         self.select_docs: List[Dict[str, Any]] | None = None
         # Pre-baked rows for aggregate_query_log_counts tests.
@@ -46,8 +54,9 @@ class _FakeCollection:
         self.rebuild_docs: List[Dict[str, Any]] | None = None
 
     # Schema helpers ---------------------------------------------------------
-    def create_index(self, *_args: Any, **_kwargs: Any) -> None:  # noqa: D401
+    def create_index(self, *args: Any, **kwargs: Any) -> None:  # noqa: D401
         """Brief: Index creation is a no-op for the fake collection."""
+        self.created_indexes.append((tuple(args), dict(kwargs)))
 
         return None
 
@@ -108,6 +117,8 @@ class _FakeCollection:
         Outputs:
           - _FakeCursor over select_docs, rebuild_docs, or counts docs.
         """
+        self.last_find_filter = dict(flt or {})
+        self.last_find_projection = dict(proj or {})
 
         if self.name == "counts":
             # Used by export_counts; synthesise docs from the mapping.
@@ -160,6 +171,7 @@ class _FakeCollection:
         Outputs:
           - Integer row count.
         """
+        self.last_count_filter = dict(flt or {})
 
         if self.name != "query_log":
             return 0
@@ -176,6 +188,7 @@ class _FakeCollection:
         Outputs:
           - None; clears in-memory state for the appropriate collection.
         """
+        self.deleted_filters.append(dict(flt or {}))
 
         if self.name == "counts":
             # Clear all aggregate counters before a rebuild.
@@ -196,6 +209,7 @@ class _FakeCollection:
         Outputs:
           - Iterable of bucket/group documents.
         """
+        self.last_aggregate_pipeline = list(pipeline)
 
         if self.name != "query_log":
             return []
@@ -815,3 +829,625 @@ def test_batch_writes_flush_query_log_on_close(
     backend.close()
     assert qcoll.query_log_rows == 1
     assert qcoll.insert_many_calls == 1
+
+
+def test_class_aliases_include_mongo_and_mongodb() -> None:
+    """Brief: MongoStatsStore advertises expected backend aliases.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts canonical and compatibility aliases are present.
+    """
+
+    assert "mongo" in MongoStatsStore.aliases
+    assert "mongodb" in MongoStatsStore.aliases
+
+
+def test_constructor_without_uri_auth_and_with_bad_queue_fallback(
+    fake_mongo_driver,
+) -> None:  # type: ignore[no-untyped-def]
+    """Brief: Constructor host/port path omits optional auth and normalizes queue size.
+
+    Inputs:
+      - fake_mongo_driver: fixture installing fake driver.
+
+    Outputs:
+      - None; asserts kwargs wiring without URI and invalid queue fallback.
+    """
+
+    backend = MongoStatsStore(
+        uri=None,
+        host="127.0.0.9",
+        port=27018,
+        username=None,
+        password=None,
+        database="db2",
+        connect_kwargs=None,
+        max_logging_queue="bad-int",  # type: ignore[arg-type]
+    )
+    client: _FakeMongoClient = backend._client  # type: ignore[assignment]
+    assert client._args == []
+    assert client.kwargs["host"] == "127.0.0.9"
+    assert client.kwargs["port"] == 27018
+    assert "username" not in client.kwargs
+    assert "password" not in client.kwargs
+    assert backend._max_logging_queue == 16384
+
+
+def test_constructor_creates_ttl_index_when_retention_days_set(
+    fake_mongo_driver,
+) -> None:  # type: ignore[no-untyped-def]
+    """Brief: TTL index is created when native TTL retention is enabled.
+
+    Inputs:
+      - fake_mongo_driver: fixture installing fake driver.
+
+    Outputs:
+      - None; asserts idx_query_log_ts_ttl index metadata.
+    """
+
+    backend = _make_backend(
+        fake_mongo_driver,
+        retention_days=1.5,
+        retention_native_ttl=True,
+    )
+    client: _FakeMongoClient = backend._client  # type: ignore[assignment]
+    qcoll: _FakeCollection = client.databases["db"]["query_log"]
+    ttl_entries = [
+        kwargs
+        for (_args, kwargs) in qcoll.created_indexes
+        if kwargs.get("name") == "idx_query_log_ts_ttl"
+    ]
+    assert len(ttl_entries) == 1
+    assert ttl_entries[0]["expireAfterSeconds"] == int(1.5 * 86400.0)
+
+
+def test_close_without_client_attribute_is_noop(
+    fake_mongo_driver,
+) -> None:  # type: ignore[no-untyped-def]
+    """Brief: close() tolerates a missing _client attribute.
+
+    Inputs:
+      - fake_mongo_driver: fixture installing fake driver.
+
+    Outputs:
+      - None; asserts defensive close path does not raise.
+    """
+
+    backend = _make_backend(fake_mongo_driver)
+    del backend._client
+    backend.close()
+
+
+def test_maybe_flush_pending_query_log_docs_locked_branches(
+    fake_mongo_driver,
+) -> None:  # type: ignore[no-untyped-def]
+    """Brief: Batch flush helper handles empty, threshold-hit, and disabled paths.
+
+    Inputs:
+      - fake_mongo_driver: fixture installing fake driver.
+
+    Outputs:
+      - None; asserts conditional flush behavior across key branches.
+    """
+
+    backend = _make_backend(
+        fake_mongo_driver,
+        batch_writes=True,
+        batch_max_size=2,
+        batch_time_sec=9999.0,
+    )
+    client: _FakeMongoClient = backend._client  # type: ignore[assignment]
+    qcoll: _FakeCollection = client.databases["db"]["query_log"]
+
+    with backend._batch_lock:
+        backend._maybe_flush_pending_query_log_docs_locked()
+        backend._pending_query_log_docs.append({"ts": 1.0})
+        backend._pending_query_log_retention = False
+        backend._maybe_flush_pending_query_log_docs_locked()
+    assert qcoll.insert_many_calls == 0
+
+    with backend._batch_lock:
+        backend._pending_query_log_docs.append({"ts": 2.0})
+        backend._pending_query_log_retention = False
+        backend._maybe_flush_pending_query_log_docs_locked()
+    assert qcoll.insert_many_calls == 1
+
+    backend._batch_writes = False
+    with backend._batch_lock:
+        backend._pending_query_log_docs = [{"ts": 3.0}]
+        backend._maybe_flush_pending_query_log_docs_locked()
+    assert backend._pending_query_log_docs == [{"ts": 3.0}]
+
+
+def test_apply_query_log_retention_returns_early_when_no_limits(
+    fake_mongo_driver,
+) -> None:  # type: ignore[no-untyped-def]
+    """Brief: Retention helper exits immediately when all limits are disabled.
+
+    Inputs:
+      - fake_mongo_driver: fixture installing fake driver.
+
+    Outputs:
+      - None; asserts no delete operation is attempted.
+    """
+
+    backend = _make_backend(fake_mongo_driver)
+    client: _FakeMongoClient = backend._client  # type: ignore[assignment]
+    qcoll: _FakeCollection = client.databases["db"]["query_log"]
+
+    backend._query_log_retention_days = None
+    backend._query_log_retention_max_records = None
+    backend._query_log_retention_max_bytes = None
+    backend._apply_query_log_retention()
+    assert qcoll.deleted_filters == []
+
+
+def test_apply_query_log_retention_returns_early_when_prune_not_due(
+    fake_mongo_driver, monkeypatch
+) -> None:  # type: ignore[no-untyped-def]
+    """Brief: Retention helper exits when cadence gate reports prune is not due.
+
+    Inputs:
+      - fake_mongo_driver: fixture installing fake driver.
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts no delete operation is attempted.
+    """
+
+    backend = _make_backend(fake_mongo_driver)
+    client: _FakeMongoClient = backend._client  # type: ignore[assignment]
+    qcoll: _FakeCollection = client.databases["db"]["query_log"]
+
+    backend._query_log_retention_days = 1.0
+    backend._query_log_retention_max_records = 10
+    backend._query_log_retention_max_bytes = None
+    monkeypatch.setattr(
+        backend, "_should_run_query_log_retention_prune", lambda **_k: False
+    )
+
+    backend._apply_query_log_retention()
+    assert qcoll.deleted_filters == []
+
+
+def test_apply_query_log_retention_applies_cutoff_and_record_limit(
+    fake_mongo_driver, monkeypatch
+) -> None:  # type: ignore[no-untyped-def]
+    """Brief: Retention helper applies cutoff deletion and record-limit pruning.
+
+    Inputs:
+      - fake_mongo_driver: fixture installing fake driver.
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts cutoff delete and max-record helper invocation.
+    """
+
+    backend = _make_backend(fake_mongo_driver)
+    client: _FakeMongoClient = backend._client  # type: ignore[assignment]
+    qcoll: _FakeCollection = client.databases["db"]["query_log"]
+    prune_calls: List[int] = []
+
+    backend._query_log_retention_days = 1.0
+    backend._query_log_retention_max_records = 7
+    backend._query_log_retention_max_bytes = None
+    monkeypatch.setattr(
+        BaseStatsStore,
+        "_retention_cutoff_ts",
+        staticmethod(lambda _days, now_ts: float(now_ts) - 5.0),
+    )
+    monkeypatch.setattr(
+        backend, "_should_run_query_log_retention_prune", lambda **_k: True
+    )
+    monkeypatch.setattr(
+        backend,
+        "_prune_query_log_to_max_records",
+        lambda n: prune_calls.append(int(n)),
+    )
+
+    backend._apply_query_log_retention()
+    assert prune_calls == [7]
+    assert any("ts" in flt for flt in qcoll.deleted_filters)
+
+
+def test_apply_query_log_retention_max_bytes_paths(
+    fake_mongo_driver, monkeypatch
+) -> None:  # type: ignore[no-untyped-def]
+    """Brief: Byte-cap retention handles both keep-list and delete-all branches.
+
+    Inputs:
+      - fake_mongo_driver: fixture installing fake driver.
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts both $nin retention and full-delete fallback paths.
+    """
+
+    backend = _make_backend(fake_mongo_driver)
+    client: _FakeMongoClient = backend._client  # type: ignore[assignment]
+    qcoll: _FakeCollection = client.databases["db"]["query_log"]
+    backend._query_log_retention_days = None
+    backend._query_log_retention_max_records = None
+    backend._query_log_retention_max_bytes = 15
+
+    monkeypatch.setattr(
+        backend, "_should_run_query_log_retention_prune", lambda **_k: True
+    )
+    monkeypatch.setattr(
+        backend,
+        "_estimate_query_log_doc_bytes",
+        lambda doc: {"a": 10, "b": 10}.get(doc.get("_id"), 1),
+    )
+
+    qcoll.select_docs = [
+        {"_id": "a", "result_json": "{}"},
+        {"_id": None, "result_json": "{}"},
+        {"_id": "b", "result_json": "{}"},
+    ]
+    backend._apply_query_log_retention()
+    assert qcoll.deleted_filters[-1] == {"_id": {"$nin": ["a"]}}
+
+    qcoll.select_docs = [{"_id": None, "result_json": "{}"}]
+    backend._apply_query_log_retention()
+    assert qcoll.deleted_filters[-1] == {}
+
+
+class _PruneCursor:
+    """Brief: Cursor test-double that applies skip/limit before iteration.
+
+    Inputs:
+      - docs: Documents to expose via iteration.
+
+    Outputs:
+      - Cursor with sort(), skip(), limit(), and iteration support.
+    """
+
+    def __init__(self, docs: List[Dict[str, Any] | object]) -> None:
+        self._docs = list(docs)
+        self._skip = 0
+        self._limit: Optional[int] = None
+
+    def sort(self, _spec: List[Tuple[str, int]]) -> "_PruneCursor":
+        """Brief: Sorting is intentionally a no-op for this test helper."""
+
+        return self
+
+    def skip(self, n: int) -> "_PruneCursor":
+        """Brief: Record skip offset for iteration slicing."""
+
+        self._skip = int(n)
+        return self
+
+    def limit(self, n: int) -> "_PruneCursor":
+        """Brief: Record iteration limit for slicing."""
+
+        self._limit = int(n)
+        return self
+
+    def __iter__(self):
+        """Brief: Iterate over sliced documents."""
+
+        docs = self._docs[self._skip :]
+        if self._limit is not None:
+            docs = docs[: self._limit]
+        return iter(docs)
+
+
+def test_prune_query_log_to_max_records_branches(
+    fake_mongo_driver, monkeypatch
+) -> None:  # type: ignore[no-untyped-def]
+    """Brief: Record-retention helper covers guard, malformed, and valid cutoff paths.
+
+    Inputs:
+      - fake_mongo_driver: fixture installing fake driver.
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts delete filter shape for a valid cutoff document.
+    """
+
+    backend = _make_backend(fake_mongo_driver)
+    client: _FakeMongoClient = backend._client  # type: ignore[assignment]
+    qcoll: _FakeCollection = client.databases["db"]["query_log"]
+
+    backend._prune_query_log_to_max_records(0)
+    assert qcoll.deleted_filters == []
+
+    monkeypatch.setattr(
+        qcoll,
+        "find",
+        lambda *_args, **_kwargs: _PruneCursor([1, 2]),  # type: ignore[list-item]
+    )
+    backend._prune_query_log_to_max_records(1)
+    assert qcoll.deleted_filters == []
+
+    monkeypatch.setattr(
+        qcoll,
+        "find",
+        lambda *_args, **_kwargs: _PruneCursor([{"_id": "missing-ts"}]),
+    )
+    backend._prune_query_log_to_max_records(1)
+    assert qcoll.deleted_filters == []
+
+    monkeypatch.setattr(
+        qcoll,
+        "find",
+        lambda *_args, **_kwargs: _PruneCursor(
+            [
+                {"ts": 30.0, "_id": "c"},
+                {"ts": 20.0, "_id": "b"},
+                {"ts": 10.0, "_id": "a"},
+            ]
+        ),
+    )
+    backend._prune_query_log_to_max_records(2)
+    assert qcoll.deleted_filters[-1] == {
+        "$or": [
+            {"ts": {"$lt": 10.0}},
+            {"ts": 10.0, "_id": {"$lte": "a"}},
+        ]
+    }
+
+
+def test_estimate_query_log_doc_bytes_handles_none_and_non_string() -> None:
+    """Brief: Document byte estimator skips None and stringifies non-string fields.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts deterministic estimate for a mixed-value payload.
+    """
+
+    payload = {
+        "client_ip": "1.2.3.4",
+        "name": None,
+        "qtype": "A",
+        "upstream_id": 7,
+        "rcode": "NOERROR",
+        "status": None,
+        "error": "boom",
+        "first": 123,
+        "result_json": "{}",
+    }
+    expected = (
+        64
+        + len("1.2.3.4".encode("utf-8"))
+        + len("A".encode("utf-8"))
+        + len("7".encode("utf-8"))
+        + len("NOERROR".encode("utf-8"))
+        + len("boom".encode("utf-8"))
+        + len("123".encode("utf-8"))
+        + len("{}".encode("utf-8"))
+    )
+    assert MongoStatsStore._estimate_query_log_doc_bytes(payload) == expected
+
+
+def test_select_query_log_filters_are_normalized(
+    fake_mongo_driver,
+) -> None:  # type: ignore[no-untyped-def]
+    """Brief: select_query_log normalizes filter inputs before querying Mongo.
+
+    Inputs:
+      - fake_mongo_driver: fixture installing fake driver.
+
+    Outputs:
+      - None; asserts normalized count filter fields and time bounds.
+    """
+
+    backend = _make_backend(fake_mongo_driver)
+    client: _FakeMongoClient = backend._client  # type: ignore[assignment]
+    qcoll: _FakeCollection = client.databases["db"]["query_log"]
+    qcoll.select_docs = [
+        {
+            "_id": "1",
+            "ts": 1.0,
+            "client_ip": "1.2.3.4",
+            "name": "example.com",
+            "qtype": "A",
+            "upstream_id": None,
+            "rcode": "NOERROR",
+            "status": "ok",
+            "error": None,
+            "first": None,
+            "result_json": "{}",
+        }
+    ]
+
+    backend.select_query_log(
+        client_ip=" 1.2.3.4 ",
+        qtype=" a ",
+        qname="Example.COM.",
+        rcode=" noerror ",
+        status=" OK ",
+        source=" Upstream ",
+        start_ts=10,
+        end_ts=20.0,
+        page=1,
+        page_size=10,
+    )
+
+    flt = qcoll.last_count_filter
+    assert flt is not None
+    assert flt["client_ip"] == "1.2.3.4"
+    assert flt["qtype"] == "A"
+    assert flt["name"] == "example.com"
+    assert flt["rcode"] == "NOERROR"
+    assert flt["status"] == {"$regex": "^OK$", "$options": "i"}
+    assert flt["ts"] == {"$gte": 10.0, "$lt": 20.0}
+    assert len(flt["$or"]) == 2
+
+
+def test_aggregate_query_log_counts_invalid_group_and_filter_normalization(
+    fake_mongo_driver,
+) -> None:  # type: ignore[no-untyped-def]
+    """Brief: Aggregate API applies normalized filters when group_by is invalid.
+
+    Inputs:
+      - fake_mongo_driver: fixture installing fake driver.
+
+    Outputs:
+      - None; asserts non-grouped pipeline shape and normalized match filters.
+    """
+
+    backend = _make_backend(fake_mongo_driver)
+    client: _FakeMongoClient = backend._client  # type: ignore[assignment]
+    qcoll: _FakeCollection = client.databases["db"]["query_log"]
+    qcoll.aggregate_rows_nogroup = [(0, 4)]
+
+    result = backend.aggregate_query_log_counts(
+        start_ts=0.0,
+        end_ts=20.0,
+        interval_seconds=10,
+        client_ip=" 1.2.3.4 ",
+        qtype=" a ",
+        qname="Example.Com",
+        rcode=" noerror ",
+        group_by="not-a-group",
+    )
+    assert result["items"][0]["count"] == 4
+
+    pipeline = qcoll.last_aggregate_pipeline
+    assert pipeline is not None
+    assert "group_value" not in pipeline[1]["$project"]
+    assert pipeline[0]["$match"]["client_ip"] == "1.2.3.4"
+    assert pipeline[0]["$match"]["qtype"] == "A"
+    assert pipeline[0]["$match"]["name"] == "example.com"
+    assert pipeline[0]["$match"]["rcode"] == "NOERROR"
+
+
+def test_aggregate_query_log_counts_skips_bad_rows_grouped(
+    fake_mongo_driver,
+) -> None:  # type: ignore[no-untyped-def]
+    """Brief: Grouped aggregate path skips rows with invalid bucket/count values.
+
+    Inputs:
+      - fake_mongo_driver: fixture installing fake driver.
+
+    Outputs:
+      - None; asserts only parseable grouped rows are retained.
+    """
+
+    backend = _make_backend(fake_mongo_driver)
+    client: _FakeMongoClient = backend._client  # type: ignore[assignment]
+    qcoll: _FakeCollection = client.databases["db"]["query_log"]
+    qcoll.aggregate_rows_group = [("bad", "A", 1), (1, "A", "3")]
+
+    result = backend.aggregate_query_log_counts(
+        start_ts=0.0,
+        end_ts=20.0,
+        interval_seconds=10,
+        group_by="qtype",
+    )
+    assert result["items"] == [
+        {
+            "bucket": 1,
+            "bucket_start_ts": 10.0,
+            "bucket_end_ts": 20.0,
+            "group_by": "qtype",
+            "group": "A",
+            "count": 3,
+        }
+    ]
+
+
+def test_aggregate_query_log_counts_handles_bucket_limit_rejection(
+    fake_mongo_driver, monkeypatch
+) -> None:  # type: ignore[no-untyped-def]
+    """Brief: Aggregate API returns empty items on bucket-limit validation errors.
+
+    Inputs:
+      - fake_mongo_driver: fixture installing fake driver.
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts ValueError handling from limit enforcement helper.
+    """
+
+    backend = _make_backend(fake_mongo_driver)
+    client: _FakeMongoClient = backend._client  # type: ignore[assignment]
+    qcoll: _FakeCollection = client.databases["db"]["query_log"]
+    qcoll.aggregate_rows_nogroup = [(0, 1)]
+
+    def _raise_value_error(*_args: Any, **_kwargs: Any) -> int:
+        raise ValueError("too many buckets")
+
+    monkeypatch.setattr(
+        mongo_mod, "enforce_query_log_aggregate_bucket_limit", _raise_value_error
+    )
+
+    result = backend.aggregate_query_log_counts(
+        start_ts=0.0,
+        end_ts=20.0,
+        interval_seconds=10,
+    )
+    assert result["items"] == []
+
+
+def test_rebuild_counts_from_query_log_branch_matrix(
+    fake_mongo_driver,
+) -> None:  # type: ignore[no-untyped-def]
+    """Brief: Rebuild path covers deny/miss/upstream and DNSSEC branch combinations.
+
+    Inputs:
+      - fake_mongo_driver: fixture installing fake driver.
+
+    Outputs:
+      - None; asserts counters for representative branch-heavy query-log rows.
+    """
+
+    backend = _make_backend(fake_mongo_driver)
+    client: _FakeMongoClient = backend._client  # type: ignore[assignment]
+    qcoll: _FakeCollection = client.databases["db"]["query_log"]
+    qcoll.rebuild_docs = [
+        {
+            "client_ip": "",
+            "name": "example.org",
+            "qtype": None,
+            "upstream_id": "up2",
+            "rcode": "SERVFAIL",
+            "status": "deny_pre",
+            "error": None,
+            "result_json": '{"dnssec_status":"dnssec_bogus"}',
+        },
+        {
+            "client_ip": "5.5.5.5",
+            "name": "sub.test.example.org",
+            "qtype": "AAAA",
+            "upstream_id": "up3",
+            "rcode": None,
+            "status": "timeout",
+            "error": None,
+            "result_json": "not-json",
+        },
+        {
+            "client_ip": "8.8.8.8",
+            "name": "",
+            "qtype": "A",
+            "upstream_id": "up4",
+            "rcode": "NOERROR",
+            "status": None,
+            "error": None,
+            "result_json": "",
+        },
+    ]
+
+    backend.rebuild_counts_from_query_log(logger_obj=None)
+    backend._op_queue.join()  # type: ignore[attr-defined]
+    counts = backend.export_counts()
+
+    assert counts["totals"]["total_queries"] == 3
+    assert counts["totals"]["cache_deny_pre"] == 1
+    assert counts["totals"]["cache_null"] == 1
+    assert counts["totals"]["cache_misses"] == 2
+    assert counts["totals"]["dnssec_bogus"] == 1
+    assert counts["domains"]["example.org"] == 2
+    assert counts["cache_miss_domains"]["example.org"] == 1
+    assert counts["cache_miss_subdomains"]["sub.test.example.org"] == 1
+    assert counts["rcode_domains"]["SERVFAIL|example.org"] == 1
+    assert counts["upstreams"]["up2|deny_pre|SERVFAIL"] == 1
+    assert counts["upstreams"]["up3|timeout|UNKNOWN"] == 1
+    assert counts["upstreams"]["up4|success|NOERROR"] == 1

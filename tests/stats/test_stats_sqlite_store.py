@@ -148,6 +148,70 @@ def test_select_query_log_filters_status_and_source() -> None:
     assert no_match["items"] == []
 
 
+def test_select_query_log_filters_ede_code() -> None:
+    """Brief: select_query_log filters rows by EDE info-code in result_json.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts ede_code filter matches numeric and quoted numeric JSON values.
+    """
+
+    store = StatsSQLiteStore(":memory:")
+    store.insert_query_log(
+        ts=1.0,
+        client_ip="192.0.2.10",
+        name="ede15-numeric.example",
+        qtype="A",
+        upstream_id="up-a",
+        rcode="NXDOMAIN",
+        status="deny_pre",
+        error=None,
+        first=None,
+        result_json='{"source":"upstream","ede_code":15}',
+    )
+    store.insert_query_log(
+        ts=2.0,
+        client_ip="192.0.2.11",
+        name="ede23-numeric.example",
+        qtype="A",
+        upstream_id="up-b",
+        rcode="SERVFAIL",
+        status="error",
+        error=None,
+        first=None,
+        result_json='{"source":"upstream","ede_code":23}',
+    )
+    store.insert_query_log(
+        ts=3.0,
+        client_ip="192.0.2.12",
+        name="ede15-string.example",
+        qtype="AAAA",
+        upstream_id="up-c",
+        rcode="NXDOMAIN",
+        status="deny_pre",
+        error=None,
+        first=None,
+        result_json='{"source": "upstream", "ede_code": "15"}',
+    )
+
+    by_ede_15 = store.select_query_log(ede_code="15")
+    assert by_ede_15["total"] == 2
+    assert {row["qname"] for row in by_ede_15["items"]} == {
+        "ede15-numeric.example",
+        "ede15-string.example",
+    }
+
+    by_ede_23 = store.select_query_log(ede_code="023")
+    assert by_ede_23["total"] == 1
+    assert by_ede_23["items"][0]["qname"] == "ede23-numeric.example"
+
+    invalid = store.select_query_log(ede_code="not-a-number")
+    assert invalid["total"] == 0
+    assert invalid["items"] == []
+
+
 def test_select_query_log_qname_matches_subdomains() -> None:
     """Brief: qname filtering includes exact domain rows and subdomains.
 
