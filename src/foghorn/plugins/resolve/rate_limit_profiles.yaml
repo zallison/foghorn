@@ -34,70 +34,71 @@ fast: &static_fast
 # Decent default for a single machine.
 localhost: &localhost
   bucket_network_prefix_v4: 0
-  alpha:           .2
+  alpha:           .2 # very fast ramp up, very slow ramp down
   alpha_down:      .01
-  bootstrap_rps:   30
-  global_max_rps:  40
+  global_max_rps:  40 # includes boosts51
+  bootstrap_rps:   20
   max_enforce_rps: 20
   min_enforce_rps: 5
   burst_factor:    5.0
-  burst_windows:   30 # 30s
+  burst_windows:   3 # 30s
 
 single: *localhost
 
-# Allow large bursts for machines coming online, software update, etc.
+# Home / Small LAN
 home: &home
   bucket_network_prefix_v4: 32 # one bucket per IP, assume net=/24 max buckets: 255
-  alpha:           .05
-  alpha_down:      .10
-  burst_factor:    10.0
-  max_enforce_rps: 20
+  alpha:           .10 # slow ramp up, faster ramp down
+  alpha_down:      .20
+  burst_factor:    10.0 # Allow large bursts for machines coming online, software update, etc.
+  burst_reset_windows: 120 # 120 * 5 = 600 seconds = 10 minutes
+  max_enforce_rps: 25
   bootstrap_rps:   40
   global_max_rps:  50 # If a device is at max_*_rps, we still have adequate bandwidth
-  min_enforce_rps: 5
+  min_enforce_rps: 4  # Minimum. Crossing this starts "boost", which here gives us 40/rps for a boost
   window_seconds:  5  # Shorter window to react faster
   warmup_windows:  4  # 20s
-  burst_windows:   6  # 30s
+  burst_windows:   3  # 15s
 
 lan: *home
 
 # If you're here, you probably know what to do. and how big your network is.
 smb: &smb
-  bucket_network_prefix_v4: 32 #  one bucket per IP max buckets: 65,280
-  alpha:            0.1
-  alpha_down:       0.2
-  bootstrap_rps:    150
-  burst_factor:     2.0
-  burst_windows:    3
-  max_enforce_rps:  150
-  min_enforce_rps:  50
+  bucket_network_prefix_v4: 32 # net=/16 one bucket per IP max buckets: 65,280
+  alpha:            0.01  # Very slow ramp up and down
+  alpha_down:       0.02
+  bootstrap_rps:    0
+  burst_reset_windows: 0
+  burst_factor:     0
+  burst_windows:    0
+  max_enforce_rps:  0
+  min_enforce_rps:  0
 
 # If you're here, you know exactly what your limit should be
 enterprise: &enterprise
   bucket_network_prefix_v4: 32 # net=/8 one bucket per IP: max buckets: 16,711,680
-  alpha:            0.2
-  alpha_down:       0.2
-  bootstrap_rps:    300
-  burst_factor:     2.0
-  burst_windows:    20
-  max_enforce_rps:  400
-  min_enforce_rps:  50
+  burst_reset_windows: 0
+  alpha:            0.0
+  alpha_down:       0.0
+  bootstrap_rps:    0
+  burst_factor:     0
+  burst_windows:    0
+  max_enforce_rps:  0
+  min_enforce_rps:  0
 
 
 public: &public
   bucket_network_prefix_v4: 32 # net=/0: one bucket per IP: max buckets: 4,278,190,080
-  alpha:            0.2
-  alpha_down:       0.2
-  bootstrap_rps:    300
-  burst_factor:     2.0
-  burst_windows:    20
-  max_enforce_rps:  400
-  min_enforce_rps:  50
+  alpha:            0.0
+  alpha_down:       0.0
+  bootstrap_rps:    0
+  burst_factor:     0.0
+  burst_windows:    0
+  max_enforce_rps:  0
+  min_enforce_rps:  0
 
 
 default: *home
-
-
 
 
 ## Network size vs Buckets size. Use this to determine how you want to divide
