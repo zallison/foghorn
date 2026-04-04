@@ -17,13 +17,13 @@ from foghorn.utils.register_caches import registered_lru_cache
 def parse_ip(
     value: object,
 ) -> Optional[ipaddress.IPv4Address | ipaddress.IPv6Address]:
-    """Brief: Parse an IP address string into an ipaddress object.
+    """Brief: Parse a candidate value into an ipaddress address object.
 
     Inputs:
-      - value: Candidate IP value (string-like).
+      - value: Candidate IP value; coerced with ``str(value).strip()``.
 
     Outputs:
-      - IPv4Address/IPv6Address instance, or None when parsing fails.
+      - IPv4Address/IPv6Address instance, or None when coercion/parsing fails.
 
     Example:
       >>> str(parse_ip("192.0.2.1"))
@@ -44,14 +44,15 @@ def parse_network(
     """Brief: Parse a CIDR or IP string into an ipaddress network.
 
     Inputs:
-      - value: Candidate CIDR or IP (string-like).
+      - value: Candidate CIDR or IP value; coerced with ``str(value).strip()``.
       - strict: Passed to ip_network when CIDR is provided (default False).
 
     Outputs:
-      - IPv4Network/IPv6Network instance, or None when parsing fails.
+      - IPv4Network/IPv6Network instance, or None when coercion/parsing fails.
 
     Notes:
       - IP literals without a slash are converted to a single-host network.
+      - None/blank values return None.
     """
     if value is None:
         return None
@@ -83,22 +84,25 @@ def _ip_in_network(
 
     Outputs:
       - bool: True when the IP is contained in the network.
+
+    Notes:
+      - Returns False when membership checks raise unexpectedly.
     """
     try:
         return ip in network
-    except Exception:
+    except Exception:  # pragma: no cover - defensive for malformed non-network inputs
         return False
 
 
 def ip_in_any_network(
     ip: ipaddress._BaseAddress,
-    networks: Iterable[ipaddress._BaseNetwork],
+    networks: Optional[Iterable[ipaddress._BaseNetwork]],
 ) -> bool:
     """Brief: Return True if *ip* is contained in any network.
 
     Inputs:
       - ip: IPv4Address or IPv6Address instance.
-      - networks: Iterable of ipaddress network objects.
+      - networks: Iterable of ipaddress network objects (or None).
 
     Outputs:
       - bool: True when ip is in any network.
@@ -109,15 +113,18 @@ def ip_in_any_network(
     return False
 
 
-def ip_string_in_cidrs(ip_str: str, cidrs: Iterable[str]) -> bool:
+def ip_string_in_cidrs(ip_str: str, cidrs: Optional[Iterable[str]]) -> bool:
     """Brief: Check whether an IP string is in any CIDR entry.
 
     Inputs:
       - ip_str: IP address string.
-      - cidrs: Iterable of CIDR strings.
+      - cidrs: Iterable of CIDR strings (or None).
 
     Outputs:
       - bool: True when the IP is contained in any CIDR.
+
+    Notes:
+      - Invalid CIDR entries are skipped.
     """
     ip_obj = parse_ip(ip_str)
     if ip_obj is None:
