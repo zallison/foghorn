@@ -3,7 +3,54 @@
 All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
-### Recent incremental updates
+### Fixed
+- InMemoryTTL cache initialization now treats invalid `min_cache_ttl` values as `0` instead of raising during plugin construction.
+- InMemoryTTL admin snapshot counting now handles malformed cache store payloads defensively and treats malformed rows as expired entries instead of failing snapshot generation.
+
+### Changed
+- `foghorn.utils.ip_networks` helper signatures and docs now explicitly support optional iterable inputs for membership helpers and document defensive parsing behavior.
+
+### Tests
+- Added branch-complete defensive regression coverage for `InMemoryTTLCache` in `tests/cache_plugins/test_in_memory_ttl_branches.py`, including malformed cache internals and import-fallback paths.
+- Added focused helper coverage for `foghorn.utils.ip_networks` in `tests/utils/test_ip_networks.py` for `None`/blank/bad-input parsing and CIDR membership edge cases.
+
+## [0.7.0]
+### Release themes (summary)
+#### Security and hardening
+- Moved multiple critical paths to fail-closed behavior (DNS UPDATE authorization, admin auth mode handling, schema-loading failures, and request body-size enforcement).
+- Replaced unsafe cache deserialization with a safe tagged JSON codec across Redis, Memcached, MongoDB, SQLite, MySQL/MariaDB, and PostgreSQL paths.
+- Tightened external fetch safety in `FileDownloader` with redirect hop validation, destination IP policy checks, and bounded response handling.
+
+#### ZoneRecords, DNS UPDATE, and transfer controls
+- Expanded DNS UPDATE into a full journaled workflow with replay/compaction, scope enforcement, replication-role controls, and stronger TSIG/key-source validation.
+- Hardened AXFR/IXFR/NOTIFY behavior with stricter policy gates, transfer/rate limits, and safer refresh scheduling.
+- Clarified authoritative source precedence and aligned runtime behavior with documented load semantics.
+
+#### Rate limiting and overload management
+- Retuned built-in RateLimit profiles and tightened global/per-key invariants so profile and snapshot behavior is more consistent.
+- Expanded enforcement controls around bootstrap/warmup/burst behavior, deny visibility logging, and CIDR-based bucket handling.
+- Improved overload behavior across listeners, async queues, and fallback paths to keep service behavior predictable under pressure.
+
+#### Query-log and observability
+- Added query-log flood controls (sampling, dedupe, grouped/bucket caps, retention guards, and backend maintenance/pruning controls).
+- Improved query-log diagnostics with EDE-aware filtering and better upstream/error context in admin payloads.
+- Expanded runtime visibility with rolling RPS windows and richer RateLimit/query-log/admin snapshots.
+
+#### Admin API and UI evolution
+- Improved FastAPI/threaded parity for auth, validation, and schema/config endpoints.
+- Added practical UI usability updates (auto-refresh intervals, persistent sorting/state, and better plugin/rate-limit rendering).
+- Migrated diagram rendering workflow to Graphviz with theme-aware output and safer fallback behavior.
+
+#### Runtime resilience and performance
+- Reduced lock contention and hot-path overhead with bounded caches, async batching improvements, and targeted helper/cache refactors.
+- Strengthened upstream failover/transport validation to reject malformed or mismatched responses consistently.
+- Improved lifecycle orchestration for plugin setup/post-setup/shutdown paths and runtime-state consistency during reload.
+
+#### Testing and documentation
+- Added broad regression coverage for DNS UPDATE, AXFR/IXFR, RateLimit invariants, query-log retention/batching, admin parity, and config validation.
+- Expanded operational documentation and examples, including dedicated query-log hardening guidance.
+
+### Detailed implementation notes
 - Query-log filtering now accepts `ede_code` across API routes, threaded handlers, admin payload helpers, and SQLite/MySQL/PostgreSQL/MongoDB backends, with UI filter controls and EDE drilldowns wired into the admin page.
 - Query-log payload shaping now derives an `error` value using fallback precedence (`item.error` → `result.error` → synthesized EDE text), and upstream-sourced rows now surface upstream identifier/URL context for clearer operator diagnostics.
 - Upstream identity resolution now prefers explicit upstream `id` values, and upstream health/admin payload paths migrate legacy health/run-count keys (`host:port`/URL) to current ids to preserve continuity across config transitions.
