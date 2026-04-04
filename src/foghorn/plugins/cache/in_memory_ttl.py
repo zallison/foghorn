@@ -38,12 +38,22 @@ class InMemoryTTLCache(CachePlugin):
         Inputs:
           - **config:
               - min_cache_ttl: Non-negative int seconds cache TTL floor.
+              - max_size: Maximum entries across positive + NXDOMAIN partitions.
+              - pct_nxdomain: Fraction in [0, 1] reserved for NXDOMAIN entries.
+              - eviction_policy: Capacity-eviction policy for backend caches.
 
         Outputs:
           - None.
         """
 
-        self.min_cache_ttl = max(0, int(config.get("min_cache_ttl", 0) or 0))
+        min_cache_ttl_cfg = config.get("min_cache_ttl", 0)
+        try:
+            min_cache_ttl_val = (
+                int(min_cache_ttl_cfg) if min_cache_ttl_cfg is not None else 0
+            )
+        except Exception:
+            min_cache_ttl_val = 0
+        self.min_cache_ttl = max(0, int(min_cache_ttl_val))
 
         max_size_cfg = config.get("max_size", 65536)
         try:
@@ -207,6 +217,11 @@ class InMemoryTTLCache(CachePlugin):
 
         Outputs:
           - None.
+
+        Notes:
+          - NXDOMAIN wire responses are stored in the NXDOMAIN partition when
+            it is enabled, and this helper keeps positive/NXDOMAIN partitions
+            mutually exclusive for the same key.
         """
 
         is_nxdomain = self._is_nxdomain_wire(value)
@@ -247,6 +262,8 @@ class InMemoryTTLCache(CachePlugin):
           - dict with keys:
               * summary: High-level statistics for the primary DNS cache.
               * caches: List of per-cache summaries for well-known caches.
+              * decorated: Metadata for caches registered via
+                foghorn.utils.register_caches.registered_cached().
         """
 
         total_entries = 0
@@ -268,15 +285,20 @@ class InMemoryTTLCache(CachePlugin):
             store = {}
             lock = None
 
-        def _compute_counts(
-            mapping: dict[tuple[object, object], tuple[float, Any]],
-        ) -> tuple[int, int, int]:
+        def _compute_counts(mapping: object) -> tuple[int, int, int]:
             total = 0
             live = 0
             expired = 0
-            for _k, (expiry, _value) in list(mapping.items()):
+            if not isinstance(mapping, dict):
+                return total, live, expired
+            for _k, raw_value in list(mapping.items()):
                 total += 1
+                if not isinstance(raw_value, (tuple, list)) or not raw_value:
+                    # Treat malformed entries as expired for counting purposes.
+                    expired += 1
+                    continue
                 try:
+                    expiry = raw_value[0]
                     exp = float(expiry)
                 except Exception:
                     # Treat malformed entries as expired for counting purposes.
@@ -482,7 +504,7 @@ class InMemoryTTLCache(CachePlugin):
                     hit_pct_primary = round(
                         (cache_hits_summary / total_primary) * 100.0, 1
                     )
-        except Exception:
+        except Exception:  # pragma: nocover - summary values are normalized ints
             hit_pct_primary = None
 
         primary_row: dict[str, object] = {
