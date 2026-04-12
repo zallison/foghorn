@@ -870,7 +870,7 @@ def test_sqlite_backend_query_log_retention_max_bytes() -> None:
         first=None,
         result_json="{}",
     )
-    row = backend._conn.execute(  # type: ignore[attr-defined]
+    row = backend._conn.execute(
         """
         SELECT
             LENGTH(client_ip)
@@ -887,7 +887,7 @@ def test_sqlite_backend_query_log_retention_max_bytes() -> None:
         ORDER BY id DESC
         LIMIT 1
         """
-    ).fetchone()
+    ).fetchone()  # type: ignore[attr-defined]
     assert row is not None
     backend._query_log_retention_max_bytes = int(row[0])  # type: ignore[attr-defined]
 
@@ -1090,3 +1090,403 @@ def test_sqlite_backend_query_log_retention_days_and_max_records(monkeypatch) ->
         "newest.example",
         "newer.example",
     ]
+
+
+def test_sqlite_backend_normalize_auto_vacuum_and_queue_limit_fallback() -> None:
+    """Brief: Auto-vacuum normalization and queue-limit fallback handle bad input.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts mapping/invalid branches and max_logging_queue fallback.
+    """
+
+    class BadInt:
+        """Helper whose __int__ conversion always fails."""
+
+        def __int__(self) -> int:
+            raise TypeError("boom")
+
+    assert SqliteStatsStore._normalize_sqlite_auto_vacuum(None) is None
+    assert SqliteStatsStore._normalize_sqlite_auto_vacuum(" full ") == 1
+    assert SqliteStatsStore._normalize_sqlite_auto_vacuum("incremental") == 2
+    assert SqliteStatsStore._normalize_sqlite_auto_vacuum("bogus") is None
+    assert SqliteStatsStore._normalize_sqlite_auto_vacuum(0) == 0
+    assert SqliteStatsStore._normalize_sqlite_auto_vacuum(9) is None
+    assert SqliteStatsStore._normalize_sqlite_auto_vacuum(BadInt()) is None
+
+    backend = SqliteStatsStore(":memory:", max_logging_queue="bad")
+    assert backend._max_logging_queue == 16384
+
+
+def test_sqlite_backend_init_connection_permission_fallback_and_auto_vacuum(
+    monkeypatch,
+) -> None:
+    """Brief: Default-path permission failures fall back to in-memory SQLite.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts db_path fallback and auto_vacuum PRAGMA application.
+    """
+
+    import foghorn.plugins.querylog.sqlite as sqlite_mod
+
+    seen: dict[str, str] = {}
+    real_connect = sqlite_mod.sqlite3.connect
+
+    def connect_spy(path: str, *args: Any, **kwargs: Any):  # type: ignore[no-untyped-def]
+        seen["path"] = str(path)
+        return real_connect(":memory:", *args, **kwargs)
+
+    monkeypatch.setattr(sqlite_mod.os, "access", lambda _path, _mode: False)
+    monkeypatch.setattr(sqlite_mod.sqlite3, "connect", connect_spy)
+
+    backend = SqliteStatsStore(
+        SqliteStatsStore.default_config["db_path"],
+        sqlite_auto_vacuum="full",
+    )
+
+    assert seen["path"] == ":memory:"
+    mode_row = backend._conn.execute("PRAGMA auto_vacuum").fetchone()  # type: ignore[attr-defined]
+    assert mode_row is not None
+    assert int(mode_row[0]) == 1
+
+
+def test_sqlite_backend_maybe_flush_locked_nonbatched_and_threshold_trigger() -> None:
+    """Brief: _maybe_flush_locked early-return and threshold flush paths both work.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts non-batched early return and size-based flush execution.
+    """
+
+    non_batched = SqliteStatsStore(":memory:", batch_writes=False)
+    non_batched._maybe_flush_locked()
+
+    batched = SqliteStatsStore(
+        ":memory:",
+        batch_writes=True,
+        batch_time_sec=3600.0,
+        batch_max_size=1,
+    )
+    batched._increment_count("totals", "flush_now", 1)
+    assert not batched._pending_ops  # type: ignore[attr-defined]
+    counts = batched.export_counts()
+    assert counts["totals"]["flush_now"] == 1
+
+
+def test_sqlite_backend_select_query_log_extra_filters_and_ede_guards() -> None:
+    """Brief: select_query_log handles extra filter combinations and EDE guards.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts client/qtype/qname/rcode/time filtering and EDE guards.
+    """
+
+    backend = SqliteStatsStore(":memory:", batch_writes=True, batch_time_sec=3600.0)
+    backend._insert_query_log(
+        ts=1.0,
+        client_ip="192.0.2.10",
+        name="example.com",
+        qtype="A",
+        upstream_id="up-a",
+        rcode="NOERROR",
+        status="ok",
+        error=None,
+        first=None,
+        result_json='{"source":"upstream","ede_code":15}',
+    )
+    backend._insert_query_log(
+        ts=3.0,
+        client_ip="192.0.2.11",
+        name="www.example.com",
+        qtype="AAAA",
+        upstream_id="up-b",
+        rcode="SERVFAIL",
+        status="error",
+        error="boom",
+        first=None,
+        result_json='{"source":"upstream","ede_code":"23"}',
+    )
+
+    assert backend._pending_ops  # type: ignore[attr-defined]
+
+    filtered = backend.select_query_log(
+        client_ip=" 192.0.2.10 ",
+        qtype=" a ",
+        qname=" Example.COM. ",
+        rcode=" noerror ",
+        ede_code="15",
+        start_ts=0,
+        end_ts=2,
+        page="not-int",
+        page_size="also-bad",
+    )
+    assert filtered["page"] == 1
+    assert filtered["page_size"] == 100
+    assert filtered["total"] == 1
+    assert filtered["items"][0]["qname"] == "example.com"
+
+    assert backend.select_query_log(ede_code="-1")["total"] == 0
+    assert backend.select_query_log(ede_code="not-a-number")["total"] == 0
+
+
+def test_sqlite_backend_aggregate_grouped_filters_and_limit_guard(monkeypatch) -> None:
+    """Brief: aggregate_query_log_counts supports grouped filters and guard errors.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts grouped filter output and ValueError guard handling path.
+    """
+
+    import foghorn.plugins.querylog.sqlite as sqlite_mod
+
+    backend = SqliteStatsStore(":memory:", batch_writes=True, batch_time_sec=3600.0)
+    backend._insert_query_log(
+        ts=1.0,
+        client_ip="198.51.100.10",
+        name="example.com",
+        qtype="A",
+        upstream_id="up-a",
+        rcode="NOERROR",
+        status="ok",
+        error=None,
+        first=None,
+        result_json="{}",
+    )
+
+    grouped = backend.aggregate_query_log_counts(
+        start_ts=0.0,
+        end_ts=10.0,
+        interval_seconds=5,
+        client_ip=" 198.51.100.10 ",
+        qtype=" a ",
+        qname=" Example.COM. ",
+        rcode=" noerror ",
+        group_by="qtype",
+    )
+
+    assert grouped["items"]
+    assert grouped["items"][0]["group_by"] == "qtype"
+    assert grouped["items"][0]["group"] == "A"
+    assert grouped["items"][0]["count"] == 1
+
+    def raise_limit(*_args: Any, **_kwargs: Any) -> int:
+        raise ValueError("too many buckets")
+
+    monkeypatch.setattr(
+        sqlite_mod, "enforce_query_log_aggregate_bucket_limit", raise_limit
+    )
+    guarded = backend.aggregate_query_log_counts(
+        start_ts=0.0,
+        end_ts=10.0,
+        interval_seconds=5,
+    )
+    assert guarded["items"] == []
+
+
+def test_sqlite_backend_retention_vacuum_interval_and_incremental_mode() -> None:
+    """Brief: Retention vacuum obeys interval gating and incremental mode path.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts invalid last-vacuum coercion, run, and interval skip paths.
+    """
+
+    backend = SqliteStatsStore(
+        ":memory:",
+        retention_vacuum_on_prune=True,
+        retention_vacuum_interval_seconds=60.0,
+        sqlite_auto_vacuum="incremental",
+    )
+    backend._retention_last_vacuum_ts = "bad-ts"  # type: ignore[assignment]
+    backend._maybe_run_retention_vacuum_locked(now_ts=100.0)
+    assert backend._retention_last_vacuum_ts == 100.0  # type: ignore[attr-defined]
+
+    backend._maybe_run_retention_vacuum_locked(now_ts=120.0)
+    assert backend._retention_last_vacuum_ts == 100.0  # type: ignore[attr-defined]
+
+
+def test_sqlite_backend_export_counts_skips_non_integer_rows_and_has_query_log() -> (
+    None
+):
+    """Brief: export_counts skips non-int rows and has_query_log tracks presence.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts non-integer row skip and empty/non-empty query_log states.
+    """
+
+    backend = SqliteStatsStore(":memory:")
+    assert backend.has_query_log() is False
+
+    with backend._conn:  # type: ignore[attr-defined]
+        backend._conn.execute(  # type: ignore[attr-defined]
+            "INSERT INTO counts (scope, key, value) VALUES (?, ?, ?)",
+            ("totals", "good", 7),
+        )
+        backend._conn.execute(  # type: ignore[attr-defined]
+            "INSERT INTO counts (scope, key, value) VALUES (?, ?, ?)",
+            ("totals", "bad", "not-an-int"),
+        )
+
+    exported = backend.export_counts()
+    assert exported["totals"]["good"] == 7
+    assert "bad" not in exported["totals"]
+
+    backend._insert_query_log(
+        ts=1.0,
+        client_ip="203.0.113.10",
+        name="present.example",
+        qtype="A",
+        upstream_id=None,
+        rcode="NOERROR",
+        status="ok",
+        error=None,
+        first=None,
+        result_json="{}",
+    )
+    assert backend.has_query_log() is True
+
+
+def test_sqlite_backend_rebuild_counts_from_query_log_miss_and_error_paths() -> None:
+    """Brief: Rebuild covers cache-miss and upstream-error aggregation branches.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts miss-domain/subdomain, rcode, and upstream error counters.
+    """
+
+    backend = SqliteStatsStore(":memory:")
+    backend._insert_query_log(
+        ts=1.0,
+        client_ip="203.0.113.20",
+        name="api.example.com",
+        qtype="AAAA",
+        upstream_id="up-err",
+        rcode="SERVFAIL",
+        status="error",
+        error="timeout",
+        first=None,
+        result_json="not-json",
+    )
+
+    backend.rebuild_counts_from_query_log(logger_obj=None)
+    backend._op_queue.join()  # type: ignore[attr-defined]
+    counts = backend.export_counts()
+
+    assert counts["totals"]["cache_misses"] == 1
+    assert counts["cache_miss_domains"]["example.com"] == 1
+    assert counts["cache_miss_subdomains"]["api.example.com"] == 1
+    assert counts["rcode_domains"]["SERVFAIL|example.com"] == 1
+    assert counts["rcode_subdomains"]["SERVFAIL|api.example.com"] == 1
+    assert counts["upstreams"]["up-err|error|SERVFAIL"] == 1
+
+
+def test_sqlite_backend_close_tolerates_missing_connection() -> None:
+    """Brief: close() tolerates a missing _conn attribute value.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts close path does not raise when _conn is None.
+    """
+
+    backend = SqliteStatsStore(":memory:", batch_writes=True, batch_time_sec=3600.0)
+    backend._conn = None  # type: ignore[assignment]
+    backend.close()
+
+
+def test_sqlite_backend_retention_prune_flushes_pending_batch_writes() -> None:
+    """Brief: Query-log retention flushes batched writes before pruning decisions.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts retention path flushes pending batched writes and prunes.
+    """
+
+    backend = SqliteStatsStore(
+        ":memory:",
+        batch_writes=True,
+        batch_time_sec=3600.0,
+        retention_max_records=1,
+    )
+    backend._insert_query_log(
+        ts=1.0,
+        client_ip="198.51.100.20",
+        name="first.example",
+        qtype="A",
+        upstream_id=None,
+        rcode="NOERROR",
+        status="ok",
+        error=None,
+        first=None,
+        result_json="{}",
+    )
+    backend._insert_query_log(
+        ts=2.0,
+        client_ip="198.51.100.21",
+        name="second.example",
+        qtype="A",
+        upstream_id=None,
+        rcode="NOERROR",
+        status="ok",
+        error=None,
+        first=None,
+        result_json="{}",
+    )
+
+    assert not backend._pending_ops  # type: ignore[attr-defined]
+    rows = backend.select_query_log(page=1, page_size=10)
+    assert rows["total"] == 1
+    assert rows["items"][0]["qname"] == "second.example"
+
+
+def test_sqlite_backend_retention_vacuum_full_mode_executes_vacuum() -> None:
+    """Brief: Retention vacuum uses VACUUM when auto_vacuum is not incremental.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts VACUUM branch is invoked and timestamp updated.
+    """
+
+    class ConnSpy:
+        """Collect SQL calls made by _maybe_run_retention_vacuum_locked."""
+
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def execute(self, sql: str) -> None:
+            self.calls.append(sql)
+
+    backend = SqliteStatsStore(
+        ":memory:",
+        retention_vacuum_on_prune=True,
+        retention_vacuum_interval_seconds=1.0,
+        sqlite_auto_vacuum="full",
+    )
+    conn_spy = ConnSpy()
+    backend._conn = conn_spy  # type: ignore[assignment]
+    backend._maybe_run_retention_vacuum_locked(now_ts=42.0)
+    assert "VACUUM" in conn_spy.calls
+    assert backend._retention_last_vacuum_ts == 42.0  # type: ignore[attr-defined]
