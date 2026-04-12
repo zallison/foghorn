@@ -390,7 +390,7 @@ class RateLimit(BasePlugin):
         # Parse mode
         raw_mode = str(self.config.get("mode", "per_client")).strip().lower()
         if raw_mode not in {"per_client", "per_client_domain", "per_domain"}:
-            logger.warning("invalid mode %r; using 'per_client'", raw_mode)
+            logger.warning("invalid mode configured; using 'per_client'")
             raw_mode = "per_client"
         self.mode = raw_mode
         # PSL availability guard for domain-based modes.
@@ -709,7 +709,13 @@ class RateLimit(BasePlugin):
         try:
             value = int(raw)
         except (TypeError, ValueError):
-            logger.warning("%s non-integer %r; using %d", key, raw, default)
+            value_type = type(raw).__name__
+            logger.warning(
+                "%s non-integer value (type=%s); using %d",
+                key,
+                value_type,
+                default,
+            )
             return default
         if value < minimum:
             logger.warning(
@@ -744,7 +750,13 @@ class RateLimit(BasePlugin):
         try:
             value = float(raw)
         except (TypeError, ValueError):
-            logger.warning("%s non-float %r; using %s", key, raw, default)
+            value_type = type(raw).__name__
+            logger.warning(
+                "%s non-float value (type=%s); using %s",
+                key,
+                value_type,
+                default,
+            )
             return default
         if value < minimum:
             logger.warning(
@@ -785,7 +797,13 @@ class RateLimit(BasePlugin):
             return True
         if text in {"0", "false", "no", "n", "off"}:
             return False
-        logger.warning("%s non-boolean %r; using %s", key, raw, default)
+        value_type = type(raw).__name__
+        logger.warning(
+            "%s non-boolean value (type=%s); using %s",
+            key,
+            value_type,
+            default,
+        )
         return bool(default)
 
     def _db_init(self) -> None:

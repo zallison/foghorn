@@ -568,9 +568,8 @@ class JournalWriter:
                         raw = fh.read().strip()
                     if raw:
                         logger.warning(
-                            "Journal lock already held for zone %s: %s",
+                            "Journal lock already held for zone %s",
                             self.zone_apex,
-                            raw,
                         )
             except Exception:
                 pass

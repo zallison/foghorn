@@ -455,12 +455,15 @@ class _StatsCollectorInitUtils:
         subdomains = subdomains or []
 
         client_networks: List[ipaddress._BaseNetwork] = []
-        for raw in clients:
-            if not raw:
+        for idx, entry in enumerate(clients):
+            if not entry:
                 continue
-            net = ip_networks.parse_network(raw, strict=False)
+            net = ip_networks.parse_network(entry, strict=False)
             if net is None:  # pragma: no cover
-                logger.debug("StatsCollector: invalid ignore client %r", raw)
+                logger.debug(
+                    "StatsCollector: invalid ignore client entry at index %d",
+                    idx,
+                )
                 continue
             client_networks.append(net)
 
