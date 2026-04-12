@@ -36,9 +36,9 @@ class MultiStatsStore(BaseStatsStore):
         - Delegates all read operations (select/export/aggregate/health) to the
           first backend in the list (the primary).
         - Fans out write operations (increment/set/insert/rebuild/close) to all
-          backends, logging and continuing on per-backend errors.
-        - Relies on BaseStatsStore for the async queue/worker used by
-          high-volume write paths such as increment_count and insert_query_log.
+          backends and continues on per-backend errors.
+        - Uses BaseStatsStore's async queue/worker for insert_query_log; keeps
+          increment_count synchronous for deterministic write visibility.
     """
 
     def __init__(self, backends: List[BaseStatsStore], **_: Any) -> None:
@@ -66,7 +66,9 @@ class MultiStatsStore(BaseStatsStore):
                 raw = getattr(b, "_max_logging_queue", None)
                 if raw is None:
                     raw = getattr(b, "max_logging_queue", None)
-            except Exception:
+            except (
+                Exception
+            ):  # pragma: nocover - defensive for non-standard backend attribute access
                 raw = None
             if raw is None:
                 continue
@@ -82,7 +84,9 @@ class MultiStatsStore(BaseStatsStore):
         if effective_max is not None:
             try:
                 self._max_logging_queue = int(effective_max)
-            except Exception:
+            except (
+                Exception
+            ):  # pragma: nocover - effective_max is already normalized to int
                 self._max_logging_queue = 16384
 
     # Health and lifecycle -------------------------------------------------
@@ -121,7 +125,9 @@ class MultiStatsStore(BaseStatsStore):
                 # Sentinel op_name "" is handled as a stop signal in _worker_loop.
                 q.put(("", (), {}))  # type: ignore[arg-type]
                 q.join()
-            except Exception:
+            except (
+                Exception
+            ):  # pragma: nocover - defensive fallback for unexpected queue implementations
                 # Best-effort: queue failures must not prevent backend close.
                 pass
 
@@ -142,7 +148,7 @@ class MultiStatsStore(BaseStatsStore):
           - delta: Increment amount (may be negative).
 
         Outputs:
-          - None; errors are logged or ignored per-backend.
+          - None; errors are ignored per-backend.
         """
 
         for backend in self._backends:
@@ -167,6 +173,16 @@ class MultiStatsStore(BaseStatsStore):
         self._increment_count(scope, key, delta)
 
     def set_count(self, scope: str, key: str, value: int) -> None:
+        """Brief: Fan out set_count calls to all backends.
+
+        Inputs:
+          - scope: Logical counter scope.
+          - key: Counter key within the scope.
+          - value: Absolute counter value to assign.
+
+        Outputs:
+          - None; errors are ignored per-backend.
+        """
         for backend in self._backends:
             try:
                 backend.set_count(scope, key, value)
@@ -174,14 +190,38 @@ class MultiStatsStore(BaseStatsStore):
                 continue
 
     def has_counts(self) -> bool:
+        """Brief: Return whether the primary backend has persisted counters.
+
+        Inputs:
+          - None.
+
+        Outputs:
+          - bool from the primary backend's has_counts.
+        """
         primary = self._backends[0]
         return primary.has_counts()
 
     def export_counts(self) -> dict[str, dict[str, int]]:
+        """Brief: Export counters from the primary backend.
+
+        Inputs:
+          - None.
+
+        Outputs:
+          - Nested counter mapping returned by the primary backend.
+        """
         primary = self._backends[0]
         return primary.export_counts()
 
     def rebuild_counts_from_query_log(self, logger_obj: Optional["logging.Logger"] = None) -> None:  # type: ignore[name-defined]
+        """Brief: Fan out forced count rebuilds to all backends.
+
+        Inputs:
+          - logger_obj: Optional logger used by backend implementations.
+
+        Outputs:
+          - None; errors are ignored per-backend.
+        """
         for backend in self._backends:
             try:
                 backend.rebuild_counts_from_query_log(logger_obj=logger_obj)
@@ -193,6 +233,15 @@ class MultiStatsStore(BaseStatsStore):
         force_rebuild: bool = False,
         logger_obj: Optional["logging.Logger"] = None,  # type: ignore[name-defined]
     ) -> None:
+        """Brief: Fan out conditional count rebuild checks to all backends.
+
+        Inputs:
+          - force_rebuild: Force rebuild regardless of backend heuristics.
+          - logger_obj: Optional logger used by backend implementations.
+
+        Outputs:
+          - None; errors are ignored per-backend.
+        """
         for backend in self._backends:
             try:
                 backend.rebuild_counts_if_needed(
@@ -230,7 +279,7 @@ class MultiStatsStore(BaseStatsStore):
           - result_json: JSON-encoded result payload.
 
         Outputs:
-          - None; errors are logged or ignored per-backend.
+          - None; errors are ignored per-backend.
         """
 
         for backend in self._backends:
@@ -308,6 +357,14 @@ class MultiStatsStore(BaseStatsStore):
         page: int = 1,
         page_size: int = 100,
     ) -> dict[str, Any]:
+        """Brief: Query rows from the primary backend only.
+
+        Inputs:
+          - Filter, time-range, and paging fields forwarded to primary.
+
+        Outputs:
+          - Paginated result mapping returned by the primary backend.
+        """
         primary = self._backends[0]
         return primary.select_query_log(
             client_ip=client_ip,
@@ -334,6 +391,14 @@ class MultiStatsStore(BaseStatsStore):
         rcode: Optional[str] = None,
         group_by: Optional[str] = None,
     ) -> dict[str, Any]:
+        """Brief: Aggregate query-log counts using the primary backend.
+
+        Inputs:
+          - Time-range and grouping filters forwarded to primary.
+
+        Outputs:
+          - Aggregation payload returned by the primary backend.
+        """
         primary = self._backends[0]
         return primary.aggregate_query_log_counts(
             start_ts=start_ts,
@@ -347,6 +412,14 @@ class MultiStatsStore(BaseStatsStore):
         )
 
     def has_query_log(self) -> bool:
+        """Brief: Return whether the primary backend stores query-log rows.
+
+        Inputs:
+          - None.
+
+        Outputs:
+          - bool from the primary backend's has_query_log.
+        """
         primary = self._backends[0]
         return primary.has_query_log()
 
@@ -435,7 +508,8 @@ def load_stats_store_backend(
       - Backend instance implementing the BaseStatsStore interface, or
         None when persistence is disabled or misconfigured. When multiple
         backends are configured, returns a MultiStatsStore that writes to
-        all backends and reads from the first-listed backend.
+        all backends and reads from the effective primary backend (first
+        configured backend unless primary_backend selects another one).
     """
 
     if not isinstance(persistence_cfg, dict):
@@ -496,7 +570,9 @@ def load_stats_store_backend(
     # Legacy single-backend configuration; treat persistence_cfg itself as the
     # SQLite backend config so existing configs continue to work.
     legacy_name = None
-    if isinstance(persistence_cfg, dict):
+    if isinstance(
+        persistence_cfg, dict
+    ):  # pragma: nocover - guarded above; persistence_cfg is always dict here
         legacy_name = persistence_cfg.get("name") or persistence_cfg.get("id")
     legacy_model = StatsStoreBackendConfig(
         name=legacy_name,

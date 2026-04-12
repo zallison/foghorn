@@ -1,24 +1,3 @@
-from __future__ import annotations
-
-import json
-import logging
-import math
-import threading
-import time
-from typing import Any, Dict, List, Optional, Tuple
-
-from .base import BaseStatsStore
-from foghorn.plugins.sql_safety import (
-    resolve_query_log_group_column,
-    validate_sql_placeholder,
-)
-from foghorn.security_limits import (
-    MAX_QUERY_LOG_AGG_GROUPED_RESULTS,
-    enforce_query_log_aggregate_bucket_limit,
-)
-from foghorn.utils import dns_names
-from .sqlite import _is_subdomain, _normalize_domain
-
 """MySQL/MariaDB-backed implementation of the BaseStatsStore interface.
 
 Inputs:
@@ -40,6 +19,27 @@ Notes:
       - driver: auto|mariadb|mysql-connector-python (or mysql)
       - driver_fallback: auto|none|<driver>|[<driver>, ...]
 """
+
+from __future__ import annotations
+
+import json
+import logging
+import math
+import threading
+import time
+from typing import Any, Dict, List, Optional, Tuple
+
+from .base import BaseStatsStore
+from foghorn.plugins.sql_safety import (
+    resolve_query_log_group_column,
+    validate_sql_placeholder,
+)
+from foghorn.security_limits import (
+    MAX_QUERY_LOG_AGG_GROUPED_RESULTS,
+    enforce_query_log_aggregate_bucket_limit,
+)
+from foghorn.utils import dns_names
+from .sqlite import _is_subdomain, _normalize_domain
 
 logger = logging.getLogger(__name__)
 
@@ -220,9 +220,6 @@ def _import_mysql_driver(
 class MySqlStatsStore(BaseStatsStore):
     """MySQL/MariaDB-backed persistent statistics and query-log backend.
 
-    # Aliases used by the stats backend registry.
-    aliases = ("mysql", "mariadb")
-
     This backend stores the same logical ``counts`` and ``query_log`` tables as
     the SQLite implementation, but in a MariaDB/MySQL database.
 
@@ -244,6 +241,9 @@ class MySqlStatsStore(BaseStatsStore):
     Outputs:
         Initialized MySqlStatsStore instance with ensured schema.
     """
+
+    # Aliases used by the stats backend registry.
+    aliases = ("mysql", "mariadb")
 
     def __init__(
         self,
@@ -269,6 +269,33 @@ class MySqlStatsStore(BaseStatsStore):
         driver_fallback: object = None,
         **_: Any,
     ) -> None:
+        """Initialize connection, batching, and retention state for this backend.
+
+        Inputs:
+            host: Database host.
+            port: Database port.
+            user: Optional database username.
+            password: Optional database password.
+            database: Target database name.
+            connect_kwargs: Optional extra driver ``connect`` kwargs.
+            async_logging: Whether to route writes through BaseStatsStore queue.
+            max_logging_queue: Maximum queued async operations.
+            batch_writes: Whether SQL writes are buffered before flush.
+            batch_time_sec: Max age of a pending batch before flush.
+            batch_max_size: Max queued SQL statements before flush.
+            retention_max_records: Optional query_log row-count cap.
+            retention_days: Optional query_log age cap in days.
+            retention_max_bytes: Optional estimated query_log byte cap.
+            retention_prune_interval_seconds: Optional prune interval gate.
+            retention_prune_every_n_inserts: Optional prune insert cadence.
+            retention_optimize_on_prune: Whether to run OPTIMIZE TABLE post-prune.
+            retention_optimize_interval_seconds: Optional optimize interval gate.
+            driver: Preferred driver selector.
+            driver_fallback: Fallback driver selector.
+
+        Outputs:
+            None.
+        """
         driver_mod, placeholder = _import_mysql_driver(
             driver=driver, driver_fallback=driver_fallback
         )
@@ -538,7 +565,7 @@ class MySqlStatsStore(BaseStatsStore):
     # Counter API
     # ------------------------------------------------------------------
     def increment_count(self, scope: str, key: str, delta: int = 1) -> None:
-        """Increment an aggregate counter, synchronously by default.
+        """Dispatch aggregate counter increments synchronously or via worker.
 
         Inputs:
             scope: Logical scope (e.g. "totals").
@@ -808,7 +835,7 @@ class MySqlStatsStore(BaseStatsStore):
             bool: True when one or more rows were deleted.
         """
 
-        if max_records <= 0:
+        if max_records <= 0:  # pragma: nocover - invalid cap already normalized out
             return False
 
         ph = self._placeholder
@@ -842,7 +869,7 @@ class MySqlStatsStore(BaseStatsStore):
             bool: True when one or more rows were deleted.
         """
 
-        if max_bytes <= 0:
+        if max_bytes <= 0:  # pragma: nocover - invalid cap already normalized out
             return False
 
         ph = self._placeholder
@@ -1101,7 +1128,10 @@ class MySqlStatsStore(BaseStatsStore):
                 }
             )
 
-        total_pages = (total + page_size_i - 1) // page_size_i if page_size_i > 0 else 0
+        if page_size_i > 0:
+            total_pages = (total + page_size_i - 1) // page_size_i
+        else:  # pragma: nocover - _normalize_page_args clamps page_size to >= 1
+            total_pages = 0
         return {
             "total": total,
             "page": page_i,
