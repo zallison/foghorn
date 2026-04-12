@@ -448,10 +448,23 @@ def test_journal_writer_append_entry_handles_write_error(
         def write(self, *_a, **_k):
             raise OSError("write boom")
 
+        def flush(self) -> None:
+            return None
+
     writer = journal.JournalWriter(zone_apex="example.com", base_dir="/tmp")
     monkeypatch.setattr(writer, "_ensure_dir", lambda: None)
     writer._file_handle = _BadHandle()
-    entry = writer.append_entry(actions=[], actor={})
+    entry = writer.append_entry(
+        actions=[
+            {
+                "type": "rr_add",
+                "owner": "err.example.com",
+                "qtype": 1,
+                "value": "192.0.2.99",
+            }
+        ],
+        actor={"client_ip": "192.0.2.10"},
+    )
     assert entry is None
 
 
@@ -745,3 +758,619 @@ def test_manifest_load_missing_file_returns_default(tmp_path) -> None:
     manifest = journal.load_manifest("example.com", str(tmp_path))
     assert isinstance(manifest, journal.Manifest)
     assert manifest.last_compacted_seq == 0
+
+
+def test_normalize_zone_apex_and_owner_in_zone_edges() -> None:
+    """Brief: Zone apex normalization rejects unsafe names and zone membership is strict.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts ValueError branches and in-zone membership behavior.
+    """
+    assert journal._normalize_zone_apex("EXAMPLE.com.") == "example.com"
+    assert journal._is_owner_in_zone("www.example.com.", "example.com") is True
+    assert journal._is_owner_in_zone("outside.net.", "example.com") is False
+
+    with pytest.raises(ValueError):
+        journal._normalize_zone_apex("")
+    with pytest.raises(ValueError):
+        journal._normalize_zone_apex(f"bad{os.path.sep}zone.com")
+    with pytest.raises(ValueError):
+        journal._normalize_zone_apex("bad..zone.com")
+    with pytest.raises(ValueError):
+        journal._normalize_zone_apex("bad zone.com")
+
+
+def test_filter_and_replace_zone_records_handle_invalid_shapes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Brief: Zone filtering/replacement skip malformed entries and handle 2-tuple fallback.
+
+    Inputs:
+      - monkeypatch: Pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts malformed owners/entries are ignored and valid records are normalized.
+    """
+    original_normalize = journal.dns_names.normalize_name
+
+    def _normalize(value: str) -> str:
+        if str(value) == "boom.invalid":
+            raise ValueError("normalize boom")
+        return original_normalize(value)
+
+    monkeypatch.setattr(journal.dns_names, "normalize_name", _normalize)
+
+    records = {
+        ("a.example.com", 1): (60, ["192.0.2.1"], ["file"]),
+        ("b.example.com", 1): (120, ["192.0.2.2"]),
+        ("c.example.com", 1): (300,),
+        ("fallback.outside.net", 1): (45, ["203.0.113.77"]),
+        ("outside.net", 1): (300, ["203.0.113.5"], ["file"]),
+        ("boom.invalid", 1): (300, ["203.0.113.9"], ["file"]),
+    }
+    filtered = journal.filter_records_for_zone(records, "example.com")
+    assert filtered[("a.example.com", 1)] == (60, ["192.0.2.1"], ["file"])
+    assert filtered[("b.example.com", 1)] == (120, ["192.0.2.2"], [])
+    assert ("c.example.com", 1) not in filtered
+    assert ("outside.net", 1) not in filtered
+    assert ("boom.invalid", 1) not in filtered
+
+    replaced = journal.replace_zone_records(
+        records=records,
+        zone_apex="example.com",
+        zone_records={
+            ("new.example.com", 1): (30, ["198.51.100.1"], ["dynamic"]),
+        },
+    )
+    assert ("a.example.com", 1) not in replaced
+    assert ("b.example.com", 1) not in replaced
+    assert replaced[("fallback.outside.net", 1)] == (45, ["203.0.113.77"], [])
+    assert replaced[("outside.net", 1)] == (300, ["203.0.113.5"], ["file"])
+    assert replaced[("new.example.com", 1)] == (30, ["198.51.100.1"], ["dynamic"])
+
+
+def test_sanitize_actor_and_validate_actions_matrix() -> None:
+    """Brief: Actor sanitization and action validation enforce shape/length constraints.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts invalid payload branches and normalized valid payloads.
+    """
+    assert journal._sanitize_actor("not-a-dict") == {}
+    assert journal._sanitize_actor({"client_ip": "x" * 8}, max_value_length=4) == {}
+    assert journal._sanitize_actor(
+        {
+            "client_ip": "192.0.2.1",
+            "auth_method": None,
+            "tsig_key_name": 1234,
+        },
+        max_value_length=64,
+    ) == {"client_ip": "192.0.2.1", "tsig_key_name": "1234"}
+
+    assert journal._validate_actions("bad") is None
+    assert journal._validate_actions([{}, {}], max_actions=1) is None
+    assert journal._validate_actions([1]) is None
+    assert journal._validate_actions([{"type": "rr_add"}]) is None
+    assert (
+        journal._validate_actions(
+            [
+                {
+                    "type": "rr_add",
+                    "owner": "owner.example.com",
+                    "qtype": 1,
+                    "value": "v",
+                }
+            ],
+            max_owner_length=3,
+        )
+        is None
+    )
+    assert (
+        journal._validate_actions(
+            [
+                {
+                    "type": "rr_add",
+                    "owner": "owner.example.com",
+                    "qtype": "bad",
+                    "value": "v",
+                }
+            ]
+        )
+        is None
+    )
+    assert (
+        journal._validate_actions(
+            [{"type": "rr_add", "owner": "owner.example.com", "qtype": 1, "value": ""}]
+        )
+        is None
+    )
+    assert (
+        journal._validate_actions(
+            [
+                {
+                    "type": "rr_add",
+                    "owner": "owner.example.com",
+                    "qtype": 1,
+                    "value": "abcd",
+                }
+            ],
+            max_rdata_length=2,
+        )
+        is None
+    )
+    assert (
+        journal._validate_actions(
+            [
+                {
+                    "type": "rr_delete_values",
+                    "owner": "owner.example.com",
+                    "qtype": 1,
+                    "value": "",
+                }
+            ]
+        )
+        is None
+    )
+    assert (
+        journal._validate_actions(
+            [
+                {
+                    "type": "rr_delete_values",
+                    "owner": "owner.example.com",
+                    "qtype": 1,
+                    "value": "abcd",
+                }
+            ],
+            max_rdata_length=2,
+        )
+        is None
+    )
+    assert (
+        journal._validate_actions(
+            [
+                {
+                    "type": "rr_replace",
+                    "owner": "owner.example.com",
+                    "qtype": 1,
+                    "values": [],
+                }
+            ]
+        )
+        is None
+    )
+    assert (
+        journal._validate_actions(
+            [
+                {
+                    "type": "rr_replace",
+                    "owner": "owner.example.com",
+                    "qtype": 1,
+                    "values": ["abcd"],
+                }
+            ],
+            max_rdata_length=2,
+        )
+        is None
+    )
+    assert (
+        journal._validate_actions(
+            [{"type": "unknown", "owner": "owner.example.com", "qtype": 1}]
+        )
+        is None
+    )
+
+    validated = journal._validate_actions(
+        [
+            {
+                "type": "rr_add",
+                "owner": "a.example.com",
+                "qtype": 1,
+                "ttl": 60,
+                "value": "192.0.2.1",
+            },
+            {
+                "type": "rr_delete_values",
+                "owner": "a.example.com",
+                "qtype": 1,
+                "value": "192.0.2.1",
+            },
+            {"type": "rr_delete_rrset", "owner": "a.example.com", "qtype": 1},
+            {"type": "name_delete_all", "owner": "a.example.com", "qtype": 1},
+            {
+                "type": "rr_replace",
+                "owner": "a.example.com",
+                "qtype": 1,
+                "ttl": 30,
+                "values": ["198.51.100.1"],
+            },
+        ]
+    )
+    assert validated == [
+        {
+            "type": "rr_add",
+            "owner": "a.example.com",
+            "qtype": 1,
+            "ttl": 60,
+            "value": "192.0.2.1",
+        },
+        {
+            "type": "rr_delete_values",
+            "owner": "a.example.com",
+            "qtype": 1,
+            "value": "192.0.2.1",
+        },
+        {"type": "rr_delete_rrset", "owner": "a.example.com", "qtype": 1},
+        {"type": "name_delete_all", "owner": "a.example.com"},
+        {
+            "type": "rr_replace",
+            "owner": "a.example.com",
+            "qtype": 1,
+            "ttl": 30,
+            "values": ["198.51.100.1"],
+        },
+    ]
+
+
+def test_scan_journal_tail_handles_offsets_and_errors(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    """Brief: Tail scanning finds the last valid sequence and tolerates read failures.
+
+    Inputs:
+      - monkeypatch: Pytest monkeypatch fixture.
+      - tmp_path: Pytest temp directory.
+
+    Outputs:
+      - None; asserts missing/corrupt file handling and valid tail hash extraction.
+    """
+    missing_seq, missing_hash = journal._scan_journal_tail(
+        str(tmp_path / "missing.ndjson")
+    )
+    assert (missing_seq, missing_hash) == (0, None)
+
+    journal_path = tmp_path / "journal.ndjson"
+    with open(journal_path, "w", encoding="utf-8") as fh:
+        fh.write("padding-line-" * 20 + "\n")
+        fh.write("{bad json}\n")
+        fh.write(json.dumps({"seq": 0, "note": "ignore"}) + "\n")
+        fh.write(json.dumps({"seq": 4, "op_id": "abc"}) + "\n")
+    seq, entry_hash = journal._scan_journal_tail(str(journal_path), max_bytes=64)
+    expected_hash = journal.hashlib.sha256(
+        json.dumps({"seq": 4, "op_id": "abc"}, sort_keys=True).encode()
+    ).hexdigest()
+    assert seq == 4
+    assert entry_hash == expected_hash
+
+    monkeypatch.setattr(
+        os.path, "getsize", lambda *_a, **_k: (_ for _ in ()).throw(OSError("boom"))
+    )
+    assert journal._scan_journal_tail(str(journal_path)) == (0, None)
+
+
+def test_journal_writer_initialize_state_and_persist_warn_branches(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    """Brief: Writer initialization, manifest persistence, and size warning branches behave safely.
+
+    Inputs:
+      - monkeypatch: Pytest monkeypatch fixture.
+      - tmp_path: Pytest temp directory.
+
+    Outputs:
+      - None; asserts sequence/hash initialization and warning/persistence edge paths.
+    """
+    monkeypatch.setattr(
+        journal,
+        "load_manifest",
+        lambda *_a, **_k: journal.Manifest(last_seq=2),
+    )
+    monkeypatch.setattr(
+        journal, "_scan_journal_tail", lambda *_a, **_k: (7, "tail-hash")
+    )
+    writer = journal.JournalWriter(zone_apex="example.com", base_dir=str(tmp_path))
+    assert writer._sequences[journal.JournalEntry] == 7
+    assert writer._last_hash == "tail-hash"
+
+    monkeypatch.setattr(
+        journal,
+        "load_manifest",
+        lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("manifest boom")),
+    )
+    monkeypatch.setattr(
+        journal,
+        "_scan_journal_tail",
+        lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("scan boom")),
+    )
+    writer_err = journal.JournalWriter(zone_apex="example.net", base_dir=str(tmp_path))
+    assert writer_err._sequences == {}
+    assert writer_err._last_hash is None
+
+    saved_seq: list[int] = []
+    monkeypatch.setattr(journal, "load_manifest", lambda *_a, **_k: journal.Manifest())
+    monkeypatch.setattr(
+        journal,
+        "save_manifest",
+        lambda manifest, *_a, **_k: saved_seq.append(int(manifest.last_seq)) or True,
+    )
+    monkeypatch.setattr(time, "time_ns", lambda: 10_000_000_000)
+
+    writer._last_manifest_write_ns = 0
+    writer._maybe_persist_sequence(9, interval_ms=1)
+    assert saved_seq == [9]
+    saved_seq.clear()
+    writer._last_manifest_write_ns = 10_000_000_000
+    writer._maybe_persist_sequence(10, interval_ms=5000)
+    assert saved_seq == []
+
+    monkeypatch.setattr(
+        journal,
+        "load_manifest",
+        lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("persist boom")),
+    )
+    writer._last_manifest_write_ns = 0
+    writer._maybe_persist_sequence(11, interval_ms=1)
+
+    os.makedirs(writer.zone_dir, exist_ok=True)
+    with open(writer.journal_path, "w", encoding="utf-8") as fh:
+        fh.write("line\n")
+
+    writer._last_size_warn_ns = 0
+    monkeypatch.setattr(time, "time_ns", lambda: 70_000_000_000)
+    writer._maybe_warn_journal_size(max_journal_bytes=1)
+    warned_at = writer._last_size_warn_ns
+    assert warned_at == 70_000_000_000
+    monkeypatch.setattr(time, "time_ns", lambda: 70_500_000_000)
+    writer._maybe_warn_journal_size(max_journal_bytes=1)
+    assert writer._last_size_warn_ns == warned_at
+    monkeypatch.setattr(time, "time_ns", lambda: 200_000_000_000)
+    monkeypatch.setattr(
+        os.path,
+        "getsize",
+        lambda *_a, **_k: (_ for _ in ()).throw(OSError("size boom")),
+    )
+    writer._maybe_warn_journal_size(max_journal_bytes=1)
+    writer._maybe_warn_journal_size(max_journal_bytes=0)
+
+
+def test_journal_writer_append_entry_validation_and_size_limits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Brief: append_entry rejects invalid actions/actors and oversized payloads.
+
+    Inputs:
+      - monkeypatch: Pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts early-return validation branches.
+    """
+    writer = journal.JournalWriter(zone_apex="example.com", base_dir="/tmp")
+    monkeypatch.setattr(writer, "_ensure_dir", lambda: None)
+
+    assert (
+        writer.append_entry(
+            actions=[
+                {
+                    "type": "rr_add",
+                    "owner": "a.example.com",
+                    "qtype": 1,
+                    "value": "",
+                }
+            ],
+            actor={"client_ip": "192.0.2.1"},
+        )
+        is None
+    )
+    assert (
+        writer.append_entry(
+            actions=[
+                {
+                    "type": "rr_add",
+                    "owner": "a.example.com",
+                    "qtype": 1,
+                    "value": "192.0.2.1",
+                }
+            ],
+            actor={},
+        )
+        is None
+    )
+    assert (
+        writer.append_entry(
+            actions=[
+                {
+                    "type": "rr_add",
+                    "owner": "a.example.com",
+                    "qtype": 1,
+                    "value": "192.0.2.1",
+                }
+            ],
+            actor={"client_ip": "192.0.2.1"},
+            max_transaction_bytes=1,
+        )
+        is None
+    )
+
+
+def test_journal_reader_iter_entries_max_line_bytes(tmp_path) -> None:
+    """Brief: iter_entries enforces max_line_bytes with validate and non-validate modes.
+
+    Inputs:
+      - tmp_path: Pytest temp directory.
+
+    Outputs:
+      - None; asserts oversize lines break/skip according to validation mode.
+    """
+    base_dir = str(tmp_path)
+    zone = "example.com"
+    zone_dir = os.path.join(base_dir, zone)
+    os.makedirs(zone_dir, exist_ok=True)
+    journal_path = os.path.join(zone_dir, "journal.ndjson")
+
+    entry = journal.JournalEntry(
+        seq=1,
+        ts_unix_ns=1,
+        op_id="op",
+        origin_node_id="node",
+        zone=zone,
+        actor={"client_ip": "192.0.2.1"},
+        actions=[
+            {
+                "type": "rr_add",
+                "owner": "a.example.com",
+                "qtype": 1,
+                "ttl": 60,
+                "value": "192.0.2.1",
+            }
+        ],
+    )
+    entry.entry_checksum = entry.compute_checksum()
+
+    with open(journal_path, "w", encoding="utf-8") as fh:
+        fh.write("x" * 2048 + "\n")
+        fh.write(json.dumps(entry.to_dict()) + "\n")
+
+    reader = journal.JournalReader(zone_apex=zone, base_dir=base_dir)
+    assert list(reader.iter_entries(validate=True, max_line_bytes=1024)) == []
+    skipped = list(reader.iter_entries(validate=False, max_line_bytes=1024))
+    assert len(skipped) == 1
+    assert skipped[0].seq == 1
+
+
+def test_manifest_and_snapshot_invalid_zone_and_line_limit_paths(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    """Brief: Manifest/snapshot helpers handle invalid zones and snapshot line-limit branches.
+
+    Inputs:
+      - monkeypatch: Pytest monkeypatch fixture.
+      - tmp_path: Pytest temp directory.
+
+    Outputs:
+      - None; asserts invalid-zone fallbacks and snapshot line-limit safeguards.
+    """
+    base_dir = str(tmp_path)
+    assert isinstance(journal.load_manifest("bad/zone", base_dir), journal.Manifest)
+    assert journal.save_manifest(journal.Manifest(), "bad/zone", base_dir) is False
+    assert journal.save_snapshot("bad/zone", base_dir, {}, seq=1) is False
+    assert journal.load_snapshot("bad/zone", base_dir) == ({}, 0)
+
+    zone = "example.com"
+    zone_dir = os.path.join(base_dir, zone)
+    os.makedirs(zone_dir, exist_ok=True)
+    snapshot_path = os.path.join(zone_dir, "snapshot.ndjson")
+
+    monkeypatch.setattr(journal, "DEFAULT_MAX_JOURNAL_LINE_BYTES", 16)
+    with open(snapshot_path, "w", encoding="utf-8") as fh:
+        fh.write(json.dumps({"snapshot_seq": 1, "pad": "x" * 64}) + "\n")
+    assert journal.load_snapshot(zone, base_dir) == ({}, 0)
+
+    monkeypatch.setattr(journal, "DEFAULT_MAX_JOURNAL_LINE_BYTES", 0)
+    with open(snapshot_path, "w", encoding="utf-8") as fh:
+        fh.write("\n")
+        fh.write(
+            json.dumps(
+                {
+                    "owner": "a.example.com",
+                    "qtype": 1,
+                    "ttl": 60,
+                    "values": ["192.0.2.5"],
+                    "sources": ["file"],
+                }
+            )
+            + "\n"
+        )
+        fh.write("\n")
+    records, seq = journal.load_snapshot(zone, base_dir)
+    assert seq == 0
+    assert records[("a.example.com", 1)] == (60, ["192.0.2.5"], ["file"])
+
+    monkeypatch.setattr(journal, "DEFAULT_MAX_JOURNAL_LINE_BYTES", 16)
+    with open(snapshot_path, "w", encoding="utf-8") as fh:
+        fh.write(json.dumps({"snapshot_seq": 2}) + "\n")
+        fh.write("x" * 64 + "\n")
+    assert journal.load_snapshot(zone, base_dir) == ({}, 0)
+
+
+def test_compact_zone_journal_invalid_zone_and_missing_journal(tmp_path) -> None:
+    """Brief: Compaction rejects invalid zones and succeeds when no journal exists yet.
+
+    Inputs:
+      - tmp_path: Pytest temp directory.
+
+    Outputs:
+      - None; asserts invalid-zone fast-fail and no-journal rotation path.
+    """
+    base_dir = str(tmp_path)
+    assert journal.compact_zone_journal("bad/zone", base_dir, {}, seq=1) is False
+
+    records = {("host.example.com", 1): (60, ["192.0.2.1"], ["file"])}
+    assert (
+        journal.compact_zone_journal(
+            zone_apex="example.com",
+            base_dir=base_dir,
+            records=records,
+            seq=1,
+        )
+        is True
+    )
+
+
+def test_compact_zone_journal_write_and_manifest_failures(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    """Brief: Compaction returns False on write-path and manifest persistence failures.
+
+    Inputs:
+      - monkeypatch: Pytest monkeypatch fixture.
+      - tmp_path: Pytest temp directory.
+
+    Outputs:
+      - None; asserts failure branches after snapshot succeeds.
+    """
+    base_dir = str(tmp_path)
+    zone = "example.net"
+    zone_dir = os.path.join(base_dir, zone)
+    os.makedirs(zone_dir, exist_ok=True)
+    journal_path = os.path.join(zone_dir, "journal.ndjson")
+    old_path = os.path.join(zone_dir, "journal.old")
+    with open(journal_path, "w", encoding="utf-8") as fh:
+        fh.write('{"seq":1}\n')
+    with open(old_path, "w", encoding="utf-8") as fh:
+        fh.write("stale\n")
+
+    monkeypatch.setattr(journal, "save_manifest", lambda *_a, **_k: False)
+    assert (
+        journal.compact_zone_journal(
+            zone_apex=zone,
+            base_dir=base_dir,
+            records={("a.example.net", 1): (60, ["192.0.2.8"], ["file"])},
+            seq=2,
+        )
+        is False
+    )
+
+    monkeypatch.setattr(journal, "save_manifest", lambda *_a, **_k: True)
+    monkeypatch.setattr(journal, "save_snapshot", lambda *_a, **_k: True)
+    monkeypatch.setattr(
+        builtins,
+        "open",
+        lambda *_a, **_k: (_ for _ in ()).throw(OSError("open boom")),
+    )
+    assert (
+        journal.compact_zone_journal(
+            zone_apex="example.org",
+            base_dir=base_dir,
+            records={("a.example.org", 1): (60, ["192.0.2.9"], ["file"])},
+            seq=3,
+        )
+        is False
+    )
