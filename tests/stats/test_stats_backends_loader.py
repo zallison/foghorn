@@ -14,6 +14,7 @@ import logging
 import threading
 import time
 from typing import Any, Dict, Optional
+import pytest
 
 from foghorn.plugins.querylog import (
     BaseStatsStore,
@@ -134,6 +135,281 @@ class DummyBackend(BaseStatsStore):
     def has_query_log(self) -> bool:  # type: ignore[override]
         self._bump("has_query_log")
         return True
+
+
+def test_multi_stats_store_requires_at_least_one_backend() -> None:
+    """Brief: MultiStatsStore raises when constructed with an empty backend list.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts ValueError for empty backend list input.
+    """
+
+    with pytest.raises(ValueError, match="at least one backend"):
+        MultiStatsStore([])
+
+
+def test_multi_stats_store_derives_effective_max_logging_queue_from_backends() -> None:
+    """Brief: Queue capacity derives from the smallest valid backend value.
+
+    Inputs:
+      - Three dummy backends with mixed queue-capacity attributes:
+        one private int, one public string int, and one invalid value.
+
+    Outputs:
+      - None; asserts effective queue capacity is the minimum valid parsed value.
+    """
+
+    primary = DummyBackend(name="primary")
+    secondary = DummyBackend(name="secondary")
+    tertiary = DummyBackend(name="tertiary")
+    primary._max_logging_queue = 500  # type: ignore[attr-defined]
+    secondary.max_logging_queue = "250"  # type: ignore[attr-defined]
+    tertiary._max_logging_queue = "not-an-int"  # type: ignore[attr-defined]
+
+    store = MultiStatsStore([primary, secondary, tertiary])
+    assert getattr(store, "_max_logging_queue", None) == 250
+
+
+def test_multi_stats_store_close_without_queue_ignores_backend_close_failures() -> None:
+    """Brief: close() continues even when one backend close operation fails.
+
+    Inputs:
+      - A healthy dummy backend and one backend that raises in close().
+
+    Outputs:
+      - None; asserts close() does not raise and still calls all backends.
+    """
+
+    class FailingCloseBackend(DummyBackend):
+        def close(self) -> None:  # type: ignore[override]
+            self._bump("close")
+            raise RuntimeError("close failure")
+
+    healthy = DummyBackend(name="healthy")
+    failing = FailingCloseBackend(name="failing")
+    store = MultiStatsStore([healthy, failing])
+
+    # No async write was enqueued, so _op_queue should be absent.
+    assert getattr(store, "_op_queue", None) is None
+    store.close()
+
+    assert healthy.calls.get("close", 0) == 1
+    assert failing.calls.get("close", 0) == 1
+
+
+def test_multi_stats_store_fanout_methods_ignore_per_backend_errors() -> None:
+    """Brief: Fan-out methods continue when a secondary backend raises.
+
+    Inputs:
+      - Primary dummy backend and one backend that raises for write-like calls.
+
+    Outputs:
+      - None; asserts fan-out operations complete, calls reach healthy primary,
+        and primary read helpers still return values.
+    """
+
+    class RaisingBackend(DummyBackend):
+        def increment_count(  # type: ignore[override]
+            self, scope: str, key: str, delta: int = 1
+        ) -> None:
+            self._bump(f"inc:{scope}:{key}")
+            raise RuntimeError("increment failure")
+
+        def set_count(self, scope: str, key: str, value: int) -> None:  # type: ignore[override]
+            self._bump(f"set:{scope}:{key}")
+            raise RuntimeError("set failure")
+
+        def rebuild_counts_from_query_log(  # type: ignore[override]
+            self, logger_obj: Optional["logging.Logger"] = None
+        ) -> None:
+            self._bump("rebuild_from_log")
+            raise RuntimeError("rebuild_from_log failure")
+
+        def rebuild_counts_if_needed(  # type: ignore[override]
+            self,
+            force_rebuild: bool = False,
+            logger_obj: Optional["logging.Logger"] = None,  # type: ignore[name-defined]
+        ) -> None:
+            self._bump("rebuild_if_needed")
+            raise RuntimeError("rebuild_if_needed failure")
+
+    primary = DummyBackend(name="primary")
+    secondary = RaisingBackend(name="secondary")
+    store = MultiStatsStore([primary, secondary])
+
+    store.increment_count("totals", "x", 1)
+    store.set_count("totals", "y", 2)
+    store.rebuild_counts_from_query_log()
+    store.rebuild_counts_if_needed(force_rebuild=True)
+
+    assert any(k.startswith("inc:totals:x") for k in primary.calls)
+    assert any(k.startswith("set:totals:y") for k in primary.calls)
+    assert primary.calls.get("rebuild_from_log", 0) == 1
+    assert primary.calls.get("rebuild_if_needed", 0) == 1
+
+    assert any(k.startswith("inc:totals:x") for k in secondary.calls)
+    assert any(k.startswith("set:totals:y") for k in secondary.calls)
+    assert secondary.calls.get("rebuild_from_log", 0) == 1
+    assert secondary.calls.get("rebuild_if_needed", 0) == 1
+
+    assert store.has_counts() is True
+    assert store.has_query_log() is True
+
+
+def test_loader_returns_none_for_non_mapping_configs() -> None:
+    """Brief: Loader returns None when persistence config is not a mapping.
+
+    Inputs:
+      - None, string, and integer as persistence config values.
+
+    Outputs:
+      - None; asserts all non-mapping inputs return None.
+    """
+
+    assert load_stats_store_backend(None) is None
+    assert load_stats_store_backend("invalid") is None  # type: ignore[arg-type]
+    assert load_stats_store_backend(123) is None  # type: ignore[arg-type]
+
+
+def test_loader_skips_non_dict_backend_entries_and_returns_none(monkeypatch) -> None:
+    """Brief: Loader ignores invalid backend list entries and can return None.
+
+    Inputs:
+      - monkeypatch fixture and a backends list containing non-dict entries.
+
+    Outputs:
+      - None; asserts no backend is built and return value is None.
+    """
+
+    built = {"count": 0}
+
+    def _dummy_ctor(
+        cfg: StatsStoreBackendConfig,
+    ) -> BaseStatsStore:  # pragma: nocover - should not be called
+        built["count"] += 1
+        return DummyBackend(name=cfg.backend)
+
+    from foghorn.plugins import querylog as qlb
+
+    monkeypatch.setattr(qlb, "_build_backend_from_config", _dummy_ctor)
+
+    persistence_cfg = {
+        "backends": [None, "sqlite", 1, 2.5, []],
+    }
+    backend = load_stats_store_backend(persistence_cfg)
+    assert backend is None
+    assert built["count"] == 0
+
+
+def test_loader_single_backend_list_returns_single_backend_instance(
+    monkeypatch,
+) -> None:
+    """Brief: One configured backend returns a backend instance, not MultiStatsStore.
+
+    Inputs:
+      - monkeypatch fixture.
+
+    Outputs:
+      - None; asserts single-entry backends config returns that one backend.
+    """
+
+    created: list[DummyBackend] = []
+
+    def _dummy_ctor(cfg: StatsStoreBackendConfig) -> BaseStatsStore:
+        b = DummyBackend(name=cfg.name or cfg.backend)
+        created.append(b)
+        return b
+
+    from foghorn.plugins import querylog as qlb
+
+    monkeypatch.setattr(qlb, "_build_backend_from_config", _dummy_ctor)
+
+    backend = load_stats_store_backend(
+        {"backends": [{"backend": "sqlite", "config": {"db_path": ":memory:"}}]}
+    )
+
+    assert len(created) == 1
+    assert backend is created[0]
+    assert not isinstance(backend, MultiStatsStore)
+
+
+def test_loader_unmatched_primary_backend_keeps_declared_primary(monkeypatch) -> None:
+    """Brief: Unknown primary_backend hint leaves first configured backend primary.
+
+    Inputs:
+      - monkeypatch fixture.
+
+    Outputs:
+      - None; asserts no reordering when primary_backend does not match.
+    """
+
+    created: list[DummyBackend] = []
+
+    def _dummy_ctor(cfg: StatsStoreBackendConfig) -> BaseStatsStore:
+        b = DummyBackend(name=cfg.name or cfg.backend)
+        created.append(b)
+        return b
+
+    from foghorn.plugins import querylog as qlb
+
+    monkeypatch.setattr(qlb, "_build_backend_from_config", _dummy_ctor)
+
+    backend = load_stats_store_backend(
+        {
+            "primary_backend": "does-not-exist",
+            "backends": [
+                {"backend": "primary", "config": {}},
+                {"backend": "secondary", "config": {}},
+            ],
+        }
+    )
+    assert isinstance(backend, MultiStatsStore)
+
+    backend.health_check()
+    assert created[0].calls.get("health_check", 0) == 1
+    assert created[1].calls.get("health_check", 0) == 0
+
+
+def test_loader_primary_backend_match_at_index_zero_does_not_reorder(
+    monkeypatch,
+) -> None:
+    """Brief: Matching the first backend by primary_backend keeps order unchanged.
+
+    Inputs:
+      - monkeypatch fixture.
+
+    Outputs:
+      - None; asserts primary remains index zero when hint already matches first.
+    """
+
+    created: list[DummyBackend] = []
+
+    def _dummy_ctor(cfg: StatsStoreBackendConfig) -> BaseStatsStore:
+        b = DummyBackend(name=cfg.name or cfg.backend)
+        created.append(b)
+        return b
+
+    from foghorn.plugins import querylog as qlb
+
+    monkeypatch.setattr(qlb, "_build_backend_from_config", _dummy_ctor)
+
+    backend = load_stats_store_backend(
+        {
+            "primary_backend": "primary",
+            "backends": [
+                {"backend": "primary", "config": {}},
+                {"backend": "secondary", "config": {}},
+            ],
+        }
+    )
+    assert isinstance(backend, MultiStatsStore)
+
+    backend.health_check()
+    assert created[0].calls.get("health_check", 0) == 1
+    assert created[1].calls.get("health_check", 0) == 0
 
 
 def test_loader_legacy_single_sqlite_config_still_works(monkeypatch) -> None:
