@@ -1075,6 +1075,29 @@ $DIG_UDP ads.example A
 $DIG_UDP www.example.com A
 ```
 
+## Resolve plugin: DnsRebinding (`dns_rebinding.py`)
+
+DnsRebinding is a post-resolve policy plugin that denies rebinding-style answers.
+
+DNS-visible behaviors:
+- Inspects A/AAAA answer records in upstream responses.
+- If any answer IP is private and `qname` is not allowlisted, returns `deny`
+  (core resolver maps this to NXDOMAIN with policy EDE handling).
+- If no private answer is present, or the queried name is allowlisted, query processing continues.
+
+Required inputs:
+- `qname` and `qtype` (typically A/AAAA queries).
+
+Key config knobs:
+- `allowlist_domains`: list of names allowed to return private addresses.
+- `allowlist_mode`: `suffix` or `exact`.
+- `private_cidrs`: CIDR ranges treated as private/rebinding-sensitive.
+
+Example:
+```bash
+$DIG_UDP www.example.com A
+```
+
 ## Resolve plugin: AccessControl (`access_control.py`)
 
 AccessControl is a policy plugin; it applies to any query from a client that matches its targeting.

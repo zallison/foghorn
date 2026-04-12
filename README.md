@@ -4,7 +4,7 @@ Foghorn is a versatile DNS server designed for flexibility and performance. Buil
 
 With built-in admin and API server support, Foghorn empowers you to monitor and manage its operations efficiently. Plugins extend its functionality by providing their own status pages, seamlessly integrated into the admin dashboard. Newer releases add DNSSEC signing helpers, zone transfers (AXFR/IXFR), RFC 8914 Extended DNS Errors (EDE), and SSH host key utilities so you can treat DNS as a first-class security and operations tool.
 
-[![Python Tests](https://github.com/zallison/foghorn/actions/workflows/pytest.yml/badge.svg)](https://github.com/zallison/foghorn/actions/workflows/pytest.yml) ![Test Coverage](https://img.shields.io/badge/test_coverage-89%25-blue) [![Docker Pulls](https://img.shields.io/docker/pulls/zallison/foghorn)](https://hub.docker.com/r/zallison/foghorn/)  [![PyPI Downloads](https://static.pepy.tech/personalized-badge/foghorn?period=total&units=INTERNATIONAL_SYSTEM&left_color=GRAY&right_color=BLUE&left_text=downloads)](https://pepy.tech/projects/foghorn)  [![BuyMeACoffee](https://raw.githubusercontent.com/pachadotdev/buymeacoffee-badges/main/bmc-blue.svg)](https://www.buymeacoffee.com/foghorndns)
+[![Python Tests](https://github.com/zallison/foghorn/actions/workflows/pytest.yml/badge.svg)](https://github.com/zallison/foghorn/actions/workflows/pytest.yml) ![Test Coverage](https://img.shields.io/badge/test_coverage-90%25-blue) [![Docker Pulls](https://img.shields.io/docker/pulls/zallison/foghorn)](https://hub.docker.com/r/zallison/foghorn/)  [![PyPI Downloads](https://static.pepy.tech/personalized-badge/foghorn?period=total&units=INTERNATIONAL_SYSTEM&left_color=GRAY&right_color=BLUE&left_text=downloads)](https://pepy.tech/projects/foghorn)  [![BuyMeACoffee](https://raw.githubusercontent.com/pachadotdev/buymeacoffee-badges/main/bmc-blue.svg)](https://www.buymeacoffee.com/foghorndns)
 
 <img src="https://raw.githubusercontent.com/zallison/foghorn/refs/heads/main/assets/screenshot-1.png" height="300" /> <img src="https://raw.githubusercontent.com/zallison/foghorn/refs/heads/main/assets/screenshot-2.png" height="300" /> <img src="https://raw.githubusercontent.com/zallison/foghorn/refs/heads/main/assets/screenshot-3.png" height="300" /> <img src="https://raw.githubusercontent.com/zallison/foghorn/refs/heads/main/assets/screenshot-4.png" height="300" />
 
@@ -44,6 +44,7 @@ Key plugins include:
   - Or silently drop the connection
 - **[ZoneRecords](docs/plugins/resolve/zone_records.md)**: Load BIND9 zone files and/or define arbitrary records without creating a full zone. Supports combining multiple files and enabling DNSSEC.
 - **[UpstreamRouter](docs/plugins/resolve/upstream_router.md)**: Route queries to different upstreams based on name, for example forwarding `.corp` to a VPN resolver.
+- **[DnsRebinding](docs/plugins/resolve/dns_rebinding.md)**: Blocks private A/AAAA answers for non-allowlisted names to reduce DNS rebinding risk.
 - Additional plugins for:
   - [Rate limiting](docs/plugins/resolve/rate_limit.md) - Static or Dynamic
   - [Docker host discovery](docs/plugins/resolve/docker_hosts.md) - Add containers to DNS
@@ -111,6 +112,7 @@ Creating new plugins is simple. You can implement custom DNS logic without writi
   - [4.8 Rate limiting (rate)](#48-rate-limiting-rate)
   - [4.9 Per-domain upstream routing (router)](#49-per-domain-upstream-routing-router)
   - [4.10 Inline and file-based records (zone)](#410-inline-and-file-based-records-zone)
+  - [4.11 DNS rebinding protection (dns_rebinding)](#411-dns-rebinding-protection-dns_rebinding)
 - [5. Example Plugins](#5-example-plugins)
   - [5.1 DNS prefetch (prefetch)](#51-dns-prefetch-prefetch)
   - [5.2 Example rewrites (examples)](#52-example-rewrites-examples)
@@ -273,6 +275,7 @@ If you have a `diagram.dot` and want to render it to `diagram.png`:
 ```bash
 dot -Tpng diagram.dot -o diagram.png
 ```
+
 
 ---
 
@@ -1047,7 +1050,31 @@ plugins:
 	  ttl: 300
 ```
 
----
+### 4.11 DNS rebinding protection (`dns_rebinding`)
+
+Blocks post-resolve answers when a non-allowlisted queried name resolves to private address space.
+
+```yaml
+plugins:
+  - type: dns_rebinding
+    hooks:
+      post_resolve:
+        priority: 40
+    config:
+      allowlist_mode: suffix   # suffix | exact
+      allowlist_domains:
+        - printer.example.com
+        - lan.example.com
+      private_cidrs:
+        - 10.0.0.0/8
+        - 172.16.0.0/12
+        - 192.168.0.0/16
+        - 127.0.0.0/8
+        - 169.254.0.0/16
+        - ::1/128
+        - fc00::/7
+        - fe80::/10
+```
 
 ## 5. Example Plugins
 
@@ -1644,7 +1671,7 @@ plugins:
 
 From here you can mix and match plugins, caches, and stats backends to shape Foghorn into exactly the DNS service you need.
 
-[![Python Tests](https://github.com/zallison/foghorn/actions/workflows/pytest.yml/badge.svg)](https://github.com/zallison/foghorn/actions/workflows/pytest.yml) ![Test Coverage](https://img.shields.io/badge/test_coverage-89%25-blue) [![Docker Pulls](https://img.shields.io/docker/pulls/zallison/foghorn)](https://hub.docker.com/r/zallison/foghorn/)  [![PyPI Downloads](https://static.pepy.tech/personalized-badge/foghorn?period=total&units=INTERNATIONAL_SYSTEM&left_color=GRAY&right_color=BLUE&left_text=downloads)](https://pepy.tech/projects/foghorn)  [![BuyMeACoffee](https://raw.githubusercontent.com/pachadotdev/buymeacoffee-badges/main/bmc-blue.svg)](https://www.buymeacoffee.com/foghorndns)
+[![Python Tests](https://github.com/zallison/foghorn/actions/workflows/pytest.yml/badge.svg)](https://github.com/zallison/foghorn/actions/workflows/pytest.yml) ![Test Coverage](https://img.shields.io/badge/test_coverage-90%25-blue) [![Docker Pulls](https://img.shields.io/docker/pulls/zallison/foghorn)](https://hub.docker.com/r/zallison/foghorn/)  [![PyPI Downloads](https://static.pepy.tech/personalized-badge/foghorn?period=total&units=INTERNATIONAL_SYSTEM&left_color=GRAY&right_color=BLUE&left_text=downloads)](https://pepy.tech/projects/foghorn)  [![BuyMeACoffee](https://raw.githubusercontent.com/pachadotdev/buymeacoffee-badges/main/bmc-blue.svg)](https://www.buymeacoffee.com/foghorndns)
 
 ## Stargazers over time
 [![Stargazers over time](https://starchart.cc/zallison/foghorn.svg?variant=adaptive)](https://starchart.cc/zallison/foghorn)
