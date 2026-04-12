@@ -84,7 +84,7 @@ def _extract_inline_scripts(index_html: str) -> list[str]:
 
     scripts: list[str] = []
     for match in re.finditer(
-        r"<script(?P<attrs>[^>]*)>(?P<content>.*?)</script>",
+        r"<script\b(?P<attrs>[^>]*)>(?P<content>.*?)</script\s*>",
         index_html,
         flags=re.IGNORECASE | re.DOTALL,
     ):
@@ -113,7 +113,7 @@ def _extract_body_markup(index_html: str) -> str:
         raise ValueError("Unable to locate <body>...</body> in index.html")
     body_markup = body_match.group("body")
     body_markup = re.sub(
-        r"<script[^>]*>.*?</script>",
+        r"<script\b[^>]*>.*?</script\s*>",
         "",
         body_markup,
         flags=re.IGNORECASE | re.DOTALL,

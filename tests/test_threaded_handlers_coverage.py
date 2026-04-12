@@ -51,6 +51,12 @@ def _one_shot_http_request(
 
     Outputs:
       - (status_code, headers_lower, body_bytes)
+
+    Notes:
+      - Some Python/runtime combinations may raise BrokenPipeError on the
+        client while sending an oversized request body when the server responds
+        early with 413 and closes the connection. In that case, this helper
+        still attempts to read the server response.
     """
 
     effective_config = dict(config or {})
@@ -85,9 +91,18 @@ def _one_shot_http_request(
     t.start()
 
     conn = http.client.HTTPConnection(host, port, timeout=5)
+    request_send_error: OSError | None = None
     try:
-        conn.request(method, path, body=body, headers=dict(headers or {}))
-        resp = conn.getresponse()
+        try:
+            conn.request(method, path, body=body, headers=dict(headers or {}))
+        except (BrokenPipeError, ConnectionResetError) as exc:
+            request_send_error = exc
+        try:
+            resp = conn.getresponse()
+        except Exception:
+            if request_send_error is not None:
+                raise request_send_error
+            raise
         status = int(resp.status)
         resp_headers = {str(k).lower(): str(v) for k, v in resp.getheaders()}
         data = resp.read()

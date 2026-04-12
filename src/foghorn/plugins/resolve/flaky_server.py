@@ -413,7 +413,7 @@ class FlakyServer(BasePlugin):
                 )
                 return PluginDecision(action="drop")
         except Exception as e:  # pragma: no cover - defensive
-            logger.debug("FlakyServer: timeout draw error: %s", e)
+            logger.debug("FlakyServer: timeout sampling error: %s", e)
 
         # Draw SERVFAIL first (precedence over NXDOMAIN and other rcodes).
         try:
@@ -422,7 +422,7 @@ class FlakyServer(BasePlugin):
                 if wire is not None:
                     return PluginDecision(action="override", response=wire)
         except Exception as e:  # pragma: no cover - defensive
-            logger.debug("FlakyServer: SERVFAIL draw error: %s", e)
+            logger.debug("FlakyServer: SERVFAIL sampling error: %s", e)
 
         # Then NXDOMAIN.
         try:
@@ -431,7 +431,7 @@ class FlakyServer(BasePlugin):
                 if wire is not None:
                     return PluginDecision(action="override", response=wire)
         except Exception as e:  # pragma: no cover - defensive
-            logger.debug("FlakyServer: NXDOMAIN draw error: %s", e)
+            logger.debug("FlakyServer: NXDOMAIN sampling error: %s", e)
 
         # FORMERR.
         try:
@@ -440,7 +440,7 @@ class FlakyServer(BasePlugin):
                 if wire is not None:
                     return PluginDecision(action="override", response=wire)
         except Exception as e:  # pragma: no cover - defensive
-            logger.debug("FlakyServer: FORMERR draw error: %s", e)
+            logger.debug("FlakyServer: FORMERR sampling error: %s", e)
 
         # NOERROR with empty answer section.
         try:
@@ -452,7 +452,7 @@ class FlakyServer(BasePlugin):
                 if wire is not None:
                     return PluginDecision(action="override", response=wire)
         except Exception as e:  # pragma: no cover - defensive
-            logger.debug("FlakyServer: NOERROR-empty draw error: %s", e)
+            logger.debug("FlakyServer: NOERROR-empty sampling error: %s", e)
 
         return None
 

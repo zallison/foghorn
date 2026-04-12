@@ -470,8 +470,9 @@ def normalize_axfr_config(raw: object) -> List[Dict[str, object]]:
     zones: List[Dict[str, object]] = []
 
     if not isinstance(raw, list):
+        zones_type = type(raw).__name__
         logger.warning(
-            "ZoneRecords axfr_zones ignored: expected list, got %r", type(raw)
+            "ZoneRecords axfr_zones ignored: expected list, got type=%s", zones_type
         )
         return zones
 

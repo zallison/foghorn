@@ -74,14 +74,14 @@ def _validate_axfr_allow_clients(entries: object) -> list[str]:
     except Exception as exc:
         logger.warning("Invalid axfr_allow_clients; using empty allowlist: %s", exc)
         return []
-    for raw in iterable:
-        text = str(raw or "").strip()
+    for idx, entry in enumerate(iterable):
+        text = str(entry or "").strip()
         if not text:
             continue
         try:
             network = ipaddress.ip_network(text, strict=False)
         except ValueError:
-            logger.warning("Ignoring invalid axfr_allow_clients entry: %r", raw)
+            logger.warning("Ignoring invalid axfr_allow_clients entry at index %d", idx)
             continue
         validated.append(str(network))
     return validated
@@ -103,13 +103,14 @@ def _validate_upstreams(upstreams: object) -> list[dict]:
         )
         return []
     validated: list[dict] = []
-    for idx, raw in enumerate(upstreams):
-        if not isinstance(raw, dict):
+    for idx, item in enumerate(upstreams):
+        if not isinstance(item, dict):
+            entry_type = type(item).__name__
             logger.warning(
-                "Ignoring upstream[%d]: expected mapping, got %s", idx, type(raw)
+                "Ignoring upstream[%d]: expected mapping, got %s", idx, entry_type
             )
             continue
-        record = dict(raw)
+        record = dict(item)
         transport = str(record.get("transport", "udp") or "udp").strip().lower()
         if transport not in _VALID_UPSTREAM_TRANSPORTS:
             logger.warning(
@@ -148,14 +149,15 @@ def _validate_upstreams(upstreams: object) -> list[dict]:
             )
             continue
         default_port = 853 if transport == "dot" else 53
-        raw_port = record.get("port", default_port)
+        port_candidate = record.get("port", default_port)
         try:
-            port = int(raw_port)
+            port = int(port_candidate)
         except Exception:
+            port_type = type(port_candidate).__name__
             logger.warning(
-                "Ignoring upstream[%d]: invalid port %r",
+                "Ignoring upstream[%d]: invalid port value type=%s",
                 idx,
-                raw_port,
+                port_type,
             )
             continue
         if port < 1 or port > 65535:

@@ -647,9 +647,10 @@ class BasePlugin:
         elif isinstance(raw, (list, tuple)):
             entries = [str(x) for x in raw]
         else:
+            input_type = type(raw).__name__
             logger.warning(
-                "BasePlugin: ignoring invalid target_qtypes value %r (expected str or list)",
-                raw,
+                "BasePlugin: ignoring invalid target_qtypes value type=%s (expected str or list)",
+                input_type,
             )
             return ["*"]
 
@@ -725,9 +726,10 @@ class BasePlugin:
         elif isinstance(raw, (list, tuple)):
             entries = [str(x) for x in raw]
         else:
+            input_type = type(raw).__name__
             logger.warning(
-                "BasePlugin: ignoring invalid targets value %r (expected str or list)",
-                raw,
+                "BasePlugin: ignoring invalid targets value type=%s (expected str or list)",
+                input_type,
             )
             return networks
 
@@ -771,9 +773,10 @@ class BasePlugin:
         elif isinstance(raw, (list, tuple)):
             entries = [str(x) for x in raw]
         else:
+            input_type = type(raw).__name__
             logger.warning(
-                "BasePlugin: ignoring invalid targets_domains value %r (expected str or list)",
-                raw,
+                "BasePlugin: ignoring invalid targets_domains value type=%s (expected str or list)",
+                input_type,
             )
             entries = []
 
@@ -857,9 +860,10 @@ class BasePlugin:
                     continue
                 _add_token(listeners, text)
         else:
+            input_type = type(raw).__name__
             logger.warning(
-                "BasePlugin: ignoring invalid targets_listener value %r (expected str or list)",
-                raw,
+                "BasePlugin: ignoring invalid targets_listener value type=%s (expected str or list)",
+                input_type,
             )
 
         # If an "any" token was seen at any point, listeners will have been
@@ -1081,9 +1085,10 @@ class BasePlugin:
         elif isinstance(raw, (list, tuple)):
             entries = list(raw)
         else:
+            input_type = type(raw).__name__
             logger.warning(
-                "BasePlugin: ignoring invalid target_opcodes value %r (expected str/int or list)",
-                raw,
+                "BasePlugin: ignoring invalid target_opcodes value type=%s (expected str/int or list)",
+                input_type,
             )
             return ["QUERY"]
 
@@ -1148,9 +1153,10 @@ class BasePlugin:
         elif isinstance(raw, (list, tuple)):
             entries = list(raw)
         else:
+            input_type = type(raw).__name__
             logger.warning(
-                "BasePlugin: ignoring invalid target_rcodes value %r (expected str/int or list)",
-                raw,
+                "BasePlugin: ignoring invalid target_rcodes value type=%s (expected str/int or list)",
+                input_type,
             )
             return ["*"]
 
