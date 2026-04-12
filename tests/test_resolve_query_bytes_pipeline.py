@@ -15,6 +15,7 @@ import foghorn.servers.server as server_mod
 from foghorn.plugins.cache.in_memory_ttl import InMemoryTTLCache
 from foghorn.plugins.resolve import base as plugin_base
 from foghorn.plugins.resolve.base import BasePlugin, PluginContext, PluginDecision
+from foghorn.plugins.resolve.dns_rebinding import DnsRebinding
 from foghorn.runtime_config import parse_upstream_health_config
 from foghorn.servers.dns_runtime_state import DNSRuntimeState
 from foghorn.servers.server import resolve_query_bytes
@@ -62,6 +63,49 @@ def test_resolve_query_bytes_cache_hit(set_runtime_snapshot):
     resp = resolve_query_bytes(q.pack(), "127.0.0.1")
     out = DNSRecord.parse(resp)
     assert out.header.rcode == RCODE.NOERROR
+
+
+def test_resolve_query_bytes_post_deny_plugin_maps_to_nxdomain(
+    monkeypatch: pytest.MonkeyPatch,
+    set_runtime_snapshot,
+) -> None:
+    """Brief: Post-resolve deny decision is synthesized to NXDOMAIN by the core pipeline.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+      - set_runtime_snapshot: fixture configuring runtime plugins and upstreams.
+
+    Outputs:
+      - None: Asserts a dns_rebinding post-resolve deny yields NXDOMAIN.
+    """
+
+    plugin = DnsRebinding()
+    plugin.setup()
+
+    def _forward_private_answer(
+        req,
+        upstreams,
+        timeout_ms,
+        qname,
+        qtype,
+        max_concurrent=None,
+        on_attempt_result=None,
+    ):
+        response = DNSRecord.question(qname, "A").reply()
+        response.add_answer(RR(qname, QTYPE.A, rdata=A("192.168.1.25"), ttl=60))
+        return response.pack(), {"host": "8.8.8.8", "port": 53}, "ok"
+
+    monkeypatch.setattr(server_mod, "send_query_with_failover", _forward_private_answer)
+    set_runtime_snapshot(
+        plugins=[plugin],
+        upstream_addrs=[{"host": "8.8.8.8", "port": 53}],
+    )
+
+    query = DNSRecord.question("www.example.com", "A")
+    wire = resolve_query_bytes(query.pack(), "127.0.0.1")
+    response = DNSRecord.parse(wire)
+
+    assert response.header.rcode == RCODE.NXDOMAIN
 
 
 def test_resolve_query_bytes_qdcount_zero_returns_formerr(set_runtime_snapshot) -> None:
