@@ -1,0 +1,37 @@
+upstreams:
+  endpoints:
+    - host: 1.1.1.1
+      port: 53
+    - host: 8.8.8.8
+      port: 53
+
+plugins:
+  - type: dns_rebinding
+    id: dns-rebinding-default
+    enabled: true
+    hooks:
+      post_resolve:
+        priority: 40
+    config:
+      allowlist_mode: suffix
+      allowlist_domains:
+        - printer.example.com
+        - lan.example.com
+      private_cidrs:
+        - 10.0.0.0/8
+        - 172.16.0.0/12
+        - 192.168.0.0/16
+        - 127.0.0.0/8
+        - 169.254.0.0/16
+        - ::1/128
+        - fc00::/7
+        - fe80::/10
+
+server:
+  listen:
+    udp:
+      enabled: true
+      host: 127.0.0.1
+      port: 5353
+    tcp:
+      enabled: false
