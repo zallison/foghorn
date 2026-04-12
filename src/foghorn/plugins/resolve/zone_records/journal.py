@@ -52,6 +52,9 @@ def _normalize_zone_apex(zone_apex: str) -> str:
 
     Outputs:
       - Normalized zone apex string.
+
+    Notes:
+      - Raises ValueError when input is empty or unsafe for filesystem usage.
     """
     zone_norm = dns_names.normalize_name(zone_apex)
     if not zone_norm:
@@ -333,6 +336,8 @@ class JournalEntry:
 
     def to_dict(self) -> Dict[str, Any]:
         """Brief: Convert to dict for JSON serialization.
+        Inputs:
+          - None.
 
         Outputs:
           - Dict representation.
@@ -352,6 +357,8 @@ class JournalEntry:
 
     def compute_checksum(self) -> str:
         """Brief: Compute SHA256 checksum of entry (excluding checksum field).
+        Inputs:
+          - None.
 
         Outputs:
           - Hex-encoded SHA256 digest.
@@ -391,6 +398,8 @@ class Manifest:
 
     def to_dict(self) -> Dict[str, Any]:
         """Brief: Convert to dict for JSON serialization.
+        Inputs:
+          - None.
 
         Outputs:
           - Dict representation.
@@ -425,6 +434,9 @@ class JournalWriter:
         Inputs:
           - zone_apex: Zone name.
           - base_dir: Base directory for journals.
+
+        Outputs:
+          - None.
         """
         self.zone_apex = _normalize_zone_apex(zone_apex)
 
@@ -443,6 +455,8 @@ class JournalWriter:
 
     def _ensure_dir(self) -> None:
         """Brief: Ensure journal directory exists with correct permissions.
+        Inputs:
+          - None.
 
         Outputs:
           - None; creates directory if missing.
@@ -460,6 +474,8 @@ class JournalWriter:
 
     def _initialize_state(self) -> None:
         """Brief: Initialize sequence and hash state from manifest and journal tail.
+        Inputs:
+          - None.
 
         Outputs:
           - None; initializes internal sequence and hash tracking.
@@ -503,7 +519,7 @@ class JournalWriter:
             manifest.last_seq = int(seq)
             save_manifest(manifest, self.zone_apex, self.base_dir)
             self._last_manifest_write_ns = now_ns
-        except Exception:
+        except Exception:  # pragma: no cover - nocover: best-effort state persistence
             pass
 
     def _maybe_warn_journal_size(self, max_journal_bytes: int) -> None:
@@ -531,11 +547,15 @@ class JournalWriter:
                         self.zone_apex,
                     )
                     self._last_size_warn_ns = now_ns
-        except OSError:
+        except (
+            OSError
+        ):  # pragma: no cover - nocover: warning path should not affect writes
             pass
 
     def acquire_lock(self) -> bool:
         """Brief: Acquire advisory lock for this zone's journal.
+        Inputs:
+          - None.
 
         Outputs:
           - bool: True if lock acquired, False otherwise.
@@ -557,7 +577,9 @@ class JournalWriter:
                     )
                 )
                 fh.flush()
-            except Exception:
+            except (
+                Exception
+            ):  # pragma: no cover - nocover: lock metadata write is best effort
                 pass
             setattr(self, "_lock_fh", fh)
             return True
@@ -572,12 +594,16 @@ class JournalWriter:
                             self.zone_apex,
                             raw,
                         )
-            except Exception:
+            except (
+                Exception
+            ):  # pragma: no cover - nocover: lock contention diagnostics only
                 pass
             return False
 
     def release_lock(self) -> None:
         """Brief: Release lock if held.
+        Inputs:
+          - None.
 
         Outputs:
           - None.
@@ -587,7 +613,9 @@ class JournalWriter:
             try:
                 fcntl.flock(fh, fcntl.LOCK_UN)
                 fh.close()
-            except Exception:
+            except (
+                Exception
+            ):  # pragma: no cover - nocover: lock cleanup should be non-fatal
                 pass
             delattr(self, "_lock_fh")
 
@@ -623,7 +651,9 @@ class JournalWriter:
             if self._file_handle:
                 try:
                     os.fsync(self._file_handle.fileno())
-                except Exception:
+                except (
+                    Exception
+                ):  # pragma: no cover - nocover: fsync failures are non-fatal
                     pass
         elif fsync_mode == "interval":
             now_ns = time.time_ns()
@@ -633,7 +663,9 @@ class JournalWriter:
                     try:
                         os.fsync(self._file_handle.fileno())
                         self._last_fsync_ns = now_ns
-                    except Exception:
+                    except (
+                        Exception
+                    ):  # pragma: no cover - nocover: fsync failures are non-fatal
                         pass
 
     def append_entry(
@@ -733,6 +765,8 @@ class JournalWriter:
 
     def close(self) -> None:
         """Brief: Close any open file handle.
+        Inputs:
+          - None.
 
         Outputs:
           - None.
@@ -740,7 +774,9 @@ class JournalWriter:
         if self._file_handle and not self._file_handle.closed:
             try:
                 self._file_handle.close()
-            except Exception:
+            except (
+                Exception
+            ):  # pragma: no cover - nocover: close failures are non-fatal cleanup
                 pass
         self._file_handle = None
 
@@ -765,6 +801,9 @@ class JournalReader:
         Inputs:
           - zone_apex: Zone name.
           - base_dir: Base directory for journals.
+
+        Outputs:
+          - None.
         """
         self.zone_apex = _normalize_zone_apex(zone_apex)
         self.base_dir = str(base_dir)
@@ -872,6 +911,8 @@ class JournalReader:
 
     def get_size_bytes(self) -> int:
         """Brief: Get journal file size in bytes.
+        Inputs:
+          - None.
 
         Outputs:
           - int: File size or 0 if missing.
@@ -883,6 +924,8 @@ class JournalReader:
 
     def get_entry_count(self) -> int:
         """Brief: Get number of entries in journal.
+        Inputs:
+          - None.
 
         Outputs:
           - int: Entry count.
@@ -969,7 +1012,9 @@ def save_manifest(manifest: Manifest, zone_apex: str, base_dir: str) -> bool:
         if os.path.exists(tmp_path):
             try:
                 os.unlink(tmp_path)
-            except Exception:
+            except (
+                Exception
+            ):  # pragma: no cover - nocover: temp cleanup failure is non-fatal
                 pass
         return False
 
@@ -1134,7 +1179,9 @@ def save_snapshot(
         if os.path.exists(tmp_path):
             try:
                 os.unlink(tmp_path)
-            except Exception:
+            except (
+                Exception
+            ):  # pragma: no cover - nocover: temp cleanup failure is non-fatal
                 pass
         return False
 
@@ -1250,6 +1297,8 @@ def compact_zone_journal(
     try:
         if os.path.exists(old_path):
             os.unlink(old_path)
-    except OSError:
+    except (
+        OSError
+    ):  # pragma: no cover - nocover: old journal cleanup failure is non-fatal
         pass
     return True
