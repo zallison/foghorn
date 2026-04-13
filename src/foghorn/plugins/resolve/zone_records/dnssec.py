@@ -334,8 +334,8 @@ def add_nsec3_denial_of_existence(
         p = str(param_vals[0]).split()
         alg = int(p[0])
         _flags = int(p[1])
-        iterations_raw = p[2]
-        iterations = int(iterations_raw)
+        iterations_input = p[2]
+        iterations = int(iterations_input)
         salt_text = str(p[3])
         if salt_text in {"", "-"}:
             salt_hash = ""
@@ -359,7 +359,7 @@ def add_nsec3_denial_of_existence(
             "ZoneRecords: NSEC3 iterations capped for zone %s (alg=%s): %s -> %s",
             zone_apex,
             alg,
-            iterations_raw if "iterations_raw" in locals() else iterations,
+            iterations_input if "iterations_input" in locals() else iterations,
             iterations,
         )
 

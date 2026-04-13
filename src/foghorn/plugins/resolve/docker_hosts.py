@@ -288,9 +288,10 @@ class DockerHosts(BasePlugin):
                     continue
                 txt_fields.append((name_val, path_val))
         elif raw_txt_fields:
+            txt_fields_type = type(raw_txt_fields).__name__
             logger.warning(
-                "DockerHosts: txt_fields must be a list when set; got %r",
-                type(raw_txt_fields),
+                "DockerHosts: txt_fields must be a list when set; got type=%s",
+                txt_fields_type,
             )
 
         self._txt_fields: List[Tuple[str, str]] = txt_fields
@@ -311,9 +312,10 @@ class DockerHosts(BasePlugin):
                     continue
                 txt_fields_keep.append(text)
         elif raw_txt_keep:
+            txt_fields_keep_type = type(raw_txt_keep).__name__
             logger.warning(
-                "DockerHosts: txt_fields_keep must be a list when set; got %r",
-                type(raw_txt_keep),
+                "DockerHosts: txt_fields_keep must be a list when set; got type=%s",
+                txt_fields_keep_type,
             )
 
         self._txt_fields_keep: List[str] = txt_fields_keep
@@ -361,10 +363,14 @@ class DockerHosts(BasePlugin):
                         host_ipv4 = str(ip_obj)
                     else:
                         logger.warning(
-                            "DockerHosts: use_ipv4=%r is not IPv4; ignoring", raw_v4
+                            "DockerHosts: use_ipv4 is not IPv4 for endpoint %s; ignoring override",
+                            url,
                         )
                 except ValueError:
-                    logger.warning("DockerHosts: invalid use_ipv4 %r; ignoring", raw_v4)
+                    logger.warning(
+                        "DockerHosts: invalid use_ipv4 for endpoint %s; ignoring override",
+                        url,
+                    )
             raw_v6 = item.get("use_ipv6")
             if raw_v6:
                 try:
@@ -373,10 +379,14 @@ class DockerHosts(BasePlugin):
                         host_ipv6 = str(ip_obj)
                     else:
                         logger.warning(
-                            "DockerHosts: use_ipv6=%r is not IPv6; ignoring", raw_v6
+                            "DockerHosts: use_ipv6 is not IPv6 for endpoint %s; ignoring override",
+                            url,
                         )
                 except ValueError:
-                    logger.warning("DockerHosts: invalid use_ipv6 %r; ignoring", raw_v6)
+                    logger.warning(
+                        "DockerHosts: invalid use_ipv6 for endpoint %s; ignoring override",
+                        url,
+                    )
 
             # Per-endpoint TTL override
             ttl_override: Optional[int]
@@ -388,9 +398,10 @@ class DockerHosts(BasePlugin):
                     ttl_val = int(ttl_raw)
                     ttl_override = ttl_val if ttl_val >= 0 else None
                 except (TypeError, ValueError):
+                    ttl_type = type(ttl_raw).__name__
                     logger.warning(
-                        "DockerHosts: invalid ttl %r for endpoint %s; ignoring override",
-                        ttl_raw,
+                        "DockerHosts: invalid ttl type=%s for endpoint %s; ignoring override",
+                        ttl_type,
                         url,
                     )
                     ttl_override = None

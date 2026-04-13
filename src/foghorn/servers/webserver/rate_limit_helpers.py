@@ -556,6 +556,49 @@ def _find_rate_limit_burst_count_readers(
     return readers
 
 
+def _resolve_rate_limit_reader_for_path(
+    readers: Dict[str, Any],
+    db_path: str,
+) -> Any:
+    """Brief: Resolve a per-db reader callable with alias-tolerant fallback.
+
+    Inputs:
+      - readers: Mapping of db_path variants to reader callables.
+      - db_path: Configured database path currently being summarized.
+
+    Outputs:
+      - Callable reader when a direct/absolute/realpath key matches, or when
+        exactly one unique callable exists across all aliases; otherwise None.
+    """
+
+    if not isinstance(readers, dict) or not readers:
+        return None
+
+    candidate_paths: list[str] = [str(db_path)]
+    try:
+        candidate_paths.append(os.path.abspath(str(db_path)))
+    except Exception:
+        pass
+    try:
+        candidate_paths.append(os.path.realpath(str(db_path)))
+    except Exception:
+        pass
+
+    for candidate_path in candidate_paths:
+        reader = readers.get(candidate_path)
+        if callable(reader):
+            return reader
+
+    unique_readers: dict[int, Any] = {}
+    for reader in readers.values():
+        if not callable(reader):
+            continue
+        unique_readers[id(reader)] = reader
+    if len(unique_readers) == 1:
+        return next(iter(unique_readers.values()))
+    return None
+
+
 def _compute_per_key_rolling_averages(
     conn: Any,
     key: str,
@@ -688,34 +731,22 @@ def _collect_rate_limit_stats(
         )
         if window_seconds <= 0:
             window_seconds = 10
-        current_rps_reader = db_current_rps_readers.get(path)
-        if current_rps_reader is None:
-            try:
-                current_rps_reader = db_current_rps_readers.get(os.path.abspath(path))
-            except Exception:
-                current_rps_reader = None
-        current_rps_snapshot_reader = db_current_rps_snapshot_readers.get(path)
-        if current_rps_snapshot_reader is None:
-            try:
-                current_rps_snapshot_reader = db_current_rps_snapshot_readers.get(
-                    os.path.abspath(path)
-                )
-            except Exception:
-                current_rps_snapshot_reader = None
-        burst_count_reader = db_burst_count_readers.get(path)
-        if burst_count_reader is None:
-            try:
-                burst_count_reader = db_burst_count_readers.get(os.path.abspath(path))
-            except Exception:
-                burst_count_reader = None
-        recalculated_allowed_rps_reader = db_recalculated_allowed_rps_readers.get(path)
-        if recalculated_allowed_rps_reader is None:
-            try:
-                recalculated_allowed_rps_reader = (
-                    db_recalculated_allowed_rps_readers.get(os.path.abspath(path))
-                )
-            except Exception:
-                recalculated_allowed_rps_reader = None
+        current_rps_reader = _resolve_rate_limit_reader_for_path(
+            db_current_rps_readers,
+            path,
+        )
+        current_rps_snapshot_reader = _resolve_rate_limit_reader_for_path(
+            db_current_rps_snapshot_readers,
+            path,
+        )
+        burst_count_reader = _resolve_rate_limit_reader_for_path(
+            db_burst_count_readers,
+            path,
+        )
+        recalculated_allowed_rps_reader = _resolve_rate_limit_reader_for_path(
+            db_recalculated_allowed_rps_readers,
+            path,
+        )
         current_window_rps_by_key: Dict[str, float] = {}
         if callable(current_rps_snapshot_reader):
             try:
