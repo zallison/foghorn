@@ -6,11 +6,11 @@ import threading
 import time
 from typing import Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 
-from foghorn.utils.current_cache import get_current_namespaced_cache, module_namespace
-from foghorn.utils.register_caches import registered_lru_cached
 from foghorn.plugins.resolve.base import BasePlugin, PluginContext, PluginDecision
+from foghorn.utils.current_cache import get_current_namespaced_cache, module_namespace
+from foghorn.utils.register_caches import registered_lru_cache
 
 log = logging.getLogger(__name__)
 
@@ -35,8 +35,7 @@ class GreylistConfig(BaseModel):
     cache_ttl_seconds: int = Field(default=300, ge=0)
     cache_max_entries: int = Field(default=100000, ge=0)
 
-    class Config:
-        extra = "allow"
+    model_config = ConfigDict(extra="allow")
 
 
 class GreylistExample(BasePlugin):
@@ -72,12 +71,14 @@ class GreylistExample(BasePlugin):
 
         return GreylistConfig
 
-    def start(self, **config):
-        """
-        Initializes the GreylistExample.
+    def setup(self) -> None:
+        """Brief: Initialize runtime state for GreylistExample.
 
-        Args:
-            **config: Plugin-specific configuration.
+        Inputs:
+          - None (uses self.config values).
+
+        Outputs:
+          - None (sets runtime fields, DB connection, and cache handle).
         """
         self.duration_seconds = self.config.get(
             "duration_seconds", self.config.get("duration_hours", 24) * 3600
@@ -93,6 +94,21 @@ class GreylistExample(BasePlugin):
             cache_plugin=self.config.get("cache"),
         )
 
+    def start(self, **config) -> None:
+        """Brief: Backward-compatible alias that delegates initialization to setup().
+
+        Inputs:
+          - **config: Optional runtime overrides merged into self.config.
+
+        Outputs:
+          - None.
+        """
+        if config:
+            merged_config = dict(self.config)
+            merged_config.update(config)
+            self.config = merged_config
+        self.setup()
+
     def _db_init(self):
         """
         Initializes the sqlite3 database.
@@ -107,7 +123,7 @@ class GreylistExample(BasePlugin):
                 ")"
             )
 
-    @registered_lru_cached(maxsize=1024)
+    @registered_lru_cache(maxsize=1024)
     def _to_base_domain(self, qname: str) -> str:
         """
         Extracts the last two labels of a domain name.

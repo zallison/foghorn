@@ -63,6 +63,7 @@ def parse_doh_get_dns_param(
     dns_param: str | None,
     *,
     decoder: Callable[[str], bytes] | None = None,
+    max_decoded_bytes: int | None = None,
 ) -> bytes:
     """Brief: Parse and validate the GET /dns-query?dns=... parameter.
 
@@ -76,6 +77,7 @@ def parse_doh_get_dns_param(
 
     Raises:
       - DohLogicError(400) when missing or invalid.
+      - DohLogicError(413) when dns_param is too large.
 
     Example:
       >>> parse_doh_get_dns_param('AQI')
@@ -85,13 +87,39 @@ def parse_doh_get_dns_param(
     if not dns_param:
         raise DohLogicError(status_code=400, detail="missing dns query parameter")
 
+    # Reject oversized dns_param strings BEFORE decoding to avoid processing
+    # excessively large base64url payloads. Base64url without padding has a
+    # 4/3 expansion ratio, so we conservatively check the string length.
+    if max_decoded_bytes is not None:
+        try:
+            limit = int(max_decoded_bytes)
+        except Exception:
+            limit = 0
+        if limit > 0:
+            # Base64url encoding has ~4/3 expansion; use ceiling as upper bound.
+            max_encoded_len = ((limit + 2) // 3) * 4
+            if len(dns_param) > max_encoded_len:
+                raise DohLogicError(
+                    status_code=413, detail="dns query parameter too large"
+                )
+
     decode = decoder or b64url_decode_nopad
     try:
-        return decode(dns_param)
+        out = decode(dns_param)
     except Exception as exc:
         raise DohLogicError(
             status_code=400, detail="invalid dns query parameter"
         ) from exc
+
+    if max_decoded_bytes is not None:
+        try:
+            limit = int(max_decoded_bytes)
+        except Exception:
+            limit = 0
+        if limit > 0 and len(out) > limit:
+            raise DohLogicError(status_code=413, detail="dns query parameter too large")
+
+    return out
 
 
 def validate_doh_post_content_type(content_type: str | None, *, dns_ct: str) -> None:

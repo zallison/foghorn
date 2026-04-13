@@ -91,13 +91,21 @@ stats:
         def stop(self) -> None:  # pragma: no cover - not exercised here
             pass
 
-    class DummyServer:
-        def __init__(self, *a, **kw) -> None:
-            pass
+    from foghorn.servers import udp_asyncio_server as udp_asyncio_mod
 
-        def serve_forever(self) -> None:
-            # Exit main loop quickly
-            raise KeyboardInterrupt
+    class DummyThread:
+        def is_alive(self) -> bool:
+            return False
+
+        def join(self, timeout: float | None = None) -> None:  # noqa: ARG002
+            return None
+
+    class DummyUDPHandle:
+        def __init__(self) -> None:
+            self.thread = DummyThread()
+
+        def stop(self) -> None:
+            return None
 
     # Patch dependencies in foghorn.main
     monkeypatch.setattr(main_mod, "StatsCollector", DummyCollector)
@@ -111,8 +119,13 @@ stats:
         return DummyStore()
 
     monkeypatch.setattr(main_mod, "load_stats_store_backend", _fake_loader)
-    monkeypatch.setattr(main_mod, "DNSServer", DummyServer)
+    monkeypatch.setattr(
+        udp_asyncio_mod,
+        "start_udp_asyncio_threaded",
+        lambda *_a, **_kw: DummyUDPHandle(),
+    )
     monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
+    monkeypatch.setattr(main_mod, "start_webserver", lambda *a, **k: None)
 
     with patch("builtins.open", mock_open(read_data=yaml_data)):
         rc = main_mod.main(["--config", "stats_persist.yaml"])
@@ -192,12 +205,21 @@ def test_main_persistence_unconfigured_skips_store(monkeypatch, tmp_path: Path) 
         def stop(self) -> None:  # pragma: no cover - not exercised
             pass
 
-    class DummyServer:
-        def __init__(self, *a, **kw) -> None:
-            pass
+    from foghorn.servers import udp_asyncio_server as udp_asyncio_mod
 
-        def serve_forever(self) -> None:
-            raise KeyboardInterrupt
+    class DummyThread:
+        def is_alive(self) -> bool:
+            return False
+
+        def join(self, timeout: float | None = None) -> None:  # noqa: ARG002
+            return None
+
+    class DummyUDPHandle:
+        def __init__(self) -> None:
+            self.thread = DummyThread()
+
+        def stop(self) -> None:
+            return None
 
     def _fake_loader_disabled(
         persistence_cfg: dict[str, object] | None,
@@ -212,8 +234,13 @@ def test_main_persistence_unconfigured_skips_store(monkeypatch, tmp_path: Path) 
     monkeypatch.setattr(main_mod, "StatsCollector", DummyCollector)
     monkeypatch.setattr(main_mod, "StatsReporter", DummyReporter)
     monkeypatch.setattr(main_mod, "load_stats_store_backend", _fake_loader_disabled)
-    monkeypatch.setattr(main_mod, "DNSServer", DummyServer)
+    monkeypatch.setattr(
+        udp_asyncio_mod,
+        "start_udp_asyncio_threaded",
+        lambda *_a, **_kw: DummyUDPHandle(),
+    )
     monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
+    monkeypatch.setattr(main_mod, "start_webserver", lambda *a, **k: None)
 
     with patch("builtins.open", mock_open(read_data=yaml_data)):
         rc = main_mod.main(["--config", "stats_persist_disabled.yaml"])
@@ -222,3 +249,93 @@ def test_main_persistence_unconfigured_skips_store(monkeypatch, tmp_path: Path) 
     assert constructed["store_constructed"] is False
     assert constructed["reporter_started"] is True
     assert constructed["reporter_args"]["persistence_store"] is None
+
+
+def test_build_effective_persistence_cfg_propagates_global_hardening_defaults() -> None:
+    """Brief: Global logging hardening keys are propagated into backend configs.
+
+    Inputs:
+        None.
+
+    Outputs:
+        None; asserts queue/retention defaults are copied to backend config.
+    """
+
+    cfg = {
+        "logging": {
+            "async": True,
+            "max_logging_queue": 2048,
+            "query_log_retention": {
+                "max_records": 1000,
+                "days": 2,
+                "max_bytes": 4096,
+                "prune_interval_seconds": 30,
+                "prune_every_n_inserts": 50,
+            },
+            "backends": [
+                {
+                    "id": "store-a",
+                    "backend": "sqlite",
+                    "config": {"db_path": "./config/var/stats_a.db"},
+                }
+            ],
+        }
+    }
+
+    out = main_mod._build_effective_persistence_cfg(cfg=cfg, stats_cfg={})
+    backends = out.get("backends")
+    assert isinstance(backends, list) and len(backends) == 1
+    conf = backends[0]["config"]
+    assert conf["async_logging"] is True
+    assert conf["max_logging_queue"] == 2048
+    assert conf["retention_max_records"] == 1000
+    assert conf["retention_days"] == 2
+    assert conf["retention_max_bytes"] == 4096
+    assert conf["retention_prune_interval_seconds"] == 30
+    assert conf["retention_prune_every_n_inserts"] == 50
+
+
+def test_build_effective_persistence_cfg_respects_per_backend_overrides() -> None:
+    """Brief: Per-backend retention fields override propagated global defaults.
+
+    Inputs:
+        None.
+
+    Outputs:
+        None; asserts explicit backend config values are preserved.
+    """
+
+    cfg = {
+        "logging": {
+            "async": True,
+            "query_log_retention_max_records": 1000,
+            "query_log_retention_days": 2,
+            "query_log_retention_max_bytes": 4096,
+            "query_log_retention_prune_interval_seconds": 30,
+            "query_log_retention_prune_every_n_inserts": 50,
+            "backends": [
+                {
+                    "id": "store-a",
+                    "backend": "sqlite",
+                    "config": {
+                        "db_path": "./config/var/stats_a.db",
+                        "retention_max_records": 25,
+                        "retention_days": 1,
+                        "retention_max_bytes": 2048,
+                        "retention_prune_interval_seconds": 5,
+                        "retention_prune_every_n_inserts": 10,
+                    },
+                }
+            ],
+        }
+    }
+
+    out = main_mod._build_effective_persistence_cfg(cfg=cfg, stats_cfg={})
+    backends = out.get("backends")
+    assert isinstance(backends, list) and len(backends) == 1
+    conf = backends[0]["config"]
+    assert conf["retention_max_records"] == 25
+    assert conf["retention_days"] == 1
+    assert conf["retention_max_bytes"] == 2048
+    assert conf["retention_prune_interval_seconds"] == 5
+    assert conf["retention_prune_every_n_inserts"] == 10

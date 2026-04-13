@@ -8,16 +8,13 @@ Outputs:
   - None
 """
 
+import threading
 from dnslib import QTYPE, RCODE, RR, A, DNSRecord
 
 from foghorn.plugins.cache.in_memory_ttl import InMemoryTTLCache
 from foghorn.plugins.resolve import base as plugin_base
-from foghorn.servers.server import (
-    DNSUDPHandler,
-    compute_effective_ttl,
-    send_query_with_failover,
-)
-from foghorn.servers.udp_server import _set_response_id
+from foghorn.servers.server import compute_effective_ttl, send_query_with_failover
+from foghorn.servers.udp_server import DNSUDPHandler, _set_response_id
 
 
 def test_set_response_id_rewrites_first_two_bytes():
@@ -88,51 +85,58 @@ def test_compute_effective_ttl_non_noerror_or_no_answers_returns_floor():
 
 
 def test_send_query_with_failover_parsing_and_servfail_failover(monkeypatch):
-    """
-    Brief: send_query_with_failover skips SERVFAIL and parsing errors, succeeds on next.
+    """Brief: Failover skips SERVFAIL and parse errors, succeeds on next upstream.
 
     Inputs:
-      - upstreams: two servers, first returns SERVFAIL, second OK
+      - monkeypatch: pytest monkeypatch fixture.
 
     Outputs:
-      - None: Asserts second upstream chosen and 'ok' reason
+      - None.
+
+    Notes:
+      - Uses real dnslib packets so response validation (TXID/question echo)
+        is exercised.
     """
 
-    class DummyQuery:
-        def send(self, host, port, timeout=None):
-            if host == "bad":
-                return b"bad-bytes"
-            return b"good-bytes"
+    qname = "example.com"
+    q = DNSRecord.question(qname, "A")
 
-    class DummyParsed:
-        class header:
-            rcode = RCODE.SERVFAIL
+    servfail = q.reply()
+    servfail.header.rcode = RCODE.SERVFAIL
+    servfail_wire = servfail.pack()
 
-    class DummyParsedOK:
-        class header:
-            rcode = RCODE.NOERROR
+    ok = q.reply()
+    ok.header.rcode = RCODE.NOERROR
+    ok_wire = ok.pack()
 
-    parse_calls = {"count": 0}
+    calls = {"n": 0}
 
-    def fake_parse(wire):
-        parse_calls["count"] += 1
-        if wire == b"bad-bytes":
-            return DummyParsed
-        return DummyParsedOK
+    def fake_udp_query(host, port, query_bytes, timeout_ms=0):  # noqa: ARG001
+        calls["n"] += 1
+        if host == "bad":
+            return servfail_wire
+        if host == "good":
+            return ok_wire
+        return b"not-a-dns-packet"
 
-    monkeypatch.setattr("foghorn.servers.server.DNSRecord.parse", fake_parse)
+    import foghorn.servers.transports.udp as udp_mod
+
+    monkeypatch.setattr(udp_mod, "udp_query", fake_udp_query)
 
     resp, used, reason = send_query_with_failover(
-        DummyQuery(),
-        upstreams=[{"host": "bad", "port": 53}, {"host": "good", "port": 53}],
+        q,
+        upstreams=[
+            {"host": "bad", "port": 53, "transport": "udp"},
+            {"host": "good", "port": 53, "transport": "udp"},
+        ],
         timeout_ms=1000,
-        qname="example.com",
+        qname=qname,
         qtype=QTYPE.A,
     )
 
-    assert resp == b"good-bytes"
-    assert used == {"host": "good", "port": 53}
     assert reason == "ok"
+    assert used == {"host": "good", "port": 53, "transport": "udp"}
+    assert resp == ok_wire
 
 
 def test_send_query_with_failover_all_failed(monkeypatch):
@@ -185,93 +189,92 @@ def test_send_query_with_failover_no_upstreams():
 
 
 def test_send_query_with_failover_concurrent_path_uses_first_success(monkeypatch):
-    """Brief: send_query_with_failover with max_concurrent>1 returns first successful upstream.
+    """Brief: max_concurrent>1 returns first successful upstream.
 
     Inputs:
       - monkeypatch: pytest monkeypatch fixture.
 
     Outputs:
-      - None: Asserts winner comes from second upstream when first fails.
+      - None.
+
+    Notes:
+      - Uses real dnslib packets so response validation remains enabled.
     """
+
+    qname = "example.com"
+    q = DNSRecord.question(qname, "A")
+    ok_wire = q.reply().pack()
+
+    def fake_udp_query(host, port, query_bytes, timeout_ms=0):  # noqa: ARG001
+        if host == "bad":
+            return b"not-a-dns-packet"
+        return ok_wire
+
+    import foghorn.servers.transports.udp as udp_mod
+
+    monkeypatch.setattr(udp_mod, "udp_query", fake_udp_query)
+
+    resp, used, reason = send_query_with_failover(
+        q,
+        upstreams=[
+            {"host": "bad", "port": 53, "transport": "udp"},
+            {"host": "good", "port": 53, "transport": "udp"},
+        ],
+        timeout_ms=100,
+        qname=qname,
+        qtype=QTYPE.A,
+        max_concurrent=2,
+    )
+
+    assert reason == "ok"
+    assert used is not None and used.get("host") == "good"
+    assert resp == ok_wire
+
+
+def test_send_query_with_failover_concurrent_path_limits_scheduling_window():
+    """Brief: concurrent failover keeps a bounded in-flight window.
+
+    Inputs:
+      - Four upstreams with max_concurrent=2 and immediate success on first upstream.
+
+    Outputs:
+      - None: Asserts later upstreams are not attempted when an early success is available.
+    """
+
+    attempted_hosts: list[str] = []
+    slow_fail_gate = threading.Event()
+    success_wire = DNSRecord.question("example.com", "A").reply().pack()
 
     class DummyQuery:
         def send(self, host, port, timeout=None):
-            if host == "bad":
-                return b"resp-bad"
-            return b"resp-good"
-
-    def fake_parse(wire):
-        class _R:
-            class header:
-                rcode = RCODE.NOERROR
-
-        if wire == b"resp-bad":
-            raise ValueError("bad parse")
-        return _R
-
-    monkeypatch.setattr("foghorn.servers.server.DNSRecord.parse", fake_parse)
+            attempted_hosts.append(host)
+            if host == "u1":
+                return success_wire
+            if host == "u2":
+                slow_fail_gate.wait(0.1)
+                raise RuntimeError("u2 failed")
+            raise RuntimeError(f"unexpected upstream attempt: {host}")
 
     resp, used, reason = send_query_with_failover(
         DummyQuery(),
-        upstreams=[{"host": "bad", "port": 53}, {"host": "good", "port": 53}],
+        upstreams=[
+            {"host": "u1", "port": 53},
+            {"host": "u2", "port": 53},
+            {"host": "u3", "port": 53},
+            {"host": "u4", "port": 53},
+        ],
         timeout_ms=100,
         qname="example.com",
         qtype=QTYPE.A,
         max_concurrent=2,
     )
 
-    assert resp == b"resp-good"
-    assert used == {"host": "good", "port": 53}
+    assert resp == success_wire
+    assert used == {"host": "u1", "port": 53}
     assert reason == "ok"
-
-
-def test_dnsserver_edns_udp_payload_config_and_fallback(monkeypatch):
-    """Brief: DNSServer applies edns_udp_payload and falls back to default on error.
-
-    Inputs:
-        - monkeypatch: pytest monkeypatch fixture.
-
-    Outputs:
-        - None; asserts DNSUDPHandler.edns_udp_payload configuration and stop().
-    """
-
-    import foghorn.servers.server as srv_mod
-    import foghorn.servers.udp_server as udp_srv_mod
-
-    class _DummyServer:
-        def __init__(self, *a, **kw):
-            self.daemon_threads = False
-            self._shutdown_called = False
-            self._close_called = False
-
-        def shutdown(self) -> None:
-            self._shutdown_called = True
-
-        def server_close(self) -> None:
-            self._close_called = True
-
-    # Avoid binding real UDP sockets in tests by patching the UDP server module
-    monkeypatch.setattr(udp_srv_mod.socketserver, "ThreadingUDPServer", _DummyServer)
-
-    # Normal numeric edns_udp_payload
-    srv_mod.DNSUDPHandler.edns_udp_payload = 0
-    srv_mod.DNSUDPHandler.dnssec_mode = "ignore"
-    server1 = srv_mod.DNSServer("127.0.0.1", 0, [], [], edns_udp_payload=1500)
-    assert srv_mod.DNSUDPHandler.dnssec_mode == "ignore"
-    assert srv_mod.DNSUDPHandler.edns_udp_payload == 1500
-
-    # Non-int -> fallback to default 1232
-    srv_mod.DNSUDPHandler.edns_udp_payload = 0
-    server2 = srv_mod.DNSServer("127.0.0.1", 0, [], [], edns_udp_payload="not-an-int")
-    assert srv_mod.DNSUDPHandler.edns_udp_payload == 1232
-
-    # stop() should call shutdown() and server_close() on both instances.
-    server1.stop()
-    server2.stop()
-    assert server1.server._shutdown_called is True
-    assert server1.server._close_called is True
-    assert server2.server._shutdown_called is True
-    assert server2.server._close_called is True
+    assert "u1" in attempted_hosts
+    assert "u3" not in attempted_hosts
+    assert "u4" not in attempted_hosts
 
 
 def _make_handler_for_cache_tests(min_cache_ttl: int):

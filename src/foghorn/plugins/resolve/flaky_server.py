@@ -6,7 +6,7 @@ import secrets
 from typing import List, Optional, Union
 
 from dnslib import QTYPE, RCODE, DNSRecord
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 
 from .base import BasePlugin, PluginContext, PluginDecision, plugin_aliases
 
@@ -17,10 +17,8 @@ class FlakyServerConfig(BaseModel):
     """Brief: Typed configuration model for FlakyServer.
 
     Inputs:
-      - servfail_one_in / nxdomain_one_in: Legacy 1-in-N probabilities for
-        SERVFAIL/NXDOMAIN (still accepted; converted to percentages).
       - servfail_percent / nxdomain_percent: Percent probabilities (0–100) for
-        SERVFAIL/NXDOMAIN draws; override the legacy one-in-N fields when set.
+        SERVFAIL/NXDOMAIN draws.
       - timeout_percent: Percent probability (0–100) of dropping the query and
         sending no response (client observes a timeout).
       - truncate_percent: Percent probability (0–100) of setting the TC bit on
@@ -56,8 +54,7 @@ class FlakyServerConfig(BaseModel):
     fuzz_actions: List[str] = Field(default_factory=lambda: ["bit_flip", "swap_bytes"])
     seed: Optional[int] = None
 
-    class Config:
-        extra = "allow"
+    model_config = ConfigDict(extra="allow")
 
 
 @plugin_aliases("flaky_server", "flaky", "buggy")
@@ -73,9 +70,7 @@ class FlakyServer(BasePlugin):
           FlakyServer behaves as a no-op (for backwards compatibility with the
           previous allow/client_ip default).
         - servfail_percent / nxdomain_percent (float 0–100): Per-request
-          probabilities of short-circuiting with SERVFAIL or NXDOMAIN. When not
-          provided, legacy servfail_one_in/nxdomain_one_in 1-in-N fields are
-          accepted and converted to equivalent percentages.
+          probabilities of short-circuiting with SERVFAIL or NXDOMAIN.
         - apply_to_qtypes (list[str], default ["*"]): Qtypes to affect (e.g.,
           ["A", "AAAA"]). "*" means all.
         - fuzz_percent (float 0–100, default 0): Chance to fuzz a matching
@@ -161,20 +156,15 @@ class FlakyServer(BasePlugin):
                 "FlakyServer: no BasePlugin targets configured; plugin will be a no-op"
             )
 
-        # Percent-based probabilities only; legacy 1-in-N fields are no longer
-        # supported. Configs must use explicit percent values.
+        # Percent-based probabilities only.
         self.servfail_prob = self._compute_probability(
             percent=config.get("servfail_percent"),
-            one_in=None,
             percent_key="servfail_percent",
-            one_in_key="servfail_one_in",
             default_percent=25.0,
         )
         self.nxdomain_prob = self._compute_probability(
             percent=config.get("nxdomain_percent"),
-            one_in=None,
             percent_key="nxdomain_percent",
-            one_in_key="nxdomain_one_in",
             default_percent=10.0,
         )
 
@@ -261,27 +251,6 @@ class FlakyServer(BasePlugin):
             self._rng = secrets.SystemRandom()
 
     @staticmethod
-    def _clamp_one_in(value, key: str) -> int:
-        """Brief: Coerce a 1-in-N value to int and clamp to >= 1.
-
-        Inputs:
-          - value: Any, intended to represent an integer N.
-          - key: str, config key name for logging context.
-
-        Outputs:
-          - int: N >= 1.
-        """
-        try:
-            n = int(value)
-        except Exception:
-            logger.warning("FlakyServer: %s non-integer %r -> default to 1", key, value)
-            return 1
-        if n < 1:
-            logger.warning("FlakyServer: %s < 1 (%d); clamping to 1", key, n)
-            return 1
-        return n
-
-    @staticmethod
     def _clamp_percent(value: object, key: str) -> float:
         """Brief: Coerce a percentage-like value into [0.0, 100.0].
 
@@ -314,18 +283,14 @@ class FlakyServer(BasePlugin):
         cls,
         *,
         percent: object | None,
-        one_in: object | None,
         percent_key: str,
-        one_in_key: str,
         default_percent: float,
     ) -> float:
-        """Brief: Resolve a probability from percent or legacy one-in-N fields.
+        """Brief: Resolve a probability from percent or a default percent.
 
         Inputs:
           - percent: Explicit percent value (0–100) when provided.
-          - one_in: Legacy 1-in-N denominator when percent is omitted.
           - percent_key: Config key name for logging percent.
-          - one_in_key: Config key name for logging one-in-N.
           - default_percent: Default percent used when neither is provided.
 
         Outputs:
@@ -334,19 +299,8 @@ class FlakyServer(BasePlugin):
         if percent is not None:
             pct = cls._clamp_percent(percent, percent_key)
             return max(0.0, min(1.0, pct / 100.0))
-
-        if one_in is not None:
-            n = cls._clamp_one_in(one_in, key=one_in_key)
-        else:
-            # Fall back to a reasonable default percent when both are omitted.
-            pct = cls._clamp_percent(default_percent, percent_key)
-            return max(0.0, min(1.0, pct / 100.0))
-
-        # Convert 1-in-N to probability, clamped to 1.0.
-        try:
-            return max(0.0, min(1.0, 1.0 / float(n)))
-        except Exception:
-            return 0.0
+        pct = cls._clamp_percent(default_percent, percent_key)
+        return max(0.0, min(1.0, pct / 100.0))
 
     def _is_target_qtype(self, qtype: Union[int, str]) -> bool:
         """Brief: Check if the query type matches the configured apply_to_qtypes set.
@@ -459,7 +413,7 @@ class FlakyServer(BasePlugin):
                 )
                 return PluginDecision(action="drop")
         except Exception as e:  # pragma: no cover - defensive
-            logger.debug("FlakyServer: timeout draw error: %s", e)
+            logger.debug("FlakyServer: timeout sampling error: %s", e)
 
         # Draw SERVFAIL first (precedence over NXDOMAIN and other rcodes).
         try:
@@ -468,7 +422,7 @@ class FlakyServer(BasePlugin):
                 if wire is not None:
                     return PluginDecision(action="override", response=wire)
         except Exception as e:  # pragma: no cover - defensive
-            logger.debug("FlakyServer: SERVFAIL draw error: %s", e)
+            logger.debug("FlakyServer: SERVFAIL sampling error: %s", e)
 
         # Then NXDOMAIN.
         try:
@@ -477,7 +431,7 @@ class FlakyServer(BasePlugin):
                 if wire is not None:
                     return PluginDecision(action="override", response=wire)
         except Exception as e:  # pragma: no cover - defensive
-            logger.debug("FlakyServer: NXDOMAIN draw error: %s", e)
+            logger.debug("FlakyServer: NXDOMAIN sampling error: %s", e)
 
         # FORMERR.
         try:
@@ -486,7 +440,7 @@ class FlakyServer(BasePlugin):
                 if wire is not None:
                     return PluginDecision(action="override", response=wire)
         except Exception as e:  # pragma: no cover - defensive
-            logger.debug("FlakyServer: FORMERR draw error: %s", e)
+            logger.debug("FlakyServer: FORMERR sampling error: %s", e)
 
         # NOERROR with empty answer section.
         try:
@@ -498,7 +452,7 @@ class FlakyServer(BasePlugin):
                 if wire is not None:
                     return PluginDecision(action="override", response=wire)
         except Exception as e:  # pragma: no cover - defensive
-            logger.debug("FlakyServer: NOERROR-empty draw error: %s", e)
+            logger.debug("FlakyServer: NOERROR-empty sampling error: %s", e)
 
         return None
 

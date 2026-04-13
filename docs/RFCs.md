@@ -193,11 +193,14 @@ The following RFCs (and related features) are not implemented directly in Foghor
 	AXFR) and is not modified via UPDATE opcodes.
 
 - **RFC 2845 – Secret Key Transaction Authentication for DNS (TSIG)**
-  - No TSIG signing or verification for queries, responses, or zone
-	transfers. AXFR client support in `ZoneRecords` operates without TSIG.
+  - AXFR TSIG is supported for:
+	- upstream AXFR client transfers via `axfr_zones[*].upstreams[*].tsig`,
+	- downstream AXFR/IXFR serving via `server.axfr.require_tsig` and
+	  `server.axfr.tsig_keys`.
+  - General recursive query/response TSIG handling outside AXFR/IXFR is not a primary feature.
 
 - **RFC 8914 – Extended DNS Errors**
--  - When `server.enable_ede` is true and the client advertises EDNS(0), Foghorn
+  - When `server.enable_ede` is true and the client advertises EDNS(0), Foghorn
    can attach RFC 8914 Extended DNS Error (EDE) options to certain synthetic
    responses (for example, policy denies, rate limits, and upstream failures)
    while leaving RCODE semantics unchanged. Upstream-provided EDE options are
@@ -225,10 +228,12 @@ Other newer or specialized DNS-related RFCs not listed above should be assumed
   zones, and Foghorn can answer AXFR/IXFR queries for zones served by
   ZoneRecords over DNS-over-TCP and DoT. There is no IXFR client support yet
   and no dynamic NOTIFY/UPDATE-based zone maintenance.
+- ZoneRecords wildcard owners use a non-RFC-4592 rule for leading `*` labels
+  (leading `*` matches one-or-more labels). Documented in the ZoneRecords guide.
 
 ---
 
-## 7. Configuring ZoneRecords AXFR (client-only)
+## 7. Configuring ZoneRecords AXFR (client + server)
 
 The `ZoneRecords` plugin can consume static records from:
 - custom pipe-delimited files (`file_paths` / `file_path`),
@@ -256,25 +261,28 @@ plugins:
       bind_paths:
         - /etc/foghorn/zones/example.com.zone
         - /etc/foghorn/zones/example.net.zone
+      # Optional: additional inline records in the custom pipe-delimited format
+      records:
+        - "example.com|TXT|300|managed by foghorn"
 
-	  # Optional: additional inline records in the custom pipe-delimited format
-	  records:
-		- "example.com|TXT|300|managed by foghorn"
-
-	  # Optional AXFR-backed zones; loaded **once** during startup.
-  axfr_zones:
-		- zone: example.com
-		  upstreams:
-			- host: 192.0.2.10   # primary upstream
-			  port: 53
-			  timeout_ms: 5000   # shared connect/read timeout
-			- host: 192.0.2.11   # secondary master (fallback)
-			  port: 53
-		- zone: example.net
-		  upstreams:
-			- host: 2001:db8::53
-			  port: 53
-			  timeout_ms: 8000
+      # Optional AXFR-backed zones; loaded **once** during startup.
+      axfr_zones:
+        - zone: example.com
+          upstreams:
+            - host: 192.0.2.10   # primary upstream
+              port: 53
+              timeout_ms: 5000   # shared connect/read timeout
+              tsig:
+                name: axfr-key.example.
+                secret: BASE64_TSIG_SECRET==
+                algorithm: hmac-sha256
+            - host: 192.0.2.11   # secondary master (fallback)
+              port: 53
+        - zone: example.net
+          upstreams:
+            - host: 2001:db8::53
+              port: 53
+              timeout_ms: 8000
 ```
 
 Semantics:
@@ -288,7 +296,8 @@ Semantics:
 	- `transport` (optional): `tcp` (default) or `dot` (DNS-over-TLS),
 	- `server_name` (optional, DoT only): TLS SNI / verification name,
 	- `verify` (optional, DoT only): whether to verify TLS certificates (default true),
-	- `ca_file` (optional, DoT only): path to a CA bundle.
+	- `ca_file` (optional, DoT only): path to a CA bundle,
+	- `tsig` (optional): `{name, secret, algorithm}` for AXFR request signing and response validation.
 - On `ZoneRecords.setup()`:
   - All configured file and BIND sources are loaded first.
   - Then AXFR is attempted for each configured zone (first master that succeeds wins).
@@ -355,13 +364,13 @@ The `allow_no_dnssec` option controls AXFR acceptance for unsigned or DNSSEC-inv
 ```yaml
 axfr_zones:
   - zone: secure.example
-	allow_no_dnssec: false   # Reject transfers without valid DNSSEC
-	upstreams:
-	  - host: 192.0.2.10
+    allow_no_dnssec: false   # Reject transfers without valid DNSSEC
+    upstreams:
+      - host: 192.0.2.10
   - zone: legacy.example
-	allow_no_dnssec: true    # Accept transfers even without DNSSEC (default)
-	upstreams:
-	  - host: 192.0.2.20
+    allow_no_dnssec: true    # Accept transfers even without DNSSEC (default)
+    upstreams:
+      - host: 192.0.2.20
 ```
 
 When `allow_no_dnssec: false`, Foghorn will reject the transfer if DNSSEC
@@ -370,8 +379,14 @@ validation fails once this feature is fully implemented. Currently
 
 ### 7.4 Limitations
 
-- No IXFR, TSIG, or incremental refresh loop.
-- No AXFR/IXFR server role; downstream clients cannot request zone transfers from Foghorn directly.
+- IXFR is served as a full AXFR-style transfer (no deltas yet).
+- AXFR TSIG is supported for both:
+  - upstream AXFR client transfers via `axfr_zones[*].upstreams[*].tsig`, and
+  - downstream AXFR/IXFR serving via `server.axfr.require_tsig` + `server.axfr.tsig_keys`.
+- AXFR/IXFR server role is available for ZoneRecords-authoritative zones over TCP/DoT.
+  Use `server.axfr` hardening controls (`allow_clients`, `max_zone_rrs`,
+  `max_concurrent_transfers`, optional per-client rate limit and transfer pacing)
+  to constrain exposure and transfer load.
 
 This document should be updated whenever Foghorn's DNS behavior meaningfully
 changes with respect to any of the listed RFCs.

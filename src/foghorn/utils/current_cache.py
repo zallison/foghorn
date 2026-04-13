@@ -145,6 +145,24 @@ def get_current_namespaced_cache(
             except Exception:
                 journal_mode = "WAL"
 
+            maxsize: int | None = None
+            try:
+                # Mirror the active sqlite DNS cache capacity when available so
+                # namespaced sqlite caches stay bounded as well.
+                maxsize_raw = getattr(
+                    getattr(cache_plugin, "_cache", None), "maxsize", None
+                )
+                if maxsize_raw is None:
+                    maxsize_raw = getattr(cache_plugin, "positive_budget", None)
+                if maxsize_raw is None:
+                    maxsize_raw = getattr(cache_plugin, "max_size", None)
+                if maxsize_raw is not None:
+                    maxsize_i = int(maxsize_raw)
+                    if maxsize_i > 0:
+                        maxsize = maxsize_i
+            except Exception:
+                maxsize = None
+
             db_path = str(getattr(cache_plugin, "db_path", ""))
             if not db_path:
                 # Defensive: should not happen, but avoid creating :memory: caches.
@@ -164,6 +182,7 @@ def get_current_namespaced_cache(
                     namespace=str(namespace),
                     journal_mode=journal_mode,
                     create_dir=True,
+                    maxsize=maxsize,
                 )
             )
     except Exception:

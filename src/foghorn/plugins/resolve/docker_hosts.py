@@ -12,14 +12,16 @@ from __future__ import annotations
 
 import ipaddress
 import logging
+import re
 import threading
 from typing import Dict, Iterable, List, Optional, Tuple
 
-from dnslib import AAAA, PTR, QTYPE, RR, A, DNSHeader, DNSRecord, TXT
-from pydantic import BaseModel, Field
+from dnslib import AAAA, PTR, QTYPE, RR, TXT, A, DNSHeader, DNSRecord
+from pydantic import BaseModel, Field, ConfigDict
 
 try:  # cachetools is an optional dependency; fall back to shim when missing.
-    from cachetools import TTLCache, LRUCache, Cache  # type: ignore[import]
+    from cachetools import Cache, LRUCache, TTLCache  # type: ignore[import]
+
     from foghorn.utils.register_caches import registered_cached
 except (
     Exception
@@ -87,6 +89,13 @@ class DockerEndpointConfig(BaseModel):
         per-container IPv6 addresses discovered from this endpoint.
       - ttl: Optional TTL override for answers derived from this endpoint; when
         omitted, the plugin-level ttl is used.
+      - suffix: Optional DNS suffix override for names sourced from this
+        endpoint. When omitted, the plugin-level suffix is used.
+      - tls_verify: When true, verify Docker daemon TLS certs for tcp://
+        endpoints.
+      - tls_cert: Optional client TLS certificate path.
+      - tls_key: Optional client TLS private-key path.
+      - tls_ca: Optional CA bundle path used to verify the daemon cert.
 
     Outputs:
       - DockerEndpointConfig instance with normalized field types.
@@ -97,6 +106,11 @@ class DockerEndpointConfig(BaseModel):
     use_ipv4: Optional[str] = None
     use_ipv6: Optional[str] = None
     ttl: Optional[int] = Field(default=None, ge=0)
+    suffix: Optional[str] = None
+    tls_verify: bool = False
+    tls_cert: Optional[str] = None
+    tls_key: Optional[str] = None
+    tls_ca: Optional[str] = None
 
 
 class DockerHostsConfig(BaseModel):
@@ -125,6 +139,8 @@ class DockerHostsConfig(BaseModel):
         "_containers.<suffix>" (or "_containers" when no suffix is configured)
         containing container summary lines, plus a host-level summary under
         "_hosts.<suffix>" (or "_hosts").
+      - expose_txt_in_additional: When true, include per-host TXT summaries in
+        A/AAAA ADDITIONAL sections.
 
     Outputs:
       - DockerHostsConfig instance with normalized field types.
@@ -134,9 +150,9 @@ class DockerHostsConfig(BaseModel):
     ttl: int = Field(default=300, ge=0)
     health: List[str] = Field(default_factory=lambda: ["healthy", "running"])
     discovery: bool = Field(default=False)
+    expose_txt_in_additional: bool = Field(default=False)
 
-    class Config:
-        extra = "allow"
+    model_config = ConfigDict(extra="allow")
 
 
 @plugin_aliases("docker-hosts", "docker_hosts", "docker")
@@ -149,7 +165,16 @@ class DockerHosts(BasePlugin):
         plus reverse pointer names (in-addr.arpa/ip6.arpa) -> hostname.
       - During pre_resolve(), answer matching A/AAAA queries with container
         addresses and PTR queries for matching reverse names.
+
+    Security:
+      - TXT metadata can leak internal topology and increase UDP response size.
+        TXT records are not included in A/AAAA additional sections unless
+        expose_txt_in_additional=true.
+      - tcp:// endpoints are plaintext unless TLS is configured.
     """
+
+    setup_provides_dns = True
+    setup_requires_dns = True
 
     @classmethod
     def get_config_model(cls):
@@ -214,6 +239,9 @@ class DockerHosts(BasePlugin):
         # _containers when no suffix is set) plus a host-level summary at
         # _hosts.<suffix> (or _hosts).
         self._discovery = bool(self.config.get("discovery", False))
+        self._expose_txt_in_additional = bool(
+            self.config.get("expose_txt_in_additional", False)
+        )
 
         # Optional default suffix applied to container names when no
         # per-endpoint suffix is provided, e.g. "docker.mycorp" so that a
@@ -260,9 +288,10 @@ class DockerHosts(BasePlugin):
                     continue
                 txt_fields.append((name_val, path_val))
         elif raw_txt_fields:
+            txt_fields_type = type(raw_txt_fields).__name__
             logger.warning(
-                "DockerHosts: txt_fields must be a list when set; got %r",
-                type(raw_txt_fields),
+                "DockerHosts: txt_fields must be a list when set; got type=%s",
+                txt_fields_type,
             )
 
         self._txt_fields: List[Tuple[str, str]] = txt_fields
@@ -283,9 +312,10 @@ class DockerHosts(BasePlugin):
                     continue
                 txt_fields_keep.append(text)
         elif raw_txt_keep:
+            txt_fields_keep_type = type(raw_txt_keep).__name__
             logger.warning(
-                "DockerHosts: txt_fields_keep must be a list when set; got %r",
-                type(raw_txt_keep),
+                "DockerHosts: txt_fields_keep must be a list when set; got type=%s",
+                txt_fields_keep_type,
             )
 
         self._txt_fields_keep: List[str] = txt_fields_keep
@@ -333,10 +363,14 @@ class DockerHosts(BasePlugin):
                         host_ipv4 = str(ip_obj)
                     else:
                         logger.warning(
-                            "DockerHosts: use_ipv4=%r is not IPv4; ignoring", raw_v4
+                            "DockerHosts: use_ipv4 is not IPv4 for endpoint %s; ignoring override",
+                            url,
                         )
                 except ValueError:
-                    logger.warning("DockerHosts: invalid use_ipv4 %r; ignoring", raw_v4)
+                    logger.warning(
+                        "DockerHosts: invalid use_ipv4 for endpoint %s; ignoring override",
+                        url,
+                    )
             raw_v6 = item.get("use_ipv6")
             if raw_v6:
                 try:
@@ -345,10 +379,14 @@ class DockerHosts(BasePlugin):
                         host_ipv6 = str(ip_obj)
                     else:
                         logger.warning(
-                            "DockerHosts: use_ipv6=%r is not IPv6; ignoring", raw_v6
+                            "DockerHosts: use_ipv6 is not IPv6 for endpoint %s; ignoring override",
+                            url,
                         )
                 except ValueError:
-                    logger.warning("DockerHosts: invalid use_ipv6 %r; ignoring", raw_v6)
+                    logger.warning(
+                        "DockerHosts: invalid use_ipv6 for endpoint %s; ignoring override",
+                        url,
+                    )
 
             # Per-endpoint TTL override
             ttl_override: Optional[int]
@@ -360,12 +398,24 @@ class DockerHosts(BasePlugin):
                     ttl_val = int(ttl_raw)
                     ttl_override = ttl_val if ttl_val >= 0 else None
                 except (TypeError, ValueError):
+                    ttl_type = type(ttl_raw).__name__
                     logger.warning(
-                        "DockerHosts: invalid ttl %r for endpoint %s; ignoring override",
-                        ttl_raw,
+                        "DockerHosts: invalid ttl type=%s for endpoint %s; ignoring override",
+                        ttl_type,
                         url,
                     )
                     ttl_override = None
+            tls_verify = bool(item.get("tls_verify", False))
+            tls_cert = str(item.get("tls_cert") or "").strip() or None
+            tls_key = str(item.get("tls_key") or "").strip() or None
+            tls_ca = str(item.get("tls_ca") or "").strip() or None
+            if url.startswith("tcp://") and not (
+                tls_verify or tls_cert or tls_key or tls_ca
+            ):
+                logger.warning(
+                    "missing TLS: plaintext endpoint %s",
+                    url,
+                )
 
             # Optional per-endpoint suffix; when absent, we fall back to the
             # plugin-level suffix stored in self._suffix.
@@ -388,10 +438,17 @@ class DockerHosts(BasePlugin):
                     "host_ipv6": host_ipv6,
                     "ttl": ttl_override,
                     "suffix": ep_suffix,
+                    "tls_verify": tls_verify,
+                    "tls_cert": tls_cert,
+                    "tls_key": tls_key,
+                    "tls_ca": tls_ca,
                 }
             )
 
         if not endpoints_cfg:
+            logger.info(
+                "DockerHosts: no endpoints configured; using default unix:///var/run/docker.sock"
+            )
             endpoints_cfg.append(
                 {
                     "url": "unix:///var/run/docker.sock",
@@ -399,6 +456,10 @@ class DockerHosts(BasePlugin):
                     "host_ipv4": None,
                     "host_ipv6": None,
                     "ttl": None,
+                    "tls_verify": False,
+                    "tls_cert": None,
+                    "tls_key": None,
+                    "tls_ca": None,
                 }
             )
 
@@ -418,6 +479,7 @@ class DockerHosts(BasePlugin):
         self._ttl_txt: Dict[str, int] = {}
         # Per-host exported ports (hostports) for admin UI display.
         self._hostports: Dict[str, List[str]] = {}
+        self._stop_event = threading.Event()
 
         # Docker clients per endpoint URL (when docker SDK is available)
         self._clients: Dict[str, object] = {}
@@ -425,7 +487,7 @@ class DockerHosts(BasePlugin):
             for ep in self._endpoints:
                 url = str(ep["url"])
                 try:
-                    client = docker.DockerClient(base_url=url)
+                    client = self._build_docker_client(url=url, endpoint=ep)
                 except DockerException as exc:
                     logger.warning(
                         "DockerHosts: failed to create client for %s: %s", url, exc
@@ -467,8 +529,6 @@ class DockerHosts(BasePlugin):
           - None; runs in a background daemon thread until process exit.
         """
 
-        import time as _time
-
         # Simple loop: sleep for the configured interval, then attempt a reload.
         # Any unexpected exceptions are logged and do not terminate the thread.
         interval = float(getattr(self, "_reload_interval", 0.0))
@@ -476,7 +536,8 @@ class DockerHosts(BasePlugin):
             return
 
         while True:
-            _time.sleep(interval)
+            if self._stop_event.wait(timeout=interval):
+                return
             try:
                 self._reload_from_docker()
             except (
@@ -488,6 +549,21 @@ class DockerHosts(BasePlugin):
                     "DockerHosts: error during periodic reload; keeping previous mappings: %s",
                     exc,
                 )
+
+    def shutdown(self) -> None:
+        """Brief: Signal background refresh thread to stop.
+
+        Inputs:
+          - None.
+
+        Outputs:
+          - None.
+        """
+
+        try:
+            self._stop_event.set()
+        except Exception:
+            return None
 
     def _iter_containers_for_endpoint(
         self, endpoint: Dict[str, object]
@@ -510,7 +586,7 @@ class DockerHosts(BasePlugin):
         # can retry endpoints that were previously unreachable.
         if client is None and docker is not None:
             try:
-                client = docker.DockerClient(base_url=url)
+                client = self._build_docker_client(url=url, endpoint=endpoint)
             except (
                 Exception
             ) as exc:  # pragma: nocover defensive: connection and auth errors depend on external Docker daemon state
@@ -540,6 +616,116 @@ class DockerHosts(BasePlugin):
                 "DockerHosts: failed to list containers for %s: %s", url, exc
             )
             return []
+
+    @staticmethod
+    def _build_tls_config(endpoint: Dict[str, object]) -> Optional[object]:
+        """Brief: Build docker TLSConfig from endpoint settings.
+
+        Inputs:
+          - endpoint: Endpoint mapping with optional tls_* keys.
+
+        Outputs:
+          - Optional TLSConfig object for docker.DockerClient.
+        """
+
+        if docker is None:
+            return None
+        tls_verify = bool(endpoint.get("tls_verify", False))
+        tls_cert = endpoint.get("tls_cert")
+        tls_key = endpoint.get("tls_key")
+        tls_ca = endpoint.get("tls_ca")
+        if not (tls_verify or tls_cert or tls_key or tls_ca):
+            return None
+
+        tls_mod = getattr(docker, "tls", None)
+        tls_cls = getattr(tls_mod, "TLSConfig", None) if tls_mod is not None else None
+        if tls_cls is None:
+            return None
+
+        client_cert = None
+        if tls_cert and tls_key:
+            client_cert = (str(tls_cert), str(tls_key))
+
+        return tls_cls(
+            client_cert=client_cert,
+            verify=bool(tls_verify),
+            ca_cert=str(tls_ca) if tls_ca else None,
+        )
+
+    def _build_docker_client(self, url: str, endpoint: Dict[str, object]) -> object:
+        """Brief: Build Docker client for an endpoint, optionally using TLS.
+
+        Inputs:
+          - url: Docker daemon URL.
+          - endpoint: Endpoint mapping with optional tls_* values.
+
+        Outputs:
+          - Docker SDK client object.
+        """
+
+        tls_cfg = self._build_tls_config(endpoint)
+        if tls_cfg is not None:
+            return docker.DockerClient(base_url=url, tls=tls_cfg)
+        return docker.DockerClient(base_url=url)
+
+    @staticmethod
+    def _is_valid_dns_name(name: str) -> bool:
+        """Brief: Validate a normalized DNS *label* before suffix expansion.
+
+        Inputs:
+          - name: Candidate hostname label (single label; no suffix) without
+            leading/trailing dots.
+
+        Outputs:
+          - bool indicating whether the label is publishable.
+        """
+        label = str(name or "").strip().strip(".").lower()
+        if not label:
+            return False
+        # Names are validated as a single label here; suffix/TLD is appended
+        # later when building owner names.
+        if "." in label:
+            return False
+        if len(label) > 63:
+            return False
+
+        label_re = re.compile(r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$")
+        return bool(label_re.match(label))
+
+    @staticmethod
+    def _is_valid_container_id_alias(name: str) -> bool:
+        """Brief: Validate a full Docker container ID alias.
+
+        Inputs:
+          - name: Candidate alias label.
+
+        Outputs:
+          - bool indicating whether name is exactly 64 hex characters.
+        """
+
+        token = str(name or "").strip().lower()
+        if len(token) != 64:
+            return False
+        for ch in token:
+            if ch not in "0123456789abcdef":
+                return False
+        return True
+
+    @staticmethod
+    def _sanitize_txt_chunk(text: str, max_bytes: int = 253) -> str:
+        """Brief: Remove control characters and clamp TXT chunk UTF-8 bytes.
+
+        Inputs:
+          - text: Raw text to emit as a DNS TXT character-string.
+          - max_bytes: Maximum UTF-8 byte budget for the chunk.
+
+        Outputs:
+          - Sanitized text chunk.
+        """
+
+        cleaned = re.sub(r"[\x00-\x1f\x7f]", "", str(text or ""))
+        encoded = cleaned.encode("utf-8")[:max_bytes]
+        return encoded.decode("utf-8", errors="ignore")
 
     def _reload_from_docker(self) -> None:
         """Brief: Rebuild in-memory host/IP maps by inspecting all containers.
@@ -718,31 +904,46 @@ class DockerHosts(BasePlugin):
                 raw_name = _strip_env_domain(raw_name)
                 hostname = _strip_env_domain(hostname) if hostname else hostname
 
-                candidate_names: List[str] = []
+                candidate_names: List[Tuple[str, bool]] = []
                 if raw_name:
-                    candidate_names.append(raw_name)
+                    candidate_names.append((raw_name, False))
                 if hostname and hostname != raw_name:
-                    candidate_names.append(hostname)
+                    candidate_names.append((hostname, False))
                 # Note: project-name is no longer used as a DNS label source; it is
                 # retained only for metadata in TXT/Info summaries.
                 if container_id:
                     # Include both short and full IDs so lookups by abbreviated
                     # container ID work when rendered into hosts-style records
                     # or when querying via PTR names generated from these labels.
-                    candidate_names.append(container_id[:12])
-                    candidate_names.append(container_id)
+                    candidate_names.append((container_id[:12], True))
+                    candidate_names.append((container_id, True))
 
-                normalized_names: List[str] = []
+                normalized_candidates: List[Tuple[str, bool]] = []
                 seen: set[str] = set()
-                for n in candidate_names:
+                for n, is_container_id_alias in candidate_names:
                     # Ensure normalized names do not retain any leading or
                     # trailing dots so we never publish names that begin with
-                    # ".".
-                    key = n.strip(".").lower()
+                    # ".". Docker/container names can include underscores;
+                    # convert "_" to "-" before validation/publication so
+                    # those names remain resolvable as host labels.
+                    key = n.strip(".").lower().replace("_", "-")
                     if not key or key in seen:
                         continue
                     seen.add(key)
-                    normalized_names.append(key)
+                    normalized_candidates.append((key, is_container_id_alias))
+                valid_names: List[str] = []
+                for key, is_container_id_alias in normalized_candidates:
+                    if self._is_valid_dns_name(key):
+                        valid_names.append(key)
+                        continue
+                    if is_container_id_alias and self._is_valid_container_id_alias(key):
+                        valid_names.append(key)
+                        continue
+                    logger.warning(
+                        "DockerHosts: skipping invalid container DNS name %r",
+                        key,
+                    )
+                normalized_names = valid_names
 
                 if (
                     not normalized_names
@@ -784,11 +985,16 @@ class DockerHosts(BasePlugin):
                 # Name, then the extracted hostname, then the container ID, and
                 # apply the same suffix (if any).
                 if raw_name:
-                    base_canonical = raw_name.strip(".").lower()
+                    base_canonical = raw_name
                 elif hostname:
-                    base_canonical = str(hostname).strip(".").lower()
+                    base_canonical = str(hostname)
                 else:  # pragma: nocover defensive: unreachable because containers without hostname are skipped earlier in _reload_from_docker
                     base_canonical = container_id or normalized_names[0]
+                base_canonical = (
+                    str(base_canonical).strip(".").lower().replace("_", "-")
+                )
+                if not self._is_valid_dns_name(base_canonical):
+                    base_canonical = normalized_names[0]
 
                 if ep_suffix:
                     ptr_canonical = f"{base_canonical}.{ep_suffix}"
@@ -1017,7 +1223,12 @@ class DockerHosts(BasePlugin):
                         {"key": "name", "label": "Name"},
                         {"key": "ipv4", "label": "IPv4", "join": ", "},
                         {"key": "ports", "label": "Ports", "join": ", "},
-                        {"key": "txt", "label": "TXT / Info", "html": True},
+                        {
+                            "key": "txt",
+                            "label": "TXT / Info",
+                            "join": " | ",
+                            "html": True,
+                        },
                     ],
                     # Frontend hint: expose a checkbox to hide hash-like
                     # hostnames (full/short container IDs) in the table.
@@ -1674,6 +1885,7 @@ class DockerHosts(BasePlugin):
             len(s) > max_len
         ):  # pragma: nocover defensive: guards against excessively long TXT lines in pathological configurations
             s = s[: max_len - 3] + "..."
+        s = DockerHosts._sanitize_txt_chunk(s)
         return s, hostports
 
     @staticmethod
@@ -1719,7 +1931,13 @@ class DockerHosts(BasePlugin):
             if not value:
                 return
             text = str(value).strip()
-            if text and text not in target:
+            if not text:
+                return
+            try:
+                ipaddress.ip_address(text)
+            except ValueError:
+                return
+            if text not in target:
                 target.append(text)
 
         for net in nets.values():
@@ -1838,7 +2056,7 @@ class DockerHosts(BasePlugin):
                 request = DNSRecord.parse(req)
             except Exception as exc:
                 logger.warning("DockerHosts: parse failure for A %s: %s", qname, exc)
-                return PluginDecision(action="override", response=None)
+                return None
 
             reply = DNSRecord(
                 DNSHeader(id=request.header.id, qr=1, aa=1, ra=1), q=request.q
@@ -1855,20 +2073,24 @@ class DockerHosts(BasePlugin):
                     )
                 )
 
-            for line in txts:
-                # TXT summaries for docker hosts are ancillary metadata for A
-                # answers and belong in the ADDITIONAL section rather than the
-                # ANSWER section so that A responses remain strictly address-only
-                # from a DNS semantics perspective.
-                reply.add_ar(
-                    RR(
-                        rname=request.q.qname,
-                        rtype=QTYPE.TXT,
-                        rclass=1,
-                        ttl=txt_ttl,
-                        rdata=TXT([str(line)]),
+            if self._expose_txt_in_additional:
+                for line in txts:
+                    reply.add_ar(
+                        RR(
+                            rname=request.q.qname,
+                            rtype=QTYPE.TXT,
+                            rclass=1,
+                            ttl=txt_ttl,
+                            rdata=TXT([self._sanitize_txt_chunk(str(line))]),
+                        )
                     )
-                )
+                try:
+                    if len(reply.pack()) > 512:
+                        reply.ar = []
+                        reply.header.tc = 1
+                except Exception:
+                    reply.ar = []
+                    reply.header.tc = 1
 
             return PluginDecision(action="override", response=reply.pack())
 
@@ -1888,7 +2110,7 @@ class DockerHosts(BasePlugin):
                 request = DNSRecord.parse(req)
             except Exception as exc:
                 logger.warning("DockerHosts: parse failure for AAAA %s: %s", qname, exc)
-                return PluginDecision(action="override", response=None)
+                return None
 
             reply = DNSRecord(
                 DNSHeader(id=request.header.id, qr=1, aa=1, ra=1), q=request.q
@@ -1905,20 +2127,24 @@ class DockerHosts(BasePlugin):
                     )
                 )
 
-            for line in txts:
-                # TXT summaries for docker hosts are ancillary metadata for AAAA
-                # answers and belong in the ADDITIONAL section rather than the
-                # ANSWER section so that AAAA responses remain strictly
-                # address-only from a DNS semantics perspective.
-                reply.add_ar(
-                    RR(
-                        rname=request.q.qname,
-                        rtype=QTYPE.TXT,
-                        rclass=1,
-                        ttl=txt_ttl,
-                        rdata=TXT([str(line)]),
+            if self._expose_txt_in_additional:
+                for line in txts:
+                    reply.add_ar(
+                        RR(
+                            rname=request.q.qname,
+                            rtype=QTYPE.TXT,
+                            rclass=1,
+                            ttl=txt_ttl,
+                            rdata=TXT([self._sanitize_txt_chunk(str(line))]),
+                        )
                     )
-                )
+                try:
+                    if len(reply.pack()) > 512:
+                        reply.ar = []
+                        reply.header.tc = 1
+                except Exception:
+                    reply.ar = []
+                    reply.header.tc = 1
 
             return PluginDecision(action="override", response=reply.pack())
 
@@ -1940,7 +2166,7 @@ class DockerHosts(BasePlugin):
                 request = DNSRecord.parse(req)
             except Exception as exc:
                 logger.warning("DockerHosts: parse failure for TXT %s: %s", qname, exc)
-                return PluginDecision(action="override", response=None)
+                return None
 
             reply = DNSRecord(
                 DNSHeader(id=request.header.id, qr=1, aa=1, ra=1), q=request.q
@@ -1953,7 +2179,7 @@ class DockerHosts(BasePlugin):
                         rtype=QTYPE.TXT,
                         rclass=1,
                         ttl=txt_ttl,
-                        rdata=TXT([str(line)]),
+                        rdata=TXT([self._sanitize_txt_chunk(str(line))]),
                     )
                 )
 
@@ -1992,7 +2218,7 @@ class DockerHosts(BasePlugin):
                 request = DNSRecord.parse(req)
             except Exception as exc:
                 logger.warning("DockerHosts: parse failure for PTR %s: %s", qname, exc)
-                return PluginDecision(action="override", response=None)
+                return None
 
             reply = DNSRecord(
                 DNSHeader(id=request.header.id, qr=1, aa=1, ra=1), q=request.q

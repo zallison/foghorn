@@ -49,13 +49,13 @@ def test_pre_resolve_override_response_id_matches(tmp_path):
 
 def test_pre_resolve_parse_failure_returns_override_with_none_response(tmp_path):
     """
-    Brief: When request wire cannot be parsed, override response is None.
+    Brief: When request wire cannot be parsed, pre_resolve returns None.
 
     Inputs:
       - invalid raw request bytes with matching hostname
 
     Outputs:
-      - None: asserts override decision with response is None
+      - None: asserts decision is None
     """
     mod = importlib.import_module("foghorn.plugins.resolve.etc_hosts")
     EtcHosts = mod.EtcHosts
@@ -68,19 +68,17 @@ def test_pre_resolve_parse_failure_returns_override_with_none_response(tmp_path)
     ctx = PluginContext(client_ip="127.0.0.1")
 
     decision = plugin.pre_resolve("broken.local", QTYPE.A, b"not-a-dns-wire", ctx)
-    assert decision is not None
-    assert decision.action == "override"
-    assert decision.response is None
+    assert decision is None
 
 
 def test_pre_resolve_ptr_parse_failure_returns_override_with_none_response(tmp_path):
-    """Brief: PTR pre_resolve returns override with None response on parse failure.
+    """Brief: PTR pre_resolve returns None on parse failure.
 
     Inputs:
       - hosts file with IPv4 mapping to generate a reverse pointer.
 
     Outputs:
-      - None: asserts PTR decision has action 'override' and response is None.
+      - None: asserts PTR decision is None.
     """
     mod = importlib.import_module("foghorn.plugins.resolve.etc_hosts")
     EtcHosts = mod.EtcHosts
@@ -97,9 +95,7 @@ def test_pre_resolve_ptr_parse_failure_returns_override_with_none_response(tmp_p
     ptr_name = ipaddress.ip_address(ip).reverse_pointer
 
     decision = plugin.pre_resolve(ptr_name, QTYPE.PTR, b"not-a-dns-wire", ctx)
-    assert decision is not None
-    assert decision.action == "override"
-    assert decision.response is None
+    assert decision is None
 
 
 def test_load_hosts_without_lock_sets_mapping(tmp_path):
@@ -127,22 +123,21 @@ def test_load_hosts_without_lock_sets_mapping(tmp_path):
     assert plugin.hosts["no.lock.local"] == "10.0.0.1"
 
 
-def test_load_hosts_valueerror_in_reverse_mapping_is_ignored(tmp_path):
-    """Brief: _load_hosts handles ValueError when building reverse mapping.
+def test_load_hosts_invalid_ip_is_ignored(tmp_path):
+    """Brief: _load_hosts skips invalid IP lines without breaking loading.
 
     Inputs:
       - tmp_path: Temporary directory for a crafted hosts file.
 
     Outputs:
-      - None; asserts that a ValueError during reverse mapping does not break loading.
+      - None; asserts invalid IP entries are ignored while valid ones load.
     """
 
     mod = importlib.import_module("foghorn.plugins.resolve.etc_hosts")
     EtcHosts = mod.EtcHosts
 
     hosts_file = tmp_path / "hosts"
-    # Use a Unicode digit in the second octet: isdigit() returns True, but int() fails,
-    # triggering the ValueError path in reverse mapping without patching builtins.
+    # Use a Unicode digit in the second octet so the IP is invalid and skipped.
     hosts_file.write_text(
         "10.0.0.1 ok.local\n1.①.2.3 bad.local\n",
         encoding="utf-8",
@@ -151,11 +146,11 @@ def test_load_hosts_valueerror_in_reverse_mapping_is_ignored(tmp_path):
     plugin = EtcHosts(file_paths=[str(hosts_file)])
     plugin.setup()
 
-    # Forward mappings are still populated.
+    # Forward mappings are still populated for valid entries.
     assert plugin.hosts["ok.local"] == "10.0.0.1"
-    assert plugin.hosts["bad.local"] == "1.①.2.3"
+    assert "bad.local" not in plugin.hosts
 
-    # Reverse mapping for the malformed IPv4 is not created due to ValueError.
+    # Reverse mapping for the malformed IPv4 is not created.
     assert "3.2.①.1.in-addr.arpa" not in plugin.hosts
 
 
@@ -498,12 +493,28 @@ def test_have_files_changed_handles_missing_and_oserror(monkeypatch, tmp_path):
 
     real_stat = os.stat
 
-    def fake_stat(path: str):
-        if path == str(missing):
+    def fake_stat(
+        path: str | os.PathLike,
+        *,
+        dir_fd: int | None = None,
+        follow_symlinks: bool = True,
+    ) -> os.stat_result:
+        """Brief: os.stat replacement that injects FileNotFoundError/OSError.
+
+        Inputs:
+          - path: Path-like object passed to os.stat.
+          - dir_fd: Optional directory file descriptor.
+          - follow_symlinks: Whether to follow symlinks (passed through).
+
+        Outputs:
+          - os.stat_result for non-error paths.
+        """
+        p = os.fspath(path)
+        if p == str(missing):
             raise FileNotFoundError
-        if path == str(error):
+        if p == str(error):
             raise OSError("boom")
-        return real_stat(path)
+        return real_stat(p, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
 
     plugin.file_paths = [str(hosts_file), str(missing), str(error)]  # type: ignore[assignment]
 

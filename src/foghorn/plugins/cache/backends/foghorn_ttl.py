@@ -201,11 +201,14 @@ class FoghornTTLCache:
             namespace: Namespace identifier.
 
         Outputs:
-            FoghornTTLCache view that shares backing store and lock.
+            FoghornTTLCache view that shares backing store and lock while
+            preserving capacity/eviction configuration.
         """
 
         return FoghornTTLCache(
             namespace=namespace,
+            maxsize=self._maxsize,
+            eviction_policy=self._eviction_policy,
             _store=self._store,
             _ttls=self._ttls,
             _lock=self._lock,

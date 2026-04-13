@@ -6,15 +6,16 @@ import time
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
-from foghorn.utils.current_cache import get_current_namespaced_cache, module_namespace
-
 from dnslib import QTYPE, RCODE, DNSRecord
+
+from foghorn.servers.transports.tcp import tcp_query as _tcp_transport_query
+from foghorn.servers.transports.udp import udp_query as _udp_transport_query
+from foghorn.utils.current_cache import get_current_namespaced_cache, module_namespace
+from foghorn.utils import dns_names
 
 from . import (
     recursive_resolver as _recursive_module,  # Self-import to honour test monkeypatching.
 )
-from foghorn.servers.transports.tcp import tcp_query as _tcp_transport_query
-from foghorn.servers.transports.udp import udp_query as _udp_transport_query
 
 """Iterative recursive resolver for Foghorn.
 
@@ -38,6 +39,11 @@ logger = logging.getLogger("foghorn.recursive")
 #   minimisation budget.
 _MAX_MINIMISE_COUNT = 10
 _MINIMISE_ONE_LAB = 2
+
+# DoS hardening: bounds on referral processing.
+_MAX_NS_NAMES = 20
+_MAX_GLUE_RECORDS = 50
+_MAX_NEXT_SERVERS = 25
 
 
 def udp_query(host: str, port: int, wire: bytes, *, timeout_ms: int = 2000) -> bytes:
@@ -112,19 +118,26 @@ def _default_root_hints() -> List[_Server]:
       - List of _Server entries for root name servers (IPv4 only).
 
     Notes:
-      - This is intentionally small and static; operators can override via
-        configuration in future steps if needed.
+      - This is static, but includes all 13 IPv4 root servers for resilience.
+      - Operators can override via configuration in future steps if needed.
     """
 
-    # A small subset of the current root servers; this is sufficient for
-    # real-world use and deterministic tests that monkeypatcfoghorn.servers.transports.
-    # Source: IANA root hints (IPv4 only).
+    # Root server IPv4 addresses.
+    # Source: IANA root hints.
     return [
         _Server("198.41.0.4", 53),  # a.root-servers.net
         _Server("199.9.14.201", 53),  # b.root-servers.net
         _Server("192.33.4.12", 53),  # c.root-servers.net
         _Server("199.7.91.13", 53),  # d.root-servers.net
         _Server("192.203.230.10", 53),  # e.root-servers.net
+        _Server("192.5.5.241", 53),  # f.root-servers.net
+        _Server("192.112.36.4", 53),  # g.root-servers.net
+        _Server("198.97.190.53", 53),  # h.root-servers.net
+        _Server("192.36.148.17", 53),  # i.root-servers.net
+        _Server("192.58.128.30", 53),  # j.root-servers.net
+        _Server("193.0.14.129", 53),  # k.root-servers.net
+        _Server("199.7.83.42", 53),  # l.root-servers.net
+        _Server("202.12.27.33", 53),  # m.root-servers.net
     ]
 
 
@@ -147,7 +160,7 @@ class RecursiveResolver:
         *,
         cache,
         stats,
-        max_depth: int = 16,
+        max_depth: int = 12,
         timeout_ms: int = 2000,
         per_try_timeout_ms: int = 2000,
     ) -> None:
@@ -228,7 +241,16 @@ class RecursiveResolver:
         return resp
 
     def _choose_initial_servers(self) -> List[_Server]:
-        # Shuffle slightly to avoid always hammering the same root.
+        """Brief: Choose the initial authority set used to start recursion.
+
+        Inputs:
+          - None
+
+        Outputs:
+          - List[_Server]: Root hints shuffled to avoid always querying the same
+            root server first.
+        """
+
         servers = _default_root_hints()
         try:
             random.shuffle(servers)
@@ -283,23 +305,78 @@ class RecursiveResolver:
         Outputs:
           - List of _Server objects for the next hop, derived from NS records
             and in-message glue (A/AAAA in the additional section).
+
+        Notes:
+          - Performs bailiwick validation: only accepts glue records whose owner
+            name is within the delegated zone(s) indicated by the NS RR owner
+            name(s) in the authority section.
+          - Uses the current stage qname from `self._stage_qname_context` when
+            present (set by resolve()) for relatedness checks.
         """
+
+        stage_qname = getattr(self, "_stage_qname_context", ".")
 
         auth = getattr(resp, "auth", None) or []
         addl = getattr(resp, "ar", None) or []
 
-        ns_names: List[str] = [
-            str(rr.rdata.label) for rr in auth if rr.rtype == QTYPE.NS
-        ]
+        # Collect delegated zone owner names from the NS RRsets.
+        zone_names: List[str] = []
+        try:
+            for rr in auth:
+                if rr.rtype != QTYPE.NS:
+                    continue
+                z = dns_names.normalize_name(getattr(rr, "rname", ""))
+                if z and z not in zone_names:
+                    zone_names.append(z)
+        except Exception:  # pragma: nocover defensive
+            zone_names = []
+
+        ns_names: List[str] = []
+        try:
+            for rr in auth:
+                if rr.rtype != QTYPE.NS:
+                    continue
+                # Defense-in-depth: only accept NS referrals whose owner is
+                # related to the stage query name.
+                owner = dns_names.normalize_name(getattr(rr, "rname", ""))
+                stage_norm = dns_names.normalize_name(stage_qname)
+                if (
+                    owner
+                    and stage_norm
+                    and not (owner == stage_norm or stage_norm.endswith("." + owner))
+                ):
+                    continue
+
+                ns_names.append(str(rr.rdata.label))
+        except Exception:  # pragma: nocover defensive
+            ns_names = []
+
         if not ns_names:
             return []
 
-        # Build a simple glue map from additional A/AAAA records.
+        # Cap NS names processed to avoid pathological authority sections.
+        if len(ns_names) > _MAX_NS_NAMES:
+            ns_names = ns_names[:_MAX_NS_NAMES]
+
+        def _in_bailiwick(name: str) -> bool:
+            n = dns_names.normalize_name(name)
+            for z in zone_names:
+                if n == z or n.endswith("." + z):
+                    return True
+            return False
+
+        # Build a glue map from in-bailiwick additional A/AAAA records.
         glue: Dict[str, List[_Server]] = {}
+        glue_seen = 0
         for rr in addl:
             if rr.rtype not in (QTYPE.A, QTYPE.AAAA):
                 continue
-            name = str(rr.rname).rstrip(".")
+            glue_seen += 1
+            if glue_seen > _MAX_GLUE_RECORDS:
+                break
+            name = dns_names.normalize_name(rr.rname)
+            if zone_names and not _in_bailiwick(name):
+                continue
             try:
                 host = str(rr.rdata)
             except (
@@ -310,8 +387,11 @@ class RecursiveResolver:
 
         servers: List[_Server] = []
         for ns_name in ns_names:
-            key = ns_name.rstrip(".").lower()
-            servers.extend(glue.get(key, []))
+            key = dns_names.normalize_name(ns_name)
+            for s in glue.get(key, []):
+                servers.append(s)
+                if len(servers) >= _MAX_NEXT_SERVERS:
+                    return servers
 
         return servers
 
@@ -338,8 +418,19 @@ class RecursiveResolver:
             minimising.
         """
 
+        # Security hardening: reject malformed requests without questions.
+        try:
+            if not (getattr(req, "questions", None) or []):
+                r = req.reply()
+                r.header.rcode = RCODE.FORMERR
+                return r.pack(), None
+        except Exception:  # pragma: nocover defensive
+            r = req.reply()
+            r.header.rcode = RCODE.FORMERR
+            return r.pack(), None
+
         q = req.questions[0]
-        qname = str(q.qname).rstrip(".")
+        qname = dns_names.normalize_name(q.qname)
         qtype = q.qtype
 
         # Precompute suffixes used for QNAME minimization. For
@@ -373,6 +464,48 @@ class RecursiveResolver:
         servers = self._choose_initial_servers()
         visited: set[Tuple[str, str]] = set()  # (stage_qname, host)
         deadline = time.time() + (self._timeout_ms / 1000.0)
+
+        def _response_matches_query(parsed: DNSRecord, stage: DNSRecord) -> bool:
+            """Brief: Validate response TXID and question match the stage query.
+
+            Inputs:
+              - parsed: Parsed DNSRecord response.
+              - stage: Stage DNSRecord query that was sent.
+
+            Outputs:
+              - bool: True if TXID matches and the first question matches.
+            """
+
+            try:
+                if int(getattr(parsed.header, "id", -1)) != int(
+                    getattr(stage.header, "id", -2)
+                ):
+                    return False
+            except Exception:
+                return False
+
+            try:
+                qs = getattr(parsed, "questions", None) or []
+                if not qs:
+                    return False
+                q0 = qs[0]
+
+                exp_qs = getattr(stage, "questions", None) or []
+                if not exp_qs:
+                    return False
+                exp0 = exp_qs[0]
+
+                resp_qname = dns_names.normalize_name(getattr(q0, "qname", ""))
+                exp_qname = dns_names.normalize_name(getattr(exp0, "qname", ""))
+                if resp_qname != exp_qname:
+                    return False
+
+                if int(getattr(q0, "qtype", -1)) != int(getattr(exp0, "qtype", -2)):
+                    return False
+            except Exception:
+                return False
+
+            return True
 
         last_upstream: Optional[str] = None
 
@@ -473,13 +606,18 @@ class RecursiveResolver:
             # Perform the upstream query directly here so that tests which
             # monkeypatch foghorn.servers.recursive_resolver.udp_query/tcp_query can
             # reliably intercept all network operations.
+            # Deadline-aware per-try timeout to avoid effectively running for
+            # max_depth * per_try_timeout_ms under slow/refusing authorities.
+            remaining_ms = max(100, int((deadline - time.time()) * 1000))
+            effective_timeout_ms = min(self._per_try_timeout_ms, remaining_ms)
+
             if resp_wire is None:
                 try:
                     resp_wire = _recursive_module.udp_query(
                         server.host,
                         int(server.port),
                         wire,
-                        timeout_ms=self._per_try_timeout_ms,
+                        timeout_ms=effective_timeout_ms,
                     )
                 except (
                     Exception
@@ -489,7 +627,7 @@ class RecursiveResolver:
                     )
                     continue
 
-            # If TC=1, retry over TCP for a full answer.
+            # Parse and validate response against the stage query (TXID + QNAME/QTYPE).
             try:
                 parsed = DNSRecord.parse(resp_wire)
             except (
@@ -503,14 +641,23 @@ class RecursiveResolver:
                 )
                 continue
 
+            if not _response_matches_query(parsed, stage_req):
+                logger.debug(
+                    "Skipping mismatched response from %s:%d for %s",
+                    server.host,
+                    server.port,
+                    stage_qname,
+                )
+                continue
+
             if getattr(parsed.header, "tc", 0):
                 try:
                     resp_wire = _recursive_module.tcp_query(
                         server.host,
                         int(server.port),
                         wire,
-                        connect_timeout_ms=self._per_try_timeout_ms,
-                        read_timeout_ms=self._per_try_timeout_ms,
+                        connect_timeout_ms=effective_timeout_ms,
+                        read_timeout_ms=effective_timeout_ms,
                     )
                 except (
                     Exception
@@ -520,6 +667,26 @@ class RecursiveResolver:
                         server.host,
                         server.port,
                         exc,
+                    )
+                    continue
+
+                try:
+                    parsed_tcp = DNSRecord.parse(resp_wire)
+                except Exception as exc:  # pragma: nocover defensive
+                    logger.debug(
+                        "Failed to parse TCP response from %s:%d: %s",
+                        server.host,
+                        server.port,
+                        exc,
+                    )
+                    continue
+
+                if not _response_matches_query(parsed_tcp, stage_req):
+                    logger.debug(
+                        "Skipping mismatched TCP response from %s:%d for %s",
+                        server.host,
+                        server.port,
+                        stage_qname,
                     )
                     continue
 
@@ -565,6 +732,7 @@ class RecursiveResolver:
                         return resp_wire, last_upstream
 
                 # Otherwise, try to follow delegations via NS + glue.
+                self._stage_qname_context = stage_qname
                 next_servers = self._extract_next_servers(resp)
                 if next_servers:
                     servers.extend(next_servers)
@@ -580,6 +748,7 @@ class RecursiveResolver:
             # Minimization stage: only use responses to discover delegations; do
             # not treat rcode directly as the final answer for the original
             # question.
+            self._stage_qname_context = stage_qname
             next_servers = self._extract_next_servers(resp)
             if next_servers:
                 servers.extend(next_servers)

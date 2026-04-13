@@ -1,11 +1,9 @@
 services:
   foghorn:
-    network_mode: ${FH_NETWORKMODE:-host}
-    image: ${PREFIX:-zallison}/foghorn:${FH_TAG:-latest}
-    container_name: ${FH_NAME:-foghorn}
-    privileged: true
+    image: zallison/foghorn:latest
+    container_name: foghorn
     volumes:
-      - ${FH_CONFIG:-./config}:/foghorn/config
+      - ${FH_CONFIG:-./foghorn/}:/foghorn/config
     ports:
       - 53:5335    # TCP/UDP
       - 5380:5380  # Admin/API

@@ -1,15 +1,29 @@
 # secondary.yaml
 server:
+  # DoS hardening knobs
+  limits:
+    resolver_executor_workers: null
+
   listen:
-    dns:
-      udp:
-        enabled: true
-        host: 0.0.0.0
-        port: 53
-      tcp:
-        enabled: true
-        host: 0.0.0.0
-        port: 53
+    udp:
+      enabled: true
+      host: 0.0.0.0
+      port: 53
+
+    tcp:
+      enabled: true
+      host: 0.0.0.0
+      port: 53
+      # Connection hardening (asyncio TCP listener only)
+      max_connections: 1024
+      max_connections_per_ip: 64
+      max_queries_per_connection: 100
+      idle_timeout_seconds: 15.0
+
+  # Optional: Admin HTTP UI (disabled by default)
+  http:
+    enabled: false
+    allow_threaded_fallback: true
   dnssec:
     mode: ignore
     validation: upstream_ad

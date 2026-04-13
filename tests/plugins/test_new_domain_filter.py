@@ -13,7 +13,7 @@ from contextlib import closing
 from unittest.mock import patch
 
 from foghorn.plugins.resolve.base import PluginContext
-from foghorn.plugins.resolve.new_domain_filter import NewDomainFilterExample
+from foghorn.plugins.resolve.examples.new_domain_filter import NewDomainFilterExample
 
 
 def test_new_domain_filter_init_defaults(tmp_path):

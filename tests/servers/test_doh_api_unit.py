@@ -117,6 +117,58 @@ def test_doh_post_resolver_exception_returns_400() -> None:
     assert resp.status_code == 400
 
 
+def test_doh_get_oversized_param_returns_413(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Brief: FastAPI DoH GET returns 413 when dns param decodes over limit.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts HTTP 413.
+
+    Notes:
+      - We avoid constructing a huge query string (which httpx may reject) by
+        monkeypatching the base64 decoder to return an oversized decoded payload.
+    """
+
+    from foghorn.security_limits import MAX_DOH_QUERY_PARAM_BYTES
+
+    def fake_decode(_s: str) -> bytes:
+        return b"x" * (int(MAX_DOH_QUERY_PARAM_BYTES) + 1)
+
+    monkeypatch.setattr(doh_api, "_b64url_decode_nopad", fake_decode)
+
+    app = doh_api.create_doh_app(lambda q, ip: q)
+    client = TestClient(app)
+
+    resp = client.get("/dns-query", params={"dns": "small"})
+    assert resp.status_code == 413
+
+
+def test_doh_post_oversized_body_returns_413() -> None:
+    """Brief: FastAPI DoH POST returns 413 when body exceeds MAX_DOH_DNS_MESSAGE_BYTES.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts HTTP 413.
+    """
+
+    from foghorn.security_limits import MAX_DOH_DNS_MESSAGE_BYTES
+
+    app = doh_api.create_doh_app(lambda q, ip: q)
+    client = TestClient(app)
+
+    body = b"x" * (int(MAX_DOH_DNS_MESSAGE_BYTES) + 1)
+    resp = client.post(
+        "/dns-query",
+        data=body,
+        headers={"Content-Type": "application/dns-message"},
+    )
+    assert resp.status_code == 413
+
+
 def test_threaded_client_ip_fallback_to_default() -> None:
     """Brief: _ThreadedDoHRequestHandler._client_ip falls back to 0.0.0.0.
 
@@ -450,6 +502,86 @@ def test_threaded_log_message_handles_bad_format() -> None:
     assert args[0] == "%s %s"
 
 
+def test_threaded_get_empty_resolver_response_504() -> None:
+    """Brief: do_GET sends 504 when resolver returns an empty response.
+
+    Inputs:
+      - None
+
+    Outputs:
+      - _send_empty called with 504.
+    """
+
+    handler = doh_api._ThreadedDoHRequestHandler.__new__(
+        doh_api._ThreadedDoHRequestHandler
+    )
+
+    query = b"\x12\x34abcd"
+    s = base64.urlsafe_b64encode(query).decode("ascii").rstrip("=")
+    handler.path = f"/dns-query?dns={s}"  # type: ignore[assignment]
+
+    def fake_client_ip() -> str:
+        return "127.0.0.1"
+
+    def empty_resolver(
+        q: bytes, client_ip: str
+    ) -> bytes:  # pragma: no cover - exercised via handler
+        return b""
+
+    called: list[int] = []
+
+    def fake_send_empty(status: int) -> None:
+        called.append(status)
+
+    handler._client_ip = fake_client_ip  # type: ignore[assignment]
+    handler._send_empty = fake_send_empty  # type: ignore[assignment]
+    handler.resolver = empty_resolver  # type: ignore[assignment]
+
+    handler.do_GET()
+    assert called == [504]
+
+
+def test_threaded_post_empty_resolver_response_504() -> None:
+    """Brief: do_POST sends 504 when resolver returns an empty response.
+
+    Inputs:
+      - None
+
+    Outputs:
+      - _send_empty called with 504.
+    """
+
+    handler = doh_api._ThreadedDoHRequestHandler.__new__(
+        doh_api._ThreadedDoHRequestHandler
+    )
+    handler.path = "/dns-query"  # type: ignore[assignment]
+    handler.headers = {
+        "Content-Type": "application/dns-message",
+        "Content-Length": "0",
+    }  # type: ignore[assignment]
+    handler.rfile = BytesIO(b"")  # type: ignore[assignment]
+
+    def fake_client_ip() -> str:
+        return "127.0.0.1"
+
+    def empty_resolver(
+        body: bytes, client_ip: str
+    ) -> bytes:  # pragma: no cover - exercised via handler
+        return b""
+
+    called: list[int] = []
+
+    def fake_send_empty(status: int) -> None:
+        called.append(status)
+
+    handler._client_ip = fake_client_ip  # type: ignore[assignment]
+    handler._send_empty = fake_send_empty  # type: ignore[assignment]
+    handler.resolver = empty_resolver  # type: ignore[assignment]
+
+    handler.do_POST()
+    assert called == [504]
+
+
 @pytest.fixture(scope="module")
 def selfsigned(tmp_path_factory: pytest.TempPathFactory) -> tuple[str, str]:
     """Brief: Create a short-lived self-signed certificate/key pair for TLS tests.
@@ -646,3 +778,35 @@ def test_start_doh_server_handles_generic_asyncio_error(
     # Depending on environment this may choose uvicorn or fall back to threaded HTTP.
     if isinstance(handle, doh_api.DoHServerHandle):
         handle.stop(timeout=0.5)
+
+
+def test_start_doh_server_disables_threaded_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Brief: start_doh_server returns None when threaded fallback is disabled.
+
+    Inputs:
+      - monkeypatch: forces asyncio.new_event_loop() to raise PermissionError.
+
+    Outputs:
+      - None; asserts the starter returns None when allow_threaded_fallback=false.
+    """
+
+    import asyncio
+
+    def boom_new_event_loop() -> asyncio.AbstractEventLoop:  # type: ignore[override]
+        raise PermissionError("no self-pipe")
+
+    monkeypatch.setattr(asyncio, "new_event_loop", boom_new_event_loop)
+
+    def echo_resolver(q: bytes, client_ip: str) -> bytes:  # noqa: ARG001
+        return q
+
+    handle = doh_api.start_doh_server(
+        "127.0.0.1",
+        0,
+        echo_resolver,
+        allow_threaded_fallback=False,
+    )
+
+    assert handle is None

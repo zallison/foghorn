@@ -1,0 +1,40 @@
+upstreams:
+  endpoints:
+    - host: 1.1.1.1
+      port: 53
+
+server:
+  listen: {}
+
+logging:
+  python:
+    level: info
+
+plugins:
+  - type: rate_limit
+    id: rate_limit_lan
+    enabled: true
+    config:
+      profile: lan  # Uses built-in 'lan' profile
+
+  - type: rate_limit
+    id: rate_limit_custom
+    enabled: true
+    config:
+      profile: lan  # Apply profile
+      # Override specific values from the profile
+      min_enforce_rps: 75
+
+  - type: rate_limit
+    id: rate_limit_enterprise
+    enabled: true
+    config:
+      profile: enterprise  # High-capacity profile
+      # Override specific values from the profile
+      burst_factor: 3
+
+  - type: rate_limit
+    id: rate_limit_single_device
+    enabled: true
+    config:
+      profile: single  # Minimal profile for single devices

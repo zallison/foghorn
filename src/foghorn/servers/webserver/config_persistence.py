@@ -14,6 +14,8 @@ from __future__ import annotations
 import os
 import shutil
 
+DEFAULT_CONFIG_BACKUP_RETENTION_COUNT = 20
+
 
 def backup_file_if_exists(src_path: str, backup_path: str) -> None:
     """Brief: Copy src_path to backup_path if src_path exists.
@@ -49,6 +51,71 @@ def write_text_file(path: str, text: str, *, encoding: str = "utf-8") -> None:
         f.write(text)
 
 
+def list_timestamped_backups_for_path(dst_path: str) -> list[str]:
+    """Brief: List timestamped backup files associated with a config path.
+
+    Inputs:
+      - dst_path: Destination config file path (e.g. /cfg/config.yaml).
+
+    Outputs:
+      - Unordered list of existing backup file paths matching
+        /cfg/config.yaml.bak.*.
+      - Returns [] when the parent directory cannot be listed.
+    """
+
+    dst_abs = os.path.abspath(str(dst_path))
+    base_dir = os.path.dirname(dst_abs) or "."
+    prefix = os.path.basename(dst_abs) + ".bak."
+
+    try:
+        names = os.listdir(base_dir)
+    except Exception:  # pragma: nocover - best-effort filesystem listing fallback
+        return []
+
+    out: list[str] = []
+    for name in names:
+        if not str(name).startswith(prefix):
+            continue
+        path = os.path.join(base_dir, str(name))
+        if os.path.isfile(path):
+            out.append(path)
+    return out
+
+
+def prune_timestamped_backups(*, dst_path: str, keep_count: int) -> None:
+    """Brief: Remove old timestamped backups while retaining the newest N files.
+
+    Inputs:
+      - dst_path: Destination config file path used to discover *.bak.* files.
+      - keep_count: Number of newest backups to retain. Values <= 0 disable prune.
+
+    Outputs:
+      - None.
+    """
+
+    keep = int(keep_count)
+    if keep <= 0:
+        return
+
+    backups = list_timestamped_backups_for_path(dst_path)
+    if len(backups) <= keep:
+        return
+
+    def _sort_key(path: str) -> tuple[float, str]:
+        try:
+            ts = float(os.path.getmtime(path))
+        except Exception:  # pragma: nocover - mtime may race with file deletion
+            ts = 0.0
+        return (ts, path)
+
+    ordered = sorted(backups, key=_sort_key, reverse=True)
+    for old_path in ordered[keep:]:
+        try:
+            os.remove(old_path)
+        except Exception:  # pragma: nocover - prune must ignore delete failures
+            pass
+
+
 def write_raw_yaml_via_copy(
     *,
     dst_path: str,
@@ -67,7 +134,7 @@ def write_raw_yaml_via_copy(
 
     Notes:
       - This mirrors the FastAPI implementation's historic behaviour.
-      - tmp_path is left on disk only if an exception is raised before cleanup.
+      - This helper does not remove tmp_path; caller-managed cleanup is expected.
     """
 
     write_text_file(tmp_path, raw_yaml)
@@ -106,6 +173,7 @@ def safe_write_raw_yaml(
     tmp_path: str,
     strategy: str,
     cleanup_tmp: bool = True,
+    backup_retention_count: int = DEFAULT_CONFIG_BACKUP_RETENTION_COUNT,
 ) -> None:
     """Brief: Safely write raw YAML with optional backup and optional cleanup.
 
@@ -116,12 +184,14 @@ def safe_write_raw_yaml(
       - tmp_path: Temporary file used during write.
       - strategy: Either 'copy' or 'replace'.
       - cleanup_tmp: When True, remove tmp_path if it still exists at the end.
+      - backup_retention_count: Number of newest timestamped backups to retain.
 
     Outputs:
       - None.
 
     Raises:
       - Propagates any underlying OSError/IOError exceptions.
+      - Raises ValueError when strategy is not 'copy' or 'replace'.
 
     Example:
       >>> safe_write_raw_yaml(dst_path='config.yaml', raw_yaml='a: 1\n', backup_path=None, tmp_path='config.yaml.new', strategy='replace')
@@ -146,10 +216,18 @@ def safe_write_raw_yaml(
         else:
             raise ValueError("strategy must be 'copy' or 'replace'")
     finally:
+        if backup_path:
+            try:
+                prune_timestamped_backups(
+                    dst_path=dst_path,
+                    keep_count=int(backup_retention_count),
+                )
+            except Exception:  # pragma: nocover - retention pruning is best-effort
+                pass
         if cleanup_tmp:
             # Best-effort cleanup: remove tmp_path if it still exists.
             try:
                 if os.path.exists(tmp_path):
                     os.remove(tmp_path)
-            except Exception:
+            except Exception:  # pragma: nocover - cleanup failures are non-fatal
                 pass

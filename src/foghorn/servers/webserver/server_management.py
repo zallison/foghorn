@@ -9,27 +9,134 @@ This module contains server startup and management functions including:
 from __future__ import annotations
 
 import http.server
+import inspect
 import logging
 import os
 import socket
 import threading
-from typing import Any, Dict, Optional
+
+# Forward declaration for create_app - actual import happens in start_webserver
+# to avoid circular dependency
+from typing import TYPE_CHECKING, Any, Dict, Optional
 
 from ...stats import StatsCollector
 from .logging_utils import RingBuffer
 from .runtime import RuntimeState
-from .types_and_buffers import WebServerHandle
 from .threaded_handlers import _ThreadedAdminRequestHandler
-
-# Forward declaration for create_app - actual import happens in start_webserver
-# to avoid circular dependency
-from typing import TYPE_CHECKING
+from .types_and_buffers import WebServerHandle
 
 if TYPE_CHECKING:
     from fastapi import FastAPI
 
 
 logger = logging.getLogger("foghorn.webserver")
+
+
+def _get_soft_nofile_limit() -> int | None:
+    """Brief: Return the process soft nofile limit when available.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - int | None: Positive RLIMIT_NOFILE soft limit, else None when unavailable.
+    """
+
+    try:
+        import resource  # Unix-only; imported lazily for portability.
+
+        soft_limit, _hard_limit = resource.getrlimit(resource.RLIMIT_NOFILE)
+        if soft_limit in (None, resource.RLIM_INFINITY):
+            return None
+        soft = int(soft_limit)
+        if soft <= 0:
+            return None
+        return soft
+    except Exception:
+        return None
+
+
+def _derive_uvicorn_limit_concurrency(web_cfg: Dict[str, Any]) -> int:
+    """Brief: Derive a safe uvicorn concurrency cap for admin HTTP.
+
+    Inputs:
+      - web_cfg: server.http configuration mapping.
+
+    Outputs:
+      - int: Positive concurrency cap used for uvicorn limit_concurrency.
+    """
+
+    # Optional explicit override when provided by callers.
+    raw_override = web_cfg.get("limit_concurrency")
+    try:
+        override = int(raw_override)
+        if override > 0:
+            return override
+    except Exception:
+        pass
+
+    # Keep a conservative default under small fd limits (for example, 1024).
+    soft_nofile = _get_soft_nofile_limit()
+    if soft_nofile is None:
+        return 256
+    return max(64, min(512, int(soft_nofile) // 2))
+
+
+def _build_uvicorn_config(
+    *,
+    uvicorn_module: Any,
+    app: "FastAPI",
+    host: str,
+    port: int,
+    web_cfg: Dict[str, Any],
+) -> Any:
+    """Brief: Build uvicorn.Config with optional hardening args when supported.
+
+    Inputs:
+      - uvicorn_module: Imported uvicorn module exposing Config.
+      - app: FastAPI application instance.
+      - host: Listen host.
+      - port: Listen port.
+      - web_cfg: server.http configuration mapping.
+
+    Outputs:
+      - uvicorn.Config instance.
+    """
+
+    config_kwargs: Dict[str, Any] = {
+        "app": app,
+        "host": host,
+        "port": port,
+        "log_level": "warning",
+    }
+
+    try:
+        params = inspect.signature(uvicorn_module.Config).parameters
+    except Exception:
+        params = {}
+
+    limit_concurrency = _derive_uvicorn_limit_concurrency(web_cfg)
+    backlog = max(64, min(2048, int(limit_concurrency)))
+
+    if "limit_concurrency" in params:
+        config_kwargs["limit_concurrency"] = int(limit_concurrency)
+    if "backlog" in params:
+        config_kwargs["backlog"] = int(backlog)
+    if "timeout_keep_alive" in params:
+        config_kwargs["timeout_keep_alive"] = 5
+
+    logger.info(
+        "Admin webserver uvicorn limits: limit_concurrency=%s backlog=%s soft_nofile=%s",
+        (
+            config_kwargs.get("limit_concurrency")
+            if "limit_concurrency" in config_kwargs
+            else "default"
+        ),
+        config_kwargs.get("backlog", "default"),
+        _get_soft_nofile_limit(),
+    )
+
+    return uvicorn_module.Config(**config_kwargs)
 
 
 class _AdminHTTPServer(http.server.ThreadingHTTPServer):
@@ -215,6 +322,22 @@ def start_webserver(
     if not enabled:
         return None
 
+    allow_threaded_fallback = bool(web_cfg.get("allow_threaded_fallback", True))
+
+    # Best-effort: generate a config diagram PNG for the active config when
+    # possible. This is intentionally non-fatal (e.g., dot missing).
+    if config_path:
+        try:
+            from ...utils.config_diagram import ensure_config_diagram_png
+
+            ok, detail, png_path = ensure_config_diagram_png(config_path=config_path)
+            if ok:
+                logger.info("Config diagram: %s (%s)", png_path, detail)
+            else:
+                logger.warning("Config diagram not generated: %s", detail)
+        except Exception:  # pragma: no cover - defensive
+            logger.exception("Config diagram generation failed")
+
     foghorn_cfg = (config.get("foghorn") or {}) if isinstance(config, dict) else {}
     use_asyncio = bool(foghorn_cfg.get("use_asyncio", True))
 
@@ -304,6 +427,15 @@ def start_webserver(
             can_use_asyncio = use_asyncio
 
     if not can_use_asyncio:
+        if not allow_threaded_fallback:
+            logger.warning(
+                "Admin webserver threaded fallback is disabled (allow_threaded_fallback=false). "
+                "Refusing to start admin webserver without uvicorn/FastAPI."
+            )
+            return None
+        logger.warning(
+            "Starting admin webserver using threaded stdlib HTTP fallback. This mode lacks full DoS/DDoS hardening and is not recommended for production."
+        )
         handle = _call_threaded(
             stats_obj=stats,
             cfg_obj=config,
@@ -319,8 +451,14 @@ def start_webserver(
     try:
         import uvicorn
     except Exception as exc:  # pragma: no cover - missing optional dependency
-        logger.error(
-            "webserver.enabled=true but uvicorn is not available: %s; using threaded fallback",
+        if not allow_threaded_fallback:
+            logger.warning(
+                "webserver.enabled=true but uvicorn is not available (%s) and threaded fallback is disabled (allow_threaded_fallback=false)",
+                exc,
+            )
+            return None
+        logger.warning(
+            "webserver.enabled=true but uvicorn is not available (%s); starting threaded stdlib HTTP fallback (not recommended for production)",
             exc,
         )
         handle = _call_threaded(
@@ -359,7 +497,13 @@ def start_webserver(
         plugins=plugins,
     )
 
-    config_uvicorn = uvicorn.Config(app, host=host, port=port, log_level="info")
+    config_uvicorn = _build_uvicorn_config(
+        uvicorn_module=uvicorn,
+        app=app,
+        host=host,
+        port=port,
+        web_cfg=web_cfg,
+    )
     server = uvicorn.Server(config_uvicorn)
 
     def _runner() -> None:
@@ -384,5 +528,5 @@ def start_webserver(
     if runtime_state is not None:
         runtime_state.set_listener("webserver", enabled=True, thread=thread)
 
-    logger.info("Started Foghorn webserver on %s:%d", host, port)
+    logger.info("Started Foghorn admin ui/api on http://%s:%d", host, port)
     return WebServerHandle(thread)

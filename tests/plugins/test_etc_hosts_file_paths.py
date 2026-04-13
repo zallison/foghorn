@@ -42,9 +42,9 @@ def test_init_with_file_paths_only_merges_in_order(tmp_path):
 
     plugin = EtcHosts(file_paths=[str(f1), str(f2)])
     plugin.setup()
-    assert plugin.hosts["hostA"] == "2.2.2.2"  # overridden by later file
-    assert plugin.hosts["hostB"] == "10.0.0.2"
-    assert plugin.hosts["hostC"] == "1.1.2.2"
+    assert plugin.hosts["hosta"] == "2.2.2.2"  # overridden by later file
+    assert plugin.hosts["hostb"] == "10.0.0.2"
+    assert plugin.hosts["hostc"] == "1.1.2.2"
     assert plugin.hosts["localhost"] == "127.0.0.1"
 
 
@@ -65,14 +65,14 @@ def test_no_input_uses_default_via_monkeypatched_normalize(tmp_path, monkeypatch
 
     default_hosts = _write(tmp_path, "default", "4.4.4.4 defaultHost\n")
 
-    def _fake_normalize(self, file_paths, legacy):
+    def _fake_normalize(self, file_paths):
         return [str(default_hosts)]
 
     monkeypatch.setattr(EtcHosts, "_normalize_paths", _fake_normalize)
 
     plugin = EtcHosts()  # no inputs -> uses monkeypatched default
     plugin.setup()
-    assert plugin.hosts["defaultHost"] == "4.4.4.4"
+    assert plugin.hosts["defaulthost"] == "4.4.4.4"
 
 
 def test_pre_resolve_with_multiple_files_uses_last_override(tmp_path):

@@ -3,6 +3,8 @@ from __future__ import annotations
 import time
 from typing import Any, Optional, Tuple
 
+from dnslib import RCODE, DNSRecord
+
 from foghorn.plugins.cache.backends.foghorn_ttl import FoghornTTLCache
 
 from .base import CachePlugin, cache_aliases
@@ -19,6 +21,12 @@ class InMemoryTTLCache(CachePlugin):
       - **config: Optional implementation-specific config.
           - min_cache_ttl: Non-negative int seconds. This is the cache expiry
             floor applied by the resolver when caching responses.
+          - max_size: Maximum number of cached DNS responses (default 65536;
+            clamped to <= 65536).
+          - pct_nxdomain: Float in [0, 1] describing what portion of max_size is
+            reserved for NXDOMAIN responses (default 0.10).
+          - eviction_policy: Eviction policy used when max_size is enforced
+            (default 'lfu').
 
     Outputs:
       - InMemoryTTLCache instance.
@@ -30,13 +38,138 @@ class InMemoryTTLCache(CachePlugin):
         Inputs:
           - **config:
               - min_cache_ttl: Non-negative int seconds cache TTL floor.
+              - max_size: Maximum entries across positive + NXDOMAIN partitions.
+              - pct_nxdomain: Fraction in [0, 1] reserved for NXDOMAIN entries.
+              - eviction_policy: Capacity-eviction policy for backend caches.
 
         Outputs:
           - None.
         """
 
-        self.min_cache_ttl = max(0, int(config.get("min_cache_ttl", 0) or 0))
-        self._cache = FoghornTTLCache()
+        min_cache_ttl_cfg = config.get("min_cache_ttl", 0)
+        try:
+            min_cache_ttl_val = (
+                int(min_cache_ttl_cfg) if min_cache_ttl_cfg is not None else 0
+            )
+        except Exception:
+            min_cache_ttl_val = 0
+        self.min_cache_ttl = max(0, int(min_cache_ttl_val))
+
+        max_size_cfg = config.get("max_size", 65536)
+        try:
+            max_size_val = int(max_size_cfg) if max_size_cfg is not None else 65536
+        except Exception:
+            max_size_val = 65536
+        self.max_size = max(1, min(65536, int(max_size_val)))
+
+        pct_cfg = config.get("pct_nxdomain", 0.10)
+        try:
+            pct = float(pct_cfg) if pct_cfg is not None else 0.10
+        except Exception:
+            pct = 0.10
+        self.pct_nxdomain = max(0.0, min(1.0, float(pct)))
+
+        eviction_policy_cfg = config.get("eviction_policy", "lfu")
+        self.eviction_policy = (
+            str(eviction_policy_cfg or "lfu").strip().lower() or "lfu"
+        )
+
+        # Reserve a portion of max_size for NXDOMAIN caching to avoid negative
+        # cache entries evicting positive ones too aggressively.
+        nxdomain_budget = int(round(self.max_size * self.pct_nxdomain))
+        nxdomain_budget = max(0, min(self.max_size - 1, int(nxdomain_budget)))
+        self.nxdomain_budget = int(nxdomain_budget)
+        self.positive_budget = int(self.max_size - self.nxdomain_budget)
+
+        self._cache = FoghornTTLCache(
+            maxsize=self.positive_budget,
+            eviction_policy=self.eviction_policy,
+        )
+        self._cache_nxdomain: FoghornTTLCache | None = None
+        if self.nxdomain_budget > 0:
+            self._cache_nxdomain = FoghornTTLCache(
+                maxsize=self.nxdomain_budget,
+                eviction_policy=self.eviction_policy,
+            )
+
+    @staticmethod
+    def _is_nxdomain_wire(value: object) -> bool:
+        """Brief: Determine whether a cached value is an NXDOMAIN DNS response.
+
+        Inputs:
+          - value: Cached payload; expected to be wire-format bytes for DNS
+            response caching.
+
+        Outputs:
+          - bool: True when value parses as a DNS response with RCODE.NXDOMAIN.
+
+        Notes:
+          - Best-effort only: parse failures return False.
+        """
+
+        if not isinstance(value, (bytes, bytearray, memoryview)):
+            return False
+        try:
+            msg = DNSRecord.parse(bytes(value))
+            return int(getattr(getattr(msg, "header", None), "rcode", -1)) == int(
+                RCODE.NXDOMAIN
+            )
+        except Exception:
+            return False
+
+    @staticmethod
+    def _delete_from_foghorn_ttl(cache: FoghornTTLCache, key: Tuple[str, int]) -> None:
+        """Brief: Best-effort delete from a FoghornTTLCache (including metadata).
+
+        Inputs:
+          - cache: FoghornTTLCache instance.
+          - key: Cache key tuple (qname, qtype).
+
+        Outputs:
+          - None.
+        """
+
+        try:
+            ns_key = getattr(cache, "_ns_key", lambda k: k)(key)
+            lock = getattr(cache, "_lock", None)
+            store = getattr(cache, "_store", None)
+            ttls = getattr(cache, "_ttls", None)
+            last_access = getattr(cache, "_last_access", None)
+            hit_counts = getattr(cache, "_hit_counts", None)
+            insert_index = getattr(cache, "_insert_index", None)
+        except Exception:
+            return
+
+        if not isinstance(store, dict):
+            return
+
+        if lock is not None:
+            try:
+                with lock:
+                    store.pop(ns_key, None)
+                    if isinstance(ttls, dict):
+                        ttls.pop(ns_key, None)
+                    if isinstance(last_access, dict):
+                        last_access.pop(ns_key, None)
+                    if isinstance(hit_counts, dict):
+                        hit_counts.pop(ns_key, None)
+                    if isinstance(insert_index, dict):
+                        insert_index.pop(ns_key, None)
+            except Exception:
+                return
+        else:
+            try:
+                store.pop(ns_key, None)
+                if isinstance(ttls, dict):
+                    ttls.pop(ns_key, None)
+                if isinstance(last_access, dict):
+                    last_access.pop(ns_key, None)
+                if isinstance(hit_counts, dict):
+                    hit_counts.pop(ns_key, None)
+                if isinstance(insert_index, dict):
+                    insert_index.pop(ns_key, None)
+            except Exception:
+                return
 
     def get(self, key: Tuple[str, int]) -> Any | None:
         """Brief: Return cached value when present.
@@ -48,7 +181,12 @@ class InMemoryTTLCache(CachePlugin):
           - Any | None: Cached value, or None.
         """
 
-        return self._cache.get(key)
+        val = self._cache.get(key)
+        if val is not None:
+            return val
+        if self._cache_nxdomain is not None:
+            return self._cache_nxdomain.get(key)
+        return None
 
     def get_with_meta(
         self, key: Tuple[str, int]
@@ -62,7 +200,12 @@ class InMemoryTTLCache(CachePlugin):
           - (value_or_None, seconds_remaining_or_None, original_ttl_or_None)
         """
 
-        return self._cache.get_with_meta(key)
+        val, remaining, ttl = self._cache.get_with_meta(key)
+        if val is not None:
+            return val, remaining, ttl
+        if self._cache_nxdomain is not None:
+            return self._cache_nxdomain.get_with_meta(key)
+        return None, None, None
 
     def set(self, key: Tuple[str, int], ttl: int, value: Any) -> None:
         """Brief: Store a cached value.
@@ -74,8 +217,23 @@ class InMemoryTTLCache(CachePlugin):
 
         Outputs:
           - None.
+
+        Notes:
+          - NXDOMAIN wire responses are stored in the NXDOMAIN partition when
+            it is enabled, and this helper keeps positive/NXDOMAIN partitions
+            mutually exclusive for the same key.
         """
 
+        is_nxdomain = self._is_nxdomain_wire(value)
+
+        # Keep partitions mutually exclusive.
+        if is_nxdomain and self._cache_nxdomain is not None:
+            self._delete_from_foghorn_ttl(self._cache, key)
+            self._cache_nxdomain.set(key, ttl, value)
+            return
+
+        if self._cache_nxdomain is not None:
+            self._delete_from_foghorn_ttl(self._cache_nxdomain, key)
         self._cache.set(key, ttl, value)
 
     def purge(self) -> int:
@@ -88,7 +246,10 @@ class InMemoryTTLCache(CachePlugin):
           - int: Number of removed entries.
         """
 
-        return int(self._cache.purge_expired())
+        removed = int(self._cache.purge_expired())
+        if self._cache_nxdomain is not None:
+            removed += int(self._cache_nxdomain.purge_expired())
+        return int(removed)
 
     def get_http_snapshot(self) -> dict[str, object]:
         """Brief: Summarize current in-memory cache state for the admin web UI.
@@ -101,11 +262,17 @@ class InMemoryTTLCache(CachePlugin):
           - dict with keys:
               * summary: High-level statistics for the primary DNS cache.
               * caches: List of per-cache summaries for well-known caches.
+              * decorated: Metadata for caches registered via
+                foghorn.utils.register_caches.registered_cached().
         """
 
         total_entries = 0
         live_entries = 0
         expired_entries = 0
+
+        nxdomain_total = 0
+        nxdomain_live = 0
+        nxdomain_expired = 0
         now_ts = time.time()
 
         # FoghornTTLCache stores entries in a private _store mapping of
@@ -118,15 +285,20 @@ class InMemoryTTLCache(CachePlugin):
             store = {}
             lock = None
 
-        def _compute_counts(
-            mapping: dict[tuple[object, object], tuple[float, Any]],
-        ) -> tuple[int, int, int]:
+        def _compute_counts(mapping: object) -> tuple[int, int, int]:
             total = 0
             live = 0
             expired = 0
-            for _k, (expiry, _value) in list(mapping.items()):
+            if not isinstance(mapping, dict):
+                return total, live, expired
+            for _k, raw_value in list(mapping.items()):
                 total += 1
+                if not isinstance(raw_value, (tuple, list)) or not raw_value:
+                    # Treat malformed entries as expired for counting purposes.
+                    expired += 1
+                    continue
                 try:
+                    expiry = raw_value[0]
                     exp = float(expiry)
                 except Exception:
                     # Treat malformed entries as expired for counting purposes.
@@ -147,6 +319,30 @@ class InMemoryTTLCache(CachePlugin):
         else:
             total_entries, live_entries, expired_entries = _compute_counts(store)  # type: ignore[arg-type]
 
+        # Optional NXDOMAIN partition.
+        if self._cache_nxdomain is not None:
+            try:
+                nx_store = getattr(self._cache_nxdomain, "_store", {}) or {}
+                nx_lock = getattr(self._cache_nxdomain, "_lock", None)
+            except Exception:
+                nx_store = {}
+                nx_lock = None
+
+            if nx_lock is not None:
+                try:
+                    with nx_lock:
+                        (
+                            nxdomain_total,
+                            nxdomain_live,
+                            nxdomain_expired,
+                        ) = _compute_counts(
+                            nx_store
+                        )  # type: ignore[arg-type]
+                except Exception:
+                    nxdomain_total = nxdomain_live = nxdomain_expired = 0
+            else:
+                nxdomain_total, nxdomain_live, nxdomain_expired = _compute_counts(nx_store)  # type: ignore[arg-type]
+
         # Global counters from the primary cache backend, when available.
         calls_total = getattr(self._cache, "calls_total", None)
         cache_hits = getattr(self._cache, "cache_hits", None)
@@ -166,10 +362,15 @@ class InMemoryTTLCache(CachePlugin):
         summary: dict[str, object] = {
             "backend": str(backend_label),
             "namespace": getattr(self._cache, "namespace", None) or "default",
-            "total_entries": int(total_entries),
-            "live_entries": int(live_entries),
-            "expired_entries": int(expired_entries),
+            "total_entries": int(total_entries + nxdomain_total),
+            "live_entries": int(live_entries + nxdomain_live),
+            "expired_entries": int(expired_entries + nxdomain_expired),
             "min_cache_ttl": int(self.min_cache_ttl),
+            "max_size": int(self.max_size),
+            "eviction_policy": str(self.eviction_policy),
+            "pct_nxdomain": float(self.pct_nxdomain),
+            "positive_budget": int(self.positive_budget),
+            "nxdomain_budget": int(self.nxdomain_budget),
         }
         if isinstance(calls_total, int):
             summary["calls_total"] = int(calls_total)
@@ -303,7 +504,7 @@ class InMemoryTTLCache(CachePlugin):
                     hit_pct_primary = round(
                         (cache_hits_summary / total_primary) * 100.0, 1
                     )
-        except Exception:
+        except Exception:  # pragma: nocover - summary values are normalized ints
             hit_pct_primary = None
 
         primary_row: dict[str, object] = {
@@ -319,12 +520,22 @@ class InMemoryTTLCache(CachePlugin):
                 primary_row[key] = summary[key]
         caches.append(primary_row)
 
-        # Per-plugin target caches (BasePlugin._targets_cache) when available via
-        # the UDP handler's plugin list.
-        try:
-            from foghorn.servers.udp_server import DNSUDPHandler  # type: ignore[import]
+        if self._cache_nxdomain is not None:
+            # Snapshot the NXDOMAIN partition as a separate row.
+            nxdomain_row = _summarize_foghorn_ttl(
+                "dns_cache (nxdomain)",
+                self._cache_nxdomain,
+            )
+            caches.append(nxdomain_row)
 
-            plugins_list = getattr(DNSUDPHandler, "plugins", []) or []
+        # Per-plugin target caches (BasePlugin._targets_cache) from shared
+        # runtime plugin state.
+        try:
+            from foghorn.servers.dns_runtime_state import (
+                DNSRuntimeState,
+            )  # type: ignore[import]
+
+            plugins_list = getattr(DNSRuntimeState, "plugins", []) or []
         except Exception:
             plugins_list = []
 
@@ -432,24 +643,6 @@ class InMemoryTTLCache(CachePlugin):
         layout: dict[str, object] = {
             "sections": [
                 {
-                    "id": "summary",
-                    "title": "Summary",
-                    "type": "kv",
-                    "path": "summary",
-                    "align": "right",
-                    "rows": [
-                        {"key": "backend", "label": "Backend"},
-                        {"key": "namespace", "label": "Namespace"},
-                        {"key": "min_cache_ttl", "label": "Min cache TTL (s)"},
-                        {"key": "total_entries", "label": "Total entries"},
-                        {"key": "live_entries", "label": "Live entries"},
-                        {"key": "expired_entries", "label": "Expired entries"},
-                        {"key": "calls_total", "label": "Calls"},
-                        {"key": "cache_hits", "label": "Hits"},
-                        {"key": "cache_misses", "label": "Misses"},
-                    ],
-                },
-                {
                     "id": "caches",
                     "title": "DNS and plugin target caches",
                     "type": "table",
@@ -491,6 +684,29 @@ class InMemoryTTLCache(CachePlugin):
                         {"key": "cache_hits", "label": "Hits", "align": "right"},
                         {"key": "cache_misses", "label": "Misses", "align": "right"},
                         {"key": "hit_pct", "label": "Hit %", "align": "right"},
+                    ],
+                },
+                {
+                    "id": "summary",
+                    "title": "Summary",
+                    "type": "kv",
+                    "path": "summary",
+                    "align": "right",
+                    "rows": [
+                        {"key": "backend", "label": "Backend"},
+                        {"key": "namespace", "label": "Namespace"},
+                        {"key": "min_cache_ttl", "label": "Min cache TTL (s)"},
+                        {"key": "max_size", "label": "Max size"},
+                        {"key": "eviction_policy", "label": "Eviction"},
+                        {"key": "pct_nxdomain", "label": "NXDOMAIN %"},
+                        {"key": "positive_budget", "label": "Positive budget"},
+                        {"key": "nxdomain_budget", "label": "NXDOMAIN budget"},
+                        {"key": "total_entries", "label": "Total entries"},
+                        {"key": "live_entries", "label": "Live entries"},
+                        {"key": "expired_entries", "label": "Expired entries"},
+                        {"key": "calls_total", "label": "Calls"},
+                        {"key": "cache_hits", "label": "Hits"},
+                        {"key": "cache_misses", "label": "Misses"},
                     ],
                 },
             ]

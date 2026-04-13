@@ -22,7 +22,7 @@ import datetime
 import json
 import logging
 from pathlib import Path
-from typing import Optional, Tuple, List
+from typing import List, Optional, Tuple
 
 import dns.dnssec
 import dns.name
@@ -85,6 +85,42 @@ def generate_keypair(
 def _sanitize_zone_name(zone_name: str) -> str:
     zone_str = str(zone_name).rstrip(".")
     return zone_str.replace(".", "_")
+
+
+def _candidate_key_lookup_dirs(keys_dir: Path) -> List[Path]:
+    """Brief: Build candidate directories for key-file existence checks.
+
+    Inputs:
+      - keys_dir: Configured key directory path.
+
+    Outputs:
+      - list[Path]: Candidate directories to probe for existing key files.
+
+    Notes:
+      - The configured path is always checked first.
+      - For relative paths that include a ``config`` (or ``.config``) segment,
+        an additional fallback candidate is included with one such segment
+        removed. This supports execution from within a ``config`` directory
+        while keeping persisted config values unchanged.
+    """
+
+    candidates: List[Path] = [keys_dir]
+
+    if keys_dir.is_absolute():
+        return candidates
+
+    parts = list(keys_dir.parts)
+    for idx, part in enumerate(parts):
+        if part not in {"config", ".config"}:
+            continue
+
+        stripped_parts = parts[:idx] + parts[idx + 1 :]
+        fallback = Path(*stripped_parts) if stripped_parts else Path(".")
+        if fallback not in candidates:
+            candidates.append(fallback)
+        break
+
+    return candidates
 
 
 def save_key(
@@ -169,9 +205,11 @@ def load_key(key_dir: Path, zone_name: str, key_type: str) -> Optional[object]:
     pem_bytes = key_path.read_bytes()
     try:
         private_key = serialization.load_pem_private_key(pem_bytes, password=None)
-        logger.info("Loaded existing %s key from %s", key_type.upper(), key_path)
+        logger.debug("Loaded existing %s key from %s", key_type.upper(), key_path)
         return private_key
-    except Exception as exc:  # pragma: no cover - defensive
+    except (
+        Exception
+    ) as exc:  # pragma: nocover - [defensive: invalid or unsupported PEM key material]
         logger.warning("Failed to load key from %s: %s", key_path, exc)
         return None
 
@@ -274,7 +312,9 @@ def sign_zone(
                 )
                 rrsig_rdataset.add(rrsig)
                 rrsig_rdataset.update_ttl(rdataset.ttl)
-            except Exception as exc:  # pragma: no cover - defensive
+            except (
+                Exception
+            ) as exc:  # pragma: nocover - [defensive: dnspython signing can fail for malformed rdatasets]
                 logger.warning(
                     "Failed to sign %s %s: %s",
                     owner,
@@ -301,7 +341,9 @@ def generate_ds_records(
         try:
             ds = dns.dnssec.make_ds(zone_name, ksk_dnskey, digest_type)
             ds_records.append(ds)
-        except Exception as exc:  # pragma: no cover - defensive
+        except (
+            Exception
+        ) as exc:  # pragma: nocover - [defensive: DS generation can fail for invalid DNSKEY/algorithm]
             logger.warning("Failed to generate DS with digest %s: %s", digest_type, exc)
     return ds_records
 
@@ -327,16 +369,26 @@ def ensure_zone_keys(
 
     zone_name_str = zone_name if zone_name.endswith(".") else zone_name + "."
     alg_enum = ALGORITHM_MAP[algorithm][0]
+    configured_keys_dir = keys_dir.expanduser()
+    lookup_dirs = [
+        p.expanduser().resolve() for p in _candidate_key_lookup_dirs(keys_dir)
+    ]
 
-    keys_dir = keys_dir.resolve()
+    keys_dir = configured_keys_dir.resolve()
+    keys_dir.mkdir(parents=True, exist_ok=True)
     keys_dir.mkdir(parents=True, exist_ok=True)
 
     ksk_private = None
     zsk_private = None
 
     if generate_policy in {"no", "maybe"}:
-        ksk_private = load_key(keys_dir, zone_name_str, "ksk")
-        zsk_private = load_key(keys_dir, zone_name_str, "zsk")
+        for lookup_dir in lookup_dirs:
+            if ksk_private is None:
+                ksk_private = load_key(lookup_dir, zone_name_str, "ksk")
+            if zsk_private is None:
+                zsk_private = load_key(lookup_dir, zone_name_str, "zsk")
+            if ksk_private is not None and zsk_private is not None:
+                break
 
     if generate_policy == "no":
         if ksk_private is None or zsk_private is None:
@@ -345,19 +397,19 @@ def ensure_zone_keys(
             )
     else:
         if ksk_private is None:
-            logger.info("Generating new KSK with algorithm %s", algorithm)
+            logger.warn("Generating new KSK with algorithm %s", algorithm)
             ksk_private, _ = generate_keypair(algorithm, "ksk")
             save_key(ksk_private, keys_dir, zone_name_str, "ksk", algorithm)
         if zsk_private is None:
-            logger.info("Generating new ZSK with algorithm %s", algorithm)
+            logger.warn("Generating new ZSK with algorithm %s", algorithm)
             zsk_private, _ = generate_keypair(algorithm, "zsk")
             save_key(zsk_private, keys_dir, zone_name_str, "zsk", algorithm)
 
     ksk_dnskey = make_dnskey_rdata(ksk_private, alg_enum, flags=257)
     zsk_dnskey = make_dnskey_rdata(zsk_private, alg_enum, flags=256)
 
-    logger.info("KSK key tag: %d", dns.dnssec.key_id(ksk_dnskey))
-    logger.info("ZSK key tag: %d", dns.dnssec.key_id(zsk_dnskey))
+    logger.debug("KSK key tag: %d", dns.dnssec.key_id(ksk_dnskey))
+    logger.debug("ZSK key tag: %d", dns.dnssec.key_id(zsk_dnskey))
 
     return ksk_private, zsk_private, ksk_dnskey, zsk_dnskey
 

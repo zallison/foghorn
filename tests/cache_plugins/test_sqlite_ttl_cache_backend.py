@@ -17,19 +17,19 @@ from foghorn.plugins.cache.backends.sqlite_ttl import SQLite3TTLCache
 
 
 def test_sqlite_ttl_cache_set_get_and_encoding_decoding(tmp_path) -> None:
-    """Brief: set/get round-trip values and use pickle only when needed.
+    """Brief: set/get round-trip values and use safe serialization when needed.
 
     Inputs:
       - tmp_path: pytest temporary directory fixture.
 
     Outputs:
-      - None; asserts bytes are stored raw and non-bytes via pickle.
+      - None; asserts bytes are stored raw and non-bytes via safe serialization.
     """
 
     db_path = tmp_path / "cache" / "ttl.sqlite"
     cache = SQLite3TTLCache(str(db_path), namespace="testcache", create_dir=True)
 
-    # Bytes are stored without pickle.
+    # Bytes are stored without serialization wrapping.
     cache.set("raw-bytes", ttl=60, value=b"value")
     with cache._lock:  # type: ignore[attr-defined]
         cur = cache._conn.cursor()  # type: ignore[attr-defined]
@@ -42,7 +42,7 @@ def test_sqlite_ttl_cache_set_get_and_encoding_decoding(tmp_path) -> None:
     assert bytes(value_blob) == b"value"
     assert int(value_is_pickle) == 0
 
-    # Non-bytes use pickle.
+    # Non-bytes use safe serialization.
     cache.set("tuple-key", ttl=60, value={"a": 1})
     value = cache.get("tuple-key")
     assert value == {"a": 1}

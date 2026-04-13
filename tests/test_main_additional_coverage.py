@@ -21,58 +21,10 @@ import pytest
 import foghorn.main as main_mod
 
 
-class _FakeThreadingModule:
-    """Test helper: module-like shim that overrides Thread but proxies others.
-
-    Inputs:
-      - real_module: The real threading module.
-      - thread_cls: Replacement Thread implementation for tests.
-
-    Outputs:
-      - An object suitable for insertion into sys.modules['threading'] that
-        exposes Thread as thread_cls while delegating all other attributes to
-        real_module.
-    """
-
-    def __init__(self, real_module, thread_cls) -> None:  # type: ignore[no-untyped-def]
-        self._real = real_module
-        self.Thread = thread_cls
-
-    def __getattr__(self, name):  # type: ignore[no-untyped-def]
-        return getattr(self._real, name)
-
-
-from foghorn.plugins.cache.none import NullCache
 from foghorn.config.config_parser import normalize_upstream_config
-from foghorn.main import _clear_lru_caches, run_setup_plugins
+from foghorn.main import run_setup_plugins, run_shutdown_plugins
+from foghorn.plugins.cache.none import NullCache
 from foghorn.plugins.resolve.base import BasePlugin
-
-
-def test_clear_lru_caches_none_and_explicit_list():
-    """Brief: _clear_lru_caches handles None and explicit wrapper lists.
-
-    Inputs:
-      - None: calls _clear_lru_caches(None) and _clear_lru_caches([wrapper]).
-
-    Outputs:
-      - None: asserts explicit wrapper.cache_clear() was invoked; no exceptions are raised.
-    """
-
-    class DummyWrapper:
-        def __init__(self) -> None:
-            self.cleared = False
-
-        def cache_clear(self) -> None:
-            self.cleared = True
-
-    # Explicit list path exercises the for-loop over provided wrappers.
-    w = DummyWrapper()
-    _clear_lru_caches([w])
-    assert w.cleared is True
-
-    # None path exercises the gc-discovery path and ensures it does not raise.
-    # We do not depend on actual gc contents for coverage.
-    _clear_lru_caches(None)
 
 
 def test_normalize_upstream_config_missing_host_and_optional_fields():
@@ -88,21 +40,23 @@ def test_normalize_upstream_config_missing_host_and_optional_fields():
 
     # Missing host should raise and cover the validation branch.
     with pytest.raises(ValueError):
-        normalize_upstream_config({"upstreams": [{}]})
+        normalize_upstream_config({"upstreams": {"endpoints": [{}]}})
 
     # Optional fields transport/tls/pool should be preserved and timeout_ms is
-    # read from the foghorn header section with a default when omitted.
+    # read from server.resolver with a default when omitted.
     cfg: Dict[str, Any] = {
-        "upstreams": [
-            {
-                "host": "1.2.3.4",
-                "port": 853,
-                "transport": "dot",
-                "tls": {"verify": True},
-                "pool": {"size": 4},
-            }
-        ],
-        "foghorn": {"timeout_ms": 2000},
+        "upstreams": {
+            "endpoints": [
+                {
+                    "host": "1.2.3.4",
+                    "port": 853,
+                    "transport": "dot",
+                    "tls": {"verify": True},
+                    "pool": {"size": 4},
+                }
+            ]
+        },
+        "server": {"resolver": {"timeout_ms": 2000}},
     }
     ups, timeout_ms = normalize_upstream_config(cfg)
     assert timeout_ms == 2000
@@ -165,6 +119,355 @@ def test_run_setup_plugins_priority_and_fallback(monkeypatch, caplog):
     assert any("Running setup for plugin" in m for m in messages)
 
 
+def test_run_setup_plugins_provider_phase_and_context(monkeypatch):
+    """Brief: Provider phase runs before consumers and context receives provider/upstream state.
+
+    Inputs:
+      - monkeypatch fixture; setup context manager patched with a recorder.
+
+    Outputs:
+      - None: asserts provider plugin setup executes before consumer setup and
+        context kwargs contain provider and upstream information.
+    """
+
+    from foghorn.plugins import setup as setup_mod
+
+    events: list[str] = []
+    context_calls: list[dict[str, Any]] = []
+
+    class Provider(BasePlugin):
+        setup_provides_dns = True
+        setup_priority = 50
+
+        def __init__(self) -> None:
+            super().__init__()
+
+        def setup(self) -> None:  # type: ignore[override]
+            events.append("provider")
+
+    class Consumer(BasePlugin):
+        setup_requires_dns = True
+        setup_priority = 1
+
+        def __init__(self) -> None:
+            super().__init__()
+
+        def setup(self) -> None:  # type: ignore[override]
+            events.append("consumer")
+
+    class FakeSetupDNSContext:
+        def __init__(self, **kwargs: Any) -> None:
+            context_calls.append(kwargs)
+
+        def __enter__(self) -> "FakeSetupDNSContext":
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:  # type: ignore[no-untyped-def]
+            return None
+
+    monkeypatch.setattr(setup_mod, "_SetupDNSResolverContext", FakeSetupDNSContext)
+
+    provider = Provider()
+    consumer = Consumer()
+    run_setup_plugins(
+        [consumer, provider],
+        upstreams=[{"host": "1.1.1.1", "port": 53}],
+        upstream_backups=[{"host": "9.9.9.9", "port": 53}],
+        timeout_ms=1234,
+        resolver_mode="forward",
+        upstream_max_concurrent=3,
+    )
+
+    assert events == ["provider", "consumer"]
+    assert len(context_calls) == 1
+    call = context_calls[0]
+    assert call["providers"] == [provider]
+    assert call["upstreams"] == [
+        {"host": "1.1.1.1", "port": 53},
+        {"host": "9.9.9.9", "port": 53},
+    ]
+    assert call["timeout_ms"] == 1234
+    assert call["resolver_mode"] == "forward"
+    assert call["upstream_max_concurrent"] == 3
+
+
+def test_run_setup_plugins_fallback_default_and_override(monkeypatch):
+    """Brief: setup_dns_fallback_to_system defaults to True and honors explicit False.
+
+    Inputs:
+      - monkeypatch fixture; setup context manager patched with a recorder.
+
+    Outputs:
+      - None: asserts fallback_to_system value passed to setup context for both
+        default and override plugin configurations.
+    """
+
+    from foghorn.plugins import setup as setup_mod
+
+    fallback_values: list[bool] = []
+
+    class NeedsDNS(BasePlugin):
+        setup_requires_dns = True
+
+        def __init__(self, **cfg: object) -> None:
+            super().__init__(**cfg)
+
+        def setup(self) -> None:  # type: ignore[override]
+            return None
+
+    class FakeSetupDNSContext:
+        def __init__(self, **kwargs: Any) -> None:
+            fallback_values.append(bool(kwargs["fallback_to_system"]))
+
+        def __enter__(self) -> "FakeSetupDNSContext":
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:  # type: ignore[no-untyped-def]
+            return None
+
+    monkeypatch.setattr(setup_mod, "_SetupDNSResolverContext", FakeSetupDNSContext)
+
+    run_setup_plugins(
+        [
+            NeedsDNS(),
+            NeedsDNS(setup_dns_fallback_to_system=False),
+        ]
+    )
+
+    assert fallback_values == [True, False]
+
+
+def test_run_setup_plugins_calls_post_setup_after_setup_phase() -> None:
+    """Brief: post_setup runs after all setup hooks complete.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts setup runs by setup_priority before post_setup calls.
+    """
+
+    events: list[str] = []
+
+    class First(BasePlugin):
+        setup_priority = 1
+
+        def __init__(self) -> None:
+            super().__init__()
+
+        def setup(self) -> None:  # type: ignore[override]
+            events.append("setup:first")
+
+        def post_setup(self) -> None:  # type: ignore[override]
+            events.append("post:first")
+
+    class Second(BasePlugin):
+        setup_priority = 2
+
+        def __init__(self) -> None:
+            super().__init__()
+
+        def setup(self) -> None:  # type: ignore[override]
+            events.append("setup:second")
+
+        def post_setup(self) -> None:  # type: ignore[override]
+            events.append("post:second")
+
+    run_setup_plugins([Second(), First()])
+
+    assert events == [
+        "setup:first",
+        "setup:second",
+        "post:first",
+        "post:second",
+    ]
+
+
+def test_run_setup_plugins_post_setup_honors_abort_on_failure() -> None:
+    """Brief: post_setup exceptions honor abort_on_failure configuration.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts non-aborting and aborting post_setup behaviors.
+    """
+
+    class NonAbort(BasePlugin):
+        def __init__(self) -> None:
+            super().__init__(abort_on_failure=False)
+
+        def setup(self) -> None:  # type: ignore[override]
+            return None
+
+        def post_setup(self) -> None:  # type: ignore[override]
+            raise RuntimeError("non-abort finished failure")
+
+    class Abort(BasePlugin):
+        def __init__(self) -> None:
+            super().__init__(abort_on_failure=True)
+
+        def setup(self) -> None:  # type: ignore[override]
+            return None
+
+        def post_setup(self) -> None:  # type: ignore[override]
+            raise RuntimeError("abort finished failure")
+
+    # Non-aborting plugin should not raise.
+    run_setup_plugins([NonAbort()])
+
+    # Aborting plugin should raise RuntimeError.
+    with pytest.raises(RuntimeError):
+        run_setup_plugins([Abort()])
+
+
+def test_run_shutdown_plugins_calls_shutdown_and_continues_on_error(caplog):
+    """Brief: run_shutdown_plugins invokes hooks once and continues on errors.
+
+    Inputs:
+      - caplog fixture; objects with shutdown() including one that raises and
+        one duplicate object reference.
+
+    Outputs:
+      - None: asserts callable shutdown hooks run once per object and errors
+        are logged without raising.
+    """
+
+    class CacheLike:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.name = "cache_like"
+
+        def shutdown(self) -> None:
+            self.calls += 1
+
+    class QueryLogLike:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.name = "query_log_like"
+
+        def shutdown(self) -> None:
+            self.calls += 1
+            raise RuntimeError("boom")
+
+    class ResolverLike:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.name = "resolver_like"
+
+        def shutdown(self) -> None:
+            self.calls += 1
+
+    cache_obj = CacheLike()
+    query_log_obj = QueryLogLike()
+    resolver_obj = ResolverLike()
+
+    caplog.set_level(logging.INFO, logger="foghorn.main.shutdown")
+    run_shutdown_plugins(
+        [cache_obj, query_log_obj, resolver_obj, None, query_log_obj, object()]
+    )
+
+    assert cache_obj.calls == 1
+    assert query_log_obj.calls == 1
+    assert resolver_obj.calls == 1
+    assert any(
+        "Running shutdown for plugin cache_like" in r.message for r in caplog.records
+    )
+    assert any(
+        "Shutdown for plugin query_log_like failed" in r.message for r in caplog.records
+    )
+
+
+def test_main_runs_shutdown_hooks_for_cache_querylog_and_resolve(monkeypatch):
+    """Brief: main() passes cache/query-log/resolve objects to shutdown helper.
+
+    Inputs:
+      - monkeypatch fixture; cache plugin, query-log backend, and resolver plugin
+        test doubles injected into main() dependencies.
+
+    Outputs:
+      - None: asserts run_shutdown_plugins receives all three lifecycle objects.
+    """
+
+    import time as _time
+
+    yaml_data = (
+        "server:\n"
+        "  http:\n"
+        "    enabled: false\n"
+        "  listen:\n"
+        "    udp:\n"
+        "      enabled: false\n"
+        "      host: 127.0.0.1\n"
+        "      port: 5354\n"
+        "  resolver:\n"
+        "    mode: forward\n"
+        "    timeout_ms: 2000\n"
+        "upstreams:\n"
+        "  strategy: failover\n"
+        "  max_concurrent: 1\n"
+        "  endpoints:\n"
+        "    - host: 1.1.1.1\n"
+        "      port: 53\n"
+    )
+
+    class CacheLike:
+        def shutdown(self) -> None:
+            return None
+
+    class QueryLogLike:
+        def shutdown(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    class ResolverLike:
+        def shutdown(self) -> None:
+            return None
+
+    cache_obj = CacheLike()
+    query_log_obj = QueryLogLike()
+    resolver_obj = ResolverLike()
+
+    captured: dict[str, list[Any]] = {"plugins": []}
+
+    def fake_run_shutdown_plugins(items: list[Any]) -> None:
+        captured["plugins"] = list(items)
+
+    monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
+    monkeypatch.setattr(main_mod, "start_webserver", lambda *a, **kw: None)
+    monkeypatch.setattr(main_mod, "run_setup_plugins", lambda _plugins, **_kw: None)
+    monkeypatch.setattr(main_mod, "run_shutdown_plugins", fake_run_shutdown_plugins)
+    monkeypatch.setattr(main_mod, "load_plugins", lambda _specs: [resolver_obj])
+    monkeypatch.setattr(
+        main_mod, "_load_cache_plugin_from_cfg", lambda **_kw: cache_obj
+    )
+    monkeypatch.setattr(
+        main_mod,
+        "_install_cache_plugin_global",
+        lambda cache_plugin=None, logger=None, **_kw: None,
+    )
+    monkeypatch.setattr(
+        main_mod,
+        "_initialize_statistics_subsystem",
+        lambda **_kw: (None, None, query_log_obj),
+    )
+
+    def _raise_keyboardinterrupt(_seconds: float) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(_time, "sleep", _raise_keyboardinterrupt)
+
+    with patch("builtins.open", mock_open(read_data=yaml_data)):
+        rc = main_mod.main(["--config", "cfg.yaml"])
+
+    assert rc == 0
+    assert cache_obj in captured["plugins"]
+    assert query_log_obj in captured["plugins"]
+    assert resolver_obj in captured["plugins"]
+
+
 def test_main_returns_one_when_run_setup_plugins_fails(monkeypatch, caplog):
     """Brief: main() returns 1 when run_setup_plugins raises RuntimeError.
 
@@ -194,17 +497,17 @@ def test_main_returns_one_when_run_setup_plugins_fails(monkeypatch, caplog):
         "plugins: []\n"
     )
 
-    class DummyServer:
-        def __init__(self, *a: Any, **kw: Any) -> None:  # pragma: no cover
-            raise AssertionError("DNSServer should not be constructed when setup fails")
+    import socketserver
 
-        def serve_forever(self) -> None:  # pragma: no cover
-            raise KeyboardInterrupt
+    def forbidden_udp_server(*_a: Any, **_kw: Any) -> None:  # pragma: no cover
+        raise AssertionError(
+            "ThreadingUDPServer should not be constructed when setup fails"
+        )
 
-    def boom_run_setup(_plugins: list[Any]) -> None:
+    def boom_run_setup(_plugins: list[Any], **_kwargs: Any) -> None:
         raise RuntimeError("setup failed")
 
-    monkeypatch.setattr(main_mod, "DNSServer", DummyServer)
+    monkeypatch.setattr(socketserver, "ThreadingUDPServer", forbidden_udp_server)
     monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
     monkeypatch.setattr(main_mod, "run_setup_plugins", boom_run_setup)
 
@@ -214,6 +517,68 @@ def test_main_returns_one_when_run_setup_plugins_fails(monkeypatch, caplog):
 
     assert rc == 1
     assert any("Plugin setup failed" in r.message for r in caplog.records)
+
+
+def test_main_passes_resolver_context_to_run_setup_plugins(monkeypatch) -> None:
+    """Brief: main() passes resolver/upstream context into run_setup_plugins().
+
+    Inputs:
+      - monkeypatch fixture; setup runner replaced with a recorder.
+
+    Outputs:
+      - None: asserts run_setup_plugins receives mode, timeout, upstreams,
+        backups, and max_concurrent from parsed config.
+    """
+
+    import time as _time
+
+    yaml_data = (
+        "server:\n"
+        "  http:\n"
+        "    enabled: false\n"
+        "  listen:\n"
+        "    udp:\n"
+        "      enabled: false\n"
+        "      host: 127.0.0.1\n"
+        "      port: 5354\n"
+        "  resolver:\n"
+        "    mode: forward\n"
+        "    timeout_ms: 2500\n"
+        "upstreams:\n"
+        "  strategy: failover\n"
+        "  max_concurrent: 4\n"
+        "  endpoints:\n"
+        "    - host: 1.1.1.1\n"
+        "      port: 53\n"
+        "plugins: []\n"
+    )
+
+    captured: dict[str, Any] = {}
+
+    def _record_setup(_plugins: list[Any], **kwargs: Any) -> None:
+        captured.update(kwargs)
+
+    def _raise_keyboardinterrupt(_seconds: float) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
+    monkeypatch.setattr(main_mod, "start_webserver", lambda *a, **kw: None)
+    monkeypatch.setattr(main_mod, "load_plugins", lambda _specs: [])
+    monkeypatch.setattr(main_mod, "run_setup_plugins", _record_setup)
+    monkeypatch.setattr(
+        main_mod, "_initialize_statistics_subsystem", lambda **_kw: (None, None, None)
+    )
+    monkeypatch.setattr(_time, "sleep", _raise_keyboardinterrupt)
+
+    with patch("builtins.open", mock_open(read_data=yaml_data)):
+        rc = main_mod.main(["--config", "cfg.yaml"])
+
+    assert rc == 0
+    assert captured["resolver_mode"] == "forward"
+    assert captured["timeout_ms"] == 2500
+    assert captured["upstream_max_concurrent"] == 4
+    assert captured["upstreams"] == [{"host": "1.1.1.1", "port": 53}]
+    assert captured["upstream_backups"] == []
 
 
 def test_main_installs_cache_plugin_without_udp_listener(monkeypatch) -> None:
@@ -272,6 +637,188 @@ def test_main_installs_cache_plugin_without_udp_listener(monkeypatch) -> None:
     assert isinstance(plugin_base.DNS_CACHE, NullCache)
 
 
+def test_main_axfr_invalid_values_and_malformed_tsig_entries(monkeypatch) -> None:
+    """Brief: AXFR invalid values are coerced and malformed TSIG entries are filtered.
+
+    Inputs:
+      - monkeypatch fixture.
+      - Config with invalid AXFR scalar types and mixed-validity tsig_keys.
+
+    Outputs:
+      - None: asserts normalized AXFR values passed into runtime snapshot setup.
+    """
+
+    import time as _time
+
+    yaml_data = (
+        "server:\n"
+        "  listen:\n"
+        "    udp:\n"
+        "      enabled: false\n"
+        "  resolver:\n"
+        "    mode: forward\n"
+        "    timeout_ms: 2000\n"
+        "  axfr:\n"
+        "    enabled: true\n"
+        '    allow_clients: "not-a-list"\n'
+        '    max_zone_rrs: "not-a-number"\n'
+        '    max_concurrent_transfers: "bad"\n'
+        '    rate_limit_per_client_per_second: "bad"\n'
+        '    rate_limit_burst: "bad"\n'
+        '    max_transfer_rate_bytes_per_second: "bad"\n'
+        '    message_max_bytes: "bad"\n'
+        "    require_tsig: true\n"
+        "    tsig_keys:\n"
+        '      - name: "key-valid"\n'
+        '        secret: "secret-valid"\n'
+        '        algorithm: "HMAC-SHA512"\n'
+        '      - name: ""\n'
+        '        secret: "missing-name"\n'
+        '      - name: "missing-secret"\n'
+        '        secret: ""\n'
+        '      - not: "a-tsig-entry"\n'
+        '      - "just-a-string"\n'
+        "upstreams:\n"
+        "  strategy: failover\n"
+        "  max_concurrent: 1\n"
+        "  endpoints:\n"
+        "    - host: 1.1.1.1\n"
+        "      port: 53\n"
+        "plugins: []\n"
+    )
+
+    captured: dict[str, Any] = {}
+
+    def _capture_runtime_snapshot(**kwargs: Any) -> None:
+        captured.update(kwargs)
+
+    monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
+    monkeypatch.setattr(main_mod, "start_webserver", lambda *a, **kw: None)
+    monkeypatch.setattr(main_mod, "run_setup_plugins", lambda *_a, **_kw: None)
+    monkeypatch.setattr(
+        main_mod,
+        "_initialize_statistics_subsystem",
+        lambda **_kw: (None, None, None),
+    )
+    monkeypatch.setattr(
+        main_mod,
+        "_initialize_runtime_snapshot",
+        _capture_runtime_snapshot,
+    )
+    monkeypatch.setattr(
+        _time,
+        "sleep",
+        lambda _s: (_ for _ in ()).throw(KeyboardInterrupt),
+    )
+
+    with patch("builtins.open", mock_open(read_data=yaml_data)):
+        rc = main_mod.main(
+            ["--config", "axfr-invalid.yaml", "--skip-schema-validation"]
+        )
+
+    assert rc == 0
+    assert captured["axfr_enabled"] is True
+    assert captured["axfr_allow_clients"] == []
+    assert captured["axfr_max_zone_rrs"] is None
+    assert captured["axfr_max_concurrent_transfers"] == 4
+    assert captured["axfr_rate_limit_per_client_per_second"] == 0.0
+    assert captured["axfr_rate_limit_burst"] == 2.0
+    assert captured["axfr_max_transfer_rate_bytes_per_second"] is None
+    assert captured["axfr_message_max_bytes"] == 64000
+    assert captured["axfr_require_tsig"] is True
+    assert captured["axfr_tsig_keys"] == [
+        {
+            "name": "key-valid",
+            "secret": "secret-valid",
+            "algorithm": "hmac-sha512",
+        }
+    ]
+
+
+def test_main_axfr_non_positive_limits_are_clamped(monkeypatch) -> None:
+    """Brief: AXFR non-positive limits are clamped to safe defaults.
+
+    Inputs:
+      - monkeypatch fixture.
+      - Config with non-positive AXFR limits and empty tsig_keys.
+
+    Outputs:
+      - None: asserts clamped AXFR values passed into runtime snapshot setup.
+    """
+
+    import time as _time
+
+    yaml_data = (
+        "server:\n"
+        "  listen:\n"
+        "    udp:\n"
+        "      enabled: false\n"
+        "  resolver:\n"
+        "    mode: forward\n"
+        "    timeout_ms: 2000\n"
+        "  axfr:\n"
+        "    enabled: true\n"
+        "    allow_clients:\n"
+        "      - 127.0.0.1\n"
+        "    max_zone_rrs: 0\n"
+        "    max_concurrent_transfers: 0\n"
+        "    rate_limit_per_client_per_second: -1\n"
+        "    rate_limit_burst: 0\n"
+        "    max_transfer_rate_bytes_per_second: -10\n"
+        "    message_max_bytes: 70000\n"
+        "    require_tsig: false\n"
+        "    tsig_keys: []\n"
+        "upstreams:\n"
+        "  strategy: failover\n"
+        "  max_concurrent: 1\n"
+        "  endpoints:\n"
+        "    - host: 1.1.1.1\n"
+        "      port: 53\n"
+        "plugins: []\n"
+    )
+
+    captured: dict[str, Any] = {}
+
+    def _capture_runtime_snapshot(**kwargs: Any) -> None:
+        captured.update(kwargs)
+
+    monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
+    monkeypatch.setattr(main_mod, "start_webserver", lambda *a, **kw: None)
+    monkeypatch.setattr(main_mod, "run_setup_plugins", lambda *_a, **_kw: None)
+    monkeypatch.setattr(
+        main_mod,
+        "_initialize_statistics_subsystem",
+        lambda **_kw: (None, None, None),
+    )
+    monkeypatch.setattr(
+        main_mod,
+        "_initialize_runtime_snapshot",
+        _capture_runtime_snapshot,
+    )
+    monkeypatch.setattr(
+        _time,
+        "sleep",
+        lambda _s: (_ for _ in ()).throw(KeyboardInterrupt),
+    )
+
+    with patch("builtins.open", mock_open(read_data=yaml_data)):
+        rc = main_mod.main(
+            ["--config", "axfr-non-positive.yaml", "--skip-schema-validation"]
+        )
+
+    assert rc == 0
+    assert captured["axfr_enabled"] is True
+    assert captured["axfr_allow_clients"] == ["127.0.0.1"]
+    assert captured["axfr_max_zone_rrs"] is None
+    assert captured["axfr_max_concurrent_transfers"] == 1
+    assert captured["axfr_rate_limit_per_client_per_second"] == 0.0
+    assert captured["axfr_rate_limit_burst"] == 1.0
+    assert captured["axfr_max_transfer_rate_bytes_per_second"] is None
+    assert captured["axfr_message_max_bytes"] == 65535
+    assert captured["axfr_require_tsig"] is False
+    assert captured["axfr_tsig_keys"] == []
+
+
 def _capture_sig_handlers() -> Dict[str, Any]:
     """Brief: Helper to capture SIGUSR1/SIGUSR2 handlers when main() registers them.
 
@@ -304,8 +851,12 @@ def test_sigusr1_skip_reset_and_coalescing(monkeypatch, caplog):
 
     Outputs:
       - None: asserts reset is skipped and that when the pending flag is set,
-        the handler returns early without invoking reload logic.
+        the handler returns early.
     """
+
+    import socketserver
+    import threading
+    import time
 
     yaml_data = (
         "server:\n"
@@ -317,6 +868,7 @@ def test_sigusr1_skip_reset_and_coalescing(monkeypatch, caplog):
         "  resolver:\n"
         "    mode: forward\n"
         "    timeout_ms: 2000\n"
+        "    use_asyncio: false\n"
         "upstreams:\n"
         "  strategy: failover\n"
         "  max_concurrent: 1\n"
@@ -328,85 +880,92 @@ def test_sigusr1_skip_reset_and_coalescing(monkeypatch, caplog):
         "  sigusr2_resets_stats: false\n"
     )
 
+    class DummyUDPServer:
+        def __init__(self, *_a: Any, **_kw: Any) -> None:
+            self.daemon_threads = False
+            self._stop = threading.Event()
+
+        def serve_forever(self) -> None:
+            self._stop.wait()
+
+        def shutdown(self) -> None:
+            self._stop.set()
+
+        def server_close(self) -> None:
+            return None
+
+    # First run: invoke SIGUSR1 once and ensure the reset-skipped log is emitted.
     handler_info = _capture_sig_handlers()
     captured = handler_info["captured"]
     fake_signal = handler_info["fake_signal"]
 
-    class DummyServer:
-        def __init__(self, *a: Any, **kw: Any) -> None:
-            pass
+    called = {"sent": False}
 
-        def serve_forever(self) -> None:
-            # Trigger handler normally once.
-            if captured["sigusr1"] is not None:
-                captured["sigusr1"](None, None)
-            raise KeyboardInterrupt
+    def _sleep_first(_seconds: float) -> None:
+        handler = captured.get("sigusr1")
+        assert handler is not None
 
-    # First run: normal SIGUSR1 to exercise skip-reset logging.
-    monkeypatch.setattr(main_mod, "DNSServer", DummyServer)
+        # First sleep: trigger the signal.
+        if not called["sent"]:
+            called["sent"] = True
+            handler(None, None)
+            return None
+
+        # Second sleep: exit after keepalive loop had a chance to process.
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(socketserver, "ThreadingUDPServer", DummyUDPServer)
     monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
     monkeypatch.setattr(main_mod.signal, "signal", fake_signal)
     monkeypatch.setattr(
         main_mod, "start_webserver", lambda *a, **k: SimpleNamespace(stop=lambda: None)
     )
+    monkeypatch.setattr(time, "sleep", _sleep_first)
 
     with patch("builtins.open", mock_open(read_data=yaml_data)):
-        caplog.set_level(logging.INFO)
+        caplog.set_level(logging.INFO, logger="foghorn.main")
         rc = main_mod.main(["--config", "cfg.yaml"])
 
     assert rc == 0
-    assert any("statistics reset skipped" in r.message for r in caplog.records)
+    assert any("SIGUSR1: statistics reset skipped" in r.message for r in caplog.records)
 
-    # Second run: ensure coalescing early-exit path is exercised by setting
-    # the pending Event in the handler closure before calling it.
+    # Second run: set the coalescing flag (pending event) and ensure SIGUSR1
+    # returns early without running the handler body.
+    caplog.clear()
+
     handler_info = _capture_sig_handlers()
     captured = handler_info["captured"]
     fake_signal = handler_info["fake_signal"]
 
-    call_counter = {"count": 0}
+    def _sleep_second(_seconds: float) -> None:
+        handler = captured.get("sigusr1")
+        assert handler is not None
 
-    class DummyServer2:
-        def __init__(self, *a: Any, **kw: Any) -> None:
-            pass
+        pending_event = None
+        for cell in handler.__closure__ or ():
+            obj = cell.cell_contents
+            if hasattr(obj, "is_set") and hasattr(obj, "set") and hasattr(obj, "clear"):
+                pending_event = obj
+                break
+        assert pending_event is not None
+        pending_event.set()
 
-        def serve_forever(self) -> None:
-            handler = captured["sigusr1"]
-            # Locate the pending Event in the closure and set it.
-            pending_event = None
-            for cell in handler.__closure__ or ():
-                if hasattr(cell.cell_contents, "is_set") and hasattr(
-                    cell.cell_contents, "set"
-                ):
-                    pending_event = cell.cell_contents
-                    break
-            assert pending_event is not None
-            pending_event.set()
+        handler(None, None)
+        raise KeyboardInterrupt
 
-            # Monkeypatch internal _process_sigusr1 via attribute on closure
-            # cell to count invocations.
-            def proxy_process(*_a: Any, **_k: Any) -> None:
-                call_counter["count"] += 1
-
-            # Replace _process_sigusr1 in the handler's globals so that if the
-            # body executes, our proxy increments the counter.
-            handler.__globals__["_process_sigusr1"] = proxy_process
-
-            handler(None, None)
-            raise KeyboardInterrupt
-
-    monkeypatch.setattr(main_mod, "DNSServer", DummyServer2)
+    monkeypatch.setattr(socketserver, "ThreadingUDPServer", DummyUDPServer)
     monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
     monkeypatch.setattr(main_mod.signal, "signal", fake_signal)
     monkeypatch.setattr(
         main_mod, "start_webserver", lambda *a, **k: SimpleNamespace(stop=lambda: None)
     )
+    monkeypatch.setattr(time, "sleep", _sleep_second)
 
     with patch("builtins.open", mock_open(read_data=yaml_data)):
         rc = main_mod.main(["--config", "cfg2.yaml"])
 
     assert rc == 0
-    # Because the pending flag was set, proxy_process should not have been called.
-    assert call_counter["count"] == 0
+    assert not any(r.message.startswith("SIGUSR1:") for r in caplog.records)
 
 
 def test_sigusr1_registration_failure_logs_warning(monkeypatch, caplog):
@@ -419,6 +978,10 @@ def test_sigusr1_registration_failure_logs_warning(monkeypatch, caplog):
       - None: asserts warning log is emitted and main() still returns cleanly.
     """
 
+    import socketserver
+    import threading
+    import time
+
     yaml_data = (
         "server:\n"
         "  listen:\n"
@@ -429,6 +992,7 @@ def test_sigusr1_registration_failure_logs_warning(monkeypatch, caplog):
         "  resolver:\n"
         "    mode: forward\n"
         "    timeout_ms: 2000\n"
+        "    use_asyncio: false\n"
         "upstreams:\n"
         "  strategy: failover\n"
         "  max_concurrent: 1\n"
@@ -437,19 +1001,29 @@ def test_sigusr1_registration_failure_logs_warning(monkeypatch, caplog):
         "      port: 53\n"
     )
 
+    class DummyUDPServer:
+        def __init__(self, *_a: Any, **_kw: Any) -> None:
+            self.daemon_threads = False
+            self._stop = threading.Event()
+
+        def serve_forever(self) -> None:
+            self._stop.wait()
+
+        def shutdown(self) -> None:
+            self._stop.set()
+
+        def server_close(self) -> None:
+            return None
+
     def fake_signal(sig, handler):
         if sig == _signal.SIGUSR1:
             raise RuntimeError("no SIGUSR1")
         return None
 
-    class DummyServer:
-        def __init__(self, *a: Any, **kw: Any) -> None:
-            pass
-
-        def serve_forever(self) -> None:
-            raise KeyboardInterrupt
-
-    monkeypatch.setattr(main_mod, "DNSServer", DummyServer)
+    monkeypatch.setattr(socketserver, "ThreadingUDPServer", DummyUDPServer)
+    monkeypatch.setattr(
+        time, "sleep", lambda _s: (_ for _ in ()).throw(KeyboardInterrupt)
+    )
     monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
     monkeypatch.setattr(main_mod.signal, "signal", fake_signal)
     monkeypatch.setattr(
@@ -465,15 +1039,19 @@ def test_sigusr1_registration_failure_logs_warning(monkeypatch, caplog):
 
 
 def test_sigusr2_error_paths_more(monkeypatch, caplog):
-    """Brief: SIGUSR2 covers stats reset error, no-collector branch, plugin error, and coalescing.
+    """Brief: SIGUSR2 covers stats reset error, plugin error, and coalescing.
 
     Inputs:
       - monkeypatch/caplog fixtures; customized stats collector and plugins.
 
     Outputs:
-      - None: asserts appropriate logs for error/no-collector paths and that
-        when the pending Event is set, the handler exits early.
+      - None: asserts appropriate logs for error paths and that when the pending
+        Event is set, the handler exits early.
     """
+
+    import socketserver
+    import threading
+    import time
 
     yaml_data = (
         "server:\n"
@@ -485,6 +1063,7 @@ def test_sigusr2_error_paths_more(monkeypatch, caplog):
         "  resolver:\n"
         "    mode: forward\n"
         "    timeout_ms: 2000\n"
+        "    use_asyncio: false\n"
         "upstreams:\n"
         "  strategy: failover\n"
         "  max_concurrent: 1\n"
@@ -496,6 +1075,20 @@ def test_sigusr2_error_paths_more(monkeypatch, caplog):
         "  sigusr2_resets_stats: true\n"
     )
 
+    class DummyUDPServer:
+        def __init__(self, *_a: Any, **_kw: Any) -> None:
+            self.daemon_threads = False
+            self._stop = threading.Event()
+
+        def serve_forever(self) -> None:
+            self._stop.wait()
+
+        def shutdown(self) -> None:
+            self._stop.set()
+
+        def server_close(self) -> None:
+            return None
+
     handler_info = _capture_sig_handlers()
     captured = handler_info["captured"]
     fake_signal = handler_info["fake_signal"]
@@ -504,10 +1097,10 @@ def test_sigusr2_error_paths_more(monkeypatch, caplog):
         """Brief: Collector whose snapshot(reset=True) raises to test error branch.
 
         Inputs:
-          - reset flag (ignored).
+          - reset flag.
 
         Outputs:
-          - None: always raises on reset; otherwise returns dummy snapshot.
+          - SimpleNamespace snapshot when reset is False; raises when reset is True.
         """
 
         def snapshot(self, reset: bool = False):  # type: ignore[override]
@@ -516,66 +1109,47 @@ def test_sigusr2_error_paths_more(monkeypatch, caplog):
             return SimpleNamespace(totals={})
 
     class DummyPlugin:
-        def __init__(self, **kw: Any) -> None:
-            self.called = False
-
         def handle_sigusr2(self) -> None:
-            self.called = True
+            return None
 
     class ErrorPlugin(DummyPlugin):
         def handle_sigusr2(self) -> None:  # type: ignore[override]
             raise RuntimeError("plugin boom")
 
-    plugins = [DummyPlugin(), ErrorPlugin()]
-
     def fake_load_plugins(_specs):
-        return plugins
+        return [DummyPlugin(), ErrorPlugin()]
 
-    call_counter = {"count": 0}
+    called = {"sent": False}
 
-    class DummyServer:
-        def __init__(self, *a: Any, **kw: Any) -> None:
-            pass
+    def _sleep_once(_seconds: float) -> None:
+        handler = captured.get("sigusr2")
+        assert handler is not None
 
-        def serve_forever(self) -> None:
-            handler = captured["sigusr2"]
-            # First call: normal path with collector and plugins to cover
-            # reset error and plugin error branches.
+        # First sleep: trigger the signal.
+        if not called["sent"]:
+            called["sent"] = True
             handler(None, None)
-            # Second call: set cfg to a non-dict so statistics inspection
-            # path raises when accessing get(), triggering the outer defensive
-            # except around configuration handling.
-            for cell in handler.__closure__ or ():
-                if (
-                    isinstance(cell.cell_contents, dict)
-                    and "statistics" in cell.cell_contents
-                ):
-                    cell.cell_contents = None  # type: ignore[assignment]
-                    break
-            handler(None, None)
-            # Third call: set pending flag for coalescing and ensure inner
-            # logic does not re-run.
-            pending_event = None
-            for cell in handler.__closure__ or ():
-                if hasattr(cell.cell_contents, "is_set") and hasattr(
-                    cell.cell_contents, "set"
-                ):
-                    pending_event = cell.cell_contents
-                    break
-            assert pending_event is not None
-            pending_event.set()
+            return None
 
-            def proxy_process_sigusr2():
-                call_counter["count"] += 1
+        # Second sleep: after processing, set the pending event and ensure the
+        # handler returns early (it should only set the Event).
+        pending_event = None
+        for cell in handler.__closure__ or ():
+            obj = cell.cell_contents
+            if hasattr(obj, "is_set") and hasattr(obj, "set") and hasattr(obj, "clear"):
+                pending_event = obj
+                break
+        assert pending_event is not None
+        pending_event.set()
 
-            handler.__globals__["_process_sigusr2"] = proxy_process_sigusr2
-            handler(None, None)
-            raise KeyboardInterrupt
+        handler(None, None)
+        raise KeyboardInterrupt
 
-    # Attach ErrorCollector as StatsCollector so SIGUSR2 reset path errors.
+    monkeypatch.setattr(socketserver, "ThreadingUDPServer", DummyUDPServer)
+    monkeypatch.setattr(time, "sleep", _sleep_once)
+    monkeypatch.setattr(DummyPlugin, "post_setup", lambda self: None, raising=False)
     monkeypatch.setattr(main_mod, "StatsCollector", lambda **kw: ErrorCollector())
     monkeypatch.setattr(main_mod, "load_plugins", fake_load_plugins)
-    monkeypatch.setattr(main_mod, "DNSServer", DummyServer)
     monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
     monkeypatch.setattr(main_mod.signal, "signal", fake_signal)
     monkeypatch.setattr(
@@ -583,16 +1157,15 @@ def test_sigusr2_error_paths_more(monkeypatch, caplog):
     )
 
     with patch("builtins.open", mock_open(read_data=yaml_data)):
-        caplog.set_level(logging.INFO)
-        rc = main_mod.main(["--config", "cfg.yaml"])
+        with caplog.at_level(logging.INFO, logger="foghorn.main"):
+            rc = main_mod.main(["--config", "cfg.yaml"])
 
     assert rc == 0
-    # Ensure error during statistics reset logged.
-    assert any(
-        "SIGUSR2: error during statistics reset" in r.message for r in caplog.records
-    )
-    # Coalescing: proxy_process_sigusr2 should not have been called.
-    assert call_counter["count"] == 0
+
+    msgs = [r.message for r in caplog.records]
+    assert any("SIGUSR2: error during statistics reset" in m for m in msgs)
+    # The coalesced second call should not emit a second 'invoked signal handler hook' line.
+    assert sum("SIGUSR2: invoked signal handler hook" in m for m in msgs) == 1
 
 
 def test_sigusr2_logs_no_collector_active(monkeypatch, caplog):
@@ -605,6 +1178,10 @@ def test_sigusr2_logs_no_collector_active(monkeypatch, caplog):
       - None: asserts informational log about skipping reset when no collector exists.
     """
 
+    import socketserver
+    import threading
+    import time
+
     yaml_data = (
         "server:\n"
         "  listen:\n"
@@ -615,6 +1192,7 @@ def test_sigusr2_logs_no_collector_active(monkeypatch, caplog):
         "  resolver:\n"
         "    mode: forward\n"
         "    timeout_ms: 2000\n"
+        "    use_asyncio: false\n"
         "upstreams:\n"
         "  strategy: failover\n"
         "  max_concurrent: 1\n"
@@ -626,22 +1204,41 @@ def test_sigusr2_logs_no_collector_active(monkeypatch, caplog):
         "  sigusr2_resets_stats: true\n"
     )
 
+    class DummyUDPServer:
+        def __init__(self, *_a: Any, **_kw: Any) -> None:
+            self.daemon_threads = False
+            self._stop = threading.Event()
+
+        def serve_forever(self) -> None:
+            self._stop.wait()
+
+        def shutdown(self) -> None:
+            self._stop.set()
+
+        def server_close(self) -> None:
+            return None
+
     handler_info = _capture_sig_handlers()
     captured = handler_info["captured"]
     fake_signal = handler_info["fake_signal"]
 
-    class DummyServer:
-        def __init__(self, *a: Any, **kw: Any) -> None:
-            pass
+    called = {"sent": False}
 
-        def serve_forever(self) -> None:
-            handler = captured["sigusr2"]
+    def _sleep_once(_seconds: float) -> None:
+        handler = captured.get("sigusr2")
+        assert handler is not None
+
+        if not called["sent"]:
+            called["sent"] = True
             handler(None, None)
-            raise KeyboardInterrupt
+            return None
+
+        raise KeyboardInterrupt
 
     # StatsCollector returns None so the SIGUSR2 handler sees no active collector.
     monkeypatch.setattr(main_mod, "StatsCollector", lambda **kw: None)
-    monkeypatch.setattr(main_mod, "DNSServer", DummyServer)
+    monkeypatch.setattr(socketserver, "ThreadingUDPServer", DummyUDPServer)
+    monkeypatch.setattr(time, "sleep", _sleep_once)
     monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
     monkeypatch.setattr(main_mod.signal, "signal", fake_signal)
     monkeypatch.setattr(
@@ -669,6 +1266,10 @@ def test_sigusr2_registration_failure_logs_warning(monkeypatch, caplog):
       - None: asserts warning log is emitted and main() still returns cleanly.
     """
 
+    import socketserver
+    import threading
+    import time
+
     yaml_data = (
         "server:\n"
         "  listen:\n"
@@ -679,6 +1280,7 @@ def test_sigusr2_registration_failure_logs_warning(monkeypatch, caplog):
         "  resolver:\n"
         "    mode: forward\n"
         "    timeout_ms: 2000\n"
+        "    use_asyncio: false\n"
         "upstreams:\n"
         "  strategy: failover\n"
         "  max_concurrent: 1\n"
@@ -687,19 +1289,29 @@ def test_sigusr2_registration_failure_logs_warning(monkeypatch, caplog):
         "      port: 53\n"
     )
 
+    class DummyUDPServer:
+        def __init__(self, *_a: Any, **_kw: Any) -> None:
+            self.daemon_threads = False
+            self._stop = threading.Event()
+
+        def serve_forever(self) -> None:
+            self._stop.wait()
+
+        def shutdown(self) -> None:
+            self._stop.set()
+
+        def server_close(self) -> None:
+            return None
+
     def fake_signal(sig, handler):
         if sig == _signal.SIGUSR2:
             raise RuntimeError("no SIGUSR2")
         return None
 
-    class DummyServer:
-        def __init__(self, *a: Any, **kw: Any) -> None:
-            pass
-
-        def serve_forever(self) -> None:
-            raise KeyboardInterrupt
-
-    monkeypatch.setattr(main_mod, "DNSServer", DummyServer)
+    monkeypatch.setattr(socketserver, "ThreadingUDPServer", DummyUDPServer)
+    monkeypatch.setattr(
+        time, "sleep", lambda _s: (_ for _ in ()).throw(KeyboardInterrupt)
+    )
     monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
     monkeypatch.setattr(main_mod.signal, "signal", fake_signal)
     monkeypatch.setattr(
@@ -736,6 +1348,7 @@ def test_sighup_with_udp_enabled_exits_cleanly(monkeypatch, caplog):
         "  resolver:\n"
         "    mode: forward\n"
         "    timeout_ms: 2000\n"
+        "    use_asyncio: false\n"
         "upstreams:\n"
         "  strategy: failover\n"
         "  max_concurrent: 1\n"
@@ -753,31 +1366,32 @@ def test_sighup_with_udp_enabled_exits_cleanly(monkeypatch, caplog):
             captured["sighup"] = handler
         return None
 
-    class DummyServer:
-        """Brief: UDP server stub that invokes SIGHUP handler then exits.
+    import socketserver
+    import threading
+    import time
 
-        Inputs:
-          - Same signature as DNSServer; extra kwargs are ignored.
-
-        Outputs:
-          - serve_forever calls the captured SIGHUP handler once and returns.
-        """
-
-        def __init__(self, *a: Any, **kw: Any) -> None:
-            self.stop_calls = 0
+    class DummyUDPServer:
+        def __init__(self, *_a: Any, **_kw: Any) -> None:
+            self.daemon_threads = False
+            self._stop = threading.Event()
 
         def serve_forever(self) -> None:
-            handler = captured["sighup"]
-            assert handler is not None
-            # Invoke the handler to trigger coordinated shutdown; do not
-            # raise so that udp_error remains None and exit_code stays 0.
-            handler(None, None)
+            self._stop.wait()
 
-        def stop(self) -> None:
-            # Track that stop() was invoked without affecting control flow.
-            self.stop_calls += 1
+        def shutdown(self) -> None:
+            self._stop.set()
 
-    monkeypatch.setattr(main_mod, "DNSServer", DummyServer)
+        def server_close(self) -> None:
+            return None
+
+    def _sleep_once(_seconds: float) -> None:
+        handler = captured.get("sighup")
+        assert handler is not None
+        handler(None, None)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(socketserver, "ThreadingUDPServer", DummyUDPServer)
+    monkeypatch.setattr(time, "sleep", _sleep_once)
     monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
     monkeypatch.setattr(main_mod.signal, "signal", fake_signal)
     monkeypatch.setattr(
@@ -808,8 +1422,9 @@ def test_start_without_udp_uses_keepalive_loop(monkeypatch, caplog):
     yaml_data = (
         "server:\n"
         "  listen:\n"
-        "    host: 127.0.0.1\n"
-        "    port: 5354\n"
+        "    dns:\n"
+        "      host: 127.0.0.1\n"
+        "      port: 5354\n"
         "    udp:\n"
         "      enabled: false\n"
         "  resolver:\n"
@@ -823,26 +1438,17 @@ def test_start_without_udp_uses_keepalive_loop(monkeypatch, caplog):
         "      port: 53\n"
     )
 
-    # Ensure DNSServer is never constructed because UDP is disabled.
-    def forbidden_dnserver(*a: Any, **kw: Any) -> None:  # pragma: no cover - defensive
-        raise AssertionError(
-            "DNSServer should not be constructed when udp.enabled=false"
-        )
-
     class DummyHandle:
         def stop(self) -> None:
             pass
 
-    def fake_sleep(_sec: int) -> None:
-        raise KeyboardInterrupt
+    import time
 
-    import sys as _sys
-
-    monkeypatch.setattr(main_mod, "DNSServer", forbidden_dnserver)
     monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
     monkeypatch.setattr(main_mod, "start_webserver", lambda *a, **k: DummyHandle())
-    # Patch the _time module alias imported inside main for the keepalive loop.
-    monkeypatch.setitem(_sys.modules, "time", SimpleNamespace(sleep=fake_sleep))
+    monkeypatch.setattr(
+        time, "sleep", lambda _s: (_ for _ in ()).throw(KeyboardInterrupt)
+    )
 
     with patch("builtins.open", mock_open(read_data=yaml_data)):
         with caplog.at_level(logging.INFO, logger="foghorn.main"):
@@ -868,8 +1474,11 @@ def test_tcp_permission_error_falls_back_to_threaded(monkeypatch, caplog):
     yaml_data = (
         "server:\n"
         "  listen:\n"
-        "    host: 127.0.0.1\n"
-        "    port: 5354\n"
+        "    dns:\n"
+        "      host: 127.0.0.1\n"
+        "      port: 5354\n"
+        "    udp:\n"
+        "      enabled: false\n"
         "    tcp:\n"
         "      enabled: true\n"
         "      host: 127.0.0.1\n"
@@ -912,12 +1521,7 @@ def test_tcp_permission_error_falls_back_to_threaded(monkeypatch, caplog):
                 self._target()
 
     import asyncio as _asyncio
-    import sys as _sys
-    import threading as _threading
 
-    fake_threading = _FakeThreadingModule(_threading, DummyThread)
-
-    monkeypatch.setattr(main_mod, "DNSServer", DummyServer)
     monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
     monkeypatch.setattr(
         main_mod, "start_webserver", lambda *a, **k: SimpleNamespace(stop=lambda: None)
@@ -928,10 +1532,9 @@ def test_tcp_permission_error_falls_back_to_threaded(monkeypatch, caplog):
         "foghorn.servers.tcp_server.serve_tcp_threaded", fake_serve_tcp_threaded
     )
     # Patch asyncio's global new_event_loop so that the instance imported in
-    # foghorn.main sees the PermissionError, and ensure that the dynamic
-    # import inside _start_asyncio_server sees our fake threading module.
+    # foghorn.main sees the PermissionError.
     monkeypatch.setattr(_asyncio, "new_event_loop", fake_new_event_loop)
-    monkeypatch.setitem(_sys.modules, "threading", fake_threading)
+    monkeypatch.setattr(main_mod.threading, "Thread", DummyThread)
 
     with patch("builtins.open", mock_open(read_data=yaml_data)):
         with caplog.at_level(logging.INFO, logger="foghorn.main"):
@@ -949,14 +1552,17 @@ def test_dot_permission_error_logs_without_fallback(monkeypatch, caplog):
         raises PermissionError, and threading.Thread runs runner synchronously.
 
     Outputs:
-      - None: asserts error log is emitted for DoT PermissionError.
+      - None: asserts error log is emitted for DoT PermissionError and startup exits non-zero.
     """
 
     yaml_data = (
         "server:\n"
         "  listen:\n"
-        "    host: 127.0.0.1\n"
-        "    port: 5354\n"
+        "    dns:\n"
+        "      host: 127.0.0.1\n"
+        "      port: 5354\n"
+        "    udp:\n"
+        "      enabled: false\n"
         "    dot:\n"
         "      enabled: true\n"
         "      host: 127.0.0.1\n"
@@ -995,30 +1601,91 @@ def test_dot_permission_error_logs_without_fallback(monkeypatch, caplog):
                 self._target()
 
     import asyncio as _asyncio
-    import sys as _sys
-    import threading as _threading
 
-    fake_threading = _FakeThreadingModule(_threading, DummyThread)
-
-    monkeypatch.setattr(main_mod, "DNSServer", DummyServer)
     monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
     monkeypatch.setattr(
         main_mod, "start_webserver", lambda *a, **k: SimpleNamespace(stop=lambda: None)
     )
     # Patch asyncio's global new_event_loop so that the instance imported in
-    # foghorn.main sees the PermissionError, and ensure that the dynamic
-    # import of threading used by _start_asyncio_server resolves to our
-    # fake module.
+    # foghorn.main sees the PermissionError.
     monkeypatch.setattr(_asyncio, "new_event_loop", fake_new_event_loop)
-    monkeypatch.setitem(_sys.modules, "threading", fake_threading)
+    monkeypatch.setattr(main_mod.threading, "Thread", DummyThread)
 
     with patch("builtins.open", mock_open(read_data=yaml_data)):
         with caplog.at_level(logging.ERROR, logger="foghorn.main"):
             rc = main_mod.main(["--config", "cfg.yaml"])
 
-    assert rc == 0
+    assert rc == 1
     assert any(
         "Asyncio loop creation failed with PermissionError for foghorn-dot" in r.message
+        for r in caplog.records
+    )
+
+
+def test_dot_startup_exception_logs_unhandled_listener_error(monkeypatch, caplog):
+    """Brief: DoT listener logs unhandled startup exceptions from asyncio runner.
+
+    Inputs:
+      - monkeypatch/caplog fixtures; listen.dot.enabled is true, serve_dot raises
+        RuntimeError, and threading.Thread runs runner synchronously.
+
+    Outputs:
+      - None: asserts the generic asyncio listener exception log is emitted for DoT and startup exits non-zero.
+    """
+
+    yaml_data = (
+        "server:\n"
+        "  listen:\n"
+        "    dns:\n"
+        "      host: 127.0.0.1\n"
+        "      port: 5354\n"
+        "    udp:\n"
+        "      enabled: false\n"
+        "    dot:\n"
+        "      enabled: true\n"
+        "      host: 127.0.0.1\n"
+        "      port: 8853\n"
+        "      cert_file: cert.pem\n"
+        "      key_file: key.pem\n"
+        "  resolver:\n"
+        "    mode: forward\n"
+        "    timeout_ms: 2000\n"
+        "upstreams:\n"
+        "  strategy: failover\n"
+        "  max_concurrent: 1\n"
+        "  endpoints:\n"
+        "    - host: 1.1.1.1\n"
+        "      port: 53\n"
+    )
+
+    async def boom_serve_dot(*a: Any, **kw: Any) -> None:  # noqa: ARG001
+        raise RuntimeError("dot boom")
+
+    class DummyThread:
+        def __init__(self, target=None, name=None, daemon=None) -> None:
+            self._target = target
+            self.name = name
+            self.daemon = daemon
+
+        def start(self) -> None:
+            if self._target is not None:
+                self._target()
+
+    monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
+    monkeypatch.setattr(
+        main_mod, "start_webserver", lambda *a, **k: SimpleNamespace(stop=lambda: None)
+    )
+    monkeypatch.setattr("foghorn.servers.dot_server.serve_dot", boom_serve_dot)
+    monkeypatch.setattr(main_mod.threading, "Thread", DummyThread)
+
+    with patch("builtins.open", mock_open(read_data=yaml_data)):
+        with caplog.at_level(logging.ERROR, logger="foghorn.main"):
+            rc = main_mod.main(["--config", "cfg.yaml"])
+
+    assert rc == 1
+    assert any(
+        "Asyncio listener foghorn-dot failed to start or exited with an unhandled exception"
+        in r.message
         for r in caplog.records
     )
 
@@ -1031,14 +1698,17 @@ def test_dot_start_logs_info(monkeypatch, caplog):
         is patched to a no-op.
 
     Outputs:
-      - None: asserts DoT startup info log is emitted.
+      - None: asserts DoT startup info log and TLS debug log are emitted.
     """
 
     yaml_data = (
         "server:\n"
         "  listen:\n"
-        "    host: 127.0.0.1\n"
-        "    port: 5354\n"
+        "    dns:\n"
+        "      host: 127.0.0.1\n"
+        "      port: 5354\n"
+        "    udp:\n"
+        "      enabled: false\n"
         "    dot:\n"
         "      enabled: true\n"
         "      host: 127.0.0.1\n"
@@ -1074,24 +1744,22 @@ def test_dot_start_logs_info(monkeypatch, caplog):
         def start(self) -> None:
             return None
 
-    import sys as _sys
-    import threading as _threading
-
-    fake_threading = _FakeThreadingModule(_threading, DummyThread)
-
-    monkeypatch.setattr(main_mod, "DNSServer", DummyServer)
     monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
     monkeypatch.setattr(
         main_mod, "start_webserver", lambda *a, **k: SimpleNamespace(stop=lambda: None)
     )
-    monkeypatch.setitem(_sys.modules, "threading", fake_threading)
+    monkeypatch.setattr(main_mod.threading, "Thread", DummyThread)
 
     with patch("builtins.open", mock_open(read_data=yaml_data)):
-        with caplog.at_level(logging.INFO, logger="foghorn.main"):
+        with caplog.at_level(logging.DEBUG, logger="foghorn.main"):
             rc = main_mod.main(["--config", "cfg.yaml"])
 
     assert rc == 0
     assert any("Starting DoT listener on" in r.message for r in caplog.records)
+    assert any(
+        "DoT TLS files: cert_file=cert.pem key_file=key.pem" in r.message
+        for r in caplog.records
+    )
 
 
 def test_asyncio_server_happy_path_runs_and_closes_loop(monkeypatch):
@@ -1107,8 +1775,11 @@ def test_asyncio_server_happy_path_runs_and_closes_loop(monkeypatch):
     yaml_data = (
         "server:\n"
         "  listen:\n"
-        "    host: 127.0.0.1\n"
-        "    port: 5354\n"
+        "    dns:\n"
+        "      host: 127.0.0.1\n"
+        "      port: 5354\n"
+        "    udp:\n"
+        "      enabled: false\n"
         "    tcp:\n"
         "      enabled: true\n"
         "      host: 127.0.0.1\n"
@@ -1145,8 +1816,6 @@ def test_asyncio_server_happy_path_runs_and_closes_loop(monkeypatch):
             self.closed = True
 
     import asyncio as _asyncio
-    import sys as _sys
-    import threading as _threading
 
     def fake_new_event_loop() -> DummyLoop:
         loop = DummyLoop()
@@ -1159,7 +1828,7 @@ def test_asyncio_server_happy_path_runs_and_closes_loop(monkeypatch):
     def fake_get_event_loop() -> DummyLoop:
         return holder["loop"]
 
-    async def fake_serve_tcp(host, port, resolver):  # noqa: ARG002
+    async def fake_serve_tcp(host, port, resolver, **kwargs):  # noqa: ARG002
         return None
 
     class DummyThread:
@@ -1174,9 +1843,6 @@ def test_asyncio_server_happy_path_runs_and_closes_loop(monkeypatch):
             if self._target is not None:
                 self._target()
 
-    fake_threading = _FakeThreadingModule(_threading, DummyThread)
-
-    monkeypatch.setattr(main_mod, "DNSServer", DummyServer)
     monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
     monkeypatch.setattr(
         main_mod, "start_webserver", lambda *a, **k: SimpleNamespace(stop=lambda: None)
@@ -1188,7 +1854,7 @@ def test_asyncio_server_happy_path_runs_and_closes_loop(monkeypatch):
     monkeypatch.setattr(_asyncio, "new_event_loop", fake_new_event_loop)
     monkeypatch.setattr(_asyncio, "set_event_loop", fake_set_event_loop)
     monkeypatch.setattr(_asyncio, "get_event_loop", fake_get_event_loop)
-    monkeypatch.setitem(_sys.modules, "threading", fake_threading)
+    monkeypatch.setattr(main_mod.threading, "Thread", DummyThread)
 
     with patch("builtins.open", mock_open(read_data=yaml_data)):
         rc = main_mod.main(["--config", "cfg_asyncio.yaml"])
@@ -1212,8 +1878,11 @@ def test_doh_start_failure_returns_one(monkeypatch, caplog):
     yaml_data = (
         "server:\n"
         "  listen:\n"
-        "    host: 127.0.0.1\n"
-        "    port: 5354\n"
+        "    dns:\n"
+        "      host: 127.0.0.1\n"
+        "      port: 5354\n"
+        "    udp:\n"
+        "      enabled: false\n"
         "    doh:\n"
         "      enabled: true\n"
         "      host: 127.0.0.1\n"
@@ -1239,7 +1908,6 @@ def test_doh_start_failure_returns_one(monkeypatch, caplog):
     def boom_start_doh(*a: Any, **kw: Any):
         raise RuntimeError("broken")
 
-    monkeypatch.setattr(main_mod, "DNSServer", DummyServer)
     monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
     monkeypatch.setattr(
         main_mod, "start_webserver", lambda *a, **k: SimpleNamespace(stop=lambda: None)
@@ -1276,6 +1944,7 @@ def test_webserver_stop_called_on_shutdown(monkeypatch, caplog):
         "  resolver:\n"
         "    mode: forward\n"
         "    timeout_ms: 2000\n"
+        "    use_asyncio: false\n"
         "upstreams:\n"
         "  strategy: failover\n"
         "  max_concurrent: 1\n"
@@ -1284,12 +1953,23 @@ def test_webserver_stop_called_on_shutdown(monkeypatch, caplog):
         "      port: 53\n"
     )
 
-    class DummyServer:
-        def __init__(self, *a: Any, **kw: Any) -> None:
-            pass
+    import socketserver
+    import threading
+    import time
+
+    class DummyUDPServer:
+        def __init__(self, *_a: Any, **_kw: Any) -> None:
+            self.daemon_threads = False
+            self._stop = threading.Event()
 
         def serve_forever(self) -> None:
-            raise KeyboardInterrupt
+            self._stop.wait()
+
+        def shutdown(self) -> None:
+            self._stop.set()
+
+        def server_close(self) -> None:
+            return None
 
     class DummyWebHandle:
         def __init__(self) -> None:
@@ -1303,7 +1983,10 @@ def test_webserver_stop_called_on_shutdown(monkeypatch, caplog):
     def fake_start_webserver(*a: Any, **k: Any) -> DummyWebHandle:
         return handle
 
-    monkeypatch.setattr(main_mod, "DNSServer", DummyServer)
+    monkeypatch.setattr(socketserver, "ThreadingUDPServer", DummyUDPServer)
+    monkeypatch.setattr(
+        time, "sleep", lambda _s: (_ for _ in ()).throw(KeyboardInterrupt)
+    )
     monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
     monkeypatch.setattr(main_mod, "start_webserver", fake_start_webserver)
 
@@ -1359,6 +2042,108 @@ def test_main_returns_one_on_config_validation_error(monkeypatch, capsys):
     assert "bad config value" in out
 
 
+def test_main_sigusr_dispatch_uses_unified_hook(monkeypatch, caplog):
+    """Brief: SIGUSR1 and SIGUSR2 invoke plugin handle_sigusr(sig_label).
+
+    Inputs:
+      - monkeypatch/caplog fixtures; signal.signal patched to capture handlers.
+      - a plugin instance providing handle_sigusr.
+
+    Outputs:
+      - None: asserts the unified hook is invoked for both SIGUSR1 and SIGUSR2
+        with the correct label.
+    """
+
+    yaml_data = (
+        "server:\n"
+        "  listen:\n"
+        "    udp:\n"
+        "      enabled: true\n"
+        "      host: 127.0.0.1\n"
+        "      port: 5354\n"
+        "  resolver:\n"
+        "    mode: forward\n"
+        "    timeout_ms: 2000\n"
+        "    use_asyncio: false\n"
+        "upstreams:\n"
+        "  strategy: failover\n"
+        "  max_concurrent: 1\n"
+        "  endpoints:\n"
+        "    - host: 1.1.1.1\n"
+        "      port: 53\n"
+        "plugins: []\n"
+    )
+
+    class P(BasePlugin):
+        def __init__(self) -> None:
+            super().__init__()
+            self.seen: list[str] = []
+
+        def handle_sigusr(self, sig_label: str) -> None:  # type: ignore[override]
+            self.seen.append(str(sig_label))
+
+    plugin = P()
+
+    captured: Dict[str, Any] = {"sigusr1": None, "sigusr2": None}
+
+    def fake_signal(sig, handler):
+        if sig == _signal.SIGUSR1:
+            captured["sigusr1"] = handler
+        elif sig == _signal.SIGUSR2:
+            captured["sigusr2"] = handler
+        return None
+
+    import socketserver
+    import threading
+    import time
+
+    class DummyUDPServer:
+        def __init__(self, *_a: Any, **_kw: Any) -> None:
+            self.daemon_threads = False
+            self._stop = threading.Event()
+
+        def serve_forever(self) -> None:
+            self._stop.wait()
+
+        def shutdown(self) -> None:
+            self._stop.set()
+
+        def server_close(self) -> None:
+            return None
+
+    called = {"sent": False}
+
+    def _sleep_once(_seconds: float) -> None:
+        if not called["sent"]:
+            called["sent"] = True
+            sigusr1 = captured.get("sigusr1")
+            sigusr2 = captured.get("sigusr2")
+            assert sigusr1 is not None
+            assert sigusr2 is not None
+            sigusr1(None, None)
+            sigusr2(None, None)
+            return None
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(socketserver, "ThreadingUDPServer", DummyUDPServer)
+    monkeypatch.setattr(time, "sleep", _sleep_once)
+    monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
+    monkeypatch.setattr(main_mod.signal, "signal", fake_signal)
+    monkeypatch.setattr(main_mod, "load_plugins", lambda *_a, **_k: [plugin])
+    monkeypatch.setattr(
+        main_mod,
+        "start_webserver",
+        lambda *a, **k: None,
+    )
+
+    with patch("builtins.open", mock_open(read_data=yaml_data)):
+        with caplog.at_level(logging.INFO, logger="foghorn.main"):
+            rc = main_mod.main(["--config", "cfg.yaml"])
+
+    assert rc == 0
+    assert plugin.seen == ["SIGUSR1", "SIGUSR2"]
+
+
 def test_sigterm_sigint_hard_kill_timer_and_early_return(monkeypatch, caplog):
     """Brief: SIGTERM/SIGINT trigger coordinated shutdown, hard-kill timer, and early-return path.
 
@@ -1380,6 +2165,7 @@ def test_sigterm_sigint_hard_kill_timer_and_early_return(monkeypatch, caplog):
         "  resolver:\n"
         "    mode: forward\n"
         "    timeout_ms: 2000\n"
+        "    use_asyncio: false\n"
         "upstreams:\n"
         "  strategy: failover\n"
         "  max_concurrent: 1\n"
@@ -1416,44 +2202,23 @@ def test_sigterm_sigint_hard_kill_timer_and_early_return(monkeypatch, caplog):
             # Do not invoke the callback automatically; tests call it explicitly.
             return None
 
-    class DummyServer:
-        """Brief: UDP server stub that drives SIGTERM/SIGINT handlers and exits.
+    import socketserver
+    import threading
+    import time
 
-        Inputs:
-          - Same signature as DNSServer; extra args are ignored.
-
-        Outputs:
-          - serve_forever orchestrates signal handlers and then raises KeyboardInterrupt
-            so main() can proceed to its shutdown sequence.
-        """
-
-        def __init__(self, *a: Any, **kw: Any) -> None:  # noqa: ARG002
-            self.server = SimpleNamespace(
-                shutdown=lambda: None,
-                server_close=lambda: None,
-            )
+    class DummyUDPServer:
+        def __init__(self, *_a: Any, **_kw: Any) -> None:
+            self.daemon_threads = False
+            self._stop = threading.Event()
 
         def serve_forever(self) -> None:
-            # First call: normal SIGTERM path to request shutdown and arm timer.
-            sigterm = captured["sigterm"]
-            assert sigterm is not None
-            sigterm(None, None)
+            self._stop.wait()
 
-            # Second call: exercise early-return path when shutdown already requested.
-            sigterm(None, None)
+        def shutdown(self) -> None:
+            self._stop.set()
 
-            # Also ensure SIGINT handler delegates correctly to _request_shutdown.
-            sigint = captured["sigint"]
-            assert sigint is not None
-            sigint(None, None)
-
-            # Invoke hard-kill callback while shutdown_complete is still False to
-            # exercise the error/logging path inside _force_exit.
-            force_exit = captured["force_exit"]
-            assert force_exit is not None
-            force_exit()
-
-            raise KeyboardInterrupt
+        def server_close(self) -> None:
+            return None
 
     kills: Dict[str, Any] = {"calls": []}
     exits: Dict[str, Any] = {"code": None}
@@ -1468,7 +2233,25 @@ def test_sigterm_sigint_hard_kill_timer_and_early_return(monkeypatch, caplog):
         # Do not actually exit the process in tests.
         return None
 
-    monkeypatch.setattr(main_mod, "DNSServer", DummyServer)
+    def _sleep_once(_seconds: float) -> None:
+        sigterm = captured.get("sigterm")
+        assert sigterm is not None
+        sigterm(None, None)
+        # Early-return path when shutdown already requested.
+        sigterm(None, None)
+
+        sigint = captured.get("sigint")
+        assert sigint is not None
+        sigint(None, None)
+
+        force_exit = captured.get("force_exit")
+        assert force_exit is not None
+        force_exit()
+
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(socketserver, "ThreadingUDPServer", DummyUDPServer)
+    monkeypatch.setattr(time, "sleep", _sleep_once)
     monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
     monkeypatch.setattr(main_mod.signal, "signal", fake_signal)
     monkeypatch.setattr(main_mod.threading, "Timer", DummyTimer)
@@ -1503,7 +2286,7 @@ def test_udp_teardown_logs_shutdown_close_and_join_errors(monkeypatch, caplog):
     """Brief: main() logs errors when UDP server shutdown/close/join raise during teardown.
 
     Inputs:
-      - monkeypatch/caplog fixtures; DNSServer and threading.Thread patched.
+      - monkeypatch/caplog fixtures; socketserver.ThreadingUDPServer and threading.Thread patched.
 
     Outputs:
       - None: asserts that shutdown, close, and join error messages are logged.
@@ -1519,6 +2302,7 @@ def test_udp_teardown_logs_shutdown_close_and_join_errors(monkeypatch, caplog):
         "  resolver:\n"
         "    mode: forward\n"
         "    timeout_ms: 2000\n"
+        "    use_asyncio: false\n"
         "upstreams:\n"
         "  strategy: failover\n"
         "  max_concurrent: 1\n"
@@ -1527,21 +2311,17 @@ def test_udp_teardown_logs_shutdown_close_and_join_errors(monkeypatch, caplog):
         "      port: 53\n"
     )
 
-    class FailingSocketServer:
+    import socketserver
+
+    class DummyFailingUDPServer:
+        def serve_forever(self) -> None:
+            return None
+
         def shutdown(self) -> None:
             raise RuntimeError("shutdown-fail")
 
         def server_close(self) -> None:
             raise RuntimeError("close-fail")
-
-    class DummyServer:
-        def __init__(self, *a: Any, **kw: Any) -> None:  # noqa: ARG002
-            self.server = FailingSocketServer()
-
-        def serve_forever(self) -> None:
-            # UDP loop is never actually started; keepalive loop exits because
-            # the thread reports not alive.
-            return None
 
     class DummyThread:
         def __init__(self, target=None, name=None, daemon=None) -> None:  # noqa: D401
@@ -1561,7 +2341,11 @@ def test_udp_teardown_logs_shutdown_close_and_join_errors(monkeypatch, caplog):
         def join(self, timeout: float | None = None) -> None:  # noqa: ARG002
             raise RuntimeError("join-fail")
 
-    monkeypatch.setattr(main_mod, "DNSServer", DummyServer)
+    monkeypatch.setattr(
+        socketserver,
+        "ThreadingUDPServer",
+        lambda *_a, **_kw: DummyFailingUDPServer(),
+    )
     monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
     monkeypatch.setattr(main_mod.threading, "Thread", DummyThread)
     monkeypatch.setattr(
@@ -1584,10 +2368,11 @@ def test_udp_teardown_logs_shutdown_close_and_join_errors(monkeypatch, caplog):
 
 
 def test_udp_teardown_outer_exception_logs_unexpected_error(monkeypatch, caplog):
-    """Brief: main() logs an unexpected error when UDP server.server attribute access fails.
+    """Brief: main() logs an unexpected error when UDP server teardown handler raises.
 
     Inputs:
-      - monkeypatch/caplog fixtures; DNSServer.server property patched to raise.
+      - monkeypatch/caplog fixtures; socketserver.ThreadingUDPServer patched to return a stub
+        whose stop() raises.
 
     Outputs:
       - None: asserts outer teardown except block logs the unexpected error message.
@@ -1603,6 +2388,7 @@ def test_udp_teardown_outer_exception_logs_unexpected_error(monkeypatch, caplog)
         "  resolver:\n"
         "    mode: forward\n"
         "    timeout_ms: 2000\n"
+        "    use_asyncio: false\n"
         "upstreams:\n"
         "  strategy: failover\n"
         "  max_concurrent: 1\n"
@@ -1611,22 +2397,14 @@ def test_udp_teardown_outer_exception_logs_unexpected_error(monkeypatch, caplog)
         "      port: 53\n"
     )
 
-    class BrokenServerAttr:
-        @property
-        def server(self):  # type: ignore[override]
-            raise RuntimeError("broken-server-attr")
+    import socketserver
 
-    class DummyServer:
-        def __init__(self, *a: Any, **kw: Any) -> None:  # noqa: ARG002
-            self._inner = BrokenServerAttr()
-
-        @property
-        def server(self):  # type: ignore[override]
-            # Delegate to inner property which raises during getattr in teardown.
-            return self._inner.server
-
+    class DummyBrokenUDPServer:
         def serve_forever(self) -> None:
             return None
+
+        def stop(self) -> None:
+            raise RuntimeError("broken-server-attr")
 
     class DummyThread:
         def __init__(self, target=None, name=None, daemon=None) -> None:  # noqa: D401
@@ -1645,7 +2423,11 @@ def test_udp_teardown_outer_exception_logs_unexpected_error(monkeypatch, caplog)
         def join(self, timeout: float | None = None) -> None:  # noqa: ARG002
             return None
 
-    monkeypatch.setattr(main_mod, "DNSServer", DummyServer)
+    monkeypatch.setattr(
+        socketserver,
+        "ThreadingUDPServer",
+        lambda *_a, **_kw: DummyBrokenUDPServer(),
+    )
     monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
     monkeypatch.setattr(main_mod.threading, "Thread", DummyThread)
     monkeypatch.setattr(

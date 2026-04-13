@@ -9,9 +9,9 @@ Outputs:
 
 from __future__ import annotations
 
-from typing import Any
 import threading
 import time
+from typing import Any
 
 import pytest
 
@@ -78,6 +78,38 @@ def test_sqlite3_cache_roundtrip_bytes(tmp_path, monkeypatch) -> None:
     # After expiry, get() should treat the entry as a miss.
     t["now"] = 1003.0
     assert plugin.get(key) is None
+
+
+def test_sqlite3_cache_nxdomain_partition_does_not_evict_positive(tmp_path) -> None:
+    """Brief: NXDOMAIN partition uses separate sqlite table and preserves positives.
+
+    Inputs:
+      - SQLite3Cache with small max_size and pct_nxdomain.
+
+    Outputs:
+      - None; asserts positive entries remain present after flooding NXDOMAIN.
+    """
+
+    from dnslib import RCODE, DNSRecord
+
+    db_path = tmp_path / "dns_cache.db"
+    plugin = SQLite3Cache(db_path=str(db_path), max_size=4, pct_nxdomain=0.5)
+
+    plugin.set(("a.example", 1), 60, b"pos-a")
+    plugin.set(("b.example", 1), 60, b"pos-b")
+
+    # Flood NXDOMAIN partition.
+    q = DNSRecord.question("nx.example")
+    nx_resp = q.reply()
+    nx_resp.header.rcode = RCODE.NXDOMAIN
+    nx_wire = nx_resp.pack()
+
+    plugin.set(("nx1.example", 1), 60, nx_wire)
+    plugin.set(("nx2.example", 1), 60, nx_wire)
+    plugin.set(("nx3.example", 1), 60, nx_wire)
+
+    assert plugin.get(("a.example", 1)) == b"pos-a"
+    assert plugin.get(("b.example", 1)) == b"pos-b"
 
 
 def test_sqlite3_cache_snapshot_includes_counters(tmp_path) -> None:
@@ -210,9 +242,9 @@ def test_sqlite3_cache_targets_cache_summary(monkeypatch, tmp_path) -> None:
             self.name = "dummy"
             self._targets_cache = DummyCache()
 
-    from foghorn.servers import udp_server as udp_mod
+    from foghorn.servers import dns_runtime_state as runtime_mod
 
-    monkeypatch.setattr(udp_mod.DNSUDPHandler, "plugins", [DummyPlugin()])
+    monkeypatch.setattr(runtime_mod.DNSRuntimeState, "plugins", [DummyPlugin()])
 
     snap = plugin.get_http_snapshot()
     caches = snap["caches"]

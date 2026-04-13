@@ -15,7 +15,8 @@ upstreams:
   strategy: failover
   max_concurrent: 1
 logging:
-  level: info
+  python:
+    level: info
 server:
   listen:
     udp:

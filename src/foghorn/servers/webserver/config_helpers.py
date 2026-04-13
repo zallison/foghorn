@@ -14,12 +14,14 @@ from __future__ import annotations
 
 import copy
 import re
-from datetime import datetime, timezone
 import threading
 import time
-from typing import Any, Dict, List, Tuple
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Tuple, Final
 
 import yaml
+
+from foghorn.utils.register_caches import registered_lru_cache
 
 # Short-lived cache for sanitized YAML configuration text returned by /config.
 # The underlying on-disk config rarely changes, so a small TTL avoids repeated
@@ -30,24 +32,35 @@ _last_config_text_key: tuple[str, tuple[str, ...]] | None = None
 _last_config_text: str | None = None
 _last_config_text_ts: float = 0.0
 
+# Precompiled regexes for lightweight YAML redaction that preserves layout/comments.
+_YAML_KEY_LINE_RE: Final[re] = re.compile(r"^(\s*)([^:\s][^:]*)\s*:(.*)$")
+# List item that is itself a mapping entry, e.g. "  - suffix: example.com".
+_YAML_LIST_KEY_LINE_RE: Final[re] = re.compile(r"^(\s*)-\s*([^:\s][^:]*)\s*:(.*)$")
+_YAML_LIST_LINE_RE: Final[re] = re.compile(r"^(\s*)-\s*(.*)$")
+
 
 def _get_web_cfg(config: Dict[str, Any] | None) -> Dict[str, Any]:
-    """Return the webserver config subsection from a full config mapping.
+    """Return the admin HTTP/webserver config subsection from a full config mapping.
 
     Inputs:
       - config: Full configuration mapping loaded from YAML (or None).
 
     Outputs:
-      - Dict representing ``config['webserver']`` when present; otherwise ``{}``.
+      - dict: Effective web configuration mapping.
 
     Notes:
-      - Centralising this avoids drift between FastAPI and threaded HTTP paths.
+      - Web config is read only from ``config['server']['http']``.
+      - Centralizing this avoids drift between FastAPI and threaded HTTP paths.
     """
 
-    if isinstance(config, dict):
-        web_cfg = config.get("webserver") or {}
-        return web_cfg if isinstance(web_cfg, dict) else {}
-    return {}
+    if not isinstance(config, dict):
+        return {}
+
+    server_cfg = config.get("server") or {}
+    if not isinstance(server_cfg, dict):
+        return {}
+    http_cfg = server_cfg.get("http")
+    return http_cfg if isinstance(http_cfg, dict) else {}
 
 
 def _get_redact_keys(config: Dict[str, Any] | None) -> List[str]:
@@ -60,12 +73,17 @@ def _get_redact_keys(config: Dict[str, Any] | None) -> List[str]:
       - List of key names that should have their values redacted.
 
     Notes:
-      - Uses ``webserver.redact_keys`` when set; otherwise falls back to a small
-        default list of sensitive names ("token", "password", "secret").
+      - Reads keys from ``server.http.redact_keys``.
+      - If unset, falls back to a small default list of sensitive names
+        ("token", "password", "secret").
     """
 
     web_cfg = _get_web_cfg(config)
-    keys = web_cfg.get("redact_keys") or ["token", "password", "secret"]
+    keys = web_cfg.get("redact_keys")
+
+    if not keys:
+        keys = ["token", "password", "secret"]
+
     if isinstance(keys, (list, tuple)):
         return [str(k) for k in keys]
     return [str(keys)]
@@ -90,9 +108,9 @@ def sanitize_config(
 
     Example::
 
-      cfg = {"webserver": {"auth": {"token": "secret"}}}
+      cfg = {"server": {"http": {"auth": {"token": "secret"}}}}
       clean = sanitize_config(cfg, ["token"])
-      assert clean["webserver"]["auth"]["token"] == "***"
+      assert clean["server"]["http"]["auth"]["token"] == "***"
     """
 
     if not isinstance(cfg, dict):
@@ -170,13 +188,6 @@ def _get_sanitized_config_yaml_cached(
         _last_config_text = body
         _last_config_text_ts = time.time()
     return body
-
-
-# Precompiled regexes for lightweight YAML redaction that preserves layout/comments.
-_YAML_KEY_LINE_RE = re.compile(r"^(\s*)([^:\s][^:]*)\s*:(.*)$")
-# List item that is itself a mapping entry, e.g. "  - suffix: example.com".
-_YAML_LIST_KEY_LINE_RE = re.compile(r"^(\s*)-\s*([^:\s][^:]*)\s*:(.*)$")
-_YAML_LIST_LINE_RE = re.compile(r"^(\s*)-\s*(.*)$")
 
 
 def _split_yaml_value_and_comment(rest: str) -> Tuple[str, str]:
@@ -291,8 +302,10 @@ def _redact_yaml_text_preserving_layout(
                     out_lines.append(line)
                     continue
 
-                # Scalar inline value -> redact.
-                new_line = f"{indent}{key_clean}: ***{comment_part}"
+                # Scalar inline value -> redact. Quote the placeholder so the
+                # resulting YAML remains parseable (unquoted "***" is treated
+                # as an alias token by YAML parsers).
+                new_line = f"{indent}{key_clean}: '***'{comment_part}"
                 out_lines.append(new_line)
                 continue
 
@@ -302,7 +315,7 @@ def _redact_yaml_text_preserving_layout(
                 value_trim = value_part.strip()
                 # Only redact scalars; when no inline value or container, keep as-is.
                 if value_trim and not _is_container_like(value_trim):
-                    new_line = f"{indent}{key_clean}: ***{comment_part}"
+                    new_line = f"{indent}{key_clean}: '***'{comment_part}"
                     out_lines.append(new_line)
                     continue
                 # Keep original line if not a scalar inline value.
@@ -335,7 +348,7 @@ def _redact_yaml_text_preserving_layout(
                     continue
 
                 # Scalar inline value -> redact.
-                new_line = f"{indent}- {key_clean}: ***{comment_part}"
+                new_line = f"{indent}- {key_clean}: '***'{comment_part}"
                 out_lines.append(new_line)
                 continue
 
@@ -351,7 +364,7 @@ def _redact_yaml_text_preserving_layout(
                 value_trim = value_part.strip()
                 # Only redact scalars; keep container or empty-as-header lines.
                 if value_trim and not _is_container_like(value_trim):
-                    new_line = f"{indent}- ***{comment_part}"
+                    new_line = f"{indent}- '***'{comment_part}"
                     out_lines.append(new_line)
                     continue
                 out_lines.append(line)
@@ -414,23 +427,21 @@ def _ts_to_utc_iso(ts: float) -> str:
     return dt.isoformat().replace("+00:00", "Z")
 
 
-def _parse_utc_datetime(value: str) -> datetime:
-    """Parse a datetime string into an aware UTC :class:`datetime`.
-
-    Brief:
-      Accepts either ISO-8601-like strings (including a trailing ``"Z"``) or
-      a simple space-separated format ``"YYYY-MM-DD HH:MM:SS"`` (optionally with
-      fractional seconds).
+@registered_lru_cache(maxsize=1024)
+def _parse_utc_datetime_cached(value: str, datetime_token: int) -> datetime:
+    """Brief: Cached helper for _parse_utc_datetime.
 
     Inputs:
       - value: Datetime string.
+      - datetime_token: Integer token included in the cache key so that tests
+        which monkeypatch the module-level ``datetime`` do not accidentally hit
+        a stale cached parse.
 
     Outputs:
       - timezone-aware :class:`datetime` in UTC.
-
-    Raises:
-      - ValueError when parsing fails.
     """
+    # datetime_token is intentionally unused except as part of the cache key.
+    _ = int(datetime_token)
 
     raw = str(value or "").strip()
     if not raw:
@@ -460,3 +471,26 @@ def _parse_utc_datetime(value: str) -> datetime:
     else:
         dt = dt.astimezone(timezone.utc)
     return dt
+
+
+def _parse_utc_datetime(value: str) -> datetime:
+    """Parse a datetime string into an aware UTC :class:`datetime`.
+
+    Brief:
+      Accepts either ISO-8601-like strings (including a trailing ``"Z"``) or
+      a simple space-separated format ``"YYYY-MM-DD HH:MM:SS"`` (optionally with
+      fractional seconds).
+
+    Inputs:
+      - value: Datetime string.
+
+    Outputs:
+      - timezone-aware :class:`datetime` in UTC.
+
+    Raises:
+      - ValueError when parsing fails.
+    """
+
+    # Include the identity of the module-level datetime binding in the cache key
+    # so that tests which monkeypatch `datetime` do not observe stale cache hits.
+    return _parse_utc_datetime_cached(value, id(datetime))

@@ -1,0 +1,42 @@
+services:
+  influxdb:
+    image: influxdb:2.7
+    container_name: foghorn-influxdb
+    restart: unless-stopped
+    env_file:
+      - ./stack.env
+    ports:
+      - '8086:8086'
+    healthcheck:
+      test: ['CMD', 'influx', 'ping']
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+    volumes:
+      - influxdb-data:/var/lib/influxdb2
+      - influxdb-config:/etc/influxdb2
+
+  grafana:
+    image: grafana/grafana-oss:11.1.4
+    container_name: foghorn-grafana
+    restart: unless-stopped
+    env_file:
+      - ./stack.env
+    depends_on:
+      influxdb:
+        condition: service_healthy
+    ports:
+      - '3000:3000'
+    environment:
+      GF_USERS_ALLOW_SIGN_UP: 'false'
+      GF_AUTH_ANONYMOUS_ENABLED: 'false'
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+
+volumes:
+  influxdb-data:
+  influxdb-config:
+  grafana-data:

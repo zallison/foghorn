@@ -1,18 +1,15 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
 import logging
 import os
 import sqlite3
 import threading
 import time
+from datetime import datetime, timezone
 from typing import Any, Dict
+from foghorn.utils.register_caches import registered_ttl_cache
 
-from cachetools import TTLCache
-
-from foghorn.utils.register_caches import registered_cached
 from ...stats import StatsCollector, StatsSnapshot
-
 
 logger = logging.getLogger("foghorn.webserver")
 
@@ -191,7 +188,7 @@ def _build_traffic_payload_from_snapshot(
     return payload
 
 
-@registered_cached(cache=TTLCache(maxsize=1, ttl=5))
+@registered_ttl_cache(maxsize=1, ttl=5)
 def _read_proc_meminfo(path: str = "/proc/meminfo") -> Dict[str, int]:
     """Brief: Parse a /proc/meminfo-style file into byte counts.
 
@@ -448,6 +445,38 @@ def get_system_info() -> Dict[str, Any]:
     return payload
 
 
+def _is_rate_limit_plugin_entry(entry_obj: Any) -> bool:
+    """Brief: Return True when a plugin entry refers to RateLimit.
+
+    Inputs:
+      - entry_obj: Plugin entry (typically a dict or string).
+
+    Outputs:
+      - bool: True if the entry appears to reference RateLimit.
+    """
+
+    candidates: list[str] = []
+
+    if isinstance(entry_obj, str):
+        candidates.append(entry_obj)
+    elif isinstance(entry_obj, dict):
+        for key in ("type", "module"):
+            raw_value = entry_obj.get(key)
+            if raw_value:
+                candidates.append(str(raw_value))
+
+    for raw in candidates:
+        text = str(raw or "").strip().lower().replace("-", "_")
+        if not text:
+            continue
+        tail = text.rsplit(".", 1)[-1]
+        if text in {"rate_limit", "ratelimit", "rate"}:
+            return True
+        if tail in {"rate_limit", "ratelimit"}:
+            return True
+    return False
+
+
 def _find_rate_limit_db_paths_from_config(config: Dict[str, Any] | None) -> list[str]:
     """Brief: Discover RateLimit db_path values from the loaded config.
 
@@ -456,6 +485,11 @@ def _find_rate_limit_db_paths_from_config(config: Dict[str, Any] | None) -> list
 
     Outputs:
       - List of unique db_path strings for RateLimit instances.
+
+    Notes:
+      - Supports plugin entries using modern ``type`` keys, legacy ``module``
+        keys, and common RateLimit aliases (``rate_limit``, ``ratelimit``,
+        ``rate``).
     """
 
     paths: set[str] = set()
@@ -467,11 +501,15 @@ def _find_rate_limit_db_paths_from_config(config: Dict[str, Any] | None) -> list
         for entry in plugins_cfg:
             if not isinstance(entry, dict):
                 continue
-            module = str(entry.get("module", "")).lower()
-            if "rate_limit" not in module:
+            if not _is_rate_limit_plugin_entry(entry):
                 continue
             cfg = entry.get("config") or {}
-            if isinstance(cfg, dict) and cfg.get("db_path"):
-                paths.add(str(cfg.get("db_path")))
+            db_path = None
+            if isinstance(cfg, dict):
+                db_path = cfg.get("db_path")
+            if db_path is None:
+                db_path = entry.get("db_path")
+            if db_path:
+                paths.add(str(db_path))
 
     return sorted(paths)

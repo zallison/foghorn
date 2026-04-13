@@ -1,10 +1,23 @@
 from __future__ import annotations
+
 import json
 import logging
+import math
+import threading
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from .base import BaseStatsStore
-from .sqlite import _normalize_domain, _is_subdomain
+from foghorn.plugins.sql_safety import (
+    resolve_query_log_group_column,
+    validate_sql_placeholder,
+)
+from foghorn.security_limits import (
+    MAX_QUERY_LOG_AGG_GROUPED_RESULTS,
+    enforce_query_log_aggregate_bucket_limit,
+)
+from foghorn.utils import dns_names
+from .sqlite import _is_subdomain, _normalize_domain
 
 """MySQL/MariaDB-backed implementation of the BaseStatsStore interface.
 
@@ -21,42 +34,187 @@ Outputs:
 Notes:
   - This backend intentionally mirrors the logical schema and behaviour of the
     SqliteStatsStore so callers remain backend-agnostic.
-  - The underlying DB driver (mysql-connector-python or MariaDB) is imported
+  - The underlying DB driver (mariadb or mysql-connector-python) is imported
     lazily so that Foghorn does not require it unless this backend is used.
+  - Config may specify:
+      - driver: auto|mariadb|mysql-connector-python (or mysql)
+      - driver_fallback: auto|none|<driver>|[<driver>, ...]
 """
 
 logger = logging.getLogger(__name__)
 
 
-def _import_mysql_driver():
+def _normalize_mysql_driver_name(raw: object) -> str | None:
+    """Brief: Normalize a MySQL driver name from config.
+
+    Inputs:
+        raw: Candidate value (string-like) from config.
+
+    Outputs:
+        str | None: Canonical driver key:
+          - 'mariadb'
+          - 'mysql-connector-python'
+        Returns None when raw is missing/empty/auto.
+    """
+
+    if raw is None:
+        return None
+    if not isinstance(raw, str):
+        return None
+
+    value = raw.strip().lower().replace("_", "-").replace(" ", "")
+    if not value or value in {"auto", "default"}:
+        return None
+
+    # Accept a few common synonyms.
+    if value in {"mariadb", "maria-db"}:
+        return "mariadb"
+    if value in {
+        "mysql",
+        "mysql-connector-python",
+        "mysql.connector",
+        "mysql-connector",
+        "mysqlconnector",
+        "mysql-connector/py",
+        "connector",
+    }:
+        return "mysql-connector-python"
+
+    raise ValueError(
+        "mysql driver must be one of 'auto', 'mariadb', 'mysql', or 'mysql-connector-python'"
+    )
+
+
+def _normalize_driver_fallbacks(raw: object) -> list[str] | None:
+    """Brief: Normalize driver fallback configuration.
+
+    Inputs:
+        raw: Candidate fallback config from YAML (string or list of strings).
+
+    Outputs:
+        list[str] | None:
+          - None for default behavior (auto fallback)
+          - [] for explicit no-fallback (none)
+          - list of canonical driver keys
+    """
+
+    if raw is None:
+        return None
+
+    if isinstance(raw, str):
+        v = raw.strip().lower().replace("_", "-").replace(" ", "")
+        if not v or v in {"auto", "default"}:
+            return None
+        if v in {"none", "no", "false", "off"}:
+            return []
+        return [_normalize_mysql_driver_name(raw)]  # type: ignore[list-item]
+
+    if isinstance(raw, list):
+        out: list[str] = []
+        for item in raw:
+            if item is None:  # pragma: nocover - trivial null-list element skip
+                continue
+            name = _normalize_mysql_driver_name(item)
+            if name is None:
+                continue
+            out.append(name)
+        return out
+
+    return None
+
+
+def _driver_order_from_config(
+    *,
+    driver: object = None,
+    driver_fallback: object = None,
+) -> list[str]:
+    """Brief: Compute the driver import order based on config.
+
+    Inputs:
+        driver: Preferred driver name ('auto'|'mariadb'|'mysql-connector-python').
+        driver_fallback: Fallback policy ('auto'|'none'|<driver>|[<driver>,...]).
+
+    Outputs:
+        list[str]: Ordered list of canonical driver keys to try.
+    """
+
+    preferred = _normalize_mysql_driver_name(driver)
+    fallbacks = _normalize_driver_fallbacks(driver_fallback)
+
+    # Default order: prefer mariadb, then mysql-connector-python.
+    default_order = ["mariadb", "mysql-connector-python"]
+
+    if preferred is None:
+        # auto/default
+        if fallbacks == []:
+            return [default_order[0]]
+        return default_order
+
+    # Explicit preferred.
+    if fallbacks is None:
+        # Default fallback for an explicit preference is "the other driver".
+        fallbacks = [d for d in default_order if d != preferred]
+
+    # fallbacks may be [] to disable.
+    order = [preferred] + list(fallbacks or [])
+
+    # Deduplicate while preserving order.
+    seen: set[str] = set()
+    out: list[str] = []
+    for item in order:
+        if item in seen:  # pragma: nocover - trivial dedupe guard
+            continue
+        seen.add(item)
+        out.append(item)
+    return out
+
+
+def _import_mysql_driver(
+    *,
+    driver: object = None,
+    driver_fallback: object = None,
+) -> tuple[object, str]:
     """Import and return a DB-API compatible MySQL/MariaDB driver module.
 
     Inputs:
-        None.
+        driver: Preferred driver name.
+        driver_fallback: Fallback policy.
 
     Outputs:
-        DB-API like module exposing a ``connect`` callable.
+        (driver_module, placeholder):
+          - driver_module: DB-API like module exposing a ``connect`` callable.
+          - placeholder: Parameter placeholder string ('%s' or '?').
 
     Raises:
         RuntimeError: When no supported MySQL/MariaDB driver is available.
+        ValueError: When driver/driver_fallback values are invalid.
     """
 
-    try:  # Prefer mysql-connector-python when available.
-        # pragma: disable E402
-        import mysql.connector as driver  # type: ignore[import]
+    order = _driver_order_from_config(driver=driver, driver_fallback=driver_fallback)
 
-        return driver
-    except Exception:  # pragma: no cover - import-path dependent
+    last_exc: Exception | None = None
+    for choice in order:
         try:
-            import mariadb as driver  # type: ignore[import]
+            if choice == "mariadb":
+                # pragma: disable E402
+                import mariadb as driver_mod  # type: ignore[import]
 
-            return driver
-        except Exception as exc:  # pragma: no cover - environment specific
-            raise RuntimeError(
-                "No supported MySQL/MariaDB driver found; install either "
-                "'mysql-connector-python' or 'mariadb' "
-                "to use the MySqlStatsStore"
-            ) from exc
+                return driver_mod, "?"  # DB-API qmark style
+
+            if choice == "mysql-connector-python":
+                # pragma: disable E402
+                import mysql.connector as driver_mod  # type: ignore[import]
+
+                return driver_mod, "%s"  # DB-API format style
+
+        except ImportError as exc:  # pragma: no cover - import-path dependent
+            last_exc = exc
+            continue
+
+    raise RuntimeError(
+        "No supported MySQL/MariaDB driver found; install either 'mariadb' or "
+        "'mysql-connector-python' to use the MySqlStatsStore"
+    ) from last_exc
 
 
 class MySqlStatsStore(BaseStatsStore):
@@ -77,6 +235,11 @@ class MySqlStatsStore(BaseStatsStore):
         connect_kwargs: Optional mapping of additional keyword arguments passed
             through to the underlying driver's ``connect`` function
             (for example, ssl, unix_socket).
+        driver: Preferred DB driver (auto|mariadb|mysql-connector-python or mysql).
+        driver_fallback: Fallback policy for driver import:
+            - auto (default): try the other driver as a fallback.
+            - none: do not fall back.
+            - <driver> or [<driver>, ...]: explicit fallback list.
 
     Outputs:
         Initialized MySqlStatsStore instance with ensured schema.
@@ -90,10 +253,25 @@ class MySqlStatsStore(BaseStatsStore):
         password: Optional[str] = None,
         database: str = "foghorn_stats",
         connect_kwargs: Optional[Dict[str, Any]] = None,
-        async_logging: bool = False,
+        async_logging: bool = True,
+        max_logging_queue: int = 16384,
+        batch_writes: bool = False,
+        batch_time_sec: float = 15.0,
+        batch_max_size: int = 1000,
+        retention_max_records: Optional[int] = None,
+        retention_days: Optional[float] = None,
+        retention_max_bytes: Optional[int] = None,
+        retention_prune_interval_seconds: Optional[float] = None,
+        retention_prune_every_n_inserts: Optional[int] = None,
+        retention_optimize_on_prune: bool = False,
+        retention_optimize_interval_seconds: Optional[float] = None,
+        driver: Optional[str] = None,
+        driver_fallback: object = None,
         **_: Any,
     ) -> None:
-        driver = _import_mysql_driver()
+        driver_mod, placeholder = _import_mysql_driver(
+            driver=driver, driver_fallback=driver_fallback
+        )
 
         kwargs: Dict[str, Any] = {
             "host": host,
@@ -107,11 +285,55 @@ class MySqlStatsStore(BaseStatsStore):
         if connect_kwargs:
             kwargs.update(dict(connect_kwargs))
 
-        self._driver = driver
-        self._conn = driver.connect(**kwargs)
+        self._driver = driver_mod
+        self._placeholder = validate_sql_placeholder(
+            placeholder,
+            allowed_placeholders={"%s", "?"},
+        )
+        self._conn = driver_mod.connect(**kwargs)
 
-        # Use synchronous logging by default for SQL stats backends.
+        # Use async logging by default for SQL stats backends.
         self._async_logging = bool(async_logging)
+        # BaseStatsStore worker queue capacity
+        try:
+            self._max_logging_queue = int(max_logging_queue)
+        except Exception:
+            self._max_logging_queue = 16384
+        self._batch_writes = bool(batch_writes)
+        self._batch_time_sec = float(batch_time_sec)
+        self._batch_max_size = int(batch_max_size)
+        self._lock = threading.RLock()
+        self._pending_ops: List[Tuple[str, Tuple[Any, ...]]] = []
+        self._pending_retention = False
+        self._last_flush = time.time()
+        self._query_log_retention_max_records = (
+            BaseStatsStore._normalize_retention_max_records(retention_max_records)
+        )
+        self._query_log_retention_days = BaseStatsStore._normalize_retention_days(
+            retention_days
+        )
+        self._query_log_retention_max_bytes = (
+            BaseStatsStore._normalize_retention_max_bytes(retention_max_bytes)
+        )
+        self._query_log_retention_prune_interval_seconds = (
+            BaseStatsStore._normalize_retention_prune_interval_seconds(
+                retention_prune_interval_seconds
+            )
+        )
+        self._query_log_retention_prune_every_n_inserts = (
+            BaseStatsStore._normalize_retention_prune_every_n_inserts(
+                retention_prune_every_n_inserts
+            )
+        )
+        self._query_log_retention_seen_inserts = 0
+        self._query_log_retention_last_prune_ts = 0.0
+        self._retention_optimize_on_prune = bool(retention_optimize_on_prune)
+        self._retention_optimize_interval_seconds = (
+            BaseStatsStore._normalize_retention_prune_interval_seconds(
+                retention_optimize_interval_seconds
+            )
+        )
+        self._retention_last_optimize_ts = 0.0
 
         self._ensure_schema()
 
@@ -172,6 +394,110 @@ class MySqlStatsStore(BaseStatsStore):
     # ------------------------------------------------------------------
     # Health and lifecycle
     # ------------------------------------------------------------------
+    def _flush_pending_writes(self) -> None:
+        """Flush pending batched operations, if batching is enabled.
+
+        Inputs:
+            None.
+
+        Outputs:
+            None.
+        """
+
+        if not self._batch_writes:
+            return
+        with self._lock:
+            self._flush_locked()
+
+    def _execute(
+        self,
+        sql: str,
+        params: Tuple[Any, ...],
+        *,
+        mark_query_log_retention: bool = False,
+    ) -> None:
+        """Execute SQL immediately or queue it for a batched flush.
+
+        Inputs:
+            sql: SQL statement text.
+            params: SQL parameters tuple.
+            mark_query_log_retention: When True, retention prune is evaluated
+                once after the current batched flush succeeds.
+
+        Outputs:
+            None.
+        """
+
+        if not self._batch_writes:
+            cur = self._conn.cursor()
+            cur.execute(sql, params)
+            self._conn.commit()
+            if mark_query_log_retention:
+                self._apply_query_log_retention()
+            return
+
+        with self._lock:
+            self._pending_ops.append((sql, params))
+            if mark_query_log_retention:
+                self._pending_retention = True
+            self._maybe_flush_locked()
+
+    def _maybe_flush_locked(self) -> None:
+        """Flush queued SQL operations when batch thresholds are reached.
+
+        Inputs:
+            None. Caller must hold ``self._lock``.
+
+        Outputs:
+            None.
+        """
+
+        if not self._batch_writes:
+            return
+        ops_len = len(self._pending_ops)
+        if ops_len == 0:
+            return
+
+        now = time.time()
+        age = now - self._last_flush
+        if ops_len >= self._batch_max_size or age >= self._batch_time_sec:
+            self._flush_locked()
+
+    def _flush_locked(self) -> None:
+        """Flush all pending SQL operations in a single commit.
+
+        Inputs:
+            None. Caller must hold ``self._lock``.
+
+        Outputs:
+            None.
+        """
+
+        if not self._pending_ops:
+            return
+
+        pending_ops = list(self._pending_ops)
+        run_retention = bool(self._pending_retention)
+
+        try:
+            cur = self._conn.cursor()
+            for sql, params in pending_ops:
+                cur.execute(sql, params)
+            self._conn.commit()
+            self._pending_ops.clear()
+            self._pending_retention = False
+            self._last_flush = time.time()
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.error(
+                "MySqlStatsStore batched flush failed: %s",
+                exc,
+                exc_info=True,
+            )
+            return
+
+        if run_retention:
+            self._apply_query_log_retention()
+
     def health_check(self) -> bool:
         """Return True when the underlying MySQL/MariaDB store is usable.
 
@@ -201,6 +527,7 @@ class MySqlStatsStore(BaseStatsStore):
         """
 
         try:
+            self._flush_pending_writes()
             conn = getattr(self, "_conn", None)
             if conn is not None:
                 conn.close()
@@ -240,13 +567,12 @@ class MySqlStatsStore(BaseStatsStore):
             None.
         """
 
+        ph = self._placeholder
         sql = (
-            "INSERT INTO counts(scope, key, value) VALUES(%s, %s, %s) "
+            f"INSERT INTO counts(scope, key, value) VALUES({ph}, {ph}, {ph}) "
             "ON DUPLICATE KEY UPDATE value = value + VALUES(value)"
         )
-        cur = self._conn.cursor()
-        cur.execute(sql, (scope, key, int(delta)))
-        self._conn.commit()
+        self._execute(sql, (scope, key, int(delta)))
 
     def set_count(self, scope: str, key: str, value: int) -> None:
         """Set an aggregate counter in the counts table.
@@ -260,13 +586,12 @@ class MySqlStatsStore(BaseStatsStore):
             None.
         """
 
+        ph = self._placeholder
         sql = (
-            "INSERT INTO counts(scope, key, value) VALUES(%s, %s, %s) "
+            f"INSERT INTO counts(scope, key, value) VALUES({ph}, {ph}, {ph}) "
             "ON DUPLICATE KEY UPDATE value = VALUES(value)"
         )
-        cur = self._conn.cursor()
-        cur.execute(sql, (scope, key, int(value)))
-        self._conn.commit()
+        self._execute(sql, (scope, key, int(value)))
 
     def has_counts(self) -> bool:
         """Return True if the counts table contains at least one row.
@@ -278,6 +603,7 @@ class MySqlStatsStore(BaseStatsStore):
             bool indicating whether counts has rows.
         """
 
+        self._flush_pending_writes()
         cur = self._conn.cursor()
         cur.execute("SELECT 1 FROM counts LIMIT 1")
         return cur.fetchone() is not None
@@ -293,6 +619,7 @@ class MySqlStatsStore(BaseStatsStore):
         """
 
         result: Dict[str, Dict[str, int]] = {}
+        self._flush_pending_writes()
         cur = self._conn.cursor()
         cur.execute("SELECT scope, key, value FROM counts")
         for scope, key, value in cur:
@@ -396,13 +723,13 @@ class MySqlStatsStore(BaseStatsStore):
             None.
         """
 
+        ph = self._placeholder
         sql = (
-            "INSERT INTO query_log (ts, client_ip, name, qtype, upstream_id, rcode, "
+            "INSERT INTO query_log (ts, client_ip, name, qtype, upstream_id, rcode, "  # noqa: S608 - placeholder token validated in __init__
             "status, error, first, result_json) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+            f"VALUES ({ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph})"  # noqa: S608 - placeholder token validated in __init__
         )
-        cur = self._conn.cursor()
-        cur.execute(
+        self._execute(
             sql,
             (
                 float(ts),
@@ -416,8 +743,192 @@ class MySqlStatsStore(BaseStatsStore):
                 first,
                 result_json,
             ),
+            mark_query_log_retention=True,
         )
-        self._conn.commit()
+
+    def _apply_query_log_retention(self) -> None:
+        """Brief: Enforce configured query-log retention limits.
+
+        Inputs:
+            None.
+
+        Outputs:
+            None; applies any configured retention limits by age, max-records,
+            and/or estimated total bytes, then optionally optimizes query_log
+            when pruning changed table contents.
+        """
+
+        cutoff_ts = BaseStatsStore._retention_cutoff_ts(
+            self._query_log_retention_days,
+            now_ts=time.time(),
+        )
+        max_records = self._query_log_retention_max_records
+        max_bytes = self._query_log_retention_max_bytes
+        now_ts = time.time()
+        if cutoff_ts is None and max_records is None and max_bytes is None:
+            return
+        if not self._should_run_query_log_retention_prune(now_ts=now_ts):
+            return
+
+        ph = self._placeholder
+        cur = self._conn.cursor()
+
+        try:
+            changed = False
+            if cutoff_ts is not None:
+                cur.execute(
+                    f"DELETE FROM query_log WHERE ts < {ph}",  # noqa: S608 - placeholder token validated in __init__
+                    (float(cutoff_ts),),
+                )
+                changed = changed or bool(getattr(cur, "rowcount", 0))
+
+            if max_records is not None:
+                changed = (
+                    self._prune_query_log_to_max_records(int(max_records)) or changed
+                )
+
+            if max_bytes is not None:
+                changed = self._prune_query_log_to_max_bytes(int(max_bytes)) or changed
+
+            self._conn.commit()
+            if changed:
+                self._maybe_optimize_query_log_table(now_ts=now_ts)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.error(
+                "MySqlStatsStore retention prune failed: %s", exc, exc_info=True
+            )
+
+    def _prune_query_log_to_max_records(self, max_records: int) -> bool:
+        """Brief: Remove oldest rows beyond a max-record retention boundary.
+
+        Inputs:
+            max_records: Maximum rows to retain in query_log.
+
+        Outputs:
+            bool: True when one or more rows were deleted.
+        """
+
+        if max_records <= 0:
+            return False
+
+        ph = self._placeholder
+        cur_cutoff = self._conn.cursor()
+        cutoff_sql = f"SELECT ts, id FROM query_log ORDER BY ts DESC, id DESC LIMIT 1 OFFSET {ph}"  # noqa: S608 - placeholder token validated in __init__
+        cur_cutoff.execute(
+            cutoff_sql,
+            (int(max_records),),
+        )
+        cutoff_row = cur_cutoff.fetchone()
+        if cutoff_row is None:
+            return False
+
+        cutoff_ts = float(cutoff_row[0])
+        cutoff_id = int(cutoff_row[1])
+        cur = self._conn.cursor()
+        delete_sql = f"DELETE FROM query_log WHERE ts < {ph} OR (ts = {ph} AND id <= {ph})"  # noqa: S608 - placeholder token validated in __init__
+        cur.execute(
+            delete_sql,
+            (cutoff_ts, cutoff_ts, cutoff_id),
+        )
+        return bool(getattr(cur, "rowcount", 0))
+
+    def _prune_query_log_to_max_bytes(self, max_bytes: int) -> bool:
+        """Brief: Remove oldest rows until estimated query_log bytes fit a cap.
+
+        Inputs:
+            max_bytes: Maximum estimated bytes to retain in query_log.
+
+        Outputs:
+            bool: True when one or more rows were deleted.
+        """
+
+        if max_bytes <= 0:
+            return False
+
+        ph = self._placeholder
+        changed = False
+        max_passes = 32
+        for _ in range(max_passes):
+            cur = self._conn.cursor()
+            cur.execute(
+                """
+                SELECT
+                    COALESCE(
+                        SUM(
+                            OCTET_LENGTH(client_ip)
+                            + OCTET_LENGTH(name)
+                            + OCTET_LENGTH(qtype)
+                            + OCTET_LENGTH(COALESCE(upstream_id, ''))
+                            + OCTET_LENGTH(COALESCE(rcode, ''))
+                            + OCTET_LENGTH(COALESCE(status, ''))
+                            + OCTET_LENGTH(COALESCE(error, ''))
+                            + OCTET_LENGTH(COALESCE(first, ''))
+                            + OCTET_LENGTH(result_json)
+                            + 64
+                        ),
+                        0
+                    ),
+                    COUNT(1)
+                FROM query_log
+                """
+            )
+            row = cur.fetchone()
+            total_bytes = int(row[0] or 0) if row else 0
+            total_rows = int(row[1] or 0) if row else 0
+            if total_bytes <= max_bytes or total_rows <= 0:
+                break
+
+            over = max(1, total_bytes - int(max_bytes))
+            ratio = float(over) / float(max(total_bytes, 1))
+            rows_to_delete = max(1, min(total_rows, int(math.ceil(ratio * total_rows))))
+
+            cur_del = self._conn.cursor()
+            prune_sql = (
+                "DELETE FROM query_log WHERE id IN ("  # noqa: S608 - placeholder token validated in __init__
+                "SELECT id FROM ("
+                f"SELECT id FROM query_log ORDER BY ts ASC, id ASC LIMIT {ph}"  # noqa: S608 - placeholder token validated in __init__
+                ") AS doomed"
+                ")"
+            )
+            cur_del.execute(
+                prune_sql,
+                (int(rows_to_delete),),
+            )
+            if not bool(getattr(cur_del, "rowcount", 0)):
+                break
+            changed = True
+
+        return changed
+
+    def _maybe_optimize_query_log_table(self, *, now_ts: float) -> None:
+        """Brief: Run optional MySQL table optimization after retention pruning.
+
+        Inputs:
+            now_ts: Current Unix timestamp used for interval gating.
+
+        Outputs:
+            None.
+        """
+
+        if not self._retention_optimize_on_prune:
+            return
+
+        interval = self._retention_optimize_interval_seconds
+        if interval is not None:
+            try:
+                last = float(getattr(self, "_retention_last_optimize_ts", 0.0) or 0.0)
+            except Exception:
+                last = 0.0
+            if last > 0.0 and (float(now_ts) - last) < float(interval):
+                return
+
+        try:
+            cur = self._conn.cursor()
+            cur.execute("OPTIMIZE TABLE query_log")
+            self._conn.commit()
+            self._retention_last_optimize_ts = float(now_ts)
+        except Exception:  # pragma: no cover - defensive
+            logger.exception("MySqlStatsStore optimize table failed")
 
     def has_query_log(self) -> bool:
         """Return True if the query_log table contains at least one row.
@@ -429,6 +940,7 @@ class MySqlStatsStore(BaseStatsStore):
             bool indicating whether query_log has rows.
         """
 
+        self._flush_pending_writes()
         cur = self._conn.cursor()
         cur.execute("SELECT 1 FROM query_log LIMIT 1")
         return cur.fetchone() is not None
@@ -439,6 +951,9 @@ class MySqlStatsStore(BaseStatsStore):
         qtype: Optional[str] = None,
         qname: Optional[str] = None,
         rcode: Optional[str] = None,
+        status: Optional[str] = None,
+        source: Optional[str] = None,
+        ede_code: Optional[str] = None,
         start_ts: Optional[float] = None,
         end_ts: Optional[float] = None,
         page: int = 1,
@@ -451,6 +966,9 @@ class MySqlStatsStore(BaseStatsStore):
             qtype: Optional qtype filter.
             qname: Optional qname filter.
             rcode: Optional rcode filter.
+            status: Optional status filter.
+            source: Optional result.source filter.
+            ede_code: Optional result.ede_code filter.
             start_ts: Optional inclusive start timestamp.
             end_ts: Optional exclusive end timestamp.
             page: 1-based page index.
@@ -466,37 +984,80 @@ class MySqlStatsStore(BaseStatsStore):
         params: List[Any] = []
 
         if client_ip:
-            where.append("client_ip = %s")
+            where.append(f"client_ip = {self._placeholder}")
             params.append(client_ip.strip())
         if qtype:
-            where.append("qtype = %s")
+            where.append(f"qtype = {self._placeholder}")
             params.append(qtype.strip().upper())
         if qname:
-            where.append("name = %s")
-            params.append(qname.strip().rstrip(".").lower())
+            where.append(f"name = {self._placeholder}")
+            params.append(dns_names.normalize_name(qname))
         if rcode:
-            where.append("rcode = %s")
+            where.append(f"rcode = {self._placeholder}")
             params.append(rcode.strip().upper())
+        if status:
+            where.append(f"LOWER(COALESCE(status, '')) = {self._placeholder}")
+            params.append(status.strip().lower())
+        if source:
+            source_s = source.strip().lower()
+            where.append(
+                f"(LOWER(result_json) LIKE {self._placeholder} OR LOWER(result_json) LIKE {self._placeholder})"
+            )
+            params.append(f'%"source":"{source_s}"%')
+            params.append(f'%"source": "{source_s}"%')
+        if ede_code is not None and str(ede_code).strip():
+            ede_code_s = str(ede_code).strip()
+            try:
+                ede_code_i = int(ede_code_s)
+            except Exception:
+                where.append("1 = 0")
+            else:
+                if ede_code_i < 0:
+                    where.append("1 = 0")
+                else:
+                    ede_code_txt = str(ede_code_i)
+                    ph = self._placeholder
+                    where.append(
+                        "("
+                        f"LOWER(result_json) LIKE {ph} OR "
+                        f"LOWER(result_json) LIKE {ph} OR "
+                        f"LOWER(result_json) LIKE {ph} OR "
+                        f"LOWER(result_json) LIKE {ph} OR "
+                        f"LOWER(result_json) LIKE {ph} OR "
+                        f"LOWER(result_json) LIKE {ph}"
+                        ")"
+                    )
+                    params.append(f'%"ede_code":{ede_code_txt},%')
+                    params.append(f'%"ede_code":{ede_code_txt}' + "}%")
+                    params.append(f'%"ede_code": {ede_code_txt},%')
+                    params.append(f'%"ede_code": {ede_code_txt}' + "}%")
+                    params.append(f'%"ede_code":"{ede_code_txt}"%')
+                    params.append(f'%"ede_code": "{ede_code_txt}"%')
         if isinstance(start_ts, (int, float)):
-            where.append("ts >= %s")
+            where.append(f"ts >= {self._placeholder}")
             params.append(float(start_ts))
         if isinstance(end_ts, (int, float)):
-            where.append("ts < %s")
+            where.append(f"ts < {self._placeholder}")
             params.append(float(end_ts))
 
         where_sql = " WHERE " + " AND ".join(where) if where else ""
 
+        self._flush_pending_writes()
         cur = self._conn.cursor()
-        cur.execute(f"SELECT COUNT(1) FROM query_log{where_sql}", tuple(params))
+        cur.execute(
+            f"SELECT COUNT(1) FROM query_log{where_sql}",  # noqa: S608 - where_sql contains only fixed allowlisted clauses with bound params
+            tuple(params),
+        )
         row = cur.fetchone()
         total = int(row[0]) if row else 0
 
         offset = (page_i - 1) * page_size_i
+        ph = self._placeholder
         sql = (
-            "SELECT id, ts, client_ip, name, qtype, upstream_id, rcode, status, "
+            "SELECT id, ts, client_ip, name, qtype, upstream_id, rcode, status, "  # noqa: S608 - where_sql clauses and placeholder token are validated
             "error, first, result_json "
             f"FROM query_log{where_sql} "
-            "ORDER BY ts DESC, id DESC LIMIT %s OFFSET %s"
+            f"ORDER BY ts DESC, id DESC LIMIT {ph} OFFSET {ph}"  # noqa: S608 - where_sql clauses and placeholder token are validated
         )
         cur2 = self._conn.cursor()
         cur2.execute(sql, tuple(params + [page_size_i, offset]))
@@ -587,48 +1148,48 @@ class MySqlStatsStore(BaseStatsStore):
                 "items": [],
             }
 
-        where: List[str] = ["ts >= %s", "ts < %s"]
+        where: List[str] = [
+            f"ts >= {self._placeholder}",
+            f"ts < {self._placeholder}",
+        ]
         params: List[Any] = [start_f, end_f]
 
         if client_ip:
-            where.append("client_ip = %s")
+            where.append(f"client_ip = {self._placeholder}")
             params.append(client_ip.strip())
         if qtype:
-            where.append("qtype = %s")
+            where.append(f"qtype = {self._placeholder}")
             params.append(qtype.strip().upper())
         if qname:
-            where.append("name = %s")
-            params.append(qname.strip().rstrip(".").lower())
+            where.append(f"name = {self._placeholder}")
+            params.append(dns_names.normalize_name(qname))
         if rcode:
-            where.append("rcode = %s")
+            where.append(f"rcode = {self._placeholder}")
             params.append(rcode.strip().upper())
 
         where_sql = " WHERE " + " AND ".join(where)
 
-        group_col = None
-        group_label = None
-        if group_by:
-            gb = str(group_by).strip().lower()
-            mapping = {
-                "client_ip": "client_ip",
-                "qtype": "qtype",
-                "qname": "name",
-                "rcode": "rcode",
-            }
-            if gb in mapping:
-                group_col = mapping[gb]
-                group_label = gb
+        group_col, group_label = resolve_query_log_group_column(group_by)
 
+        self._flush_pending_writes()
         cur = self._conn.cursor()
         rows: List[Tuple[int, Optional[str], int]] = []
         if group_col:
+            ph = self._placeholder
             sql = (
-                "SELECT FLOOR((ts - %s) / %s) AS bucket, "
+                f"SELECT FLOOR((ts - {ph}) / {ph}) AS bucket, "  # noqa: S608 - group_col and where_sql are allowlisted; placeholder token validated
                 f"{group_col} AS group_value, COUNT(1) AS c "
                 f"FROM query_log{where_sql} "
-                "GROUP BY bucket, group_value ORDER BY bucket ASC"
+                f"GROUP BY bucket, group_value ORDER BY bucket ASC LIMIT {ph}"  # noqa: S608 - group_col and where_sql are allowlisted; placeholder token validated
             )
-            cur.execute(sql, tuple([start_f, interval_i] + params))
+            cur.execute(
+                sql,
+                tuple(
+                    [start_f, interval_i]
+                    + params
+                    + [int(MAX_QUERY_LOG_AGG_GROUPED_RESULTS) + 1]
+                ),
+            )
             for bucket, group_value, c in cur:
                 try:
                     b_i = int(bucket)
@@ -639,10 +1200,11 @@ class MySqlStatsStore(BaseStatsStore):
                     (b_i, str(group_value) if group_value is not None else None, c_i)
                 )
         else:
+            ph = self._placeholder
             sql = (
-                "SELECT FLOOR((ts - %s) / %s) AS bucket, COUNT(1) AS c "
+                f"SELECT FLOOR((ts - {ph}) / {ph}) AS bucket, COUNT(1) AS c "  # noqa: S608 - where_sql contains only fixed allowlisted clauses
                 f"FROM query_log{where_sql} "
-                "GROUP BY bucket ORDER BY bucket ASC"
+                "GROUP BY bucket ORDER BY bucket ASC"  # noqa: S608 - where_sql contains only fixed allowlisted clauses
             )
             cur.execute(sql, tuple([start_f, interval_i] + params))
             for bucket, c in cur:
@@ -654,11 +1216,20 @@ class MySqlStatsStore(BaseStatsStore):
                 rows.append((b_i, None, c_i))
 
         if not group_col:
-            import math
-
-            num = int(math.ceil((end_f - start_f) / float(interval_i)))
-            if num < 0:
-                num = 0
+            try:
+                num = enforce_query_log_aggregate_bucket_limit(
+                    start_f, end_f, interval_i
+                )
+            except ValueError as exc:
+                logger.warning(
+                    "MySqlStatsStore aggregate_query_log_counts rejected: %s", exc
+                )
+                return {
+                    "start_ts": start_f,
+                    "end_ts": end_f,
+                    "interval_seconds": interval_i,
+                    "items": [],
+                }
             by_bucket = {b: c for (b, _g, c) in rows}
             items: List[Dict[str, Any]] = []
             for b in range(num):
@@ -718,6 +1289,7 @@ class MySqlStatsStore(BaseStatsStore):
         """
 
         log = logger_obj or logger
+        self._flush_pending_writes()
         conn = self._conn
         cur = conn.cursor()
 

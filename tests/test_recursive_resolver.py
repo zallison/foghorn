@@ -11,24 +11,35 @@ Outputs:
 from typing import Any
 
 import pytest
-from dnslib import A, NS, QTYPE, RCODE, RR, SOA, DNSRecord
+from dnslib import NS, QTYPE, RCODE, RR, SOA, A, DNSRecord
 
 from foghorn.plugins.cache.backends.foghorn_ttl import FoghornTTLCache
-from foghorn.recursive_resolver import RecursiveResolver
+from foghorn.servers.recursive_resolver import RecursiveResolver
 
 
-def _make_nxdomain_with_soa(qname: str) -> bytes:
+def _make_nxdomain_with_soa(
+    qname: str,
+    *,
+    txid: int | None = None,
+    qtype_name: str = "A",
+) -> bytes:
     """Brief: Helper to build NXDOMAIN response with SOA for qname.
 
     Inputs:
       - qname: Query name as text.
+      - txid: Optional transaction ID to copy into the response.
 
     Outputs:
       - Wire-format DNS response bytes with NXDOMAIN and SOA authority.
     """
 
-    q = DNSRecord.question(qname, "A")
+    q = DNSRecord.question(qname, qtype_name)
     r = q.reply()
+    if txid is not None:
+        try:
+            r.header.id = int(txid)
+        except Exception:  # pragma: no cover - defensive
+            pass
     r.header.rcode = RCODE.NXDOMAIN
     r.add_auth(
         RR(
@@ -60,7 +71,7 @@ def test_recursive_resolver_positive_referral_chain(
     # Synthetic authorities used in the referral chain. We patch the
     # initial server list to contain a single synthetic root so the test is
     # deterministic and does not depend on the baked-in root hints.
-    import foghorn.recursive_resolver as rr_mod
+    import foghorn.servers.recursive_resolver as rr_mod
 
     root_ip = "192.0.2.1"
     tld_ip = "203.0.113.10"
@@ -106,7 +117,9 @@ def test_recursive_resolver_positive_referral_chain(
             return r.pack()
 
         # Unexpected host: treat as NXDOMAIN to fail clearly in tests.
-        return _make_nxdomain_with_soa(qname)
+        return _make_nxdomain_with_soa(
+            qname, txid=q.header.id, qtype_name=QTYPE[q.questions[0].qtype]
+        )
 
     # Patch the udp_query used inside recursive_resolver.
     monkeypatch.setattr(rr_mod, "udp_query", fake_udp_query)
@@ -117,6 +130,7 @@ def test_recursive_resolver_positive_referral_chain(
 
     monkeypatch.setattr(rr_mod, "tcp_query", _boom_tcp)
 
+    # Note: default max_depth is 12, using 8 here to test depth limiting
     resolver = RecursiveResolver(
         cache=FoghornTTLCache(),
         stats=None,
@@ -149,7 +163,7 @@ def test_recursive_resolver_nxdomain_terminates(
     # Use a fixed synthetic root for determinism.
     root_ip = "192.0.2.1"
 
-    import foghorn.recursive_resolver as rr_mod
+    import foghorn.servers.recursive_resolver as rr_mod
 
     def fake_choose_initial_servers(self):  # noqa: D401
         """Return a single synthetic root server for NXDOMAIN test."""
@@ -166,12 +180,16 @@ def test_recursive_resolver_nxdomain_terminates(
         """Return NXDOMAIN with SOA for any root hit."""
 
         q = DNSRecord.parse(wire)
-        qname = str(q.questions[0].qname).rstrip(".")
+        q0 = q.questions[0]
+        qname = str(q0.qname).rstrip(".")
+        qtype_name = QTYPE[q0.qtype]
 
         if host == root_ip:
-            return _make_nxdomain_with_soa(qname)
+            return _make_nxdomain_with_soa(
+                qname, txid=q.header.id, qtype_name=qtype_name
+            )
 
-        return _make_nxdomain_with_soa(qname)
+        return _make_nxdomain_with_soa(qname, txid=q.header.id, qtype_name=qtype_name)
 
     monkeypatch.setattr(rr_mod, "udp_query", fake_udp_query)
 
@@ -207,7 +225,7 @@ def test_recursive_resolver_qname_minimization(monkeypatch: pytest.MonkeyPatch) 
         "example.com." NS before the final full QNAME A lookup.
     """
 
-    import foghorn.recursive_resolver as rr_mod
+    import foghorn.servers.recursive_resolver as rr_mod
 
     root_ip = "192.0.2.1"
     tld_ip = "203.0.113.10"
@@ -260,7 +278,16 @@ def test_recursive_resolver_qname_minimization(monkeypatch: pytest.MonkeyPatch) 
             )
             return r.pack()
 
-        return _make_nxdomain_with_soa(qn)
+        # For unexpected hosts, preserve TXID/QTYPE to satisfy response/query validation.
+        try:
+            q0 = q.questions[0]
+            return _make_nxdomain_with_soa(
+                str(q0.qname).rstrip("."),
+                txid=q.header.id,
+                qtype_name=QTYPE[q0.qtype],
+            )
+        except Exception:
+            return _make_nxdomain_with_soa(qn)
 
     monkeypatch.setattr(rr_mod, "udp_query", fake_udp_query)
 
@@ -314,7 +341,7 @@ def test_udp_and_tcp_query_wrappers_delegate(monkeypatch: pytest.MonkeyPatch) ->
         with the expected arguments and return values.
     """
 
-    import foghorn.recursive_resolver as rr_mod
+    import foghorn.servers.recursive_resolver as rr_mod
 
     udp_called = {}
 
@@ -384,7 +411,7 @@ def test_default_root_hints_and_choose_initial_servers() -> None:
       - Non-empty lists of _Server instances suitable as initial authorities.
     """
 
-    import foghorn.recursive_resolver as rr_mod
+    import foghorn.servers.recursive_resolver as rr_mod
 
     hints = rr_mod._default_root_hints()
     assert hints
@@ -403,6 +430,129 @@ def test_default_root_hints_and_choose_initial_servers() -> None:
     assert all(isinstance(s, rr_mod._Server) for s in servers)
 
 
+def test_extract_next_servers_ignores_out_of_bailiwick_glue() -> None:
+    """Brief: _extract_next_servers ignores out-of-bailiwick additional glue.
+
+    Inputs:
+      - None (synthetic referral response).
+
+    Outputs:
+      - Asserts that a referral for target.com does not accept glue for an
+        unrelated name like www.bank.com.
+    """
+
+    # Build a synthetic referral response.
+    q = DNSRecord.question("target.com.", "NS")
+    r = q.reply()
+
+    # Authority: delegation for target.com.
+    r.add_auth(RR("target.com.", QTYPE.NS, rdata=NS("ns.evil.com."), ttl=300))
+
+    # Additional: out-of-bailiwick glue should be ignored.
+    r.add_ar(RR("www.bank.com.", QTYPE.A, rdata=A("192.0.2.123"), ttl=300))
+    r.add_ar(RR("ns.evil.com.", QTYPE.A, rdata=A("192.0.2.200"), ttl=300))
+
+    resolver = RecursiveResolver(cache=FoghornTTLCache(), stats=None)
+    resolver._stage_qname_context = "target.com."
+
+    servers = resolver._extract_next_servers(DNSRecord.parse(r.pack()))
+    assert servers == []
+
+
+def test_resolve_skips_mismatched_txid_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Brief: resolve() discards responses with mismatched transaction IDs.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - Asserts a mismatched-TXID response is ignored and resolution fails with
+        SERVFAIL when no other valid responses are available.
+    """
+
+    import foghorn.servers.recursive_resolver as rr_mod
+
+    root_ip = "192.0.2.1"
+
+    def fake_choose_initial_servers(self):  # noqa: D401
+        """Return a single synthetic root server."""
+
+        return [rr_mod._Server(root_ip, 53)]
+
+    monkeypatch.setattr(
+        RecursiveResolver, "_choose_initial_servers", fake_choose_initial_servers
+    )
+
+    def fake_udp_query(
+        host: str, port: int, wire: bytes, timeout_ms: int = 0
+    ) -> bytes:  # noqa: D401, ANN001
+        """Return a response with the wrong TXID."""
+
+        q = DNSRecord.parse(wire)
+        r = q.reply()
+        r.header.id = (q.header.id + 1) % 65536
+        return r.pack()
+
+    monkeypatch.setattr(rr_mod, "udp_query", fake_udp_query)
+
+    resolver = RecursiveResolver(cache=FoghornTTLCache(), stats=None, max_depth=2)
+    req = DNSRecord.question("example.com.", "A")
+    wire, _upstream = resolver.resolve(req)
+
+    resp = DNSRecord.parse(wire)
+    assert resp.header.rcode == RCODE.SERVFAIL
+
+
+def test_resolve_skips_mismatched_question_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Brief: resolve() discards responses whose question does not match.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - Asserts a mismatched-question response is ignored and resolution fails
+        with SERVFAIL when no other valid responses are available.
+    """
+
+    import foghorn.servers.recursive_resolver as rr_mod
+
+    root_ip = "192.0.2.1"
+
+    def fake_choose_initial_servers(self):  # noqa: D401
+        """Return a single synthetic root server."""
+
+        return [rr_mod._Server(root_ip, 53)]
+
+    monkeypatch.setattr(
+        RecursiveResolver, "_choose_initial_servers", fake_choose_initial_servers
+    )
+
+    def fake_udp_query(
+        host: str, port: int, wire: bytes, timeout_ms: int = 0
+    ) -> bytes:  # noqa: D401, ANN001
+        """Return a response echoing a different question."""
+
+        q = DNSRecord.parse(wire)
+        q0 = q.questions[0]
+        # Different qname, same qtype, same TXID.
+        r = DNSRecord.question("other.example.", QTYPE[q0.qtype]).reply()
+        r.header.id = q.header.id
+        return r.pack()
+
+    monkeypatch.setattr(rr_mod, "udp_query", fake_udp_query)
+
+    resolver = RecursiveResolver(cache=FoghornTTLCache(), stats=None, max_depth=2)
+    req = DNSRecord.question("example.com.", "A")
+    wire, _upstream = resolver.resolve(req)
+
+    resp = DNSRecord.parse(wire)
+    assert resp.header.rcode == RCODE.SERVFAIL
+
+
 def test_query_single_udp_and_tcp_flow(monkeypatch: pytest.MonkeyPatch) -> None:
     """Brief: _query_single performs UDP query with TCP fallback on TC=1.
 
@@ -414,7 +564,7 @@ def test_query_single_udp_and_tcp_flow(monkeypatch: pytest.MonkeyPatch) -> None:
         the TCP response bytes.
     """
 
-    import foghorn.recursive_resolver as rr_mod
+    import foghorn.servers.recursive_resolver as rr_mod
 
     udp_calls: list[tuple[str, int, bytes, int]] = []
     tcp_calls: list[tuple[str, int, bytes, int, int]] = []
@@ -605,7 +755,7 @@ def test_resolve_honours_overall_deadline(monkeypatch: pytest.MonkeyPatch) -> No
         already exceeds the computed deadline.
     """
 
-    import foghorn.recursive_resolver as rr_mod
+    import foghorn.servers.recursive_resolver as rr_mod
 
     root = rr_mod._Server("192.0.2.1", 53)
 
@@ -665,7 +815,7 @@ def test_resolve_visited_loop_guard_and_delegation_follow(
         the visited-set guard and final-stage delegation handling.
     """
 
-    import foghorn.recursive_resolver as rr_mod
+    import foghorn.servers.recursive_resolver as rr_mod
 
     root = rr_mod._Server("192.0.2.1", 53)
 
@@ -730,7 +880,7 @@ def test_resolve_tcp_fallback_on_tc_in_main_loop(
         at least once.
     """
 
-    import foghorn.recursive_resolver as rr_mod
+    import foghorn.servers.recursive_resolver as rr_mod
 
     root = rr_mod._Server("192.0.2.1", 53)
 
@@ -812,7 +962,7 @@ def test_resolve_noerror_nodata_with_soa_returns_directly(
       - Final response is the upstream NOERROR NODATA with SOA authority.
     """
 
-    import foghorn.recursive_resolver as rr_mod
+    import foghorn.servers.recursive_resolver as rr_mod
 
     root = rr_mod._Server("192.0.2.1", 53)
 
@@ -884,7 +1034,7 @@ def test_resolve_final_fallthrough_without_delegation(
       - Upstream SERVFAIL with no NS-based delegation is returned as-is.
     """
 
-    import foghorn.recursive_resolver as rr_mod
+    import foghorn.servers.recursive_resolver as rr_mod
 
     root = rr_mod._Server("192.0.2.1", 53)
 

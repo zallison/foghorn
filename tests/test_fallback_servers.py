@@ -20,12 +20,11 @@ from typing import Any
 
 import pytest
 
+# API / index.html / stats
 # DNS-over-HTTP(s) - Provide cert and key to enable HTTPS, otherwise use an ssl terminator
 from foghorn.servers import doh_api as doh_mod
-from foghorn.servers.doh_api import DoHServerHandle, start_doh_server
-
-# API / index.html / stats
 from foghorn.servers import webserver as web_mod
+from foghorn.servers.doh_api import DoHServerHandle, start_doh_server
 from foghorn.servers.webserver import RingBuffer, WebServerHandle, start_webserver
 from foghorn.stats import StatsCollector, StatsSQLiteStore
 
@@ -81,6 +80,28 @@ def test_doh_fallback_threaded_server_roundtrip(monkeypatch: Any) -> None:
     # Give the server a brief moment to start accepting connections.
     time.sleep(0.05)
 
+    # Test /openapi.json and /docs exist in threaded mode.
+    conn0 = http.client.HTTPConnection(host, port, timeout=1)
+    try:
+        conn0.request("GET", "/openapi.json")
+        resp0 = conn0.getresponse()
+        body0 = resp0.read()
+        assert resp0.status == 200
+        schema = json.loads(body0.decode("utf-8"))
+        assert "/dns-query" in (schema.get("paths") or {})
+    finally:
+        conn0.close()
+
+    conn0b = http.client.HTTPConnection(host, port, timeout=1)
+    try:
+        conn0b.request("GET", "/docs")
+        resp0b = conn0b.getresponse()
+        body0b = resp0b.read()
+        assert resp0b.status == 200
+        assert b"SwaggerUIBundle" in body0b
+    finally:
+        conn0b.close()
+
     # Test POST /dns-query
     conn = http.client.HTTPConnection(host, port, timeout=1)
     try:
@@ -112,6 +133,195 @@ def test_doh_fallback_threaded_server_roundtrip(monkeypatch: Any) -> None:
         conn2.close()
 
     handle.stop()
+
+
+def test_admin_webserver_auth_parity_fastapi_and_threaded(monkeypatch: Any) -> None:
+    """Brief: FastAPI and threaded admin /stats auth must match for token-mode cases.
+
+    Inputs:
+      - monkeypatch: used to force threaded fallback by breaking asyncio loop creation.
+
+    Outputs:
+      - Asserts status code, detail/status payload fields, and WWW-Authenticate
+        header are identical across FastAPI and threaded handlers for the same
+        request headers.
+    """
+
+    try:
+        from fastapi.testclient import TestClient
+    except ModuleNotFoundError:
+        pytest.skip("fastapi not installed; skipping auth parity test")
+
+    cfg = {
+        "server": {
+            "http": {
+                "enabled": True,
+                "host": "127.0.0.1",
+                "port": 0,
+                "auth": {"mode": "token", "token": "secret-token"},
+            }
+        },
+    }
+
+    app = web_mod.create_app(stats=None, config=cfg, log_buffer=RingBuffer())
+    client = TestClient(app)
+
+    cases: list[dict[str, Any]] = [
+        {"headers": {}},
+        {"headers": {"Authorization": "Bearer wrong-token"}},
+        {"headers": {"X-API-Key": "wrong-token"}},
+        {"headers": {"Authorization": "Bearer secret-token"}},
+        {"headers": {"X-API-Key": "secret-token"}},
+    ]
+
+    fastapi_expected: list[dict[str, Any]] = []
+    for case in cases:
+        headers = case["headers"]
+        response = client.get("/stats", headers=headers)
+        payload = response.json()
+        fastapi_expected.append(
+            {
+                "headers": headers,
+                "status_code": response.status_code,
+                "detail": payload.get("detail"),
+                "status": payload.get("status"),
+                "www_authenticate": response.headers.get("www-authenticate"),
+            }
+        )
+
+    def boom_new_loop(*_a: Any, **_kw: Any) -> asyncio.AbstractEventLoop:
+        raise PermissionError("no self-pipe")
+
+    monkeypatch.setattr(asyncio, "new_event_loop", boom_new_loop, raising=True)
+
+    handle = start_webserver(stats=None, config=cfg, log_buffer=RingBuffer())
+    assert isinstance(handle, WebServerHandle)
+
+    server = handle._server  # type: ignore[attr-defined]
+    assert server is not None
+    host, port = server.server_address
+
+    time.sleep(0.05)
+
+    try:
+        for expected in fastapi_expected:
+            conn = http.client.HTTPConnection(host, port, timeout=1)
+            try:
+                conn.request("GET", "/stats", headers=expected["headers"])
+                response = conn.getresponse()
+                body = response.read()
+                payload = json.loads(body.decode("utf-8"))
+                assert response.status == expected["status_code"]
+                assert payload.get("detail") == expected["detail"]
+                assert payload.get("status") == expected["status"]
+                assert (response.getheader("WWW-Authenticate") or "").lower() == (
+                    expected["www_authenticate"] or ""
+                ).lower()
+            finally:
+                conn.close()
+    finally:
+        handle.stop()
+
+
+def test_admin_webserver_missing_token_parity_fastapi_and_threaded(
+    monkeypatch: Any,
+) -> None:
+    """Brief: FastAPI and threaded /stats must both return 500 when token mode lacks token.
+
+    Inputs:
+      - monkeypatch: used to force threaded fallback by breaking asyncio loop creation.
+
+    Outputs:
+      - Asserts status and detail fields are identical across FastAPI and
+        threaded implementations for auth.mode=token without auth.token.
+    """
+
+    try:
+        from fastapi.testclient import TestClient
+    except ModuleNotFoundError:
+        pytest.skip("fastapi not installed; skipping auth parity test")
+
+    cfg = {
+        "server": {
+            "http": {
+                "enabled": True,
+                "host": "127.0.0.1",
+                "port": 0,
+                "auth": {"mode": "token"},
+            }
+        },
+    }
+
+    app = web_mod.create_app(stats=None, config=cfg, log_buffer=RingBuffer())
+    client = TestClient(app)
+    fastapi_response = client.get("/stats")
+    fastapi_payload = fastapi_response.json()
+
+    def boom_new_loop(*_a: Any, **_kw: Any) -> asyncio.AbstractEventLoop:
+        raise PermissionError("no self-pipe")
+
+    monkeypatch.setattr(asyncio, "new_event_loop", boom_new_loop, raising=True)
+
+    handle = start_webserver(stats=None, config=cfg, log_buffer=RingBuffer())
+    assert isinstance(handle, WebServerHandle)
+    server = handle._server  # type: ignore[attr-defined]
+    assert server is not None
+    host, port = server.server_address
+
+    time.sleep(0.05)
+
+    try:
+        conn = http.client.HTTPConnection(host, port, timeout=1)
+        try:
+            conn.request("GET", "/stats")
+            threaded_response = conn.getresponse()
+            body = threaded_response.read()
+            threaded_payload = json.loads(body.decode("utf-8"))
+            assert threaded_response.status == fastapi_response.status_code
+            assert threaded_payload.get("detail") == fastapi_payload.get("detail")
+            assert (threaded_response.getheader("WWW-Authenticate") or "").lower() == (
+                fastapi_response.headers.get("www-authenticate") or ""
+            ).lower()
+        finally:
+            conn.close()
+    finally:
+        handle.stop()
+
+
+def test_admin_fallback_disabled_returns_none(monkeypatch: Any, tmp_path) -> None:
+    """Brief: start_webserver returns None when threaded fallback is disabled.
+
+    Inputs:
+      - monkeypatch: forces asyncio.new_event_loop() to raise PermissionError.
+      - tmp_path: temp directory for a minimal www_root.
+
+    Outputs:
+      - None; asserts start_webserver returns None.
+    """
+
+    def boom_new_loop(*_a: Any, **_kw: Any) -> asyncio.AbstractEventLoop:
+        raise PermissionError("no self-pipe")
+
+    monkeypatch.setattr(asyncio, "new_event_loop", boom_new_loop, raising=True)
+
+    www_root = tmp_path / "html"
+    www_root.mkdir()
+    (www_root / "index.html").write_text("ok", encoding="utf-8")
+
+    cfg = {
+        "server": {
+            "http": {
+                "enabled": True,
+                "host": "127.0.0.1",
+                "port": 0,
+                "www_root": str(www_root),
+                "allow_threaded_fallback": False,
+            }
+        }
+    }
+
+    handle = start_webserver(stats=None, config=cfg, log_buffer=None)
+    assert handle is None
 
 
 def test_admin_fallback_logs_with_limit_and_static_files(
@@ -169,6 +379,38 @@ def test_admin_fallback_logs_with_limit_and_static_files(
     host, port = server.server_address
 
     time.sleep(0.05)
+
+    # Test /openapi.json and /docs exist in threaded mode when FastAPI is installed.
+    try:
+        import fastapi  # noqa: F401
+
+        fastapi_available = True
+    except ModuleNotFoundError:
+        fastapi_available = False
+
+    if fastapi_available:
+        conn_docs = http.client.HTTPConnection(host, port, timeout=1)
+        try:
+            conn_docs.request("GET", "/openapi.json")
+            resp_docs = conn_docs.getresponse()
+            body_docs = resp_docs.read()
+            assert resp_docs.status == 200
+            schema = json.loads(body_docs.decode("utf-8"))
+            paths = schema.get("paths") or {}
+            assert "/api/v1/health" in paths
+            assert "/health" not in paths
+        finally:
+            conn_docs.close()
+
+        conn_docs2 = http.client.HTTPConnection(host, port, timeout=1)
+        try:
+            conn_docs2.request("GET", "/docs")
+            resp_docs2 = conn_docs2.getresponse()
+            body_docs2 = resp_docs2.read()
+            assert resp_docs2.status == 200
+            assert b"Swagger UI" in body_docs2 or b"SwaggerUIBundle" in body_docs2
+        finally:
+            conn_docs2.close()
 
     # Test /logs with a limit query parameter.
     conn = http.client.HTTPConnection(host, port, timeout=1)
@@ -369,7 +611,15 @@ def test_admin_fallback_config_raw_and_save(monkeypatch: Any, tmp_path) -> None:
 
     # Create a temporary config file.
     cfg_path = tmp_path / "config.yaml"
-    initial_yaml = "initial: 1\nwebserver:\n  enabled: true\n"
+
+    # Use a schema-valid v2 config so /config/save can parse + validate it.
+    initial_yaml = (
+        "upstreams:\n"
+        "  endpoints:\n"
+        "  - host: 8.8.8.8\n"
+        "server:\n"
+        "  listen: {}\n"
+    )
     cfg_path.write_text(initial_yaml, encoding="utf-8")
 
     cfg = {
@@ -393,21 +643,43 @@ def test_admin_fallback_config_raw_and_save(monkeypatch: Any, tmp_path) -> None:
 
     time.sleep(0.05)
 
-    # Test GET /config/raw.json returns the on-disk YAML and parsed config.
-    conn = http.client.HTTPConnection(host, port, timeout=1)
-    try:
-        conn.request("GET", "/config/raw.json")
-        resp = conn.getresponse()
-        body = resp.read()
-        assert resp.status == 200
-        data = json.loads(body.decode("utf-8"))
-        assert data["raw_yaml"] == initial_yaml
-        assert data["config"]["initial"] == 1
-    finally:
-        conn.close()
+    # Test GET /config/raw.json endpoints return the on-disk YAML and parsed config.
+    for path in [
+        "/config/raw.json",
+        "/api/v1/config/raw.json",
+    ]:
+        conn = http.client.HTTPConnection(host, port, timeout=1)
+        try:
+            conn.request("GET", path)
+            resp = conn.getresponse()
+            body = resp.read()
+            assert resp.status == 200
+            data = json.loads(body.decode("utf-8"))
+            assert data["raw_yaml"] == initial_yaml
+            assert data["config"]["upstreams"]["endpoints"][0]["host"] == "8.8.8.8"
+        finally:
+            conn.close()
+
+    # Raw YAML endpoints.
+    for path in [
+        "/config/raw",
+        "/api/v1/config/raw",
+    ]:
+        conn_y = http.client.HTTPConnection(host, port, timeout=1)
+        try:
+            conn_y.request("GET", path)
+            resp_y = conn_y.getresponse()
+            body_y = resp_y.read()
+            assert resp_y.status == 200
+            assert body_y.decode("utf-8") == initial_yaml
+        finally:
+            conn_y.close()
 
     # Test POST /config/save overwrites the config file.
-    new_cfg = {"answer": 42, "webserver": {"enabled": True}}
+    new_cfg = {
+        "upstreams": {"endpoints": [{"host": "9.9.9.9"}]},
+        "server": {"listen": {}},
+    }
     import yaml
 
     new_yaml = yaml.safe_dump(new_cfg)
@@ -435,8 +707,8 @@ def test_admin_fallback_config_raw_and_save(monkeypatch: Any, tmp_path) -> None:
     import yaml
 
     reloaded = yaml.safe_load(on_disk)
-    assert reloaded["answer"] == 42
-    assert reloaded["webserver"]["enabled"] is True
+    assert reloaded["upstreams"]["endpoints"][0]["host"] == "9.9.9.9"
+    assert isinstance(reloaded.get("server", {}).get("listen"), dict)
 
     handle.stop()
 
@@ -517,12 +789,8 @@ def test_admin_fallback_query_log_validation_errors(monkeypatch: Any) -> None:
                 "enabled": True,
                 "host": "127.0.0.1",
                 "port": 0,
+                "auth": {"mode": "token", "token": "secret-token"},
             }
-        },
-        # Auth configuration for the threaded admin handlers still lives under
-        # the legacy webserver block; start_webserver now only reads server.http.
-        "webserver": {
-            "auth": {"mode": "token", "token": "secret-token"},
         },
     }
 
@@ -962,12 +1230,8 @@ def test_admin_webserver_fallback_health_and_auth(monkeypatch: Any) -> None:
                 "enabled": True,
                 "host": "127.0.0.1",
                 "port": 0,
+                "auth": {"mode": "token", "token": "secret-token"},
             }
-        },
-        # Auth configuration for threaded handlers continues to live under the
-        # legacy webserver block; start_webserver now only reads server.http.
-        "webserver": {
-            "auth": {"mode": "token", "token": "secret-token"},
         },
     }
 

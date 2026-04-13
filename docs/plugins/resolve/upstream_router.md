@@ -20,9 +20,10 @@ plugins:
   - id: corp-router
     type: upstream_router
     hooks:
-      pre_resolve: { priority: 235 }
+      pre_resolve: 235
     config:
-      targets: [ 192.168.0.0/16 ]
+      targets:
+        ips: [192.168.0.0/16 ]
       routes:
         - suffix: corp
           upstreams:
@@ -39,18 +40,19 @@ plugins:
   - id: router-advanced
     type: upstream_router
     hooks:
-      pre_resolve: { priority: 230 }
+      pre_resolve: 230
     config:
       # BasePlugin targeting + logging
       targets:
-        - 192.168.0.0/16
-      targets_ignore:
-        - 192.168.1.100/32
-      targets_listener: any
-      targets_domains:
-        - example.com
-      targets_domains_mode: suffix
-      target_qtypes: [ 'A', 'AAAA' ]
+        ips:
+          - 192.168.0.0/16
+        ignore_ips:
+          - 192.168.1.100/32
+        listeners: any
+        domains:
+          - example.com
+        domains_mode: suffix
+        qtypes: [ 'A', 'AAAA' ]
       logging:
         level: info
         stderr: true

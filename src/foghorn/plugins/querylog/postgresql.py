@@ -21,10 +21,20 @@ Notes:
 
 import json
 import logging
+import math
+import threading
+import time
 from typing import Any, Dict, List, Optional, Tuple
+from foghorn.plugins.sql_safety import resolve_query_log_group_column
+from foghorn.security_limits import (
+    MAX_QUERY_LOG_AGG_GROUPED_RESULTS,
+    enforce_query_log_aggregate_bucket_limit,
+)
+
+from foghorn.utils import dns_names
 
 from .base import BaseStatsStore
-from .sqlite import _normalize_domain, _is_subdomain
+from .sqlite import _is_subdomain, _normalize_domain
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +87,16 @@ class PostgresStatsStore(BaseStatsStore):
         connect_kwargs: Optional mapping of additional keyword arguments passed
             through to the underlying driver's ``connect`` function
             (for example, sslmode, options).
+        async_logging: When True, enqueue counter/log operations on the
+            BaseStatsStore worker queue.
+        max_logging_queue: Maximum queued operations when async logging is on.
+        retention_max_records: Optional cap on retained query_log rows.
+        retention_days: Optional age limit (in days) for query_log rows.
+        retention_max_bytes: Optional estimated byte cap for query_log rows.
+        retention_prune_interval_seconds: Optional prune interval gate.
+        retention_prune_every_n_inserts: Optional prune cadence by insert count.
+        retention_vacuum_on_prune: Whether to run VACUUM ANALYZE after pruning.
+        retention_vacuum_interval_seconds: Optional interval gate for vacuum.
 
     Outputs:
         Initialized PostgresStatsStore instance with ensured schema.
@@ -90,7 +110,18 @@ class PostgresStatsStore(BaseStatsStore):
         password: Optional[str] = None,
         database: str = "foghorn_stats",
         connect_kwargs: Optional[Dict[str, Any]] = None,
-        async_logging: bool = False,
+        async_logging: bool = True,
+        max_logging_queue: int = 16384,
+        batch_writes: bool = False,
+        batch_time_sec: float = 15.0,
+        batch_max_size: int = 1000,
+        retention_max_records: Optional[int] = None,
+        retention_days: Optional[float] = None,
+        retention_max_bytes: Optional[int] = None,
+        retention_prune_interval_seconds: Optional[float] = None,
+        retention_prune_every_n_inserts: Optional[int] = None,
+        retention_vacuum_on_prune: bool = False,
+        retention_vacuum_interval_seconds: Optional[float] = None,
         **_: Any,
     ) -> None:
         driver = _import_postgres_driver()
@@ -110,8 +141,48 @@ class PostgresStatsStore(BaseStatsStore):
         self._driver = driver
         self._conn = driver.connect(**kwargs)
 
-        # Use synchronous logging by default for SQL stats backends.
+        # Use async logging by default for SQL stats backends.
         self._async_logging = bool(async_logging)
+        # BaseStatsStore worker queue capacity
+        try:
+            self._max_logging_queue = int(max_logging_queue)
+        except Exception:
+            self._max_logging_queue = 16384
+        self._batch_writes = bool(batch_writes)
+        self._batch_time_sec = float(batch_time_sec)
+        self._batch_max_size = int(batch_max_size)
+        self._lock = threading.RLock()
+        self._pending_ops: List[Tuple[str, Tuple[Any, ...]]] = []
+        self._pending_retention = False
+        self._last_flush = time.time()
+        self._query_log_retention_max_records = (
+            BaseStatsStore._normalize_retention_max_records(retention_max_records)
+        )
+        self._query_log_retention_days = BaseStatsStore._normalize_retention_days(
+            retention_days
+        )
+        self._query_log_retention_max_bytes = (
+            BaseStatsStore._normalize_retention_max_bytes(retention_max_bytes)
+        )
+        self._query_log_retention_prune_interval_seconds = (
+            BaseStatsStore._normalize_retention_prune_interval_seconds(
+                retention_prune_interval_seconds
+            )
+        )
+        self._query_log_retention_prune_every_n_inserts = (
+            BaseStatsStore._normalize_retention_prune_every_n_inserts(
+                retention_prune_every_n_inserts
+            )
+        )
+        self._query_log_retention_seen_inserts = 0
+        self._query_log_retention_last_prune_ts = 0.0
+        self._retention_vacuum_on_prune = bool(retention_vacuum_on_prune)
+        self._retention_vacuum_interval_seconds = (
+            BaseStatsStore._normalize_retention_prune_interval_seconds(
+                retention_vacuum_interval_seconds
+            )
+        )
+        self._retention_last_vacuum_ts = 0.0
 
         self._ensure_schema()
 
@@ -191,6 +262,110 @@ class PostgresStatsStore(BaseStatsStore):
     # ------------------------------------------------------------------
     # Health and lifecycle
     # ------------------------------------------------------------------
+    def _flush_pending_writes(self) -> None:
+        """Flush pending batched operations, if batching is enabled.
+
+        Inputs:
+            None.
+
+        Outputs:
+            None.
+        """
+
+        if not self._batch_writes:
+            return
+        with self._lock:
+            self._flush_locked()
+
+    def _execute(
+        self,
+        sql: str,
+        params: Tuple[Any, ...],
+        *,
+        mark_query_log_retention: bool = False,
+    ) -> None:
+        """Execute SQL immediately or queue it for a batched flush.
+
+        Inputs:
+            sql: SQL statement text.
+            params: SQL parameters tuple.
+            mark_query_log_retention: When True, retention prune is evaluated
+                once after the current batched flush succeeds.
+
+        Outputs:
+            None.
+        """
+
+        if not self._batch_writes:
+            cur = self._conn.cursor()
+            cur.execute(sql, params)
+            self._conn.commit()
+            if mark_query_log_retention:
+                self._apply_query_log_retention()
+            return
+
+        with self._lock:
+            self._pending_ops.append((sql, params))
+            if mark_query_log_retention:
+                self._pending_retention = True
+            self._maybe_flush_locked()
+
+    def _maybe_flush_locked(self) -> None:
+        """Flush queued SQL operations when batch thresholds are reached.
+
+        Inputs:
+            None. Caller must hold ``self._lock``.
+
+        Outputs:
+            None.
+        """
+
+        if not self._batch_writes:
+            return
+        ops_len = len(self._pending_ops)
+        if ops_len == 0:
+            return
+
+        now = time.time()
+        age = now - self._last_flush
+        if ops_len >= self._batch_max_size or age >= self._batch_time_sec:
+            self._flush_locked()
+
+    def _flush_locked(self) -> None:
+        """Flush all pending SQL operations in a single commit.
+
+        Inputs:
+            None. Caller must hold ``self._lock``.
+
+        Outputs:
+            None.
+        """
+
+        if not self._pending_ops:
+            return
+
+        pending_ops = list(self._pending_ops)
+        run_retention = bool(self._pending_retention)
+
+        try:
+            cur = self._conn.cursor()
+            for sql, params in pending_ops:
+                cur.execute(sql, params)
+            self._conn.commit()
+            self._pending_ops.clear()
+            self._pending_retention = False
+            self._last_flush = time.time()
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.error(
+                "PostgresStatsStore batched flush failed: %s",
+                exc,
+                exc_info=True,
+            )
+            return
+
+        if run_retention:
+            self._apply_query_log_retention()
+
     def health_check(self) -> bool:
         """Return True when the underlying PostgreSQL store is usable.
 
@@ -220,6 +395,7 @@ class PostgresStatsStore(BaseStatsStore):
         """
 
         try:
+            self._flush_pending_writes()
             conn = getattr(self, "_conn", None)
             if conn is not None:
                 conn.close()
@@ -263,9 +439,7 @@ class PostgresStatsStore(BaseStatsStore):
             "INSERT INTO counts(scope, key, value) VALUES(%s, %s, %s) "
             "ON CONFLICT (scope, key) DO UPDATE SET value = counts.value + EXCLUDED.value"
         )
-        cur = self._conn.cursor()
-        cur.execute(sql, (scope, key, int(delta)))
-        self._conn.commit()
+        self._execute(sql, (scope, key, int(delta)))
 
     def set_count(self, scope: str, key: str, value: int) -> None:
         """Set an aggregate counter in the counts table.
@@ -283,9 +457,7 @@ class PostgresStatsStore(BaseStatsStore):
             "INSERT INTO counts(scope, key, value) VALUES(%s, %s, %s) "
             "ON CONFLICT (scope, key) DO UPDATE SET value = EXCLUDED.value"
         )
-        cur = self._conn.cursor()
-        cur.execute(sql, (scope, key, int(value)))
-        self._conn.commit()
+        self._execute(sql, (scope, key, int(value)))
 
     def has_counts(self) -> bool:
         """Return True if the counts table contains at least one row.
@@ -297,6 +469,7 @@ class PostgresStatsStore(BaseStatsStore):
             bool indicating whether counts has rows.
         """
 
+        self._flush_pending_writes()
         cur = self._conn.cursor()
         cur.execute("SELECT 1 FROM counts LIMIT 1")
         return cur.fetchone() is not None
@@ -312,6 +485,7 @@ class PostgresStatsStore(BaseStatsStore):
         """
 
         result: Dict[str, Dict[str, int]] = {}
+        self._flush_pending_writes()
         cur = self._conn.cursor()
         cur.execute("SELECT scope, key, value FROM counts")
         for scope, key, value in cur:
@@ -420,8 +594,7 @@ class PostgresStatsStore(BaseStatsStore):
             "status, error, first, result_json) "
             "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
         )
-        cur = self._conn.cursor()
-        cur.execute(
+        self._execute(
             sql,
             (
                 float(ts),
@@ -435,8 +608,200 @@ class PostgresStatsStore(BaseStatsStore):
                 first,
                 result_json,
             ),
+            mark_query_log_retention=True,
         )
-        self._conn.commit()
+
+    def _apply_query_log_retention(self) -> None:
+        """Brief: Enforce configured query-log retention limits.
+
+        Inputs:
+            None.
+
+        Outputs:
+            None; deletes rows older than the cutoff and/or rows beyond the
+            configured max-record count, optionally prunes by estimated byte
+            cap, and may trigger a post-prune vacuum.
+        """
+
+        cutoff_ts = BaseStatsStore._retention_cutoff_ts(
+            self._query_log_retention_days,
+            now_ts=time.time(),
+        )
+        max_records = self._query_log_retention_max_records
+        max_bytes = self._query_log_retention_max_bytes
+        now_ts = time.time()
+        if cutoff_ts is None and max_records is None and max_bytes is None:
+            return
+        if not self._should_run_query_log_retention_prune(now_ts=now_ts):
+            return
+
+        cur = self._conn.cursor()
+        try:
+            changed = False
+            if cutoff_ts is not None:
+                cur.execute(
+                    "DELETE FROM query_log WHERE ts < %s",
+                    (float(cutoff_ts),),
+                )
+                changed = changed or bool(getattr(cur, "rowcount", 0))
+
+            if max_records is not None:
+                changed = (
+                    self._prune_query_log_to_max_records(int(max_records)) or changed
+                )
+
+            if max_bytes is not None:
+                changed = self._prune_query_log_to_max_bytes(int(max_bytes)) or changed
+
+            self._conn.commit()
+            if changed:
+                self._maybe_vacuum_query_log_table(now_ts=now_ts)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.error(
+                "PostgresStatsStore retention prune failed: %s",
+                exc,
+                exc_info=True,
+            )
+
+    def _prune_query_log_to_max_records(self, max_records: int) -> bool:
+        """Brief: Remove oldest rows beyond a max-record retention boundary.
+
+        Inputs:
+            max_records: Maximum rows to retain in query_log.
+
+        Outputs:
+            bool: True when one or more rows were deleted.
+        """
+
+        if max_records <= 0:
+            return False
+
+        cur_cutoff = self._conn.cursor()
+        cur_cutoff.execute(
+            (
+                "SELECT ts, id FROM query_log "
+                "ORDER BY ts DESC, id DESC LIMIT 1 OFFSET %s"
+            ),
+            (int(max_records),),
+        )
+        cutoff_row = cur_cutoff.fetchone()
+        if cutoff_row is None:
+            return False
+
+        cutoff_ts = float(cutoff_row[0])
+        cutoff_id = int(cutoff_row[1])
+        cur = self._conn.cursor()
+        cur.execute(
+            ("DELETE FROM query_log " "WHERE ts < %s OR (ts = %s AND id <= %s)"),
+            (cutoff_ts, cutoff_ts, cutoff_id),
+        )
+        return bool(getattr(cur, "rowcount", 0))
+
+    def _prune_query_log_to_max_bytes(self, max_bytes: int) -> bool:
+        """Brief: Remove oldest rows until estimated query_log bytes fit a cap.
+
+        Inputs:
+            max_bytes: Maximum estimated bytes to retain in query_log.
+
+        Outputs:
+            bool: True when one or more rows were deleted.
+        """
+
+        if max_bytes <= 0:
+            return False
+
+        changed = False
+        max_passes = 32
+        for _ in range(max_passes):
+            cur = self._conn.cursor()
+            cur.execute(
+                """
+                SELECT
+                    COALESCE(
+                        SUM(
+                            OCTET_LENGTH(client_ip)
+                            + OCTET_LENGTH(name)
+                            + OCTET_LENGTH(qtype)
+                            + OCTET_LENGTH(COALESCE(upstream_id, ''))
+                            + OCTET_LENGTH(COALESCE(rcode, ''))
+                            + OCTET_LENGTH(COALESCE(status, ''))
+                            + OCTET_LENGTH(COALESCE(error, ''))
+                            + OCTET_LENGTH(COALESCE(first, ''))
+                            + OCTET_LENGTH(result_json)
+                            + 64
+                        ),
+                        0
+                    ),
+                    COUNT(1)
+                FROM query_log
+                """
+            )
+            row = cur.fetchone()
+            total_bytes = int(row[0] or 0) if row else 0
+            total_rows = int(row[1] or 0) if row else 0
+            if total_bytes <= max_bytes or total_rows <= 0:
+                break
+
+            over = max(1, total_bytes - int(max_bytes))
+            ratio = float(over) / float(max(total_bytes, 1))
+            rows_to_delete = max(1, min(total_rows, int(math.ceil(ratio * total_rows))))
+
+            cur_del = self._conn.cursor()
+            cur_del.execute(
+                (
+                    "WITH doomed AS ("
+                    "SELECT id FROM query_log ORDER BY ts ASC, id ASC LIMIT %s"
+                    ") "
+                    "DELETE FROM query_log q USING doomed d WHERE q.id = d.id"
+                ),
+                (int(rows_to_delete),),
+            )
+            if not bool(getattr(cur_del, "rowcount", 0)):
+                break
+            changed = True
+
+        return changed
+
+    def _maybe_vacuum_query_log_table(self, *, now_ts: float) -> None:
+        """Brief: Run optional PostgreSQL VACUUM after retention pruning.
+
+        Inputs:
+            now_ts: Current Unix timestamp used for interval gating.
+
+        Outputs:
+            None.
+        """
+
+        if not self._retention_vacuum_on_prune:
+            return
+
+        interval = self._retention_vacuum_interval_seconds
+        if interval is not None:
+            try:
+                last = float(getattr(self, "_retention_last_vacuum_ts", 0.0) or 0.0)
+            except Exception:
+                last = 0.0
+            if last > 0.0 and (float(now_ts) - last) < float(interval):
+                return
+
+        conn = self._conn
+        old_autocommit: object = None
+        autocommit_supported = hasattr(conn, "autocommit")
+        try:
+            if autocommit_supported:
+                old_autocommit = getattr(conn, "autocommit")
+                setattr(conn, "autocommit", True)
+            cur = conn.cursor()
+            cur.execute("VACUUM ANALYZE query_log")
+            self._retention_last_vacuum_ts = float(now_ts)
+        except Exception:  # pragma: no cover - defensive
+            logger.exception("PostgresStatsStore vacuum failed")
+        finally:
+            if autocommit_supported:
+                try:
+                    setattr(conn, "autocommit", old_autocommit)
+                except Exception:  # pragma: nocover - best-effort autocommit restore
+                    pass
 
     def has_query_log(self) -> bool:
         """Return True if the query_log table contains at least one row.
@@ -448,6 +813,7 @@ class PostgresStatsStore(BaseStatsStore):
             bool indicating whether query_log has rows.
         """
 
+        self._flush_pending_writes()
         cur = self._conn.cursor()
         cur.execute("SELECT 1 FROM query_log LIMIT 1")
         return cur.fetchone() is not None
@@ -458,6 +824,9 @@ class PostgresStatsStore(BaseStatsStore):
         qtype: Optional[str] = None,
         qname: Optional[str] = None,
         rcode: Optional[str] = None,
+        status: Optional[str] = None,
+        source: Optional[str] = None,
+        ede_code: Optional[str] = None,
         start_ts: Optional[float] = None,
         end_ts: Optional[float] = None,
         page: int = 1,
@@ -470,6 +839,9 @@ class PostgresStatsStore(BaseStatsStore):
             qtype: Optional qtype filter.
             qname: Optional qname filter.
             rcode: Optional rcode filter.
+            status: Optional status filter.
+            source: Optional result.source filter.
+            ede_code: Optional result.ede_code filter.
             start_ts: Optional inclusive start timestamp.
             end_ts: Optional exclusive end timestamp.
             page: 1-based page index.
@@ -492,10 +864,45 @@ class PostgresStatsStore(BaseStatsStore):
             params.append(qtype.strip().upper())
         if qname:
             where.append("name = %s")
-            params.append(qname.strip().rstrip(".").lower())
+            params.append(dns_names.normalize_name(qname))
         if rcode:
             where.append("rcode = %s")
             params.append(rcode.strip().upper())
+        if status:
+            where.append("LOWER(COALESCE(status, '')) = %s")
+            params.append(status.strip().lower())
+        if source:
+            source_s = source.strip().lower()
+            where.append("(LOWER(result_json) LIKE %s OR LOWER(result_json) LIKE %s)")
+            params.append(f'%"source":"{source_s}"%')
+            params.append(f'%"source": "{source_s}"%')
+        if ede_code is not None and str(ede_code).strip():
+            ede_code_s = str(ede_code).strip()
+            try:
+                ede_code_i = int(ede_code_s)
+            except Exception:
+                where.append("1 = 0")
+            else:
+                if ede_code_i < 0:
+                    where.append("1 = 0")
+                else:
+                    ede_code_txt = str(ede_code_i)
+                    where.append(
+                        "("
+                        "LOWER(result_json) LIKE %s OR "
+                        "LOWER(result_json) LIKE %s OR "
+                        "LOWER(result_json) LIKE %s OR "
+                        "LOWER(result_json) LIKE %s OR "
+                        "LOWER(result_json) LIKE %s OR "
+                        "LOWER(result_json) LIKE %s"
+                        ")"
+                    )
+                    params.append(f'%"ede_code":{ede_code_txt},%')
+                    params.append(f'%"ede_code":{ede_code_txt}' + "}%")
+                    params.append(f'%"ede_code": {ede_code_txt},%')
+                    params.append(f'%"ede_code": {ede_code_txt}' + "}%")
+                    params.append(f'%"ede_code":"{ede_code_txt}"%')
+                    params.append(f'%"ede_code": "{ede_code_txt}"%')
         if isinstance(start_ts, (int, float)):
             where.append("ts >= %s")
             params.append(float(start_ts))
@@ -505,17 +912,21 @@ class PostgresStatsStore(BaseStatsStore):
 
         where_sql = " WHERE " + " AND ".join(where) if where else ""
 
+        self._flush_pending_writes()
         cur = self._conn.cursor()
-        cur.execute(f"SELECT COUNT(1) FROM query_log{where_sql}", tuple(params))
+        cur.execute(
+            f"SELECT COUNT(1) FROM query_log{where_sql}",  # noqa: S608 - where_sql contains only fixed allowlisted clauses with bound params
+            tuple(params),
+        )
         row = cur.fetchone()
         total = int(row[0]) if row else 0
 
         offset = (page_i - 1) * page_size_i
         sql = (
-            "SELECT id, ts, client_ip, name, qtype, upstream_id, rcode, status, "
+            "SELECT id, ts, client_ip, name, qtype, upstream_id, rcode, status, "  # noqa: S608 - where_sql clauses are fixed allowlisted fragments
             "error, first, result_json "
             f"FROM query_log{where_sql} "
-            "ORDER BY ts DESC, id DESC LIMIT %s OFFSET %s"
+            "ORDER BY ts DESC, id DESC LIMIT %s OFFSET %s"  # noqa: S608 - where_sql clauses are fixed allowlisted fragments
         )
         cur2 = self._conn.cursor()
         cur2.execute(sql, tuple(params + [page_size_i, offset]))
@@ -617,37 +1028,33 @@ class PostgresStatsStore(BaseStatsStore):
             params.append(qtype.strip().upper())
         if qname:
             where.append("name = %s")
-            params.append(qname.strip().rstrip(".").lower())
+            params.append(dns_names.normalize_name(qname))
         if rcode:
             where.append("rcode = %s")
             params.append(rcode.strip().upper())
 
         where_sql = " WHERE " + " AND ".join(where)
 
-        group_col = None
-        group_label = None
-        if group_by:
-            gb = str(group_by).strip().lower()
-            mapping = {
-                "client_ip": "client_ip",
-                "qtype": "qtype",
-                "qname": "name",
-                "rcode": "rcode",
-            }
-            if gb in mapping:
-                group_col = mapping[gb]
-                group_label = gb
+        group_col, group_label = resolve_query_log_group_column(group_by)
 
+        self._flush_pending_writes()
         cur = self._conn.cursor()
         rows: List[Tuple[int, Optional[str], int]] = []
         if group_col:
             sql = (
-                "SELECT FLOOR((ts - %s) / %s)::BIGINT AS bucket, "
+                "SELECT FLOOR((ts - %s) / %s)::BIGINT AS bucket, "  # noqa: S608 - group_col and where_sql are allowlisted
                 f"{group_col} AS group_value, COUNT(1) AS c "
                 f"FROM query_log{where_sql} "
-                "GROUP BY bucket, group_value ORDER BY bucket ASC"
+                "GROUP BY bucket, group_value ORDER BY bucket ASC LIMIT %s"  # noqa: S608 - group_col and where_sql are allowlisted
             )
-            cur.execute(sql, tuple([start_f, interval_i] + params))
+            cur.execute(
+                sql,
+                tuple(
+                    [start_f, interval_i]
+                    + params
+                    + [int(MAX_QUERY_LOG_AGG_GROUPED_RESULTS) + 1]
+                ),
+            )
             for bucket, group_value, c in cur:
                 try:
                     b_i = int(bucket)
@@ -659,9 +1066,9 @@ class PostgresStatsStore(BaseStatsStore):
                 )
         else:
             sql = (
-                "SELECT FLOOR((ts - %s) / %s)::BIGINT AS bucket, COUNT(1) AS c "
+                "SELECT FLOOR((ts - %s) / %s)::BIGINT AS bucket, COUNT(1) AS c "  # noqa: S608 - where_sql contains only fixed allowlisted clauses
                 f"FROM query_log{where_sql} "
-                "GROUP BY bucket ORDER BY bucket ASC"
+                "GROUP BY bucket ORDER BY bucket ASC"  # noqa: S608 - where_sql contains only fixed allowlisted clauses
             )
             cur.execute(sql, tuple([start_f, interval_i] + params))
             for bucket, c in cur:
@@ -673,11 +1080,20 @@ class PostgresStatsStore(BaseStatsStore):
                 rows.append((b_i, None, c_i))
 
         if not group_col:
-            import math
-
-            num = int(math.ceil((end_f - start_f) / float(interval_i)))
-            if num < 0:
-                num = 0
+            try:
+                num = enforce_query_log_aggregate_bucket_limit(
+                    start_f, end_f, interval_i
+                )
+            except ValueError as exc:
+                logger.warning(
+                    "PostgresStatsStore aggregate_query_log_counts rejected: %s", exc
+                )
+                return {
+                    "start_ts": start_f,
+                    "end_ts": end_f,
+                    "interval_seconds": interval_i,
+                    "items": [],
+                }
             by_bucket = {b: c for (b, _g, c) in rows}
             items: List[Dict[str, Any]] = []
             for b in range(num):
@@ -737,6 +1153,7 @@ class PostgresStatsStore(BaseStatsStore):
         """
 
         log = logger_obj or logger
+        self._flush_pending_writes()
         conn = self._conn
         cur = conn.cursor()
 
@@ -809,7 +1226,9 @@ class PostgresStatsStore(BaseStatsStore):
                 if domain:
                     if _is_subdomain(domain):
                         self.increment_count("sub_domains", domain, 1)
-                    if base:
+                    if (
+                        base
+                    ):  # pragma: nocover - base is truthy whenever normalized domain is truthy
                         self.increment_count("domains", base, 1)
 
                 # Per-qtype domain counters for all qtypes.
@@ -897,7 +1316,9 @@ class PostgresStatsStore(BaseStatsStore):
             log.warning(
                 "Force rebuild requested: discarding existing counts and rebuilding from query_log",
             )
-        elif not has_counts:
+        elif (
+            not has_counts
+        ):  # pragma: nocover - false arc is unreachable after prior has_counts return guard
             log.warning(
                 "Counts table is empty but query_log has rows; rebuilding counts from query_log",
             )

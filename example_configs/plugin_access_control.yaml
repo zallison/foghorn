@@ -1,20 +1,59 @@
 upstreams:
   endpoints:
-  - host: 1.1.1.1
-    port: 53
-  - host: 8.8.8.8
-    port: 53
+    - host: 1.1.1.1
+      port: 53
+    - host: 8.8.8.8
+      port: 53
+
 logging:
-  level: info
+  python:
+    level: info
+
 plugins:
-- type: acl
-  config:
-    default: allow
-    allow:
-    - 192.0.2.0/24
-    - 10.0.0.0/8
-    deny:
-    - 203.0.113.0/24
+  - type: acl
+    id: acl_example
+    enabled: true
+    comment: 'Access control example (allow + deny lists).'
+    config:
+      # BasePlugin options (apply to all plugins)
+      abort_on_failure: false
+      enabled: true
+      comment: 'Config-level comment (ignored).'
+      priority: 50
+      pre_priority: 50
+      post_priority: 50
+      setup_priority: 50
+      targets:
+        ips:
+          - 0.0.0.0/0
+          - 2001:db8::/32
+        ignore_ips:
+          - 127.0.0.1/32
+        listeners: any
+        domains:
+          - corp.example
+        domains_mode: suffix
+        qtypes:
+          - '*'
+        opcodes:
+          - QUERY
+      targets_cache_ttl_seconds: 300
+      logging:
+        level: info
+        stderr: true
+      cache:
+        module: in_memory_ttl
+        config:
+          min_cache_ttl: 0
+
+      # AccessControl-specific options
+      default: allow
+      allow:
+        - 192.0.2.0/24
+        - 10.0.0.0/8
+      deny:
+        - 203.0.113.0/24
+
 server:
   listen:
     udp:

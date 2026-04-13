@@ -7,7 +7,7 @@ import threading
 import time
 from typing import Any, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 
 from foghorn.utils.current_cache import get_current_namespaced_cache, module_namespace
 
@@ -45,8 +45,7 @@ class NewDomainFilterExampleConfig(BaseModel):
     whois_cache_ttl_seconds: int = Field(default=3600, ge=0)
     whois_refresh_seconds: int = Field(default=86400, ge=0)
 
-    class Config:
-        extra = "allow"
+    model_config = ConfigDict(extra="allow")
 
 
 @plugin_aliases("new_domain", "new_domain_filter", "ndf")

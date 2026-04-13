@@ -1,124 +1,63 @@
 from __future__ import annotations
 
 import argparse
-import functools
-import gc
+from hashlib import sha256
 import logging
 import os
+import platform
+import re
 import signal
+import socket
+import sys
 import threading
 from typing import List, Optional
 
+# Backward-compatible export: some tests and third-party code monkeypatch
+# foghorn.main.DNSServer to avoid starting a real server.
+try:  # pragma: no cover - simple import surface for tests
+    from dnslib.server import DNSServer  # type: ignore
+except Exception:  # pragma: no cover - defensive
+    DNSServer = object  # type: ignore[assignment]
+
+from foghorn.stats.meta import FOGHORN_VERSION
+
 from .config.config_parser import (
     load_plugins,
-    normalize_upstream_config,
     parse_config_file,
 )
-from foghorn.dnssec.dnssec_validate import configure_dnssec_resolver
-from foghorn.utils.register_caches import apply_decorated_cache_overrides
 from .config.logging_config import init_logging
-from .plugins.resolve.base import BasePlugin
-from .servers.doh_api import start_doh_server
-from .servers.server import DNSServer
-from .servers.webserver import RingBuffer, RuntimeState, start_webserver
-from .stats import StatsCollector, StatsReporter
 from .plugins.querylog import BaseStatsStore, load_stats_store_backend
-
-
-def _clear_lru_caches(wrappers: Optional[List[object]]):
-    # Collect all cached function wrappers
-    gc.collect()
-    if not wrappers:
-        wrappers = [
-            obj
-            for obj in gc.get_objects()
-            if isinstance(obj, functools._lru_cache_wrapper)
-        ]
-
-    # Clear all caches
-    for wrapper in wrappers:
-        wrapper.cache_clear()
-
-
-def _is_setup_plugin(plugin: BasePlugin) -> bool:
-    """Brief: Determine whether a plugin overrides BasePlugin.setup.
-
-    Inputs:
-      - plugin: BasePlugin instance.
-
-    Outputs:
-      - bool: True when plugin defines its own setup() implementation.
-
-    Example use:
-      >>> from foghorn.plugins.resolve.base import BasePlugin
-      >>> class P(BasePlugin):
-      ...     def setup(self):
-      ...         pass
-      >>> p = P()
-      >>> _is_setup_plugin(p)
-      True
-    """
-
-    try:
-        return plugin.__class__.setup is not BasePlugin.setup
-    except Exception:
-        return False
-
-
-def run_setup_plugins(plugins: List[BasePlugin]) -> None:
-    """Brief: Run setup() on setup-aware plugins in ascending setup_priority order.
-
-    Inputs:
-      - plugins: List[BasePlugin] instances, typically from load_plugins().
-
-    Outputs:
-      - None; raises RuntimeError if a setup plugin with abort_on_failure=True fails.
-
-    Notes:
-      - Plugins that override BasePlugin.setup are considered setup plugins.
-      - Execution order is controlled by each plugin's setup_priority attribute
-        (default 100).
-    """
-
-    logger = logging.getLogger("foghorn.main.setup")
-
-    setup_entries: List[tuple[int, BasePlugin]] = []
-    for p in plugins or []:
-        if not _is_setup_plugin(p):
-            continue
-        try:
-            prio = int(getattr(p, "setup_priority", 100))
-        except Exception:
-            prio = 100
-        setup_entries.append((prio, p))
-
-    setup_entries.sort(key=lambda item: item[0])
-
-    for prio, plugin in setup_entries:
-        cfg = getattr(plugin, "config", {}) or {}
-        abort_on_failure = bool(cfg.get("abort_on_failure", True))
-        name = plugin.__class__.__name__
-        logger.info(
-            "Running setup for plugin %s (setup_priority=%d, abort_on_failure=%s)",
-            name,
-            prio,
-            abort_on_failure,
-        )
-        try:
-            plugin.setup()
-        except Exception as e:  # pragma: no cover
-            logger.error("Setup for plugin %s failed: %s", name, e, exc_info=True)
-            if abort_on_failure:
-                raise RuntimeError(f"Setup for plugin {name} failed") from e
-            logger.warning(
-                "Continuing startup despite setup failure in plugin %s because abort_on_failure is False",
-                name,
-            )
+from .plugins.resolve.base import BasePlugin
+from .plugins.setup import (
+    _SetupDNSResolverContext,
+    run_setup_plugins,
+    run_shutdown_plugins,
+)
+from .main_config_helpers import (
+    _apply_cache_overrides_from_config,
+    _build_listener_configs,
+    _build_main_arg_parser,
+    _configure_resolver_executor,
+    _extract_server_and_logging_cfg,
+    _get_min_cache_ttl,
+    _install_cache_plugin_global,
+    _load_cache_plugin_from_cfg,
+    _normalize_upstreams_for_mode,
+    _parse_resolver_cfg,
+    _resolve_web_config,
+    _seed_listener_runtime_state,
+)
+from .runtime_config import (
+    RuntimeSnapshot,
+    initialize_runtime,
+    parse_upstream_health_config,
+)
+from .servers.runtime_state import RingBuffer, RuntimeState
+from .stats import StatsCollector, StatsReporter
 
 
 def main(argv: List[str] | None = None) -> int:
     """
-    Main entry point for the DNS server.
     Parses arguments, loads configuration, initializes plugins, and starts the server.
 
     Args:
@@ -149,36 +88,7 @@ def main(argv: List[str] | None = None) -> int:
         ...     server_thread.start()
         ...     time.sleep(0.1) # Give server time to start
     """
-    parser = argparse.ArgumentParser(description="Caching DNS server with plugins")
-    parser.add_argument("--config", default="config.yaml", help="Path to YAML config")
-    parser.add_argument(
-        "-v",
-        "--var",
-        action="append",
-        default=[],
-        help=(
-            "Set a configuration variable (KEY=YAML). May be provided multiple times; "
-            "CLI overrides environment overrides config file variables."
-        ),
-    )
-    parser.add_argument(
-        "--rebuild",
-        action="store_true",
-        help=(
-            "Rebuild statistics counts from the persistent query_log on startup "
-            "(overrides existing counts when present)."
-        ),
-    )
-    parser.add_argument(
-        "--config-extras",
-        dest="config_extras",
-        choices=["ignore", "warn", "error"],
-        default="warn",
-        help=(
-            "Policy for unknown config keys not described by the JSON Schema: "
-            "ignore (keep current behaviour), warn (default), or error."
-        ),
-    )
+    parser = _build_main_arg_parser()
     args = parser.parse_args(argv)
 
     # Load and validate configuration.
@@ -186,57 +96,26 @@ def main(argv: List[str] | None = None) -> int:
         cfg = parse_config_file(
             args.config,
             cli_vars=list(getattr(args, "var", []) or []),
-            unknown_keys=str(getattr(args, "config_extras", "warn") or "warn"),
+            unknown_keys=str(getattr(args, "config_extras", "error") or "error"),
+            skip_schema_validation=bool(getattr(args, "skip_schema_validation", False)),
         )
     except ValueError as exc:
         print(str(exc))
         return 1
 
     # Initialize logging before any other operations.
-    server_cfg = cfg.get("server") or {}
-    if not isinstance(server_cfg, dict):
-        raise ValueError("config.server must be a mapping when present")
-
-    logging_cfg = cfg.get("logging") or {}
-    if not isinstance(logging_cfg, dict):
-        raise ValueError("config.logging must be a mapping when present")
-
-    # New layout: Python logging configuration lives under logging.python.
-    # Only this shape is supported; legacy root-level logging keys are no
-    # longer interpreted.
-    python_logging_cfg = logging_cfg.get("python") or {}
-    if not isinstance(python_logging_cfg, dict):
-        python_logging_cfg = {}
+    server_cfg, logging_cfg, python_logging_cfg = _extract_server_and_logging_cfg(cfg)
 
     init_logging(python_logging_cfg or None)
 
     logger = logging.getLogger("foghorn.main")
-    logger.info("Loaded config from %s", args.config)
+    _log_startup_banner(logger, config_path=str(args.config))
 
     # Apply any configured overrides for decorated caches (registered_cached /
-    # registered_lru_cached) before listeners are started so that diagnostic
+    # registered_lru_cache) before listeners are started so that diagnostic
     # caches use operator-selected sizes/TTLs. This is best-effort and
     # silently ignores malformed entries.
-    try:
-        cache_block = server_cfg.get("cache") if isinstance(server_cfg, dict) else None
-        raw_overrides = []
-        if isinstance(cache_block, dict):
-            # Preferred key: server.cache.func_caches (list of DecoratedCacheOverride).
-            candidate = cache_block.get("func_caches")
-            # Backwards-compatible fallbacks for older configs/tests.
-            if not isinstance(candidate, list):
-                candidate = cache_block.get("modify")
-            if not isinstance(candidate, list):
-                candidate = cache_block.get("decorated_overrides")
-            if isinstance(candidate, list):
-                raw_overrides = [o for o in candidate if isinstance(o, dict)]
-        apply_decorated_cache_overrides(raw_overrides)
-    except (
-        Exception
-    ):  # pragma: no cover - defensive: cache override failures must not block startup
-        logger.debug(
-            "Failed to apply decorated cache overrides from config", exc_info=True
-        )
+    _apply_cache_overrides_from_config(logger=logger, server_cfg=server_cfg)
 
     # Keep references for signal-driven reload/reset and coordinated shutdown.
     # These are captured by inner closures (SIGUSR1/SIGUSR2 handlers and
@@ -258,138 +137,69 @@ def main(argv: List[str] | None = None) -> int:
 
     # Runtime state used by /ready readiness probes exposed by the admin webserver.
     runtime_state = RuntimeState(startup_complete=False)
+    listener_failures: dict[str, str] = {}
+
+    def _record_listener_error(
+        name: str, exc: Exception | str, *, fatal: bool = True
+    ) -> None:
+        """Brief: Record listener errors in runtime state and fatal-error tracker.
+
+        Inputs:
+          - name: Logical listener name (udp/tcp/dot/doh/webserver).
+          - exc: Exception instance or message describing the failure.
+          - fatal: When true, mark the listener error as fatal for process exit.
+
+        Outputs:
+          - None.
+        """
+
+        runtime_state.set_listener_error(name, exc)
+        if fatal:
+            listener_failures[str(name)] = str(exc)
 
     # Normalize listen configuration.
-    listen_cfg = server_cfg.get("listen") or {}
-    if not isinstance(listen_cfg, dict):
-        listen_cfg = {}
-
-    dns_cfg = listen_cfg.get("dns")
-    if not isinstance(dns_cfg, dict):
-        dns_cfg = {}
-
-    # Host/port precedence:
-    #   1) listen.dns.host/port when set
-    #   2) listen.host/port when set
-    #   3) hard-coded defaults 127.0.0.1:5335
-    raw_host = dns_cfg.get("host")
-    if raw_host is None:
-        raw_host = listen_cfg.get("host", "127.0.0.1")
-    raw_port = dns_cfg.get("port")
-    if raw_port is None:
-        raw_port = listen_cfg.get("port", 5335)
-
-    default_host = str(raw_host)
-    try:
-        default_port = int(raw_port)
-    except (TypeError, ValueError):
-        default_port = 5335
-
-    # Resolver configuration (forward vs recursive) with conservative defaults.
-    resolver_cfg = server_cfg.get("resolver") or cfg.get("resolver") or {}
-    if not isinstance(resolver_cfg, dict):
-        raise ValueError("config.server.resolver must be a mapping when present")
-
-    def _sub(key, defaults):
-        d = listen_cfg.get(key, {}) or {}
-        out = {**defaults, **d} if isinstance(d, dict) else defaults
-        return out
-
-    udp_section = listen_cfg.get("udp")
-    if isinstance(udp_section, dict):
-        udp_default_enabled = bool(udp_section.get("enabled", True))
-    else:
-        # No explicit UDP listener block; fall back to dns.udp when present,
-        # otherwise preserve the historical default of UDP enabled.
-        if "udp" in dns_cfg:
-            udp_default_enabled = bool(dns_cfg.get("udp"))
-        else:
-            udp_default_enabled = True
-
-    udp_cfg = _sub(
-        "udp",
-        {
-            "enabled": udp_default_enabled,
-            "host": default_host,
-            "port": default_port or 5335,
-        },
-    )
-
-    tcp_section = listen_cfg.get("tcp")
-    if isinstance(tcp_section, dict):
-        tcp_default_enabled = bool(tcp_section.get("enabled", True))
-    else:
-        # No explicit TCP listener block; fall back to dns.tcp when present,
-        # otherwise preserve the historical default of TCP disabled.
-        if "tcp" in dns_cfg:
-            tcp_default_enabled = bool(dns_cfg.get("tcp"))
-        else:
-            tcp_default_enabled = False
-
-    tcp_cfg = _sub(
-        "tcp",
-        {
-            "enabled": tcp_default_enabled,
-            "host": default_host,
-            "port": default_port or 5335,
-        },
-    )
-
-    dot_section = listen_cfg.get("dot")
-    dot_default_enabled = True if isinstance(dot_section, dict) else False
-    dot_cfg = _sub(
-        "dot", {"enabled": dot_default_enabled, "host": default_host, "port": 853}
-    )
-
-    doh_section = listen_cfg.get("doh")
-    doh_default_enabled = True if isinstance(doh_section, dict) else False
-    doh_cfg = _sub(
-        "doh", {"enabled": doh_default_enabled, "host": default_host, "port": 1443}
-    )
+    (
+        listen_cfg,
+        udp_cfg,
+        tcp_cfg,
+        dot_cfg,
+        doh_cfg,
+        default_host,
+        default_port,
+    ) = _build_listener_configs(server_cfg=server_cfg)
 
     # Seed readiness state with expected listeners. The thread/handle references
     # are filled in later once each listener is started.
-    runtime_state.set_listener(
-        "udp", enabled=bool(udp_cfg.get("enabled", True)), thread=None
-    )
-    runtime_state.set_listener(
-        "tcp", enabled=bool(tcp_cfg.get("enabled", False)), thread=None
-    )
-    runtime_state.set_listener(
-        "dot", enabled=bool(dot_cfg.get("enabled", False)), thread=None
-    )
-    runtime_state.set_listener(
-        "doh", enabled=bool(doh_cfg.get("enabled", False)), thread=None
+    _seed_listener_runtime_state(
+        runtime_state=runtime_state,
+        udp_cfg=udp_cfg,
+        tcp_cfg=tcp_cfg,
+        dot_cfg=dot_cfg,
+        doh_cfg=doh_cfg,
     )
 
-    resolver_mode = str(resolver_cfg.get("mode", "forward")).lower()
-    try:
-        recursive_max_depth = int(resolver_cfg.get("max_depth", 16))
-    except (TypeError, ValueError):
-        recursive_max_depth = 16
-    try:
-        recursive_timeout_ms = int(resolver_cfg.get("timeout_ms", 2000))
-    except (TypeError, ValueError):
-        recursive_timeout_ms = 2000
-    try:
-        recursive_per_try_timeout_ms = int(
-            resolver_cfg.get("per_try_timeout_ms", recursive_timeout_ms)
-        )
-    except (TypeError, ValueError):
-        recursive_per_try_timeout_ms = recursive_timeout_ms
+    (
+        resolver_cfg,
+        resolver_mode,
+        recursive_max_depth,
+        recursive_timeout_ms,
+        recursive_per_try_timeout_ms,
+    ) = _parse_resolver_cfg(cfg=cfg, server_cfg=server_cfg, logger=logger)
 
     # Normalize upstream configuration only in forwarder mode.
-    if resolver_mode == "forward":
-        upstreams, timeout_ms = normalize_upstream_config(cfg)
-    else:
-        upstreams = []
-        timeout_ms = recursive_timeout_ms
+    upstreams, upstream_backups, timeout_ms = _normalize_upstreams_for_mode(
+        cfg=cfg,
+        resolver_mode=resolver_mode,
+        recursive_timeout_ms=recursive_timeout_ms,
+        logger=logger,
+    )
 
     # Upstream selection strategy and concurrency controls (v2 upstreams block).
     upstream_cfg = cfg.get("upstreams") or {}
     if not isinstance(upstream_cfg, dict):
         raise ValueError("config.upstreams must be a mapping when present")
     upstream_strategy = str(upstream_cfg.get("strategy", "failover")).lower()
+    upstream_health = parse_upstream_health_config(upstream_cfg)
     upstream_max_concurrent = int(upstream_cfg.get("max_concurrent", 1) or 1)
     if upstream_max_concurrent < 1:
         upstream_max_concurrent = 1
@@ -398,336 +208,101 @@ def main(argv: List[str] | None = None) -> int:
     # environments. When false, threaded fallbacks are used where available.
     use_asyncio = bool(resolver_cfg.get("use_asyncio", True))
 
-    # Cache plugin selection.
-    #
-    # Brief:
-    #   Cache is configured at the top-level `cache:` block so operators can
-    #   swap implementations without changing the resolver pipeline.
-    #
-    # Inputs:
-    #   - server.cache: null | mapping (preferred, v2 layout)
-    #   - cfg['cache']: null | str | mapping (legacy root-level fallback)
-    #
-    # Outputs:
-    #   - cache_plugin: CachePlugin instance
+    # Configure a shared, bounded ThreadPoolExecutor for asyncio-based listeners
+    # (TCP/DoT and any other paths that call run_in_executor).
+    limits_cfg = server_cfg.get("limits") if isinstance(server_cfg, dict) else None
+    if not isinstance(limits_cfg, dict):
+        limits_cfg = {}
+
+    _configure_resolver_executor(limits_cfg=limits_cfg, logger=logger)
+
+    # Configure bounded background executor used for best-effort work triggered
+    # by untrusted network events (cache refresh / NOTIFY scheduling).
     try:
-        from foghorn.plugins.cache.registry import load_cache_plugin
+        from .servers.bg_executor import configure_bg_executor
 
-        cache_cfg = None
-        if isinstance(server_cfg, dict):
-            cache_cfg = server_cfg.get("cache")
-        if cache_cfg is None:
-            cache_cfg = cfg.get("cache")
-        cache_plugin = load_cache_plugin(cache_cfg)
+        raw_workers = limits_cfg.get("bg_executor_workers")
+        raw_pending = limits_cfg.get("bg_executor_max_pending")
+        try:
+            bg_workers = int(raw_workers) if raw_workers is not None else None
+        except Exception:
+            bg_workers = None
+        try:
+            bg_pending = int(raw_pending) if raw_pending is not None else None
+        except Exception:
+            bg_pending = None
+        configure_bg_executor(max_workers=bg_workers, max_pending=bg_pending)
     except Exception:
-        cache_plugin = None
+        logger.warning("Failed to configure background executor", exc_info=True)
 
-    # Install the configured cache plugin globally so alfoghorn.servers.transports (UDP/TCP/DoT/DoH)
-    # share it, even when the UDP DNSServer is not started.
-    if cache_plugin is not None:
-        try:
-            from foghorn.plugins.resolve import base as plugin_base
-
-            plugin_base.DNS_CACHE = cache_plugin  # type: ignore[assignment]
-        except Exception:
-            pass
-
-    # Cache TTL floor (applied to cache expiry, not the on-wire DNS TTL) is now
-    # configured via the cache plugin.
-    min_cache_ttl = 0
-    if cache_plugin is not None:
-        try:
-            min_cache_ttl = int(getattr(cache_plugin, "min_cache_ttl", 0) or 0)
-        except Exception:
-            min_cache_ttl = 0
-    min_cache_ttl = max(0, min_cache_ttl)
+    cache_plugin = _load_cache_plugin_from_cfg(
+        cfg=cfg, server_cfg=server_cfg, logger=logger
+    )
+    _install_cache_plugin_global(cache_plugin=cache_plugin, logger=logger)
+    min_cache_ttl = _get_min_cache_ttl(cache_plugin)
 
     plugins = load_plugins(cfg.get("plugins", []))
     logger.info(
         "Loaded %d plugins: %s", len(plugins), [p.__class__.__name__ for p in plugins]
     )
 
+    # Warn if exposed listeners lack rate limiting
+    try:
+        from .config.rate_limit_check import check_rate_limit_plugin_config
+
+        check_rate_limit_plugin_config(plugins=plugins, cfg=cfg)
+    except Exception as exc:
+        logger.warning("rate-limit config check skipped: %s", exc)
+
     # Run setup phase for setup-aware plugins before starting listeners
     try:
-        run_setup_plugins(plugins)
+        run_setup_plugins(
+            plugins,
+            upstreams=upstreams,
+            upstream_backups=upstream_backups,
+            timeout_ms=timeout_ms,
+            resolver_mode=resolver_mode,
+            upstream_max_concurrent=upstream_max_concurrent,
+        )
     except RuntimeError as e:
         logger.error("Plugin setup failed: %s", e)
         return 1
 
-    # Initialize statistics collection if enabled (v2: root 'stats').
-    stats_cfg = cfg.get("stats", {}) or {}
-    if not isinstance(stats_cfg, dict):
-        stats_cfg = {}
-    if isinstance(stats_cfg, dict):
-        stats_enabled = bool(stats_cfg.get("enabled", True))
+    setup_dns_providers = [
+        plugin
+        for plugin in (plugins or [])
+        if bool(getattr(plugin, "setup_provides_dns", False))
+    ]
+    if setup_dns_providers:
+        with _SetupDNSResolverContext(
+            providers=setup_dns_providers,
+            upstreams=list(upstreams or []) + list(upstream_backups or []),
+            timeout_ms=int(timeout_ms),
+            resolver_mode=str(resolver_mode or "forward"),
+            upstream_max_concurrent=max(1, int(upstream_max_concurrent or 1)),
+            fallback_to_system=True,
+            logger_obj=logger,
+        ):
+            stats_collector, stats_reporter, stats_persistence_store = (
+                _initialize_statistics_subsystem(
+                    cfg=cfg,
+                    logging_cfg=logging_cfg,
+                    args=args,
+                    logger=logger,
+                )
+            )
     else:
-        stats_enabled = False
-
-    # Global toggle to keep only the raw query_log in persistence and avoid
-    # mirroring aggregate counters into the backend.
-    logging_query_log_only = bool(logging_cfg.get("query_log_only", False))
-
-    stats_collector = None
-    stats_reporter = None
-    stats_persistence_store = None
-
-    stats_collector = None
-    stats_reporter = None
-    stats_persistence_store = None
-
-    if stats_enabled:
-        # Optional persistence store; the store is responsible for maintaining
-        # long-lived aggregate counts and a raw query_log. The in-memory
-        # StatsCollector remains the live source for periodic logging and web
-        # API snapshots.
-        stats_persistence_store = None
-
-        # When query_log_only is enabled globally, skip background warm-load and
-        # rebuild passes so that the persistence store is only used for
-        # append-only query_log writes.
-        logging_only_effective = bool(logging_query_log_only)
-
-        # Helper: derive an effective persistence configuration from the new
-        # layout where statistics/query-log backends are described under
-        # logging.backends and stats.source_backend selects the primary backend.
-        def _build_effective_persistence_cfg() -> dict[str, object]:
-            """Brief: Compute the effective statistics persistence configuration.
-
-            Inputs:
-              - None (captures cfg/stats_cfg from closure).
-
-            Outputs:
-              - dict: Configuration mapping suitable for load_stats_store_backend.
-            """
-
-            logging_block = cfg.get("logging") or {}
-            if not isinstance(logging_block, dict):
-                return {}
-
-            backends_cfg = logging_block.get("backends") or []
-            if not isinstance(backends_cfg, list) or not backends_cfg:
-                return {}
-
-            async_default = bool(logging_block.get("async", True))
-
-            primary_hint = stats_cfg.get("source_backend")
-            primary_backend = (
-                str(primary_hint).strip() if isinstance(primary_hint, str) else ""
+        stats_collector, stats_reporter, stats_persistence_store = (
+            _initialize_statistics_subsystem(
+                cfg=cfg,
+                logging_cfg=logging_cfg,
+                args=args,
+                logger=logger,
             )
-
-            normalized_backends: list[dict[str, object]] = []
-            for entry in backends_cfg:
-                if not isinstance(entry, dict):
-                    continue
-
-                backend_name = entry.get("backend")
-                if not backend_name:
-                    continue
-
-                raw_config = entry.get("config")
-                conf: dict[str, object]
-                if isinstance(raw_config, dict):
-                    conf = dict(raw_config)
-                else:
-                    # Accept a flattened layout where backend-specific options
-                    # live alongside id/backend.
-                    conf = {
-                        k: v
-                        for k, v in entry.items()
-                        if k not in {"id", "name", "backend", "config"}
-                    }
-
-                # Propagate the global logging.async flag to backends that do
-                # not opt out explicitly via async_logging.
-                conf.setdefault("async_logging", async_default)
-
-                backend_entry: dict[str, object] = {
-                    "backend": backend_name,
-                    "config": conf,
-                }
-
-                backend_id = entry.get("id") or entry.get("name")
-                if isinstance(backend_id, str) and backend_id.strip():
-                    backend_entry["name"] = backend_id
-
-                normalized_backends.append(backend_entry)
-
-            if not normalized_backends:
-                return {}
-
-            effective: dict[str, object] = {"backends": normalized_backends}
-            if primary_backend:
-                effective["primary_backend"] = primary_backend
-            return effective
-
-        # Determine whether a rebuild should be forced from CLI/config/env.
-        def _is_truthy_env(val: Optional[str]) -> bool:
-            """Return True if an environment variable string represents a truthy value.
-
-            Inputs:
-                val: Environment variable value or None.
-
-            Outputs:
-                bool: True for common truthy strings (1, true, yes, on), else False.
-            """
-
-            if val is None:
-                return False
-            return str(val).strip().lower() in {
-                "1",
-                "true",
-                "t",
-                "yes",
-                "y",
-                "on",
-            }  # pragma: no cover - best effort
-
-        # Allow force_rebuild to be controlled from three sources, in
-        # increasing precedence order:
-        #   1) statistics.force_rebuild (root-level flag)
-        #   2) FOGHORN_FORCE_REBUILD
-        #   3) --rebuild (highest precedence)
-        force_rebuild_root = bool(stats_cfg.get("force_rebuild", False))
-        force_rebuild_env = _is_truthy_env(os.getenv("FOGHORN_FORCE_REBUILD"))
-        force_rebuild = bool(args.rebuild or force_rebuild_env or force_rebuild_root)
-
-        try:
-            # Delegate backend construction (including multi-backend setups) to
-            # the querylog backend loader. This uses logging.backends and
-            # stats.source_backend exclusively.
-            backend_cfg: dict[str, object] = _build_effective_persistence_cfg()
-            if backend_cfg:
-                stats_persistence_store = load_stats_store_backend(backend_cfg)
-            else:
-                stats_persistence_store = None
-
-            if stats_persistence_store is None:
-                logger.info(
-                    "Statistics persistence not configured; running in memory-only mode",
-                )
-            else:
-                logger.info(
-                    "Initialized statistics backend %s",
-                    stats_persistence_store.__class__.__name__,
-                )
-
-                # Optionally rebuild counts from the query_log when requested or
-                # when counts are empty but query_log has rows. When
-                # statistics.logging_only or statistics.query_log_only is
-                # enabled, skip this background rebuild so that the persistence
-                # store is only exercised via insert-style operations
-                # (query_log appends and, in logging_only mode, counter
-                # increments).
-                if not logging_only_effective:
-                    try:
-                        stats_persistence_store.rebuild_counts_if_needed(
-                            force_rebuild=force_rebuild, logger_obj=logger
-                        )
-                    except (
-                        Exception
-                    ) as exc:  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
-                        logger.error(
-                            "Failed to rebuild statistics counts from query_log: %s",
-                            exc,
-                            exc_info=True,
-                        )
-        except (
-            Exception
-        ) as exc:  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
-            logger.error(
-                "Failed to initialize statistics persistence: %s; continuing without persistence",
-                exc,
-                exc_info=True,
-            )
-            stats_persistence_store = None
-
-        # Initialize in-memory collector, wiring in the persistence store when present.
-        ignore_cfg = stats_cfg.get("ignore", {}) or {}
-        ignore_top_clients = list(ignore_cfg.get("top_clients", []) or [])
-        ignore_top_domains = list(ignore_cfg.get("top_domains", []) or [])
-        ignore_top_subdomains = list(ignore_cfg.get("top_subdomains", []) or [])
-        include_in_stats = bool(ignore_cfg.get("include_in_stats", True))
-        domains_mode = str(ignore_cfg.get("top_domains_mode", "exact")).lower()
-        subdomains_mode = str(ignore_cfg.get("top_subdomains_mode", "exact")).lower()
-        ignore_domains_as_suffix = domains_mode == "suffix"
-        ignore_subdomains_as_suffix = subdomains_mode == "suffix"
-        ignore_single_host = bool(ignore_cfg.get("ignore_single_host", False))
-
-        stats_collector = StatsCollector(
-            track_uniques=stats_cfg.get("track_uniques", True),
-            include_qtype_breakdown=stats_cfg.get("include_qtype_breakdown", True),
-            # Enable top clients/domains and latency by default when statistics
-            # are enabled, while still allowing explicit False in config to
-            # disable them.
-            include_top_clients=bool(stats_cfg.get("include_top_clients", True)),
-            include_top_domains=bool(stats_cfg.get("include_top_domains", True)),
-            top_n=int(stats_cfg.get("top_n", 10)),
-            track_latency=bool(stats_cfg.get("track_latency", True)),
-            stats_store=stats_persistence_store,
-            ignore_top_clients=ignore_top_clients,
-            ignore_top_domains=ignore_top_domains,
-            ignore_top_subdomains=ignore_top_subdomains,
-            ignore_domains_as_suffix=ignore_domains_as_suffix,
-            ignore_subdomains_as_suffix=ignore_subdomains_as_suffix,
-            ignore_single_host=ignore_single_host,
-            include_ignored_in_stats=include_in_stats,
-            logging_only=logging_only_effective,
-            query_log_only=logging_query_log_only,
-        )
-
-        # Best-effort warm-load of persisted aggregate counters on startup.
-        if not logging_only_effective:
-            try:
-                stats_collector.warm_load_from_store()
-                logger.info("Statistics warm-load from SQLite store completed")
-            except (
-                Exception
-            ) as exc:  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
-                logger.error(
-                    "Failed to warm-load statistics from SQLite store: %s",
-                    exc,
-                    exc_info=True,
-                )
-
-        stats_reporter = StatsReporter(
-            collector=stats_collector,
-            # Default statistics interval is 300s (5 minutes) when not overridden in config.
-            interval_seconds=int(stats_cfg.get("interval_seconds", 300)),
-            reset_on_log=stats_cfg.get("reset_on_log", False),
-            log_level=stats_cfg.get("log_level", "info"),
-            persistence_store=stats_persistence_store,
-        )
-        stats_reporter.start()
-        logger.info(
-            "Statistics collection enabled (interval: %ds)",
-            stats_reporter.interval_seconds,
         )
 
     # Initialize webserver log buffer (shared with admin HTTP API).
-    #
-    # Preferred v2 location:
-    #   server:
-    #     http: {...}
-    #
-    # Legacy fallbacks (still accepted for existing configs/tests):
-    #   - root-level http: {...}
-    #   - root-level webserver: {...}
-    server_http = None
-    try:
-        if isinstance(server_cfg, dict):
-            server_http = server_cfg.get("http")
-    except Exception:
-        server_http = None
-
-    web_cfg = server_http or cfg.get("http") or cfg.get("webserver", {}) or {}
-    if not isinstance(web_cfg, dict):
-        web_cfg = {}
-    # If a http block exists, default enabled to True unless explicitly disabled
-    # with enabled: false. This mirrors the listener expectations and
-    # start_webserver() behaviour.
-    has_web_cfg = bool(web_cfg)
-    raw_web_enabled = web_cfg.get("enabled") if isinstance(web_cfg, dict) else None
-    web_enabled = bool(raw_web_enabled) if raw_web_enabled is not None else has_web_cfg
+    web_cfg, web_enabled = _resolve_web_config(cfg=cfg, server_cfg=server_cfg)
 
     if web_enabled:
         buffer_size = int((web_cfg.get("logs") or {}).get("buffer_size", 500))
@@ -735,6 +310,13 @@ def main(argv: List[str] | None = None) -> int:
 
     # Seed webserver readiness expectation.
     runtime_state.set_listener("webserver", enabled=web_enabled, thread=None)
+    enabled_listeners: dict[str, bool] = {
+        "udp": bool(udp_cfg.get("enabled", True)),
+        "tcp": bool(tcp_cfg.get("enabled", False)),
+        "dot": bool(dot_cfg.get("enabled", False)),
+        "doh": bool(doh_cfg.get("enabled", False)),
+        "webserver": bool(web_enabled),
+    }
 
     # --- Coordinated shutdown state ---
     # shutdown_event is set when a termination-like signal (KeyboardInterrupt,
@@ -764,9 +346,8 @@ def main(argv: List[str] | None = None) -> int:
           - None
 
         Notes:
-          - Both SIGUSR1 and SIGUSR2 share the same behavior: when statistics
-            are enabled and the configuration flags sigusr[12]_resets_stats is
-            true, the in-memory statistics are reset.
+          - SIGUSR1 and SIGUSR2 each honor their own reset flag:
+            sigusr1_resets_stats for SIGUSR1, sigusr2_resets_stats for SIGUSR2.
         """
 
         nonlocal cfg, stats_collector
@@ -782,14 +363,10 @@ def main(argv: List[str] | None = None) -> int:
                 s_cfg = {}
 
             enabled = bool(s_cfg.get("enabled", False))
-            # Use sigusr2_resets_stats as the canonical configuration flag for
-            # both SIGUSR1 and SIGUSR2 so that user expectations are consistent
-            # regardless of which signal they choose to send. For
-            # backwards-compatibility, also accept sigusr1_resets_stats as a
-            # deprecated alias.
             reset_flag = bool(
-                s_cfg.get("sigusr2_resets_stats", False)
-                or s_cfg.get("sigusr1_resets_stats", False)
+                sig_label == "SIGUSR1" and s_cfg.get("sigusr1_resets_stats", False)
+            ) or bool(
+                sig_label == "SIGUSR2" and s_cfg.get("sigusr2_resets_stats", False)
             )
 
             if enabled and reset_flag:
@@ -806,9 +383,15 @@ def main(argv: List[str] | None = None) -> int:
                         "%s: no statistics collector active, skipping reset", sig_label
                     )
             else:
+                expected_flag = (
+                    "sigusr1_resets_stats"
+                    if sig_label == "SIGUSR1"
+                    else "sigusr2_resets_stats"
+                )
                 log.info(
-                    "%s: statistics reset skipped (disabled or sigusr2_resets_stats not set)",
+                    "%s: statistics reset skipped (disabled or %s not set)",
                     sig_label,
+                    expected_flag,
                 )
         except (
             Exception
@@ -819,17 +402,28 @@ def main(argv: List[str] | None = None) -> int:
                 e,
             )
 
-        # Invoke plugin handlers. Each plugin can optionally expose
-        # handle_sigusr2(); errors are logged but do not abort other handlers.
-        # This keeps plugin notifications best-effort while preserving the
-        # overall signal semantics.
+        # Invoke plugin handlers. Plugins may expose a unified
+        # handle_sigusr(sig_label) hook; older plugins may still expose the
+        # legacy handle_sigusr2() hook.
+        #
+        # Errors are logged but do not abort other handlers.
         count = 0
         for p in plugins or []:
             try:
-                handler = getattr(p, "handle_sigusr2", None)
+                handler = getattr(p, "handle_sigusr", None)
                 if callable(handler):
-                    handler()
+                    handler(sig_label)
                     count += 1
+                    continue
+
+                # Backward-compatible fallback.
+                # Only SIGUSR2 maps to legacy handle_sigusr2(). SIGUSR1 should
+                # not invoke the SIGUSR2 hook.
+                if sig_label == "SIGUSR2":
+                    legacy = getattr(p, "handle_sigusr2", None)
+                    if callable(legacy):
+                        legacy()
+                        count += 1
             except (
                 Exception
             ) as e:  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
@@ -839,26 +433,18 @@ def main(argv: List[str] | None = None) -> int:
                     p.__class__.__name__,
                     e,
                 )
-        log.info("%s: invoked handle_sigusr2 on %d plugins", sig_label, count)
+        log.info("%s: invoked signal handler hook on %d plugins", sig_label, count)
 
     def _sigusr1_handler(_signum, _frame):
-        # coalesce multiple signals
+        # Coalesce multiple signals; do not do non-async-signal-safe work here.
         if _sigusr1_pending.is_set():
             return
         _sigusr1_pending.set()
-        try:
-            _process_usr_signal("SIGUSR1")
-        finally:
-            _sigusr1_pending.clear()
 
     def _sigusr2_handler(_signum, _frame):
         if _sigusr2_pending.is_set():
             return
         _sigusr2_pending.set()
-        try:
-            _process_usr_signal("SIGUSR2")
-        finally:
-            _sigusr2_pending.clear()
 
     # --- Termination-oriented signals (SIGHUP/SIGTERM) ---
     def _request_shutdown(reason: str, code: int) -> None:
@@ -923,45 +509,41 @@ def main(argv: List[str] | None = None) -> int:
         _request_shutdown("SIGINT", 2)
 
     # Register handlers (Unix only)
-    try:
-        signal.signal(signal.SIGUSR1, _sigusr1_handler)
-        logger.debug(
-            "Installed SIGUSR1 handler to notify plugins and optionally reset statistics"
-        )
-    except Exception:
-        logger.warning("Could not install SIGUSR1 handler on this platform")
-
-    try:
-        signal.signal(signal.SIGUSR2, _sigusr2_handler)
-        logger.debug(
-            "Installed SIGUSR2 handler to notify plugins and optionally reset statistics"
-        )
-    except Exception:
-        logger.warning("Could not install SIGUSR2 handler on this platform")
-
-    try:
-        signal.signal(signal.SIGHUP, _sighup_handler)
-        logger.debug("Installed SIGHUP handler for clean shutdown (exit code 0)")
-    except (
-        Exception
-    ):  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
-        logger.warning("Could not install SIGHUP handler on this platform")
-
-    try:
-        signal.signal(signal.SIGTERM, _sigterm_handler)
-        logger.debug("Installed SIGTERM handler for immediate shutdown (exit code 2)")
-    except (
-        Exception
-    ):  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
-        logger.warning("Could not install SIGTERM handler on this platform")
-
-    try:
-        signal.signal(signal.SIGINT, _sigint_handler)
-        logger.debug("Installed SIGINT handler for immediate shutdown (exit code 2)")
-    except (
-        Exception
-    ):  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
-        logger.warning("Could not install SIGINT handler on this platform")
+    _install_signal_handler(
+        sig=signal.SIGUSR1,
+        handler=_sigusr1_handler,
+        logger=logger,
+        success_log="Installed SIGUSR1 handler to notify plugins and optionally reset statistics",
+        failure_log="Could not install SIGUSR1 handler on this platform",
+    )
+    _install_signal_handler(
+        sig=signal.SIGUSR2,
+        handler=_sigusr2_handler,
+        logger=logger,
+        success_log="Installed SIGUSR2 handler to notify plugins and optionally reset statistics",
+        failure_log="Could not install SIGUSR2 handler on this platform",
+    )
+    _install_signal_handler(
+        sig=signal.SIGHUP,
+        handler=_sighup_handler,
+        logger=logger,
+        success_log="Installed SIGHUP handler for clean shutdown (exit code 0)",
+        failure_log="Could not install SIGHUP handler on this platform",
+    )
+    _install_signal_handler(
+        sig=signal.SIGTERM,
+        handler=_sigterm_handler,
+        logger=logger,
+        success_log="Installed SIGTERM handler for immediate shutdown (exit code 2)",
+        failure_log="Could not install SIGTERM handler on this platform",
+    )
+    _install_signal_handler(
+        sig=signal.SIGINT,
+        handler=_sigint_handler,
+        logger=logger,
+        success_log="Installed SIGINT handler for immediate shutdown (exit code 2)",
+        failure_log="Could not install SIGINT handler on this platform",
+    )
 
     # DNSSEC config (ignore|passthrough|validate).
     dnssec_cfg = server_cfg.get("dnssec") or {}
@@ -974,12 +556,111 @@ def main(argv: List[str] | None = None) -> int:
     # Extended DNS Errors (RFC 8914) feature gate. When false, the resolver
     # will not add any EDE options of its own and will continue to treat
     # upstream EDNS options opaquely.
-    enable_ede = bool(server_cfg.get("enable_ede", False))
+    enable_ede = bool(server_cfg.get("enable_ede", True))
 
     # .local forward blocking (RFC 6762). When false (default), queries for
     # .local names that are not answered by plugins are blocked from being
     # forwarded to upstream resolvers and return NXDOMAIN instead.
     forward_local = bool(server_cfg.get("forward_local", False))
+
+    # Resolver search-domain qualification settings.
+    _search_cfg_main = resolver_cfg.get("search") or {}
+    if not isinstance(_search_cfg_main, dict):
+        _search_cfg_main = {}
+    search_domain_main = (
+        str(_search_cfg_main.get("domain", "") or "").strip().rstrip(".")
+    )
+    qualify_single_label_main = bool(_search_cfg_main.get("qualify_single_label", True))
+    _raw_npt_main = _search_cfg_main.get("qualify_non_proper_tld", False)
+    if isinstance(_raw_npt_main, list):
+        qualify_non_proper_tld_main: object = [
+            str(e).strip().rstrip(".") for e in _raw_npt_main if str(e).strip()
+        ]
+    elif isinstance(_raw_npt_main, str):
+        _s_main = _raw_npt_main.strip().lower()
+        qualify_non_proper_tld_main = True if _s_main in ("true", "yes", "1") else False
+    else:
+        qualify_non_proper_tld_main = bool(_raw_npt_main)
+    _raw_tld_mode_main = _search_cfg_main.get("non_proper_tld_mode", "suffix")
+    non_proper_tld_mode_main = str(_raw_tld_mode_main or "suffix").strip().lower()
+    if non_proper_tld_mode_main not in {"suffix", "exact"}:
+        non_proper_tld_mode_main = "suffix"
+
+    # AXFR/IXFR transfer policy (applies to TCP/DoT listeners).
+    axfr_cfg = server_cfg.get("axfr") or {}
+    if not isinstance(axfr_cfg, dict):
+        axfr_cfg = {}
+    axfr_enabled = bool(axfr_cfg.get("enabled", False))
+    axfr_allow_clients = axfr_cfg.get("allow_clients") or []
+    if not isinstance(axfr_allow_clients, list):
+        axfr_allow_clients = []
+    axfr_allow_clients = [str(x) for x in axfr_allow_clients if x]
+    try:
+        raw_axfr_max_zone_rrs = axfr_cfg.get("max_zone_rrs")
+        axfr_max_zone_rrs = (
+            int(raw_axfr_max_zone_rrs)
+            if raw_axfr_max_zone_rrs is not None
+            and str(raw_axfr_max_zone_rrs).strip() != ""
+            else None
+        )
+    except Exception:
+        axfr_max_zone_rrs = None
+    if axfr_max_zone_rrs is not None and axfr_max_zone_rrs <= 0:
+        axfr_max_zone_rrs = None
+    try:
+        axfr_max_concurrent_transfers = int(axfr_cfg.get("max_concurrent_transfers", 4))
+    except Exception:
+        axfr_max_concurrent_transfers = 4
+    axfr_max_concurrent_transfers = max(1, int(axfr_max_concurrent_transfers))
+    try:
+        axfr_rate_limit_per_client_per_second = float(
+            axfr_cfg.get("rate_limit_per_client_per_second", 0.0)
+        )
+    except Exception:
+        axfr_rate_limit_per_client_per_second = 0.0
+    axfr_rate_limit_per_client_per_second = max(
+        0.0, float(axfr_rate_limit_per_client_per_second)
+    )
+    try:
+        axfr_rate_limit_burst = float(axfr_cfg.get("rate_limit_burst", 2.0))
+    except Exception:
+        axfr_rate_limit_burst = 2.0
+    axfr_rate_limit_burst = max(1.0, float(axfr_rate_limit_burst))
+    try:
+        raw_axfr_max_transfer_rate = axfr_cfg.get("max_transfer_rate_bytes_per_second")
+        axfr_max_transfer_rate_bytes_per_second = (
+            int(raw_axfr_max_transfer_rate)
+            if raw_axfr_max_transfer_rate is not None
+            and str(raw_axfr_max_transfer_rate).strip() != ""
+            else None
+        )
+    except Exception:
+        axfr_max_transfer_rate_bytes_per_second = None
+    if (
+        axfr_max_transfer_rate_bytes_per_second is not None
+        and axfr_max_transfer_rate_bytes_per_second <= 0
+    ):
+        axfr_max_transfer_rate_bytes_per_second = None
+    try:
+        axfr_message_max_bytes = int(axfr_cfg.get("message_max_bytes", 64000))
+    except Exception:
+        axfr_message_max_bytes = 64000
+    axfr_message_max_bytes = max(512, min(65535, int(axfr_message_max_bytes)))
+    axfr_require_tsig = bool(axfr_cfg.get("require_tsig", False))
+    axfr_tsig_keys_raw = axfr_cfg.get("tsig_keys") or []
+    axfr_tsig_keys: list[dict[str, str]] = []
+    if isinstance(axfr_tsig_keys_raw, list):
+        for entry in axfr_tsig_keys_raw:
+            if not isinstance(entry, dict):
+                continue
+            name = str(entry.get("name") or "").strip()
+            secret = str(entry.get("secret") or "").strip()
+            algorithm = str(entry.get("algorithm") or "hmac-sha256").strip().lower()
+            if not name or not secret:
+                continue
+            axfr_tsig_keys.append(
+                {"name": name, "secret": secret, "algorithm": algorithm}
+            )
 
     # When performing local DNSSEC validation (including local_extended), point
     # the validator's internal resolver at the configured upstream hosts so that
@@ -987,110 +668,117 @@ def main(argv: List[str] | None = None) -> int:
     # normal forwarding. In recursive mode there are no forwarder upstreams; in
     # that case, route all DNSSEC helper lookups through Foghorn's own
     # RecursiveResolver rather than the system resolver.
-    if dnssec_mode == "validate" and dnssec_validation in {"local", "local_extended"}:
-        if resolver_mode == "forward":
-            upstream_hosts = [
-                str(u["host"]) for u in upstreams if isinstance(u, dict) and "host" in u
-            ]
-            configure_dnssec_resolver(upstream_hosts or None)
-        else:
-            # Empty list is a sentinel tellingfoghorn.dnssec.dnssec_validate to use
-            # RecursiveResolver for all validation lookups.
-            configure_dnssec_resolver([])
-    else:
-        # For non-validating modes or upstream_ad, fall back to system resolver
-        # configuration inside the DNSSEC validator.
-        configure_dnssec_resolver(None)
-
-    server = None
-    udp_thread: threading.Thread | None = None
-    udp_error: Exception | None = None
-    # Track background listener threads (UDP, TCP, DoT, etc.) uniformly so the
-    # keepalive loop does not treat UDP as a special case.
-    loop_threads: list[threading.Thread] = []
-    if bool(udp_cfg.get("enabled", True)):
-        uhost = str(udp_cfg.get("host", default_host))
-        uport = int(udp_cfg.get("port", default_port))
-        server = DNSServer(
-            uhost,
-            uport,
-            upstreams,
-            plugins,
-            timeout=timeout_ms / 1000.0,
+    try:
+        _initialize_runtime_snapshot(
+            logger=logger,
+            cfg=cfg,
+            plugins=plugins,
+            upstreams=upstreams,
+            upstream_backups=upstream_backups,
+            upstream_health=upstream_health,
             timeout_ms=timeout_ms,
-            min_cache_ttl=min_cache_ttl,
-            stats_collector=stats_collector,
-            cache=cache_plugin,
-            dnssec_mode=dnssec_mode,
-            edns_udp_payload=edns_payload,
-            dnssec_validation=dnssec_validation,
             upstream_strategy=upstream_strategy,
             upstream_max_concurrent=upstream_max_concurrent,
             resolver_mode=resolver_mode,
             recursive_max_depth=recursive_max_depth,
             recursive_timeout_ms=recursive_timeout_ms,
             recursive_per_try_timeout_ms=recursive_per_try_timeout_ms,
+            dnssec_mode=dnssec_mode,
+            dnssec_validation=dnssec_validation,
+            edns_payload=edns_payload,
             enable_ede=enable_ede,
             forward_local=forward_local,
+            search_domain=search_domain_main,
+            qualify_single_label=qualify_single_label_main,
+            qualify_non_proper_tld=qualify_non_proper_tld_main,
+            non_proper_tld_mode=non_proper_tld_mode_main,
+            min_cache_ttl=min_cache_ttl,
+            stats_collector=stats_collector,
+            cache_plugin=cache_plugin,
+            udp_cfg=udp_cfg,
+            axfr_enabled=axfr_enabled,
+            axfr_allow_clients=axfr_allow_clients,
+            axfr_max_zone_rrs=axfr_max_zone_rrs,
+            axfr_max_concurrent_transfers=axfr_max_concurrent_transfers,
+            axfr_rate_limit_per_client_per_second=axfr_rate_limit_per_client_per_second,
+            axfr_rate_limit_burst=axfr_rate_limit_burst,
+            axfr_max_transfer_rate_bytes_per_second=axfr_max_transfer_rate_bytes_per_second,
+            axfr_message_max_bytes=axfr_message_max_bytes,
+            axfr_require_tsig=axfr_require_tsig,
+            axfr_tsig_keys=axfr_tsig_keys,
+            cfg_path=cfg_path,
+            args=args,
         )
+    except Exception:
+        # Runtime snapshot is required for stable resolver behavior.
+        logger.error("Fatal: runtime snapshot initialization failed", exc_info=True)
+        return 1
+    if not _configure_dnssec_validation_resolver(
+        logger=logger,
+        dnssec_mode=dnssec_mode,
+        dnssec_validation=dnssec_validation,
+        resolver_mode=resolver_mode,
+        upstreams=upstreams,
+    ):
+        return 1
 
-    # Log startup info
-    if resolver_mode == "forward":
-        upstream_info = ", ".join(
-            [
-                f"{u['url']}" if "url" in u else f"{u['host']}:{u['port']}"
-                for u in upstreams
-            ]
-        )
-    else:
-        upstream_info = "(recursive mode; no forward upstreams)"
-    logger.info(
-        "Resolver mode=%s, upstreams: [%s], timeout: %dms",
-        resolver_mode,
-        upstream_info,
-        timeout_ms,
-    )
+    server = None
+    udp_handle = None
+    udp_thread: threading.Thread | None = None
+    udp_error: Exception | None = None
+    # Track background listener threads (UDP, TCP, DoT, etc.) uniformly so the
+    # keepalive loop does not treat UDP as a special case.
+    loop_threads: list[threading.Thread] = []
 
-    if server is not None:
-        # Run UDP server in a background thread so the main thread can manage
-        # coordinated shutdown alongside TCP/DoT/DoH listeners. Capture
-        # unexpected exceptions so main() can reflect them in its exit code.
-        def _run_udp() -> None:
-            nonlocal udp_error
-            try:
-                server.serve_forever()
-            except Exception as e:  # pragma: no cover - propagated via udp_error
-                udp_error = e
-                runtime_state.set_listener_error("udp", e)
-
-        logger.info(
-            "Starting UDP listener on %s:%d",
-            uhost,
-            uport,
-        )
-
-        udp_thread = threading.Thread(
-            target=_run_udp,
-            name="foghorn-udp",
-            daemon=True,
-        )
-        udp_thread.start()
-        loop_threads.append(udp_thread)
-        runtime_state.set_listener("udp", enabled=True, thread=udp_thread)
-    else:
-        # When no UDP listener is configured, the main thread still enters the
-        # keepalive loop below so that TCP/DoT/DoH listeners (or tests that
-        # disable UDP entirely) can drive shutdown via signals or KeyboardInterrupt.
-        logger.info(
-            "Starting Foghorn without UDP listener; main thread will use keepalive loop",
-        )
+    # Shared resolver adapter for UDP listener.
+    from .servers.server import resolve_query_bytes as _resolve_query_bytes
 
     # Optionally start TCP/DoT listeners based on listen config
 
     # Resolver adapter for TCP/DoT servers
     import asyncio
 
-    from .servers.server import resolve_query_bytes as _resolve_query_bytes
+    def _resolve_udp(query_bytes: bytes, client_ip: str) -> bytes:
+        """Brief: Resolve a DNS query received via UDP listener.
+
+        Inputs:
+          - query_bytes: Wire-format DNS query bytes.
+          - client_ip: Client IP address string.
+
+        Outputs:
+          - bytes: Wire-format DNS response produced by the shared resolver.
+
+        Notes:
+          - Enforces the UDP response size ceiling (TC=1) after resolution so
+            both asyncio and threaded UDP paths share consistent truncation
+            behavior.
+        """
+
+        wire = _resolve_query_bytes(
+            query_bytes,
+            client_ip,
+            listener="udp",
+            secure=False,
+        )
+
+        try:
+            from foghorn.runtime_config import get_runtime_snapshot
+            from .servers.udp_server import enforce_udp_response_size_ceiling
+
+            server_max = get_runtime_snapshot().udp_max_response_bytes
+            wire = enforce_udp_response_size_ceiling(
+                query_wire=query_bytes,
+                response_wire=wire,
+                server_max_bytes=server_max,
+            )
+        except Exception as exc:
+            logger.warning(
+                "UDP response size ceiling enforcement failed (returning original wire bytes): %s",
+                exc,
+                exc_info=True,
+            )
+
+        return wire
 
     def _resolve_tcp(query_bytes: bytes, client_ip: str) -> bytes:
         """Brief: Resolve a DNS query received via TCP listener.
@@ -1166,45 +854,253 @@ def main(argv: List[str] | None = None) -> int:
                 # When a fallback is provided, treat it as a successful start and
                 # do not mark the listener as failed.
                 if callable(on_permission_error):
-                    on_permission_error()
+                    try:
+                        on_permission_error()
+                    except Exception as fallback_exc:
+                        _record_listener_error(listener_key, fallback_exc)
+                        logging.getLogger("foghorn.main").exception(
+                            "Asyncio listener %s failed while handling PermissionError fallback: %s",
+                            name,
+                            fallback_exc,
+                        )
                 else:
-                    runtime_state.set_listener_error(listener_key, e)
+                    _record_listener_error(listener_key, e)
                     logging.getLogger("foghorn.main").error(
                         "Asyncio loop creation failed with PermissionError for %s; no fallback provided",
                         name,
                     )
             except Exception as e:  # pragma: no cover - best-effort readiness tracking
-                runtime_state.set_listener_error(listener_key, e)
+                _record_listener_error(listener_key, e)
+                logging.getLogger("foghorn.main").exception(
+                    "Asyncio listener %s failed to start or exited with an unhandled exception: %s",
+                    name,
+                    e,
+                )
 
-        # Import threading dynamically so tests can monkeypatch via sys.modules
-        import importlib as _importlib
-
-        _threading = _importlib.import_module("threading")
-        t = _threading.Thread(target=runner, name=name, daemon=True)
+        t = threading.Thread(target=runner, name=name, daemon=True)
         t.start()
         loop_threads.append(t)
         runtime_state.set_listener(listener_key, enabled=True, thread=t)
         return t
 
+    if bool(udp_cfg.get("enabled", True)):
+        uhost = str(udp_cfg.get("host", default_host))
+        uport = int(udp_cfg.get("port", default_port))
+
+        # UDP listener defaults to asyncio. Threaded fallback is only allowed
+        # on localhost or when allow_unsafe_threaded_listeners is true.
+        allow_unsafe = bool(limits_cfg.get("allow_unsafe_threaded_listeners", False))
+        from foghorn.security_limits import is_loopback_host
+
+        is_loopback = is_loopback_host(uhost)
+        # Default to asyncio everywhere. Config can override with explicit
+        # use_asyncio setting.
+        udp_use_asyncio = bool(udp_cfg.get("use_asyncio", True))
+
+        # Allow threaded fallback only on localhost or when allow_unsafe is true.
+        # If neither is true and threaded is needed due to PermissionError,
+        # the server will refuse to start.
+        allow_threaded_default = is_loopback or allow_unsafe
+        allow_threaded_fallback = bool(
+            udp_cfg.get("allow_threaded_fallback", allow_threaded_default)
+        )
+        exit_on_asyncio_failure = bool(
+            udp_cfg.get("exit_on_asyncio_failure", False)
+            or udp_cfg.get("refuse_threaded_fallback", False)
+        )
+
+        try:
+            max_inflight = int(udp_cfg.get("max_inflight", 1024) or 1024)
+        except Exception:
+            max_inflight = 1024
+        try:
+            max_inflight_per_ip = int(udp_cfg.get("max_inflight_per_ip", 64) or 64)
+        except Exception:
+            max_inflight_per_ip = 64
+
+        try:
+            max_query_bytes = int(udp_cfg.get("max_query_bytes", 4096) or 4096)
+        except Exception:
+            max_query_bytes = 4096
+
+        max_inflight_by_cidr = udp_cfg.get("max_inflight_by_cidr")
+        if max_inflight_by_cidr is not None and not isinstance(
+            max_inflight_by_cidr, list
+        ):
+            max_inflight_by_cidr = None
+
+        # Log startup info
+        if resolver_mode == "forward":
+            upstream_info = f"{len(upstreams)}"
+        else:
+            upstream_info = "(recursive mode; no forward upstreams)"
+        logger.info(
+            "Starting Resolver mode=%s, upstream_count=%s, timeout=%dms",
+            resolver_mode,
+            upstream_info,
+            timeout_ms,
+        )
+
+        if use_asyncio and udp_use_asyncio:
+            try:
+                from .servers.executors import get_resolver_executor
+                from .servers.udp_asyncio_server import start_udp_asyncio_threaded
+
+                logger.info(
+                    "Starting UDP listener on %s:%d (asyncio)",
+                    uhost,
+                    uport,
+                )
+
+                udp_handle = start_udp_asyncio_threaded(
+                    uhost,
+                    uport,
+                    _resolve_udp,
+                    max_inflight=max_inflight,
+                    max_inflight_per_ip=max_inflight_per_ip,
+                    max_query_bytes=max_query_bytes,
+                    overload_response=str(udp_cfg.get("overload_response", "servfail")),
+                    max_inflight_by_cidr=max_inflight_by_cidr,
+                    executor=get_resolver_executor(),
+                    thread_name="foghorn-udp",
+                )
+                udp_thread = udp_handle.thread
+                loop_threads.append(udp_thread)
+                runtime_state.set_listener("udp", enabled=True, thread=udp_thread)
+            except PermissionError as exc:
+                if not allow_threaded_fallback or exit_on_asyncio_failure:
+                    _record_listener_error("udp", exc)
+                    logger.error(
+                        "Asyncio UDP listener failed with PermissionError and threaded fallback is disabled; exiting. Error: %s",
+                        exc,
+                    )
+                    return 1
+                runtime_state.set_listener_error("udp", exc)
+
+                logger.warning(
+                    "Asyncio UDP listener failed with PermissionError; falling back to ThreadingUDPServer (less robust under DDoS). "
+                    "Consider enabling asyncio UDP. Error: %s",
+                    exc,
+                )
+            except Exception as exc:
+                _record_listener_error("udp", exc)
+                logger.error("Failed to start asyncio UDP listener: %s", exc)
+                return 1
+
+        if udp_thread is None:
+            # Threaded UDP (legacy fallback).
+            from foghorn.security_limits import is_loopback_host
+
+            allow_unsafe = bool(
+                limits_cfg.get("allow_unsafe_threaded_listeners", False)
+            )
+            if not is_loopback_host(uhost) and not allow_unsafe:
+                logger.error(
+                    "Refusing to start threaded UDP listener on non-loopback host %s. "
+                    "Enable UDP asyncio listener or set server.limits.allow_unsafe_threaded_listeners=true.",
+                    uhost,
+                )
+                return 1
+
+            from foghorn.servers.udp_server import DNSUDPHandler
+            import socketserver as _socketserver
+
+            server = _socketserver.ThreadingUDPServer((uhost, uport), DNSUDPHandler)
+            server.daemon_threads = True
+
+            # Run UDP server in a background thread so the main thread can manage
+            # coordinated shutdown alongside TCP/DoT/DoH listeners. Capture
+            # unexpected exceptions so main() can reflect them in its exit code.
+            def _run_udp() -> None:
+                nonlocal udp_error
+                try:
+                    server.serve_forever()
+                except Exception as e:  # pragma: no cover - propagated via udp_error
+                    udp_error = e
+                    _record_listener_error("udp", e)
+
+            logger.info(
+                "Starting UDP listener on %s:%d (threaded)",
+                uhost,
+                uport,
+            )
+
+            udp_thread = threading.Thread(
+                target=_run_udp,
+                name="foghorn-udp-threaded",
+                daemon=True,
+            )
+            udp_thread.start()
+            loop_threads.append(udp_thread)
+            runtime_state.set_listener("udp", enabled=True, thread=udp_thread)
+    else:
+        # When no UDP listener is configured, the main thread still enters the
+        # keepalive loop below so that TCP/DoT/DoH listeners (or tests that
+        # disable UDP entirely) can drive shutdown via signals or KeyboardInterrupt.
+        logger.info(
+            "Starting Foghorn without UDP listener; main thread will use keepalive loop",
+        )
+
     if bool(tcp_cfg.get("enabled", False)):
+        from foghorn.security_limits import is_loopback_host
+
         from .servers.tcp_server import serve_tcp, serve_tcp_threaded
 
         thost = str(tcp_cfg.get("host", default_host))
         tport = int(tcp_cfg.get("port", 53))
+
+        def _start_tcp_threaded() -> None:
+            allow_unsafe = bool(
+                limits_cfg.get("allow_unsafe_threaded_listeners", False)
+            )
+            if not is_loopback_host(thost) and not allow_unsafe:
+                raise RuntimeError(
+                    "Refusing to start threaded TCP listener on non-loopback host. "
+                    "Enable asyncio TCP listener or set server.limits.allow_unsafe_threaded_listeners=true."
+                )
+            try:
+                serve_tcp_threaded(thost, tport, _resolve_tcp)
+            except Exception as exc:
+                _record_listener_error("tcp", exc)
+                raise
+
         if use_asyncio:
             logger.info("Starting TCP listener on %s:%d (asyncio)", thost, tport)
             _start_asyncio_server(
-                lambda: serve_tcp(thost, tport, _resolve_tcp),
+                lambda: serve_tcp(
+                    thost,
+                    tport,
+                    _resolve_tcp,
+                    max_connections=int(tcp_cfg.get("max_connections", 1024) or 1024),
+                    max_connections_per_ip=int(
+                        tcp_cfg.get("max_connections_per_ip", 64) or 64
+                    ),
+                    max_queries_per_connection=int(
+                        tcp_cfg.get("max_queries_per_connection", 100) or 100
+                    ),
+                    idle_timeout_seconds=float(
+                        tcp_cfg.get("idle_timeout_seconds", 15.0) or 15.0
+                    ),
+                    overload_response=str(tcp_cfg.get("overload_response", "drop")),
+                ),
                 name="foghorn-tcp",
                 listener_key="tcp",
-                on_permission_error=lambda: serve_tcp_threaded(
-                    thost, tport, _resolve_tcp
-                ),
+                on_permission_error=_start_tcp_threaded,
             )
         else:
             logger.info("Starting TCP listener on %s:%d (threaded)", thost, tport)
+            allow_unsafe = bool(
+                limits_cfg.get("allow_unsafe_threaded_listeners", False)
+            )
+            if not is_loopback_host(thost) and not allow_unsafe:
+                logger.error(
+                    "Refusing to start threaded TCP listener on non-loopback host %s. "
+                    "Enable asyncio TCP listener or set server.limits.allow_unsafe_threaded_listeners=true.",
+                    thost,
+                )
+                return 1
             t = threading.Thread(
-                target=lambda: serve_tcp_threaded(thost, tport, _resolve_tcp),
+                target=_start_tcp_threaded,
                 name="foghorn-tcp-threaded",
                 daemon=True,
             )
@@ -1220,11 +1116,20 @@ def main(argv: List[str] | None = None) -> int:
         cert_file = dot_cfg.get("cert_file")
         key_file = dot_cfg.get("key_file")
         if not cert_file or not key_file:
+            msg = "listen.dot.enabled=true but cert_file/key_file not provided"
+            _record_listener_error("dot", msg)
             logger.error(
-                "listen.dot.enabled=true but cert_file/key_file not provided; skipping DoT"
+                "%s; refusing to start",
+                msg,
             )
+            return 1
         else:
-            logger.info("Starting DoT listener on %s:%d", dhost, dport)
+            logger.info("Starting DoT listener on %s:%d (asyncio)", dhost, dport)
+            logger.debug(
+                "DoT TLS files: cert_file=%s key_file=%s",
+                cert_file,
+                key_file,
+            )
             _start_asyncio_server(
                 lambda: serve_dot(
                     dhost,
@@ -1232,6 +1137,17 @@ def main(argv: List[str] | None = None) -> int:
                     _resolve_dot,
                     cert_file=cert_file,
                     key_file=key_file,
+                    max_connections=int(dot_cfg.get("max_connections", 1024) or 1024),
+                    max_connections_per_ip=int(
+                        dot_cfg.get("max_connections_per_ip", 64) or 64
+                    ),
+                    max_queries_per_connection=int(
+                        dot_cfg.get("max_queries_per_connection", 100) or 100
+                    ),
+                    idle_timeout_seconds=float(
+                        dot_cfg.get("idle_timeout_seconds", 15.0) or 15.0
+                    ),
+                    overload_response=str(dot_cfg.get("overload_response", "drop")),
                 ),
                 name="foghorn-dot",
                 listener_key="dot",
@@ -1243,8 +1159,26 @@ def main(argv: List[str] | None = None) -> int:
         cert_file = doh_cfg.get("cert_file")
         key_file = doh_cfg.get("key_file")
         logger.info("Starting DoH listener on %s:%d", h, p)
+
+        # Threaded DoH fallback uses stdlib HTTP server (no DoS/DDoS hardening).
+        # Match the opt-in safety gate used by TCP/UDP threaded listeners.
+        from foghorn.security_limits import is_loopback_host
+
+        allow_unsafe = bool(limits_cfg.get("allow_unsafe_threaded_listeners", False))
+        allow_threaded_default = is_loopback_host(h) or allow_unsafe
+        allow_threaded_fallback = bool(
+            doh_cfg.get("allow_threaded_fallback", allow_threaded_default)
+        )
+        if allow_threaded_fallback and not allow_threaded_default:
+            logger.warning(
+                "DoH threaded fallback is enabled in config but host %s is not loopback; "
+                "disabling threaded fallback unless server.limits.allow_unsafe_threaded_listeners=true",
+                h,
+            )
+            allow_threaded_fallback = False
+
         try:
-            # start uvicorn-based DoH FastAPI server in background thread
+            # Start uvicorn-based DoH FastAPI server in background thread.
             doh_handle = start_doh_server(
                 h,
                 p,
@@ -1252,13 +1186,21 @@ def main(argv: List[str] | None = None) -> int:
                 cert_file=cert_file,
                 key_file=key_file,
                 use_asyncio=use_asyncio,
+                allow_threaded_fallback=allow_threaded_fallback,
             )
-        except Exception as e:
-            runtime_state.set_listener_error("doh", e)
-            logger.error("Failed to start DoH server: %s", e)
+        except Exception as exc:
+            _record_listener_error("doh", exc)
+            if isinstance(exc, (ImportError, ModuleNotFoundError)):
+                logger.error(
+                    "listen.doh.enabled=true but DoH dependencies are missing (%s). "
+                    "Install fastapi+uvicorn or disable listen.doh.",
+                    exc,
+                )
+            else:
+                logger.error("Failed to start DoH server: %s", exc)
             return 1
         if doh_handle is None:
-            runtime_state.set_listener_error("doh", "start_doh_server returned None")
+            _record_listener_error("doh", "start_doh_server returned None")
             logger.error(
                 "Fatal: listen.doh.enabled=true but start_doh_server returned None"
             )
@@ -1266,27 +1208,32 @@ def main(argv: List[str] | None = None) -> int:
 
         runtime_state.set_listener("doh", enabled=True, thread=doh_handle)
 
-    # Start admin HTTP webserver (FastAPI) and treat None handle as fatal when
-    # webserver.enabled is true. Tests and production code both rely on a
-    # single call to start_webserver() so it can be cleanly monkeypatched and
-    # stopped from the finally: block below.
-    try:
-        web_handle = start_webserver(
-            stats_collector,
-            cfg,
-            log_buffer=web_log_buffer,
-            config_path=cfg_path,
-            runtime_state=runtime_state,
-            plugins=plugins,
-        )
-    except (
-        Exception
-    ) as e:  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-        logger.error("Failed to start webserver: %s", e)
-        return 1
+    # Start admin HTTP webserver (FastAPI). When disabled, avoid importing the
+    # FastAPI implementation so minimal/headless builds can omit it.
+    if web_enabled:
+        try:
+            web_handle = start_webserver(
+                stats_collector,
+                cfg,
+                log_buffer=web_log_buffer,
+                config_path=cfg_path,
+                runtime_state=runtime_state,
+                plugins=plugins,
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            _record_listener_error("webserver", exc)
+            if isinstance(exc, (ImportError, ModuleNotFoundError)):
+                logger.error(
+                    "server.http.enabled=true (or legacy http/webserver config present) but "
+                    "admin webserver dependencies are missing (%s). Install fastapi+uvicorn or disable server.http.",
+                    exc,
+                )
+            else:
+                logger.error("Failed to start webserver: %s", exc)
+            return 1
 
     if web_enabled and web_handle is None:
-        runtime_state.set_listener_error("webserver", "start_webserver returned None")
+        _record_listener_error("webserver", "start_webserver returned None")
         logger.error("Fatal: webserver.enabled=true but start_webserver returned None")
         return 1
 
@@ -1315,25 +1262,62 @@ def main(argv: List[str] | None = None) -> int:
 
             Notes:
               - Test stubs may not implement is_alive(); in that case we
-                conservatively treat the thread as still running so the
-                keepalive loop remains active.
+                treat the thread as already exited so tests can terminate the
+                keepalive loop promptly.
             """
 
             try:
                 return not t.is_alive()
-            except Exception:
+            except AttributeError:
                 # Test doubles used in unit tests may not implement is_alive();
                 # treat them as already exited so the keepalive loop can
                 # terminate promptly.
                 return True
+            except (
+                Exception
+            ):  # pragma: nocover - defensive: mocked thread objects may raise unexpectedly in liveness probes
+                logger.debug(
+                    "Failed to check listener thread liveness; treating thread as dead",
+                    exc_info=True,
+                )
+                return True
 
         while not shutdown_event.is_set():
+            # Drain SIGUSR1/SIGUSR2 work outside of the signal handler context.
+            if _sigusr1_pending.is_set():
+                _sigusr1_pending.clear()
+                try:
+                    _process_usr_signal("SIGUSR1")
+                except Exception:
+                    logger.exception("SIGUSR1: unhandled error while processing signal")
+
+            if _sigusr2_pending.is_set():
+                _sigusr2_pending.clear()
+                try:
+                    _process_usr_signal("SIGUSR2")
+                except Exception:
+                    logger.exception("SIGUSR2: unhandled error while processing signal")
+
             # If the UDP server thread has reported an unhandled exception,
             # mirror the legacy behaviour by logging it and treating it as a
             # server-level failure for main()'s exit code.
             if udp_error is not None:
                 logger.exception(
                     "Unhandled exception during UDP server operation %s", udp_error
+                )
+                if exit_code == 0:
+                    exit_code = 1
+                break
+
+            fatal_listener_errors = [
+                f"{name}: {error}"
+                for name, error in listener_failures.items()
+                if enabled_listeners.get(name, False)
+            ]
+            if fatal_listener_errors:
+                logger.error(
+                    "Fatal listener failure detected: %s",
+                    "; ".join(fatal_listener_errors),
                 )
                 if exit_code == 0:
                     exit_code = 1
@@ -1369,6 +1353,12 @@ def main(argv: List[str] | None = None) -> int:
         # Request UDP server shutdown and close sockets before tearing down
         # statistics and web components so that no new requests are processed
         # during shutdown.
+        if udp_handle is not None:
+            try:
+                udp_handle.stop()
+            except Exception:
+                logger.exception("Unexpected error while stopping asyncio UDP listener")
+
         if server is not None:
             try:
                 if hasattr(server, "stop"):
@@ -1376,6 +1366,16 @@ def main(argv: List[str] | None = None) -> int:
                     # abstraction so all UDP-specific details live in the UDP
                     # module.
                     server.stop()
+                elif hasattr(server, "shutdown") and hasattr(server, "server_close"):
+                    # socketserver.ThreadingUDPServer and compatible servers.
+                    try:
+                        server.shutdown()
+                    except Exception:
+                        logger.exception("Error while shutting down UDP server")
+                    try:
+                        server.server_close()
+                    except Exception:
+                        logger.exception("Error while closing UDP server socket")
                 else:
                     # Backwards-compatible path for legacy server stubs that
                     # expose a .server attribute with shutdown/server_close
@@ -1415,11 +1415,916 @@ def main(argv: List[str] | None = None) -> int:
             logger.info("Stopping webserver")
             web_handle.stop()
 
+        # Shutdown best-effort background executor so pending refresh/notify
+        # tasks do not outlive controlled process termination.
+        try:
+            from .servers.bg_executor import shutdown_bg_executor
+
+            shutdown_bg_executor(wait=False)
+        except Exception:
+            logger.exception("Unexpected error while shutting down background executor")
+
+        # Best-effort lifecycle teardown for loaded resolver plugins, optional
+        # query-log backend, and cache plugin. Errors are logged inside the
+        # helper and must not abort process shutdown.
+        run_shutdown_plugins([cache_plugin, stats_persistence_store, *plugins])
+
+        # Clear in-process runtime snapshot state. This is mostly relevant for
+        # unit tests that call main() multiple times in one Python process.
+        try:
+            from foghorn import runtime_config as _runtime_config
+
+            _runtime_config.clear_runtime()
+        except (
+            Exception
+        ):  # pragma: nocover - best effort: runtime cleanup should not block shutdown
+            pass
+
         # Mark shutdown as complete so any pending hard-kill timers can detect
         # successful termination and avoid forcing an unnecessary SIGKILL.
         shutdown_complete.set()
 
     return exit_code
+
+
+def start_doh_server(
+    host: str,
+    port: int,
+    resolve_bytes,
+    *,
+    cert_file: str | None = None,
+    key_file: str | None = None,
+    use_asyncio: bool = True,
+    allow_threaded_fallback: bool = True,
+) -> object | None:
+    """Brief: Start the optional DoH (DNS-over-HTTPS) server.
+
+    This wrapper exists so tests can monkeypatch foghorn.main.start_doh_server
+    without importing FastAPI/uvicorn at foghorn.main import time.
+
+    Inputs:
+      - host: Bind host.
+      - port: Bind port.
+      - resolve_bytes: Callable that takes (query_bytes, client_ip) and returns response bytes.
+      - cert_file: Optional TLS certificate path.
+      - key_file: Optional TLS private key path.
+      - use_asyncio: When true, prefer asyncio; otherwise use threaded fallback when supported.
+      - allow_threaded_fallback: When false, refuse to start the threaded fallback.
+
+    Outputs:
+      - object | None: Server handle/thread-like object returned by the DoH
+        server factory.
+
+    Notes:
+      - Exceptions raised by the underlying DoH server factory are propagated
+        to the caller.
+
+    Example use:
+      In tests, monkeypatch the wrapper symbol without importing FastAPI at import time:
+        monkeypatch.setattr(foghorn.main, 'start_doh_server', fake_start)
+    """
+
+    from .servers.doh_api import start_doh_server as _start_doh_server
+
+    return _start_doh_server(
+        host,
+        port,
+        resolve_bytes,
+        cert_file=cert_file,
+        key_file=key_file,
+        use_asyncio=use_asyncio,
+        allow_threaded_fallback=allow_threaded_fallback,
+    )
+
+
+def start_webserver(
+    stats_collector,
+    cfg,
+    *,
+    log_buffer=None,
+    config_path: str | None = None,
+    runtime_state: RuntimeState | None = None,
+    plugins: list[BasePlugin] | None = None,
+) -> object | None:
+    """Brief: Start the optional admin HTTP webserver.
+
+    This wrapper exists so tests can monkeypatch foghorn.main.start_webserver
+    without importing FastAPI/uvicorn at foghorn.main import time.
+
+    Inputs:
+      - stats_collector: StatsCollector instance or None.
+      - cfg: Parsed config mapping.
+      - log_buffer: Optional RingBuffer for recent logs.
+      - config_path: Path to the loaded config file.
+      - runtime_state: Optional RuntimeState for readiness endpoints.
+      - plugins: Optional list of active plugins.
+
+    Outputs:
+      - object | None: Webserver handle/thread-like object returned by the
+        webserver factory.
+
+    Notes:
+      - Exceptions raised by the underlying webserver factory are propagated
+        to the caller.
+
+    Example use:
+      In tests, monkeypatch the wrapper symbol without importing FastAPI at import time:
+        monkeypatch.setattr(foghorn.main, 'start_webserver', fake_start)
+    """
+
+    from .servers.webserver import start_webserver as _start_webserver
+
+    return _start_webserver(
+        stats_collector,
+        cfg,
+        log_buffer=log_buffer,
+        config_path=config_path,
+        runtime_state=runtime_state,
+        plugins=plugins,
+    )
+
+
+def _env_first(*keys: str) -> str | None:
+    """Brief: Return the first non-empty environment variable value.
+
+    Inputs:
+      - keys: Environment variable names to check in order.
+
+    Outputs:
+      - str | None: The first non-empty value, or None if none are set.
+    """
+
+    for key in keys:
+        val = os.environ.get(key)
+        if val:
+            return str(val)
+    return None
+
+
+def _format_bytes(num_bytes: int) -> str:
+    """Brief: Human-friendly bytes formatter.
+
+    Inputs:
+      - num_bytes: Size in bytes.
+
+    Outputs:
+      - str: Formatted size (e.g., '123B', '4.5KiB', '12.0MiB').
+
+    Example:
+      >>> _format_bytes(1024)
+      '1.0KiB'
+    """
+
+    units = ["B", "KiB", "MiB", "GiB", "TiB"]
+    size = float(max(0, num_bytes))
+    for unit in units:
+        if size < 1024.0 or unit == units[-1]:
+            if unit == "B":
+                return f"{int(size)}{unit}"
+            return f"{size:.1f}{unit}"
+        size /= 1024.0
+    return f"{int(num_bytes)}B"
+
+
+def _get_file_size_bytes(path: str) -> int | None:
+    """Brief: Best-effort file size lookup.
+
+    Inputs:
+      - path: File path.
+
+    Outputs:
+      - int | None: Size in bytes, or None if not found/unreadable.
+    """
+
+    try:
+        return int(os.stat(path).st_size)
+    except Exception:
+        return None
+
+
+def _detect_docker_container_id() -> str | None:
+    """Brief: Best-effort Docker container id detection.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - str | None: Container id (typically 12-64 hex chars), or None if not detected.
+
+    Notes:
+      - In Docker, HOSTNAME commonly equals the container id.
+      - On modern Docker, cgroup entries may not include the container id;
+        mountinfo parsing is used as a fallback.
+    """
+
+    candidate = os.environ.get("HOSTNAME")
+    if candidate and re.fullmatch(r"[0-9a-f]{12,64}", candidate):
+        return candidate
+
+    if not os.path.exists("/.dockerenv"):
+        return None
+    try:
+        with open("/proc/self/mountinfo", "r", encoding="utf-8") as f:
+            for line in f:
+                m = re.search(r"/docker/containers/([0-9a-f]{12,64})/", line)
+                if m:
+                    return m.group(1)
+    except (
+        Exception
+    ):  # pragma: nocover - best effort: mountinfo format/access varies by runtime and sandbox
+        pass
+
+    try:
+        with open("/proc/self/cgroup", "r", encoding="utf-8") as f:
+            for line in f:
+                m = re.search(r"docker[/-]([0-9a-f]{12,64})", line)
+                if m:
+                    return m.group(1)
+    except (
+        Exception
+    ):  # pragma: nocover - best effort: cgroup layout differs across container/cgroup versions
+        pass
+
+    return None
+
+
+def _log_startup_banner(logger: logging.Logger, *, config_path: str) -> None:
+    """Brief: Log startup metadata immediately after logging is configured.
+
+    Inputs:
+      - logger: Logger to write startup messages to.
+      - config_path: Path to the config file used for this run.
+
+    Outputs:
+      - None.
+    """
+    abs_cfg = os.path.abspath(config_path)
+    cfg_size = _get_file_size_bytes(abs_cfg)
+    sha256_hash = "unknown"
+    try:
+        digest = sha256()
+        with open(abs_cfg, "rb") as f:
+            for byte_block in iter(lambda: f.read(4096), b""):
+                digest.update(byte_block)
+        sha256_hash = digest.hexdigest()
+    except (
+        Exception
+    ):  # pragma: nocover - best effort: startup hash computation must not block process boot
+        pass
+    cfg_size_str = (
+        f"{cfg_size} bytes ({_format_bytes(cfg_size)})"
+        if cfg_size is not None
+        else "unknown"
+    )
+
+    hostname = socket.gethostname()
+    arch = platform.machine() or "unknown"
+    os_id = f"{platform.system()} {platform.release()}".strip()
+    py_ver = sys.version.split()[0] if sys.version else "unknown"
+    pid = os.getpid()
+
+    container_id = _detect_docker_container_id()
+    git_sha = _env_first("FOGHORN_GIT_SHA", "GIT_SHA")
+    build_id = _env_first(
+        "FOGHORN_BUILD_ID",
+        "BUILD_ID",
+        "FOGHORN_IMAGE_ID",
+        "IMAGE_ID",
+        "IMAGE_SHA",
+        "DOCKER_IMAGE_SHA",
+        "OCI_IMAGE_DIGEST",
+        "IMAGE_DIGEST",
+        "CONTAINER_IMAGE",
+    )
+
+    logger.info("Starting Foghorn")
+    logger.info("  version=%s", FOGHORN_VERSION)
+    logger.info("  config=%s (size=%s)", abs_cfg, cfg_size_str)
+    logger.info("  config_sha256=%s", sha256_hash)
+    logger.info("  hostname=%s", hostname)
+    logger.info("  arch=%s", arch)
+    logger.info("  os=%s", os_id)
+    logger.info("  python=%s", py_ver)
+    logger.info("  pid=%d", pid)
+    if container_id:
+        logger.info(
+            "  container_id=%s",
+            f"{container_id[:12]}[{container_id[12:]}]",
+        )
+    if build_id:
+        logger.info("  image_or_build_id=%s", build_id)
+    if git_sha:
+        logger.info("  git_sha=%s", git_sha)
+
+
+def _build_effective_persistence_cfg(
+    *,
+    cfg: dict,
+    stats_cfg: dict,
+) -> dict[str, object]:
+    """Brief: Compute effective stats persistence config from logging.backends.
+
+    Inputs:
+      - cfg: Parsed root configuration mapping.
+      - stats_cfg: Parsed stats configuration mapping.
+
+    Outputs:
+      - dict[str, object]: Mapping suitable for load_stats_store_backend().
+    """
+
+    logging_block = cfg.get("logging") or {}
+    if not isinstance(logging_block, dict):
+        return {}
+
+    backends_cfg = logging_block.get("backends") or []
+    if not isinstance(backends_cfg, list) or not backends_cfg:
+        return {}
+
+    async_default = bool(logging_block.get("async", True))
+    retention_cfg = logging_block.get("query_log_retention")
+    retention_max_records = None
+    retention_days = None
+    retention_max_bytes = None
+    retention_prune_interval_seconds = None
+    retention_prune_every_n_inserts = None
+    if isinstance(retention_cfg, dict):
+        retention_max_records = retention_cfg.get("max_records")
+        retention_days = retention_cfg.get("days")
+        retention_max_bytes = retention_cfg.get("max_bytes")
+        retention_prune_interval_seconds = retention_cfg.get("prune_interval_seconds")
+        retention_prune_every_n_inserts = retention_cfg.get("prune_every_n_inserts")
+    if retention_max_records is None:
+        retention_max_records = logging_block.get("query_log_retention_max_records")
+    if retention_days is None:
+        retention_days = logging_block.get("query_log_retention_days")
+    if retention_max_bytes is None:
+        retention_max_bytes = logging_block.get("query_log_retention_max_bytes")
+    if retention_prune_interval_seconds is None:
+        retention_prune_interval_seconds = logging_block.get(
+            "query_log_retention_prune_interval_seconds"
+        )
+    if retention_prune_every_n_inserts is None:
+        retention_prune_every_n_inserts = logging_block.get(
+            "query_log_retention_prune_every_n_inserts"
+        )
+    global_max_logging_queue = logging_block.get("max_logging_queue")
+
+    primary_hint = stats_cfg.get("source_backend")
+    primary_backend = str(primary_hint).strip() if isinstance(primary_hint, str) else ""
+
+    normalized_backends: list[dict[str, object]] = []
+    for entry in backends_cfg:
+        if not isinstance(entry, dict):
+            continue
+
+        backend_name = entry.get("backend")
+        if not backend_name:
+            continue
+
+        raw_config = entry.get("config")
+        conf: dict[str, object]
+        if isinstance(raw_config, dict):
+            conf = dict(raw_config)
+        else:
+            # Accept a flattened layout where backend-specific options
+            # live alongside id/backend.
+            conf = {
+                k: v
+                for k, v in entry.items()
+                if k not in {"id", "name", "backend", "config"}
+            }
+
+        # Propagate the global logging.async flag to backends that do
+        # not opt out explicitly via async_logging.
+        conf.setdefault("async_logging", async_default)
+        if global_max_logging_queue is not None:
+            conf.setdefault("max_logging_queue", global_max_logging_queue)
+        if retention_max_records is not None:
+            conf.setdefault("retention_max_records", retention_max_records)
+        if retention_days is not None:
+            conf.setdefault("retention_days", retention_days)
+        if retention_max_bytes is not None:
+            conf.setdefault("retention_max_bytes", retention_max_bytes)
+        if retention_prune_interval_seconds is not None:
+            conf.setdefault(
+                "retention_prune_interval_seconds",
+                retention_prune_interval_seconds,
+            )
+        if retention_prune_every_n_inserts is not None:
+            conf.setdefault(
+                "retention_prune_every_n_inserts",
+                retention_prune_every_n_inserts,
+            )
+
+        backend_entry: dict[str, object] = {
+            "backend": backend_name,
+            "config": conf,
+        }
+
+        backend_id = entry.get("id") or entry.get("name")
+        if isinstance(backend_id, str) and backend_id.strip():
+            backend_entry["name"] = backend_id
+
+        normalized_backends.append(backend_entry)
+
+    if not normalized_backends:
+        return {}
+
+    effective: dict[str, object] = {"backends": normalized_backends}
+    if primary_backend:
+        effective["primary_backend"] = primary_backend
+    return effective
+
+
+def _is_truthy_env(val: Optional[str]) -> bool:
+    """Return True if an environment variable string represents a truthy value.
+
+    Inputs:
+        val: Environment variable value or None.
+
+    Outputs:
+        bool: True for common truthy strings (1, true, yes, on), else False.
+    """
+
+    if val is None:
+        return False
+    return str(val).strip().lower() in {
+        "1",
+        "true",
+        "t",
+        "yes",
+        "y",
+        "on",
+    }  # pragma: no cover - best effort
+
+
+def _initialize_statistics_subsystem(
+    *,
+    cfg: dict,
+    logging_cfg: dict,
+    args: argparse.Namespace,
+    logger: logging.Logger,
+) -> tuple[Optional[StatsCollector], Optional[StatsReporter], Optional[BaseStatsStore]]:
+    """Brief: Initialize stats collector/reporter/store from configuration.
+
+    Inputs:
+      - cfg: Parsed root configuration mapping.
+      - logging_cfg: Parsed logging configuration mapping.
+      - args: Parsed CLI args.
+      - logger: Logger for startup diagnostics.
+
+    Outputs:
+      - tuple[Optional[StatsCollector], Optional[StatsReporter], Optional[BaseStatsStore]]:
+        Initialized stats components (None when stats are disabled/unavailable).
+    """
+
+    # Initialize statistics collection if enabled (v2: root 'stats').
+    stats_cfg = cfg.get("stats", {}) or {}
+    if not isinstance(stats_cfg, dict):
+        stats_cfg = {}
+    stats_enabled = bool(stats_cfg.get("enabled", True))
+
+    # Global toggle to keep only the raw query_log in persistence and avoid
+    # mirroring aggregate counters into the backend.
+    logging_query_log_only = bool(logging_cfg.get("query_log_only", False))
+    query_log_sample_rate: object = logging_cfg.get("query_log_sample_rate", 1.0)
+    query_log_sampling_cfg = logging_cfg.get("query_log_sampling")
+    if isinstance(query_log_sampling_cfg, dict):
+        if query_log_sampling_cfg.get("enabled") is False:
+            query_log_sample_rate = 0.0
+        sample_rate_obj = query_log_sampling_cfg.get("sample_rate")
+        if sample_rate_obj is None:
+            sample_rate_obj = query_log_sampling_cfg.get("rate")
+        if sample_rate_obj is not None:
+            query_log_sample_rate = sample_rate_obj
+
+    query_log_dedupe_window_seconds: object = logging_cfg.get(
+        "query_log_dedupe_window_seconds",
+        0.0,
+    )
+    query_log_dedupe_max_entries: object = logging_cfg.get(
+        "query_log_dedupe_max_entries",
+        50000,
+    )
+    query_log_dedupe_cfg = logging_cfg.get("query_log_dedupe")
+    if isinstance(query_log_dedupe_cfg, dict):
+        window_obj = query_log_dedupe_cfg.get("window_seconds")
+        if window_obj is not None:
+            query_log_dedupe_window_seconds = window_obj
+        max_entries_obj = query_log_dedupe_cfg.get("max_entries")
+        if max_entries_obj is not None:
+            query_log_dedupe_max_entries = max_entries_obj
+
+    stats_collector = None
+    stats_reporter = None
+    stats_persistence_store = None
+
+    if stats_enabled:
+        # Optional persistence store; the store is responsible for maintaining
+        # long-lived aggregate counts and a raw query_log. The in-memory
+        # StatsCollector remains the live source for periodic logging and web
+        # API snapshots.
+        stats_persistence_store = None
+
+        # When query_log_only is enabled globally, skip background warm-load and
+        # rebuild passes so that the persistence store is only used for
+        # append-only query_log writes.
+        logging_only_effective = bool(logging_query_log_only)
+
+        # Allow force_rebuild to be controlled from three sources, in
+        # increasing precedence order:
+        #   1) statistics.force_rebuild (root-level flag)
+        #   2) FOGHORN_FORCE_REBUILD
+        #   3) --rebuild (highest precedence)
+        force_rebuild_root = bool(stats_cfg.get("force_rebuild", False))
+        force_rebuild_env = _is_truthy_env(os.getenv("FOGHORN_FORCE_REBUILD"))
+        force_rebuild = bool(args.rebuild or force_rebuild_env or force_rebuild_root)
+
+        try:
+            # Delegate backend construction (including multi-backend setups) to
+            # the querylog backend loader. This uses logging.backends and
+            # stats.source_backend exclusively.
+            backend_cfg: dict[str, object] = _build_effective_persistence_cfg(
+                cfg=cfg,
+                stats_cfg=stats_cfg,
+            )
+            if backend_cfg:
+                stats_persistence_store = load_stats_store_backend(backend_cfg)
+            else:
+                stats_persistence_store = None
+
+            if stats_persistence_store is None:
+                logger.warn(
+                    "Statistics persistence not configured; running in memory-only mode",
+                )
+            else:
+                logger.info(
+                    "Started statistics backend %s",
+                    stats_persistence_store.__class__.__name__,
+                )
+
+                # Optionally rebuild counts from the query_log when requested or
+                # when counts are empty but query_log has rows. When
+                # statistics.logging_only or statistics.query_log_only is
+                # enabled, skip this background rebuild so that the persistence
+                # store is only exercised via insert-style operations
+                # (query_log appends and, in logging_only mode, counter
+                # increments).
+                if not logging_only_effective:
+                    try:
+                        stats_persistence_store.rebuild_counts_if_needed(
+                            force_rebuild=force_rebuild, logger_obj=logger
+                        )
+                    except (
+                        Exception
+                    ) as exc:  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
+                        logger.error(
+                            "Failed to rebuild statistics counts from query_log: %s",
+                            exc,
+                            exc_info=True,
+                        )
+        except (
+            Exception
+        ) as exc:  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
+            logger.error(
+                "Failed to initialize statistics persistence: %s; continuing without persistence",
+                exc,
+                exc_info=True,
+            )
+            stats_persistence_store = None
+
+        # Initialize in-memory collector, wiring in the persistence store when present.
+        ignore_cfg = stats_cfg.get("ignore", {}) or {}
+        ignore_top_clients = list(ignore_cfg.get("top_clients", []) or [])
+        ignore_top_domains = list(ignore_cfg.get("top_domains", []) or [])
+        ignore_top_subdomains = list(ignore_cfg.get("top_subdomains", []) or [])
+        include_in_stats = bool(ignore_cfg.get("include_in_stats", True))
+        domains_mode = str(ignore_cfg.get("top_domains_mode", "exact")).lower()
+        subdomains_mode = str(ignore_cfg.get("top_subdomains_mode", "exact")).lower()
+        ignore_domains_as_suffix = domains_mode == "suffix"
+        ignore_subdomains_as_suffix = subdomains_mode == "suffix"
+        ignore_single_host = bool(ignore_cfg.get("ignore_single_host", False))
+
+        stats_collector = StatsCollector(
+            track_uniques=stats_cfg.get("track_uniques", True),
+            include_qtype_breakdown=stats_cfg.get("include_qtype_breakdown", True),
+            # Enable top clients/domains and latency by default when statistics
+            # are enabled, while still allowing explicit False in config to
+            # disable them.
+            include_top_clients=bool(stats_cfg.get("include_top_clients", True)),
+            include_top_domains=bool(stats_cfg.get("include_top_domains", True)),
+            top_n=int(stats_cfg.get("top_n", 10)),
+            track_latency=bool(stats_cfg.get("track_latency", True)),
+            stats_store=stats_persistence_store,
+            ignore_top_clients=ignore_top_clients,
+            ignore_top_domains=ignore_top_domains,
+            ignore_top_subdomains=ignore_top_subdomains,
+            ignore_domains_as_suffix=ignore_domains_as_suffix,
+            ignore_subdomains_as_suffix=ignore_subdomains_as_suffix,
+            ignore_single_host=ignore_single_host,
+            include_ignored_in_stats=include_in_stats,
+            logging_only=logging_only_effective,
+            query_log_only=logging_query_log_only,
+            query_log_sample_rate=query_log_sample_rate,
+            query_log_dedupe_window_seconds=query_log_dedupe_window_seconds,
+            query_log_dedupe_max_entries=query_log_dedupe_max_entries,
+        )
+
+        # Best-effort warm-load of persisted aggregate counters on startup.
+        if not logging_only_effective:
+            try:
+                stats_collector.warm_load_from_store()
+                logger.info("Started statistics warm-load")
+            except (
+                Exception
+            ) as exc:  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
+                logger.error(
+                    "Failed to warm-load statistics from SQLite store: %s",
+                    exc,
+                    exc_info=True,
+                )
+
+        stats_reporter = StatsReporter(
+            collector=stats_collector,
+            # Default statistics interval is 300s (5 minutes) when not overridden in config.
+            interval_seconds=int(stats_cfg.get("interval_seconds", 300)),
+            reset_on_log=stats_cfg.get("reset_on_log", False),
+            log_level=stats_cfg.get("log_level", "info"),
+            persistence_store=stats_persistence_store,
+        )
+        stats_reporter.start()
+        logger.info(
+            "Started statistics collection (interval=%ds)",
+            stats_reporter.interval_seconds,
+        )
+
+    return stats_collector, stats_reporter, stats_persistence_store
+
+
+def _initialize_runtime_snapshot(
+    *,
+    logger: logging.Logger,
+    cfg: dict,
+    plugins: list[BasePlugin],
+    upstreams: list,
+    upstream_backups: list,
+    upstream_health,
+    timeout_ms: int,
+    upstream_strategy: str,
+    upstream_max_concurrent: int,
+    resolver_mode: str,
+    recursive_max_depth: int,
+    recursive_timeout_ms: int,
+    recursive_per_try_timeout_ms: int,
+    dnssec_mode: str,
+    dnssec_validation: str,
+    edns_payload: int,
+    enable_ede: bool,
+    forward_local: bool,
+    search_domain: str = "",
+    qualify_single_label: bool = True,
+    qualify_non_proper_tld: object = False,
+    non_proper_tld_mode: str = "suffix",
+    min_cache_ttl: int = 0,
+    stats_collector: Optional[StatsCollector] = None,
+    cache_plugin: object | None = None,
+    udp_cfg: dict = None,  # type: ignore[assignment]
+    axfr_enabled: bool = False,
+    axfr_allow_clients: list[str],
+    axfr_max_zone_rrs: int | None,
+    axfr_max_concurrent_transfers: int,
+    axfr_rate_limit_per_client_per_second: float,
+    axfr_rate_limit_burst: float,
+    axfr_max_transfer_rate_bytes_per_second: int | None,
+    axfr_message_max_bytes: int,
+    axfr_require_tsig: bool,
+    axfr_tsig_keys: list[dict[str, str]],
+    cfg_path: str,
+    args: argparse.Namespace,
+) -> None:
+    """Brief: Initialize process-wide runtime snapshot, best effort.
+
+    Inputs:
+      - logger: Logger for debug output on failure.
+      - cfg: Parsed root configuration mapping.
+      - plugins: Active plugin instances.
+      - upstreams: Normalized primary upstream list.
+      - upstream_backups: Normalized backup upstream list.
+      - upstream_health: Parsed upstream health config.
+      - timeout_ms: Effective upstream timeout.
+      - upstream_strategy: Effective upstream strategy.
+      - upstream_max_concurrent: Effective max concurrent upstream requests.
+      - resolver_mode: Effective resolver mode.
+      - recursive_max_depth: Recursive resolver max depth.
+      - recursive_timeout_ms: Recursive resolver timeout.
+      - recursive_per_try_timeout_ms: Per-try recursive timeout.
+      - dnssec_mode: DNSSEC mode.
+      - dnssec_validation: DNSSEC validation mode.
+      - edns_payload: Effective EDNS UDP payload size.
+      - enable_ede: EDE feature toggle.
+      - forward_local: .local forwarding toggle.
+      - min_cache_ttl: Cache TTL floor.
+      - stats_collector: Stats collector instance or None.
+      - cache_plugin: Cache plugin instance or None.
+      - udp_cfg: UDP listener config.
+      - axfr_enabled: AXFR enable flag.
+      - axfr_allow_clients: AXFR allowlist client entries.
+      - axfr_max_zone_rrs: Optional max RR count per AXFR/IXFR zone transfer.
+      - axfr_max_concurrent_transfers: Max in-flight AXFR/IXFR transfers.
+      - axfr_rate_limit_per_client_per_second: Per-client transfer request rate.
+      - axfr_rate_limit_burst: Per-client AXFR token bucket burst size.
+      - axfr_max_transfer_rate_bytes_per_second: Optional transfer pacing cap.
+      - axfr_message_max_bytes: Max packed DNS message bytes per transfer frame.
+      - axfr_require_tsig: Whether inbound AXFR/IXFR requests must use TSIG.
+      - axfr_tsig_keys: Configured TSIG keys for AXFR/IXFR auth.
+      - cfg_path: Active config file path.
+      - args: Parsed CLI args.
+
+    Outputs:
+      - None.
+    """
+
+    # Initialize the in-process runtime snapshot before starting any listeners
+    # so that shared resolver paths (UDP/TCP/DoT/DoH) can consult a consistent,
+    # per-request configuration snapshot.
+    try:
+        import time as _time
+
+        udp_max_response_bytes = None
+        try:
+            raw_udp_max = (
+                udp_cfg.get("max_response_bytes") if isinstance(udp_cfg, dict) else None
+            )
+            if raw_udp_max is not None:
+                udp_max_response_bytes = int(raw_udp_max)
+        except Exception:
+            udp_max_response_bytes = None
+
+        # EDNS UDP payload advertised to clients. Enforce both a minimum and a
+        # safety ceiling to avoid misconfiguration advertising huge buffers.
+        # RFC 6891 suggests that 4096 is a practical maximum for most deployments.
+        edns_min = 512
+        edns_max = 4096
+        configured_edns = int(edns_payload)
+        if configured_edns > edns_max:
+            logger.warning(
+                "Configured DNSSEC/EDNS udp_payload_size=%d exceeds cap=%d; clamping",
+                configured_edns,
+                edns_max,
+            )
+        effective_edns = max(edns_min, min(configured_edns, edns_max))
+
+        snapshot = RuntimeSnapshot(
+            cfg=cfg,
+            plugins=list(plugins or []),
+            upstream_addrs=list(upstreams or []),
+            upstream_backup_addrs=list(upstream_backups or []),
+            upstream_health=upstream_health,
+            timeout_ms=int(timeout_ms),
+            upstream_strategy=str(upstream_strategy),
+            upstream_max_concurrent=int(upstream_max_concurrent),
+            resolver_mode=str(resolver_mode),
+            recursive_max_depth=int(recursive_max_depth),
+            recursive_timeout_ms=int(recursive_timeout_ms),
+            recursive_per_try_timeout_ms=int(recursive_per_try_timeout_ms),
+            dnssec_mode=str(dnssec_mode),
+            dnssec_validation=str(dnssec_validation),
+            edns_udp_payload=int(effective_edns),
+            enable_ede=bool(enable_ede),
+            forward_local=bool(forward_local),
+            min_cache_ttl=int(min_cache_ttl),
+            # Cache prefetch is not config-plumbed yet; keep defaults.
+            cache_prefetch_enabled=False,
+            cache_prefetch_min_ttl=0,
+            cache_prefetch_max_ttl=0,
+            cache_prefetch_refresh_before_expiry=0.0,
+            cache_prefetch_allow_stale_after_expiry=0.0,
+            stats_collector=stats_collector,
+            cache_plugin=cache_plugin,
+            udp_max_response_bytes=udp_max_response_bytes,
+            search_domain=str(search_domain),
+            qualify_single_label=bool(qualify_single_label),
+            qualify_non_proper_tld=qualify_non_proper_tld,
+            non_proper_tld_mode=str(non_proper_tld_mode),
+            axfr_enabled=bool(axfr_enabled),
+            axfr_allow_clients=list(axfr_allow_clients or []),
+            axfr_max_zone_rrs=(
+                int(axfr_max_zone_rrs) if axfr_max_zone_rrs is not None else None
+            ),
+            axfr_max_concurrent_transfers=max(1, int(axfr_max_concurrent_transfers)),
+            axfr_rate_limit_per_client_per_second=max(
+                0.0, float(axfr_rate_limit_per_client_per_second)
+            ),
+            axfr_rate_limit_burst=max(1.0, float(axfr_rate_limit_burst)),
+            axfr_max_transfer_rate_bytes_per_second=(
+                int(axfr_max_transfer_rate_bytes_per_second)
+                if axfr_max_transfer_rate_bytes_per_second is not None
+                else None
+            ),
+            axfr_message_max_bytes=max(512, min(65535, int(axfr_message_max_bytes))),
+            axfr_require_tsig=bool(axfr_require_tsig),
+            axfr_tsig_keys=list(axfr_tsig_keys or []),
+            generation=1,
+            applied_at_epoch=_time.time(),
+        )
+        initialize_runtime(
+            snapshot=snapshot,
+            config_path=cfg_path,
+            cli_vars=list(getattr(args, "var", []) or []),
+            unknown_keys_policy=str(getattr(args, "config_extras", "error") or "error"),
+        )
+    except Exception:
+        logger.error("Failed to initialize runtime snapshot", exc_info=True)
+        raise
+
+
+def _configure_dnssec_validation_resolver(
+    *,
+    logger: logging.Logger,
+    dnssec_mode: str,
+    dnssec_validation: str,
+    resolver_mode: str,
+    upstreams: list,
+) -> bool:
+    """Brief: Configure DNSSEC validator resolver routing.
+
+    Inputs:
+      - logger: Logger for dependency/mode diagnostics.
+      - dnssec_mode: Effective DNSSEC mode.
+      - dnssec_validation: DNSSEC validation strategy.
+      - resolver_mode: Effective resolver mode.
+      - upstreams: Normalized forward upstreams.
+
+    Outputs:
+      - bool: True when startup should continue; False on fatal dependency errors.
+    """
+
+    if dnssec_mode == "validate" and dnssec_validation in {"local", "local_extended"}:
+        try:
+            from foghorn.dnssec.dnssec_validate import (
+                configure_dnssec_resolver as _configure_dnssec_resolver,
+            )
+        except Exception as exc:
+            logger.error(
+                "DNSSEC validation is enabled (dnssec.mode=validate, dnssec.validation=%s) "
+                "but required dependencies are missing (%s). Install dnspython+cryptography or disable DNSSEC validation.",
+                dnssec_validation,
+                exc,
+            )
+            return False
+
+        if resolver_mode == "forward":
+            upstream_hosts = [
+                str(u["host"]) for u in upstreams if isinstance(u, dict) and "host" in u
+            ]
+            _configure_dnssec_resolver(upstream_hosts or None)
+        else:
+            # Empty list is a sentinel telling foghorn.dnssec.dnssec_validate to use
+            # RecursiveResolver for all validation lookups.
+            _configure_dnssec_resolver([])
+    else:
+        # DNSSEC validation is not using local lookups. Avoid importing dnspython
+        # at startup so minimal/headless builds can omit it.
+        try:
+            from foghorn.dnssec.dnssec_validate import (
+                configure_dnssec_resolver as _configure_dnssec_resolver,
+            )
+
+            _configure_dnssec_resolver(None)
+        except (
+            Exception
+        ):  # pragma: nocover - optional dependency path; safe to ignore outside local DNSSEC validation
+            pass
+
+    return True
+
+
+def _install_signal_handler(
+    *,
+    sig,
+    handler,
+    logger: logging.Logger,
+    success_log: str,
+    failure_log: str,
+) -> None:
+    """Brief: Install a signal handler with consistent logging.
+
+    Inputs:
+      - sig: Signal constant from signal module.
+      - handler: Callable signal handler.
+      - logger: Logger for success/failure messages.
+      - success_log: Debug message when handler installation succeeds.
+      - failure_log: Warning message when installation fails.
+
+    Outputs:
+      - None.
+    """
+
+    try:
+        signal.signal(sig, handler)
+        logger.debug(success_log)
+    except Exception:
+        logger.warning(failure_log)
 
 
 if __name__ == "__main__":

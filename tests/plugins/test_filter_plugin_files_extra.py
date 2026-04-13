@@ -53,8 +53,8 @@ def test_domains_files_allow_and_block(tmp_path):
     """
     allowf = tmp_path / "allows.txt"
     blockf = tmp_path / "blocks.txt"
-    allowf.write_text("ok.com\n")
-    blockf.write_text("bad.com\n")
+    allowf.write_text("OK.COM.\n")
+    blockf.write_text("BAD.COM.\n")
 
     p = Filter(
         db_path=str(tmp_path / "bl.db"),
@@ -102,8 +102,8 @@ def test_load_list_from_file_json_error_and_missing_domain(tmp_path, caplog):
         p.load_list_from_file(str(f), mode="allow")
         # Normalized domains should be allowed despite noisy lines.
         assert p.is_allowed("ads.example") is True
-        # Token with extra content after '^' is ignored, so default deny applies.
-        assert p.is_allowed("ads2.example") is False
+        # AdGuard options after '^' should still load the domain token.
+        assert p.is_allowed("ads2.example") is True
 
 
 def test_patterns_and_keywords_files(tmp_path, caplog):
@@ -221,6 +221,73 @@ def test_load_list_from_file_adguard_token_blocks_subdomains(tmp_path):
         assert p.is_allowed("sub.bad.example") is False
         # Unrelated domains fall back to default allow.
         assert p.is_allowed("other.com") is True
+
+
+def test_load_list_from_file_hosts_format_lines_are_loaded(tmp_path):
+    """Brief: Hosts-style list lines load host tokens as block domains.
+
+    Inputs:
+      - tmp_path: temporary directory.
+
+    Outputs:
+      - None: Asserts hostnames from IP-prefixed lines are inserted and denied.
+    """
+    db = tmp_path / "bl.db"
+    p = Filter(db_path=str(db), default="allow")
+    p.setup()
+
+    f = tmp_path / "hosts_domains.txt"
+    f.write_text(
+        "\n".join(
+            [
+                "0.0.0.0 ads.example tracker.example",
+                "127.0.0.1 loop.example # inline comment",
+                "::1 v6.example",
+            ]
+        )
+    )
+
+    with closing(p.conn):
+        p.load_list_from_file(str(f), mode="deny")
+        assert p.is_allowed("ads.example") is False
+        assert p.is_allowed("tracker.example") is False
+        assert p.is_allowed("loop.example") is False
+        assert p.is_allowed("v6.example") is False
+        assert p.is_allowed("unrelated.example") is True
+
+
+def test_load_list_from_file_warns_only_when_no_supported_entries(tmp_path, caplog):
+    """Brief: Unsupported-format warning appears only when nothing can be loaded.
+
+    Inputs:
+      - tmp_path/caplog fixtures.
+
+    Outputs:
+      - None: Asserts warning for unsupported-only files and no warning for mixed files.
+    """
+    db = tmp_path / "bl.db"
+    p = Filter(db_path=str(db), default="allow")
+    p.setup()
+
+    unsupported_only = tmp_path / "unsupported_only.txt"
+    unsupported_only.write_text("\n".join(["not a supported entry", "bad|token"]))
+
+    mixed = tmp_path / "mixed.txt"
+    mixed.write_text("\n".join(["not a supported entry", "ok.example"]))
+
+    caplog.set_level("WARNING")
+    with closing(p.conn):
+        p.load_list_from_file(str(unsupported_only), mode="deny")
+        assert any(
+            "unsupported list format" in rec.getMessage() for rec in caplog.records
+        )
+
+        caplog.clear()
+        p.load_list_from_file(str(mixed), mode="deny")
+        assert not any(
+            "unsupported list format" in rec.getMessage() for rec in caplog.records
+        )
+        assert p.is_allowed("ok.example") is False
 
 
 def test_blocked_ips_files_csv_simple_and_jsonl(tmp_path):
@@ -346,8 +413,8 @@ def test_glob_expansion_for_new_files(tmp_path):
         assert p.pre_resolve("demo", QTYPE.A, b"", ctx).action == "deny"
 
 
-def test_missing_files_raise(tmp_path):
-    """Brief: setup() raises FileNotFoundError when a patterns file is missing.
+def test_missing_files_raise_when_strict_enabled(tmp_path):
+    """Brief: setup() raises FileNotFoundError when strict_file_loading is enabled.
 
     Inputs:
       - tmp_path: temporary directory for nonexistent patterns file.
@@ -358,12 +425,35 @@ def test_missing_files_raise(tmp_path):
     p = Filter(
         db_path=str(tmp_path / "bl.db"),
         blocked_patterns_files=[str(tmp_path / "nope.re")],
+        strict_file_loading=True,
     )
     with pytest.raises(FileNotFoundError):
         p.setup()
     # setup() may have opened the SQLite DB before failing; close defensively.
     if getattr(p, "conn", None) is not None:
         p.conn.close()
+
+
+def test_missing_files_are_skipped_when_not_strict(tmp_path):
+    """Brief: setup() skips missing files when strict_file_loading is disabled.
+
+    Inputs:
+      - tmp_path: temporary directory for nonexistent patterns file.
+
+    Outputs:
+      - None: Asserts setup succeeds and plugin remains usable.
+    """
+    p = Filter(
+        db_path=str(tmp_path / "bl_non_strict.db"),
+        blocked_patterns_files=[str(tmp_path / "nope.re")],
+        strict_file_loading=False,
+        default="allow",
+    )
+    p.setup()
+
+    with closing(p.conn):
+        ctx = PluginContext(client_ip="1.2.3.4")
+        assert p.pre_resolve("ok.example", QTYPE.A, b"", ctx).action == "skip"
 
 
 def test_expand_globs_fallback_to_os_path_exists(tmp_path, monkeypatch):

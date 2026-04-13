@@ -12,25 +12,36 @@ Outputs:
 from typing import Any
 
 import pytest
-from dnslib import A, NS, QTYPE, RCODE, RR, SOA, DNSRecord
+from dnslib import NS, QTYPE, RCODE, RR, SOA, A, DNSRecord
 
-from foghorn.plugins.cache.backends.foghorn_ttl import FoghornTTLCache
 import foghorn.servers.recursive_resolver as rr_mod
+from foghorn.plugins.cache.backends.foghorn_ttl import FoghornTTLCache
 from foghorn.servers.recursive_resolver import RecursiveResolver
 
 
-def _make_nxdomain_with_soa(qname: str) -> bytes:
+def _make_nxdomain_with_soa(
+    qname: str,
+    *,
+    txid: int | None = None,
+    qtype_name: str = "A",
+) -> bytes:
     """Brief: Helper to build NXDOMAIN response with SOA for qname.
 
     Inputs:
       - qname: Query name as text.
+      - txid: Optional transaction ID to copy into the response.
 
     Outputs:
       - Wire-format DNS response bytes with NXDOMAIN and SOA authority.
     """
 
-    q = DNSRecord.question(qname, "A")
+    q = DNSRecord.question(qname, qtype_name)
     r = q.reply()
+    if txid is not None:
+        try:
+            r.header.id = int(txid)
+        except Exception:  # pragma: no cover - defensive
+            pass
     r.header.rcode = RCODE.NXDOMAIN
     r.add_auth(
         RR(
@@ -143,6 +154,121 @@ def test_servers_default_root_hints_and_choose_initial_servers() -> None:
     servers = resolver._choose_initial_servers()
     assert servers
     assert all(isinstance(s, rr_mod._Server) for s in servers)
+
+
+def test_servers_extract_next_servers_ignores_out_of_bailiwick_glue() -> None:
+    """Brief: _extract_next_servers ignores out-of-bailiwick additional glue.
+
+    Inputs:
+      - None (synthetic referral response).
+
+    Outputs:
+      - Asserts that a referral for target.com does not accept glue for an
+        unrelated name like www.bank.com.
+    """
+
+    q = DNSRecord.question("target.com.", "NS")
+    r = q.reply()
+
+    r.add_auth(RR("target.com.", QTYPE.NS, rdata=NS("ns.evil.com."), ttl=300))
+
+    r.add_ar(RR("www.bank.com.", QTYPE.A, rdata=A("192.0.2.123"), ttl=300))
+    r.add_ar(RR("ns.evil.com.", QTYPE.A, rdata=A("192.0.2.200"), ttl=300))
+
+    resolver = RecursiveResolver(cache=FoghornTTLCache(), stats=None)
+    resolver._stage_qname_context = "target.com."
+
+    servers = resolver._extract_next_servers(DNSRecord.parse(r.pack()))
+    assert servers == []
+
+
+def test_servers_resolve_skips_mismatched_txid_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Brief: resolve() discards responses with mismatched transaction IDs.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - Asserts a mismatched-TXID response is ignored and resolution fails with
+        SERVFAIL when no other valid responses are available.
+    """
+
+    root_ip = "192.0.2.1"
+
+    def fake_choose_initial_servers(self):  # noqa: D401
+        """Return a single synthetic root server."""
+
+        return [rr_mod._Server(root_ip, 53)]
+
+    monkeypatch.setattr(
+        RecursiveResolver, "_choose_initial_servers", fake_choose_initial_servers
+    )
+
+    def fake_udp_query(
+        host: str, port: int, wire: bytes, timeout_ms: int = 0
+    ) -> bytes:  # noqa: D401, ANN001
+        """Return a response with the wrong TXID."""
+
+        q = DNSRecord.parse(wire)
+        r = q.reply()
+        r.header.id = (q.header.id + 1) % 65536
+        return r.pack()
+
+    monkeypatch.setattr(rr_mod, "udp_query", fake_udp_query)
+
+    resolver = RecursiveResolver(cache=FoghornTTLCache(), stats=None, max_depth=2)
+    req = DNSRecord.question("example.com.", "A")
+    wire, _upstream = resolver.resolve(req)
+
+    resp = DNSRecord.parse(wire)
+    assert resp.header.rcode == RCODE.SERVFAIL
+
+
+def test_servers_resolve_skips_mismatched_question_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Brief: resolve() discards responses whose question does not match.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - Asserts a mismatched-question response is ignored and resolution fails
+        with SERVFAIL when no other valid responses are available.
+    """
+
+    root_ip = "192.0.2.1"
+
+    def fake_choose_initial_servers(self):  # noqa: D401
+        """Return a single synthetic root server."""
+
+        return [rr_mod._Server(root_ip, 53)]
+
+    monkeypatch.setattr(
+        RecursiveResolver, "_choose_initial_servers", fake_choose_initial_servers
+    )
+
+    def fake_udp_query(
+        host: str, port: int, wire: bytes, timeout_ms: int = 0
+    ) -> bytes:  # noqa: D401, ANN001
+        """Return a response echoing a different question."""
+
+        q = DNSRecord.parse(wire)
+        q0 = q.questions[0]
+        r = DNSRecord.question("other.example.", QTYPE[q0.qtype]).reply()
+        r.header.id = q.header.id
+        return r.pack()
+
+    monkeypatch.setattr(rr_mod, "udp_query", fake_udp_query)
+
+    resolver = RecursiveResolver(cache=FoghornTTLCache(), stats=None, max_depth=2)
+    req = DNSRecord.question("example.com.", "A")
+    wire, _upstream = resolver.resolve(req)
+
+    resp = DNSRecord.parse(wire)
+    assert resp.header.rcode == RCODE.SERVFAIL
 
 
 def test_servers_query_single_udp_and_tcp_flow(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -267,7 +393,11 @@ def test_servers_recursive_resolver_positive_referral_chain(
             return r.pack()
 
         # Unexpected host: treat as NXDOMAIN to fail clearly in tests.
-        return _make_nxdomain_with_soa(qname)
+        return _make_nxdomain_with_soa(
+            qname,
+            txid=q.header.id,
+            qtype_name=QTYPE[q.questions[0].qtype],
+        )
 
     monkeypatch.setattr(rr_mod, "udp_query", fake_udp_query)
 

@@ -17,7 +17,7 @@ Typical use cases:
 - Verifying application retry and failover logic before exposing them to real upstream failures.
 - Testing monitoring and alerting systems that should detect intermittent or partial DNS outages.
 
-The plugin is **off by default** unless you configure BasePlugin `targets` / `targets_ignore`. If no client targets are set, FlakyServer acts as a no-op and never triggers.
+The plugin is **off by default** unless you configure BasePlugin `targets` (for example `targets.ips` or `targets.ignore_ips`). If no client targets are set, FlakyServer acts as a no-op and never triggers.
 
 ## Basic configuration
 
@@ -26,12 +26,12 @@ plugins:
   - id: flaky-lab
     type: flaky_server
     hooks:
-      pre_resolve:  { priority: 15 }
-      post_resolve: { priority: 15 }
+      priority: 15
     config:
       # Only affect lab clients
       targets:
-        - 192.0.2.0/24
+        ips:
+          - 192.0.2.0/24
 
       # Simple behaviour: ~10% SERVFAIL, ~5% NXDOMAIN on any qtype
       servfail_percent: 10.0
@@ -45,20 +45,20 @@ plugins:
   - id: flaky-integration
     type: flaky_server
     hooks:
-      pre_resolve:  { priority: 15 }
-      post_resolve: { priority: 15 }
+      priority: 15
     config:
       # BasePlugin targeting
       targets:
-        - 192.0.2.0/24
-        - 2001:db8:dead:beef::/64
-      targets_ignore:
-        - 192.0.2.10/32
-      targets_listener: insecure          # only UDP/TCP, not DoT/DoH
-      targets_domains:
-        - test.example
-      targets_domains_mode: suffix
-      target_qtypes: [ 'A', 'AAAA', 'MX' ]  # base-level qtype filter
+        ips:
+          - 192.0.2.0/24
+          - 2001:db8:dead:beef::/64
+        ignore_ips:
+          - 192.0.2.10/32
+        listeners: insecure          # only UDP/TCP, not DoT/DoH
+        domains:
+          - test.example
+        domains_mode: suffix
+        qtypes: [ 'A', 'AAAA', 'MX' ]  # base-level qtype filter
 
       # BasePlugin logging
       logging:
@@ -132,9 +132,9 @@ independent Bernoulli draws per query/response.
 ### Behaviour notes
 
 - FlakyServer only runs when:
-  - BasePlugin client targeting passes (`targets`, `targets_ignore`, etc.); **and**
-  - at least one of `targets` / `targets_ignore` is configured (otherwise it is a no-op);
-  - and the qtype matches both BasePlugin `target_qtypes` and
+  - BasePlugin client targeting passes (`targets.ips`/`targets.ignore_ips`, etc.); **and**
+  - at least one of `targets.ips` / `targets.ignore_ips` is configured (otherwise it is a no-op);
+  - and the qtype matches both BasePlugin `targets.qtypes` and
     FlakyServer `apply_to_qtypes`.
 - In `pre_resolve`, decision order is:
   1. Timeouts (`timeout_percent`) – drop query.
@@ -147,5 +147,5 @@ independent Bernoulli draws per query/response.
 
 ### Common BasePlugin options
 
-FlakyServer supports all standard base options (`targets*`, `target_qtypes`,
-`logging`, etc.) as shown in the full configuration example above.
+FlakyServer supports all standard base options via the nested `targets` block
+and per-plugin `logging`, as shown in the full configuration example above.

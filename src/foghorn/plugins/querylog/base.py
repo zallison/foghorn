@@ -17,11 +17,13 @@ scripts) can remain backend-agnostic.
 from __future__ import annotations
 
 import logging
+import math
 import queue
 import threading
+import time
 from typing import Any, Dict, Optional, Tuple
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 
 
 class StatsStoreBackendConfig(BaseModel):
@@ -30,7 +32,8 @@ class StatsStoreBackendConfig(BaseModel):
     Inputs (constructor fields):
       - name: Optional logical instance name used to distinguish multiple
         backends of the same type (for example, "primary", "analytics"). When
-        omitted, a default name is derived from the backend alias.
+        omitted, this field remains None (any default selection behavior is
+        handled by higher-level loader logic).
       - backend: String identifier for the backend implementation. This may be
         a short alias (for example, "sqlite", "mysql", "redis", "mongo") or a
         fully-qualified dotted import path to a concrete backend class.
@@ -55,8 +58,7 @@ class StatsStoreBackendConfig(BaseModel):
         description="Backend-specific configuration options",
     )
 
-    class Config:
-        extra = "allow"
+    model_config = ConfigDict(extra="allow")
 
 
 class BaseStatsStore:
@@ -111,13 +113,43 @@ class BaseStatsStore:
 
         Outputs:
           - None; ensures ``self._op_queue`` and the worker thread exist.
+
+        Notes:
+          - The queue is intentionally bounded by ``max_logging_queue`` to avoid
+            unbounded memory growth under sustained write pressure.
+          - When ``max_logging_queue`` is <= 0, the queue is treated as
+            unbounded (stdlib queue maxsize=0 semantics).
         """
 
         if getattr(self, "_op_queue", None) is not None:
             return
 
-        q: "queue.Queue[tuple[str, tuple[Any, ...], dict[str, Any]]]" = queue.Queue()
+        # Default queue capacity when backends do not override it.
+        max_q = 1024 * 64  # 64k
+        try:
+            max_q_obj = getattr(self, "_max_logging_queue", None)
+            if max_q_obj is None:
+                max_q_obj = getattr(self, "max_logging_queue", None)
+            if max_q_obj is not None:
+                max_q = int(max_q_obj)
+        except Exception:
+            max_q = 1024 * 64
+
+        # maxsize=0 in queue.Queue means unbounded.
+        maxsize = max(0, int(max_q))
+
+        q: "queue.Queue[tuple[str, tuple[Any, ...], dict[str, Any]]]" = queue.Queue(
+            maxsize=maxsize
+        )
         self._op_queue = q
+
+        # Queue pressure warnings and drop counters are best-effort and must not
+        # affect backend correctness.
+        self._op_queue_warn_last_ts: dict[int, float] = {}
+        self._op_queue_warn_last_bucket: int | None = None
+        self._op_queue_drops_total: int = 0
+        self._op_queue_drops_by_op: dict[str, int] = {}
+        self._op_queue_drops_by_reason: dict[str, int] = {}
 
         worker = threading.Thread(
             target=self._worker_loop,
@@ -170,6 +202,350 @@ class BaseStatsStore:
                     # Defensive: task_done must not raise.
                     pass
 
+    def _queue_pressure_bucket(
+        self, *, size: int, capacity: int
+    ) -> tuple[int, float, float]:
+        """Brief: Classify queue pressure into a bucket with a reminder interval.
+
+        Inputs:
+          - size: Current queue length.
+          - capacity: Queue capacity (maxsize), must be > 0.
+
+        Outputs:
+          - (bucket_pct, pct_full, reminder_seconds)
+
+        Buckets:
+          - <25  -> bucket 0, remind 60m
+          - 25%  -> bucket 25, remind 30m
+          - 50%  -> bucket 50, remind 15m
+          - 75%  -> bucket 75, remind 10m
+          - 90%  -> bucket 90, remind 4m
+          - 100% -> bucket 100, remind 60s
+        """
+
+        cap = max(1, int(capacity))
+        sz = max(0, int(size))
+        pct = (float(sz) / float(cap)) * 100.0
+
+        if pct >= 100.0:
+            return 100, pct, 60.0
+        if pct >= 90.0:
+            return 90, pct, 240.0
+        if pct >= 75.0:
+            return 75, pct, 600.0
+        if pct >= 50.0:
+            return 50, pct, 900.0
+        if pct >= 25.0:
+            return 25, pct, 1800.0
+        return 0, pct, 3600.0
+
+    def _maybe_warn_queue_pressure(self) -> None:
+        """Brief: Emit tiered queue-pressure warnings with rate limiting.
+
+        Inputs:
+          - None.
+
+        Outputs:
+          - None; logs best-effort.
+
+        Notes:
+          - This is called on the enqueue hot path and must remain lightweight.
+          - Warnings are rate-limited by bucket and also emitted immediately when
+            transitioning between buckets.
+        """
+
+        q = getattr(self, "_op_queue", None)
+        if q is None:
+            return
+
+        try:
+            cap = int(getattr(q, "maxsize", 0) or 0)
+            if cap <= 0:
+                return
+            size = int(q.qsize())
+        except Exception:
+            return
+
+        bucket, pct_full, remind_s = self._queue_pressure_bucket(
+            size=size, capacity=cap
+        )
+        # Keep low-volume noise out of logs; only emit pressure logs once the
+        # queue is over 5% full.
+        if pct_full <= 5.0:
+            return
+        now = time.time()
+
+        try:
+            last_bucket = getattr(self, "_op_queue_warn_last_bucket", None)
+        except Exception:
+            last_bucket = None
+
+        # Emit immediately on bucket changes.
+        bucket_changed = last_bucket != bucket
+
+        last_ts = 0.0
+        try:
+            last_ts = float(
+                (getattr(self, "_op_queue_warn_last_ts", {}) or {}).get(bucket, 0.0)
+            )
+        except Exception:
+            last_ts = 0.0
+
+        due = (now - last_ts) >= float(remind_s)
+        if not bucket_changed and not due:
+            return
+
+        try:
+            getattr(self, "_op_queue_warn_last_ts", {})[bucket] = now
+            self._op_queue_warn_last_bucket = bucket
+        except Exception:
+            pass
+
+        try:
+            drops = int(getattr(self, "_op_queue_drops_total", 0) or 0)
+        except Exception:
+            drops = 0
+        full_drops = 0
+        low_priority_drops = 0
+        try:
+            by_reason = getattr(self, "_op_queue_drops_by_reason", {}) or {}
+            if isinstance(by_reason, dict):
+                full_drops = int(by_reason.get("full", 0) or 0)
+                low_priority_drops = int(by_reason.get("low_priority", 0) or 0)
+        except Exception:
+            full_drops = 0
+            low_priority_drops = 0
+
+        msg = (
+            "Querylog async queue pressure: %d/%d (%.1f%%), bucket=%d%%, "
+            "drops=%d (full=%d, low_priority=%d)"
+        ) % (
+            size,
+            cap,
+            pct_full,
+            bucket,
+            drops,
+            full_drops,
+            low_priority_drops,
+        )
+
+        log = logging.getLogger(__name__)
+        if bucket >= 25:
+            log.warning(msg)
+        else:
+            log.info(msg)
+
+    def _record_queue_drop(self, op_name: str, reason: str = "full") -> None:
+        """Brief: Increment best-effort counters for a dropped queue operation.
+
+        Inputs:
+          - op_name: Operation name (e.g. 'insert_query_log').
+          - reason: Drop-reason key (for example, 'full' or 'low_priority').
+
+        Outputs:
+          - None.
+        """
+
+        try:
+            self._op_queue_drops_total = (
+                int(getattr(self, "_op_queue_drops_total", 0) or 0) + 1
+            )
+        except Exception:
+            return
+
+        try:
+            by_op = getattr(self, "_op_queue_drops_by_op", None)
+            if isinstance(by_op, dict):
+                by_op[op_name] = int(by_op.get(op_name, 0) or 0) + 1
+        except Exception:
+            pass
+
+        try:
+            reason_key = str(reason or "unknown").strip().lower() or "unknown"
+        except Exception:
+            reason_key = "unknown"
+        try:
+            by_reason = getattr(self, "_op_queue_drops_by_reason", None)
+            if by_reason is None:
+                by_reason = {}
+                self._op_queue_drops_by_reason = by_reason
+            if isinstance(by_reason, dict):
+                by_reason[reason_key] = int(by_reason.get(reason_key, 0) or 0) + 1
+        except Exception:
+            pass
+
+    @staticmethod
+    def _is_low_priority_query_log_row(*, rcode: object, status: object) -> bool:
+        """Brief: Return True when a query-log row is low-priority under pressure.
+
+        Inputs:
+          - rcode: Query-log rcode value.
+          - status: Query-log status value.
+
+        Outputs:
+          - bool: True for REFUSED responses or drop-style statuses.
+        """
+
+        try:
+            rcode_s = str(rcode or "").strip().upper()
+        except Exception:
+            rcode_s = ""
+        if rcode_s == "REFUSED":
+            return True
+
+        try:
+            status_s = str(status or "").strip().lower()
+        except Exception:
+            status_s = ""
+        return status_s in {"drop", "dropped"}
+
+    def _should_shed_low_priority_query_log(
+        self,
+        *,
+        rcode: object,
+        status: object,
+    ) -> bool:
+        """Brief: Decide whether to shed a low-priority query-log row pre-enqueue.
+
+        Inputs:
+          - rcode: Query-log rcode value.
+          - status: Query-log status value.
+
+        Outputs:
+          - bool: True when queue is bounded, >=25% full, and row is low-priority.
+        """
+
+        q = getattr(self, "_op_queue", None)
+        if q is None:
+            return False
+
+        try:
+            cap = int(getattr(q, "maxsize", 0) or 0)
+            if cap <= 0:
+                return False
+            size = int(q.qsize())
+        except Exception:
+            return False
+
+        pct_full = (float(size) / float(max(1, cap))) * 100.0
+        if pct_full < 25.0:
+            return False
+        return self._is_low_priority_query_log_row(rcode=rcode, status=status)
+
+    def record_suppressed_query_log_drop_candidate(
+        self,
+        *,
+        rcode: object,
+        status: object,
+    ) -> bool:
+        """Brief: Account for a suppressed low-priority query-log row under pressure.
+
+        Inputs:
+          - rcode: Candidate query-log rcode value.
+          - status: Candidate query-log status value.
+
+        Outputs:
+          - bool: True when the row qualifies as low-priority and queue pressure
+            indicates it would be shed (bounded queue at >=25% full).
+        """
+
+        try:
+            should_count = self._should_shed_low_priority_query_log(
+                rcode=rcode,
+                status=status,
+            )
+        except Exception:
+            should_count = False
+        if not should_count:
+            return False
+
+        self._record_queue_drop("insert_query_log", reason="low_priority")
+        try:
+            q = getattr(self, "_op_queue", None)
+            size = int(q.qsize()) if q is not None else 0
+            cap = int(getattr(q, "maxsize", 0) or 0) if q is not None else 0
+            logging.getLogger(__name__).debug(
+                "Counted suppressed query-log row as low_priority drop "
+                "(rcode=%s status=%s queue=%d/%d)",
+                str(rcode),
+                str(status),
+                size,
+                cap,
+            )
+        except Exception:
+            pass
+        self._maybe_warn_queue_pressure()
+        return True
+
+    def get_async_queue_metrics(self) -> Dict[str, object]:
+        """Brief: Return best-effort metrics for the async worker queue.
+
+        Inputs:
+          - None.
+
+        Outputs:
+          - dict with keys:
+              - capacity: int | None queue capacity (None when unbounded)
+              - size: int current queue size (0 when uninitialized)
+              - pct_full: float | None percent full (None when unbounded)
+              - drops_total: int best-effort dropped op count
+              - drops_by_op: dict[str,int] best-effort drops per op
+              - drops_by_reason: dict[str,int] best-effort drops per reason
+        """
+
+        q = getattr(self, "_op_queue", None)
+        cap: int | None = None
+        size = 0
+        pct_full: float | None = None
+
+        if q is not None:
+            try:
+                maxsize = int(getattr(q, "maxsize", 0) or 0)
+                if maxsize > 0:
+                    cap = maxsize
+                    size = int(q.qsize())
+                    pct_full = (float(size) / float(maxsize)) * 100.0
+                else:
+                    # Unbounded queue.
+                    cap = None
+                    size = int(q.qsize())
+                    pct_full = None
+            except Exception:
+                cap = None
+                size = 0
+                pct_full = None
+
+        drops_total = int(getattr(self, "_op_queue_drops_total", 0) or 0)
+        drops_by_op_raw = getattr(self, "_op_queue_drops_by_op", {}) or {}
+        drops_by_op: dict[str, int] = {}
+        if isinstance(drops_by_op_raw, dict):
+            for k, v in drops_by_op_raw.items():
+                if not k:
+                    continue
+                try:
+                    drops_by_op[str(k)] = int(v)
+                except Exception:
+                    continue
+        drops_by_reason_raw = getattr(self, "_op_queue_drops_by_reason", {}) or {}
+        drops_by_reason: dict[str, int] = {}
+        if isinstance(drops_by_reason_raw, dict):
+            for k, v in drops_by_reason_raw.items():
+                if not k:
+                    continue
+                try:
+                    drops_by_reason[str(k)] = int(v)
+                except Exception:
+                    continue
+
+        return {
+            "capacity": cap,
+            "size": int(size),
+            "pct_full": pct_full,
+            "drops_total": drops_total,
+            "drops_by_op": drops_by_op,
+            "drops_by_reason": drops_by_reason,
+        }
+
     # ------------------------------------------------------------------
     # Health and lifecycle
     # ------------------------------------------------------------------
@@ -217,9 +593,20 @@ class BaseStatsStore:
 
         try:
             self._ensure_worker()
-            self._op_queue.put(  # type: ignore[attr-defined]
-                ("increment_count", (scope, key, delta), {})
-            )
+            q = getattr(self, "_op_queue", None)
+            if q is None:
+                raise RuntimeError("op queue not initialized")
+
+            try:
+                q.put_nowait(("increment_count", (scope, key, delta), {}))
+            except queue.Full:
+                # Drop on full queue; this is explicitly allowed so query
+                # processing is never delayed by logging backpressure.
+                self._record_queue_drop("increment_count", reason="full")
+                self._maybe_warn_queue_pressure()
+                return
+
+            self._maybe_warn_queue_pressure()
         except Exception:
             handler = getattr(self, "_increment_count", None)
             if callable(handler):
@@ -349,29 +736,45 @@ class BaseStatsStore:
           - None; returns after queuing the operation. The worker thread will
             later call ``_insert_query_log`` on this instance. When the queue
             cannot be used, falls back to calling ``_insert_query_log``
-            synchronously when available.
+            synchronously when available. Low-priority rows may be shed when
+            the queue is near capacity.
         """
 
         try:
             self._ensure_worker()
-            self._op_queue.put(  # type: ignore[attr-defined]
-                (
-                    "insert_query_log",
+            q = getattr(self, "_op_queue", None)
+            if q is None:
+                raise RuntimeError("op queue not initialized")
+            if self._should_shed_low_priority_query_log(rcode=rcode, status=status):
+                self._record_queue_drop("insert_query_log", reason="low_priority")
+                self._maybe_warn_queue_pressure()
+                return
+
+            try:
+                q.put_nowait(
                     (
-                        ts,
-                        client_ip,
-                        name,
-                        qtype,
-                        upstream_id,
-                        rcode,
-                        status,
-                        error,
-                        first,
-                        result_json,
-                    ),
-                    {},
+                        "insert_query_log",
+                        (
+                            ts,
+                            client_ip,
+                            name,
+                            qtype,
+                            upstream_id,
+                            rcode,
+                            status,
+                            error,
+                            first,
+                            result_json,
+                        ),
+                        {},
+                    )
                 )
-            )
+            except queue.Full:
+                self._record_queue_drop("insert_query_log", reason="full")
+                self._maybe_warn_queue_pressure()
+                return
+
+            self._maybe_warn_queue_pressure()
         except Exception:
             handler = getattr(self, "_insert_query_log", None)
             if callable(handler):
@@ -398,6 +801,9 @@ class BaseStatsStore:
         qtype: Optional[str] = None,
         qname: Optional[str] = None,
         rcode: Optional[str] = None,
+        status: Optional[str] = None,
+        source: Optional[str] = None,
+        ede_code: Optional[str] = None,
         start_ts: Optional[float] = None,
         end_ts: Optional[float] = None,
         page: int = 1,
@@ -410,6 +816,9 @@ class BaseStatsStore:
           - qtype: Optional qtype filter (typically case-insensitive).
           - qname: Optional qname filter (typically normalized before storage).
           - rcode: Optional rcode filter (case-insensitive).
+          - status: Optional high-level status filter (case-insensitive).
+          - source: Optional result.source filter (case-insensitive).
+          - ede_code: Optional result.ede_code filter.
           - start_ts: Optional inclusive start timestamp (Unix seconds).
           - end_ts: Optional exclusive end timestamp (Unix seconds).
           - page: 1-based page number.
@@ -550,3 +959,212 @@ class BaseStatsStore:
             interval_i = 0
 
         return start_f, end_f, interval_i
+
+    @staticmethod
+    def _normalize_retention_max_records(raw: object) -> int | None:
+        """Brief: Normalize a max-records retention setting.
+
+        Inputs:
+          - raw: Raw configured max-records value.
+
+        Outputs:
+          - int | None: Positive integer max-records limit when valid, else None.
+        """
+
+        if raw is None:
+            return None
+
+        try:
+            value = int(raw)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return None
+
+        if value <= 0:
+            return None
+        return value
+
+    @staticmethod
+    def _normalize_retention_days(raw: object) -> float | None:
+        """Brief: Normalize a day-based retention setting.
+
+        Inputs:
+          - raw: Raw configured retention window in days.
+
+        Outputs:
+          - float | None: Positive finite days value when valid, else None.
+        """
+
+        if raw is None:
+            return None
+
+        try:
+            value = float(raw)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return None
+
+        if not math.isfinite(value) or value <= 0.0:
+            return None
+        return value
+
+    @staticmethod
+    def _normalize_retention_max_bytes(raw: object) -> int | None:
+        """Brief: Normalize a max-bytes retention setting.
+
+        Inputs:
+          - raw: Raw configured max-bytes value.
+
+        Outputs:
+          - int | None: Positive integer byte limit when valid, else None.
+        """
+
+        if raw is None:
+            return None
+
+        try:
+            value = int(raw)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return None
+
+        if value <= 0:
+            return None
+        return value
+
+    @staticmethod
+    def _normalize_retention_prune_interval_seconds(raw: object) -> float | None:
+        """Brief: Normalize a retention prune interval setting.
+
+        Inputs:
+          - raw: Raw configured prune interval in seconds.
+
+        Outputs:
+          - float | None: Positive finite seconds value when valid, else None.
+        """
+
+        if raw is None:
+            return None
+
+        try:
+            value = float(raw)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return None
+
+        if not math.isfinite(value) or value <= 0.0:
+            return None
+        return value
+
+    @staticmethod
+    def _normalize_retention_prune_every_n_inserts(raw: object) -> int | None:
+        """Brief: Normalize a retention prune cadence in inserted rows.
+
+        Inputs:
+          - raw: Raw configured insertion cadence value.
+
+        Outputs:
+          - int | None: Positive integer cadence when valid, else None.
+        """
+
+        if raw is None:
+            return None
+
+        try:
+            value = int(raw)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return None
+
+        if value <= 0:
+            return None
+        return value
+
+    def _should_run_query_log_retention_prune(
+        self,
+        *,
+        now_ts: float | None = None,
+    ) -> bool:
+        """Brief: Return True when a configured retention prune should execute now.
+
+        Inputs:
+          - now_ts: Optional current Unix timestamp override.
+
+        Outputs:
+          - bool: True when retention is configured and cadence checks pass.
+
+        Notes:
+          - Uses backend attributes when present:
+            - _query_log_retention_max_records / _query_log_retention_days
+            - _query_log_retention_max_bytes
+            - _query_log_retention_prune_every_n_inserts
+            - _query_log_retention_prune_interval_seconds
+          - Maintains best-effort runtime counters:
+            - _query_log_retention_seen_inserts
+            - _query_log_retention_last_prune_ts
+        """
+
+        max_records = getattr(self, "_query_log_retention_max_records", None)
+        retention_days = getattr(self, "_query_log_retention_days", None)
+        max_bytes = getattr(self, "_query_log_retention_max_bytes", None)
+        if max_records is None and retention_days is None and max_bytes is None:
+            return False
+
+        if now_ts is None:
+            now_ts = time.time()
+        now_f = float(now_ts)
+
+        try:
+            insert_count = (
+                int(getattr(self, "_query_log_retention_seen_inserts", 0) or 0) + 1
+            )
+        except Exception:
+            insert_count = 1
+        self._query_log_retention_seen_inserts = int(insert_count)
+
+        every_n = getattr(self, "_query_log_retention_prune_every_n_inserts", None)
+        if every_n is not None:
+            try:
+                every_n_i = int(every_n)
+            except Exception:
+                every_n_i = 1
+            if every_n_i > 1 and (insert_count % every_n_i) != 0:
+                return False
+
+        interval = getattr(self, "_query_log_retention_prune_interval_seconds", None)
+        if interval is not None:
+            try:
+                interval_f = float(interval)
+            except Exception:
+                interval_f = 0.0
+            if interval_f > 0.0:
+                try:
+                    last_prune = float(
+                        getattr(self, "_query_log_retention_last_prune_ts", 0.0) or 0.0
+                    )
+                except Exception:
+                    last_prune = 0.0
+                if last_prune > 0.0 and (now_f - last_prune) < interval_f:
+                    return False
+
+        self._query_log_retention_last_prune_ts = now_f
+        return True
+
+    @staticmethod
+    def _retention_cutoff_ts(
+        retention_days: float | None,
+        *,
+        now_ts: float | None = None,
+    ) -> float | None:
+        """Brief: Compute an absolute cutoff timestamp from a days-based policy.
+
+        Inputs:
+          - retention_days: Positive number of days to retain, or None.
+          - now_ts: Optional current Unix timestamp override.
+
+        Outputs:
+          - float | None: Inclusive cutoff timestamp (keep records >= cutoff),
+            or None when no day-based retention is configured.
+        """
+
+        if retention_days is None:
+            return None
+
+        if now_ts is None:
+            now_ts = time.time()
+        return float(now_ts) - (float(retention_days) * 86400.0)

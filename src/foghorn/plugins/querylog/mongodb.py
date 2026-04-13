@@ -21,10 +21,18 @@ Notes:
 
 import json
 import logging
+import re
+import threading
+import time
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
+from foghorn.security_limits import (
+    MAX_QUERY_LOG_AGG_GROUPED_RESULTS,
+    enforce_query_log_aggregate_bucket_limit,
+)
 
 from .base import BaseStatsStore
-from .sqlite import _normalize_domain, _is_subdomain
+from .sqlite import _is_subdomain, _normalize_domain
 
 logger = logging.getLogger(__name__)
 
@@ -56,9 +64,6 @@ def _import_mongo_driver():
 class MongoStatsStore(BaseStatsStore):
     """MongoDB-backed persistent statistics and query-log backend.
 
-    # Aliases used by the stats backend registry.
-    aliases = ("mongo", "mongodb")
-
     This backend stores the same logical ``counts`` and ``query_log`` data as
     the SQLite implementation, but in MongoDB collections.
 
@@ -71,10 +76,25 @@ class MongoStatsStore(BaseStatsStore):
         database: Database name (default "foghorn_stats").
         connect_kwargs: Optional mapping of additional keyword arguments passed
             through to MongoClient (for example, tls, replicaSet).
+        async_logging: When True, enqueue writes on the BaseStatsStore worker
+            queue.
+        max_logging_queue: Maximum queued operations when async logging is on.
+        batch_writes: Whether to batch query-log writes via ``insert_many``.
+        batch_time_sec: Max age of pending query-log batch before flush.
+        batch_max_size: Max pending query-log docs before forced flush.
+        retention_max_records: Optional cap on retained query-log documents.
+        retention_days: Optional age limit (in days) for query-log documents.
+        retention_max_bytes: Optional estimated byte cap for query-log docs.
+        retention_prune_interval_seconds: Optional prune interval gate.
+        retention_prune_every_n_inserts: Optional prune cadence by insert count.
+        retention_native_ttl: Whether to create a MongoDB TTL index on ts_dt.
 
     Outputs:
         Initialized MongoStatsStore instance with ensured collections/indexes.
     """
+
+    # Aliases used by the stats backend registry.
+    aliases = ("mongo", "mongodb")
 
     def __init__(
         self,
@@ -86,6 +106,16 @@ class MongoStatsStore(BaseStatsStore):
         database: str = "foghorn_stats",
         connect_kwargs: Optional[Dict[str, Any]] = None,
         async_logging: bool = False,
+        max_logging_queue: int = 16384,
+        batch_writes: bool = False,
+        batch_time_sec: float = 15.0,
+        batch_max_size: int = 1000,
+        retention_max_records: Optional[int] = None,
+        retention_days: Optional[float] = None,
+        retention_max_bytes: Optional[int] = None,
+        retention_prune_interval_seconds: Optional[float] = None,
+        retention_prune_every_n_inserts: Optional[int] = None,
+        retention_native_ttl: bool = True,
         **_: Any,
     ) -> None:
         mongo_mod = _import_mongo_driver()
@@ -107,6 +137,40 @@ class MongoStatsStore(BaseStatsStore):
 
         # Use synchronous logging by default for Mongo stats backend.
         self._async_logging = bool(async_logging)
+        # BaseStatsStore worker queue capacity
+        try:
+            self._max_logging_queue = int(max_logging_queue)
+        except Exception:
+            self._max_logging_queue = 16384
+        self._batch_writes = bool(batch_writes)
+        self._batch_time_sec = float(batch_time_sec)
+        self._batch_max_size = int(batch_max_size)
+        self._batch_lock = threading.RLock()
+        self._pending_query_log_docs: List[Dict[str, Any]] = []
+        self._pending_query_log_retention = False
+        self._last_flush = time.time()
+        self._query_log_retention_max_records = (
+            BaseStatsStore._normalize_retention_max_records(retention_max_records)
+        )
+        self._query_log_retention_days = BaseStatsStore._normalize_retention_days(
+            retention_days
+        )
+        self._query_log_retention_max_bytes = (
+            BaseStatsStore._normalize_retention_max_bytes(retention_max_bytes)
+        )
+        self._query_log_retention_prune_interval_seconds = (
+            BaseStatsStore._normalize_retention_prune_interval_seconds(
+                retention_prune_interval_seconds
+            )
+        )
+        self._query_log_retention_prune_every_n_inserts = (
+            BaseStatsStore._normalize_retention_prune_every_n_inserts(
+                retention_prune_every_n_inserts
+            )
+        )
+        self._query_log_retention_seen_inserts = 0
+        self._query_log_retention_last_prune_ts = 0.0
+        self._retention_native_ttl = bool(retention_native_ttl)
 
         self._db = self._client[database]
         self._counts = self._db["counts"]
@@ -142,6 +206,19 @@ class MongoStatsStore(BaseStatsStore):
             self._query_log.create_index(
                 [("upstream_id", 1), ("ts", 1)], name="idx_query_log_upstream_ts"
             )
+            if (
+                self._retention_native_ttl
+                and self._query_log_retention_days is not None
+            ):
+                ttl_seconds = max(
+                    1,
+                    int(float(self._query_log_retention_days) * 86400.0),
+                )
+                self._query_log.create_index(
+                    [("ts_dt", 1)],
+                    name="idx_query_log_ts_ttl",
+                    expireAfterSeconds=int(ttl_seconds),
+                )
         except Exception as exc:  # pragma: no cover - defensive
             logger.error(
                 "MongoStatsStore _ensure_indexes error: %s", exc, exc_info=True
@@ -150,6 +227,79 @@ class MongoStatsStore(BaseStatsStore):
     # ------------------------------------------------------------------
     # Health and lifecycle
     # ------------------------------------------------------------------
+    def _flush_pending_query_log_docs(self) -> None:
+        """Flush buffered query-log documents when batching is enabled.
+
+        Inputs:
+            None.
+
+        Outputs:
+            None.
+        """
+
+        if not self._batch_writes:
+            return
+        with self._batch_lock:
+            self._flush_pending_query_log_docs_locked()
+
+    def _maybe_flush_pending_query_log_docs_locked(self) -> None:
+        """Flush buffered query-log docs when size/time thresholds are met.
+
+        Inputs:
+            None. Caller must hold ``self._batch_lock``.
+
+        Outputs:
+            None.
+        """
+
+        if not self._batch_writes:
+            return
+        docs_len = len(self._pending_query_log_docs)
+        if docs_len == 0:
+            return
+
+        now = time.time()
+        age = now - self._last_flush
+        if docs_len >= self._batch_max_size or age >= self._batch_time_sec:
+            self._flush_pending_query_log_docs_locked()
+
+    def _flush_pending_query_log_docs_locked(self) -> None:
+        """Flush buffered query-log docs via ``insert_many``.
+
+        Inputs:
+            None. Caller must hold ``self._batch_lock``.
+
+        Outputs:
+            None.
+        """
+
+        if not self._pending_query_log_docs:
+            return
+
+        docs = list(self._pending_query_log_docs)
+        run_retention = bool(self._pending_query_log_retention)
+
+        try:
+            self._query_log.insert_many(docs)
+            self._pending_query_log_docs.clear()
+            self._pending_query_log_retention = False
+            self._last_flush = time.time()
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.error(
+                "MongoStatsStore batched query_log flush failed: %s",
+                exc,
+                exc_info=True,
+            )
+            # Best-effort behavior: drop uncertain partial batches to avoid
+            # duplicate retries.
+            self._pending_query_log_docs.clear()
+            self._pending_query_log_retention = False
+            self._last_flush = time.time()
+            return
+
+        if run_retention:
+            self._apply_query_log_retention()
+
     def health_check(self) -> bool:
         """Return True when the underlying MongoDB store is usable.
 
@@ -178,8 +328,9 @@ class MongoStatsStore(BaseStatsStore):
         """
 
         try:
+            self._flush_pending_query_log_docs()
             client = getattr(self, "_client", None)
-            if client is not None:
+            if client is not None:  # pragma: nocover - _client is normally present
                 client.close()
         except Exception:  # pragma: no cover - defensive
             logger.exception("Error while closing MongoStatsStore client")
@@ -310,6 +461,7 @@ class MongoStatsStore(BaseStatsStore):
         try:
             doc = {
                 "ts": float(ts),
+                "ts_dt": datetime.fromtimestamp(float(ts), tz=timezone.utc),
                 "client_ip": client_ip,
                 "name": name,
                 "qtype": qtype,
@@ -320,11 +472,159 @@ class MongoStatsStore(BaseStatsStore):
                 "first": first,
                 "result_json": result_json,
             }
-            self._query_log.insert_one(doc)
+            if not self._batch_writes:
+                self._query_log.insert_one(doc)
+                self._apply_query_log_retention()
+                return
+
+            with self._batch_lock:
+                self._pending_query_log_docs.append(doc)
+                self._pending_query_log_retention = True
+                self._maybe_flush_pending_query_log_docs_locked()
         except Exception as exc:  # pragma: no cover - defensive
             logger.error(
                 "MongoStatsStore insert_query_log error: %s", exc, exc_info=True
             )
+
+    def _apply_query_log_retention(self) -> None:
+        """Brief: Enforce configured query-log retention limits.
+
+        Inputs:
+            None.
+
+        Outputs:
+            None; removes old rows and/or over-limit rows when retention is
+            configured.
+        """
+
+        cutoff_ts = BaseStatsStore._retention_cutoff_ts(
+            self._query_log_retention_days,
+            now_ts=time.time(),
+        )
+        max_records = self._query_log_retention_max_records
+        max_bytes = self._query_log_retention_max_bytes
+
+        if cutoff_ts is None and max_records is None and max_bytes is None:
+            return
+        if not self._should_run_query_log_retention_prune(now_ts=time.time()):
+            return
+
+        try:
+            if cutoff_ts is not None:
+                self._query_log.delete_many({"ts": {"$lt": float(cutoff_ts)}})
+
+            if max_records is not None:
+                self._prune_query_log_to_max_records(int(max_records))
+
+            if max_bytes is not None:
+                keep_ids_by_size: list[object] = []
+                retained_bytes = 0
+                cursor = self._query_log.find(
+                    {},
+                    {
+                        "_id": 1,
+                        "client_ip": 1,
+                        "name": 1,
+                        "qtype": 1,
+                        "upstream_id": 1,
+                        "rcode": 1,
+                        "status": 1,
+                        "error": 1,
+                        "first": 1,
+                        "result_json": 1,
+                    },
+                ).sort([("ts", -1), ("_id", -1)])
+                for doc in cursor:
+                    doc_id = doc.get("_id")
+                    if doc_id is None:  # pragma: nocover - Mongo documents include _id
+                        continue
+
+                    doc_bytes = self._estimate_query_log_doc_bytes(doc)
+                    if keep_ids_by_size and (retained_bytes + doc_bytes) > int(
+                        max_bytes
+                    ):
+                        break
+                    keep_ids_by_size.append(doc_id)
+                    retained_bytes += int(doc_bytes)
+
+                if keep_ids_by_size:
+                    self._query_log.delete_many({"_id": {"$nin": keep_ids_by_size}})
+                else:
+                    self._query_log.delete_many({})
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.error(
+                "MongoStatsStore retention prune failed: %s", exc, exc_info=True
+            )
+
+    def _prune_query_log_to_max_records(self, max_records: int) -> None:
+        """Brief: Remove oldest docs beyond a max-record retention boundary.
+
+        Inputs:
+            max_records: Maximum documents to retain in query_log.
+
+        Outputs:
+            None.
+        """
+
+        if max_records <= 0:
+            return
+
+        cutoff_cursor = (
+            self._query_log.find({}, {"_id": 1, "ts": 1})
+            .sort([("ts", -1), ("_id", -1)])
+            .skip(int(max_records))
+            .limit(1)
+        )
+        cutoff_doc = next(iter(cutoff_cursor), None)
+        if not isinstance(cutoff_doc, dict):  # pragma: nocover - defensive
+            return
+
+        cutoff_ts_raw = cutoff_doc.get("ts")
+        cutoff_id = cutoff_doc.get("_id")
+        if cutoff_ts_raw is None or cutoff_id is None:  # pragma: nocover - defensive
+            return
+
+        cutoff_ts = float(cutoff_ts_raw)
+        self._query_log.delete_many(
+            {
+                "$or": [
+                    {"ts": {"$lt": cutoff_ts}},
+                    {"ts": cutoff_ts, "_id": {"$lte": cutoff_id}},
+                ]
+            }
+        )
+
+    @staticmethod
+    def _estimate_query_log_doc_bytes(doc: Dict[str, Any]) -> int:
+        """Brief: Estimate storage bytes for a query_log document.
+
+        Inputs:
+            doc: Mongo query_log document.
+
+        Outputs:
+            int: Approximate encoded byte size used for retention capping.
+        """
+
+        total = 64
+        for key in (
+            "client_ip",
+            "name",
+            "qtype",
+            "upstream_id",
+            "rcode",
+            "status",
+            "error",
+            "first",
+            "result_json",
+        ):
+            value = doc.get(key)
+            if value is None:
+                continue
+            if isinstance(value, str):
+                total += len(value.encode("utf-8"))
+            else:
+                total += len(str(value).encode("utf-8"))
+        return int(total)
 
     def has_query_log(self) -> bool:
         """Return True if the query_log collection contains at least one document.
@@ -336,6 +636,7 @@ class MongoStatsStore(BaseStatsStore):
             bool indicating whether query_log has documents.
         """
 
+        self._flush_pending_query_log_docs()
         try:
             return self._query_log.find_one({}, {"_id": 1}) is not None
         except Exception as exc:  # pragma: no cover - defensive
@@ -348,6 +649,9 @@ class MongoStatsStore(BaseStatsStore):
         qtype: Optional[str] = None,
         qname: Optional[str] = None,
         rcode: Optional[str] = None,
+        status: Optional[str] = None,
+        source: Optional[str] = None,
+        ede_code: Optional[str] = None,
         start_ts: Optional[float] = None,
         end_ts: Optional[float] = None,
         page: int = 1,
@@ -360,6 +664,9 @@ class MongoStatsStore(BaseStatsStore):
             qtype: Optional qtype filter.
             qname: Optional qname filter.
             rcode: Optional rcode filter.
+            status: Optional status filter.
+            source: Optional result.source filter.
+            ede_code: Optional result.ede_code filter.
             start_ts: Optional inclusive start timestamp.
             end_ts: Optional exclusive end timestamp.
             page: 1-based page index.
@@ -377,9 +684,81 @@ class MongoStatsStore(BaseStatsStore):
         if qtype:
             flt["qtype"] = qtype.strip().upper()
         if qname:
-            flt["name"] = qname.strip().rstrip(".").lower()
+            flt["name"] = _normalize_domain(qname)
         if rcode:
             flt["rcode"] = rcode.strip().upper()
+        if status:
+            status_s = status.strip()
+            if status_s:
+                flt["status"] = {"$regex": f"^{re.escape(status_s)}$", "$options": "i"}
+        source_or: List[Dict[str, Any]] | None = None
+        if source:
+            source_s = source.strip().lower()
+            if source_s:
+                compact = re.escape(f'"source":"{source_s}"')
+                spaced = re.escape(f'"source": "{source_s}"')
+                source_or = [
+                    {"result_json": {"$regex": compact, "$options": "i"}},
+                    {"result_json": {"$regex": spaced, "$options": "i"}},
+                ]
+        ede_or: List[Dict[str, Any]] | None = None
+        if ede_code is not None and str(ede_code).strip():
+            ede_code_s = str(ede_code).strip()
+            try:
+                ede_code_i = int(ede_code_s)
+            except Exception:
+                flt["_id"] = {"$exists": False}
+            else:
+                if ede_code_i < 0:
+                    flt["_id"] = {"$exists": False}
+                else:
+                    ede_code_txt = str(ede_code_i)
+                    ede_or = [
+                        {
+                            "result_json": {
+                                "$regex": re.escape(f'"ede_code":{ede_code_txt},'),
+                                "$options": "i",
+                            }
+                        },
+                        {
+                            "result_json": {
+                                "$regex": re.escape(f'"ede_code":{ede_code_txt}' + "}"),
+                                "$options": "i",
+                            }
+                        },
+                        {
+                            "result_json": {
+                                "$regex": re.escape(f'"ede_code":"{ede_code_txt}"'),
+                                "$options": "i",
+                            }
+                        },
+                        {
+                            "result_json": {
+                                "$regex": re.escape(
+                                    f'"ede_code": {ede_code_txt}' + "}"
+                                ),
+                                "$options": "i",
+                            }
+                        },
+                        {
+                            "result_json": {
+                                "$regex": re.escape(f'"ede_code":"{ede_code_txt}"'),
+                                "$options": "i",
+                            }
+                        },
+                        {
+                            "result_json": {
+                                "$regex": re.escape(f'"ede_code": "{ede_code_txt}"'),
+                                "$options": "i",
+                            }
+                        },
+                    ]
+        if source_or and ede_or:
+            flt["$and"] = [{"$or": source_or}, {"$or": ede_or}]
+        elif source_or:
+            flt["$or"] = source_or
+        elif ede_or:
+            flt["$or"] = ede_or
         if isinstance(start_ts, (int, float)) or isinstance(end_ts, (int, float)):
             ts_cond: Dict[str, Any] = {}
             if isinstance(start_ts, (int, float)):
@@ -387,6 +766,7 @@ class MongoStatsStore(BaseStatsStore):
             if isinstance(end_ts, (int, float)):
                 ts_cond["$lt"] = float(end_ts)
             flt["ts"] = ts_cond
+        self._flush_pending_query_log_docs()
 
         try:
             total = int(self._query_log.count_documents(flt))
@@ -507,7 +887,7 @@ class MongoStatsStore(BaseStatsStore):
         if qtype:
             flt["qtype"] = qtype.strip().upper()
         if qname:
-            flt["name"] = qname.strip().rstrip(".").lower()
+            flt["name"] = _normalize_domain(qname)
         if rcode:
             flt["rcode"] = rcode.strip().upper()
 
@@ -524,6 +904,7 @@ class MongoStatsStore(BaseStatsStore):
             if gb in mapping:
                 group_col = mapping[gb]
                 group_label = gb
+        self._flush_pending_query_log_docs()
 
         rows: List[Tuple[int, Optional[str], int]] = []
         try:
@@ -553,6 +934,7 @@ class MongoStatsStore(BaseStatsStore):
                         }
                     },
                     {"$sort": {"_id.bucket": 1}},
+                    {"$limit": int(MAX_QUERY_LOG_AGG_GROUPED_RESULTS) + 1},
                 ]
                 for doc in self._query_log.aggregate(pipeline):
                     try:
@@ -602,11 +984,20 @@ class MongoStatsStore(BaseStatsStore):
             rows = []
 
         if not group_col:
-            import math
-
-            num = int(math.ceil((end_f - start_f) / float(interval_i)))
-            if num < 0:
-                num = 0
+            try:
+                num = enforce_query_log_aggregate_bucket_limit(
+                    start_f, end_f, interval_i
+                )
+            except ValueError as exc:
+                logger.warning(
+                    "MongoStatsStore aggregate_query_log_counts rejected: %s", exc
+                )
+                return {
+                    "start_ts": start_f,
+                    "end_ts": end_f,
+                    "interval_seconds": interval_i,
+                    "items": [],
+                }
             by_bucket = {b: c for (b, _g, c) in rows}
             items: List[Dict[str, Any]] = []
             for b in range(num):
@@ -666,6 +1057,7 @@ class MongoStatsStore(BaseStatsStore):
         """
 
         log = logger_obj or logger
+        self._flush_pending_query_log_docs()
 
         try:
             self._counts.delete_many({})

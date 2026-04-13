@@ -25,11 +25,14 @@ import json
 import logging
 import os
 import socket
+import threading
+import time
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
+
+from foghorn.stats import FOGHORN_VERSION
 
 from .base import BaseStatsStore
-from foghorn.stats import FOGHORN_VERSION
 
 logger = logging.getLogger(__name__)
 
@@ -40,9 +43,20 @@ class JsonLogging(BaseStatsStore):
     Inputs (constructor):
         file_path: Path to the JSON log file. Parent directories are created
             if they do not already exist.
-        async_logging: When True, use the BaseStatsStore background worker
-            queue for insert_query_log calls; when False (default), writes are
-            performed synchronously in the calling thread.
+        async_logging: Accepted for API compatibility with other backends.
+            insert_query_log dispatch is handled by BaseStatsStore queue logic.
+        max_logging_queue: Best-effort queue size hint consumed by the shared
+            BaseStatsStore worker implementation.
+        retention_max_records: Optional max-record retention limit. When set,
+            compaction keeps only the newest N query-log records.
+        retention_days: Optional day-window retention limit. When set,
+            compaction drops records older than the computed cutoff.
+        retention_max_bytes: Optional byte-cap retention limit. When set,
+            compaction drops oldest records until retained bytes are within cap.
+        retention_prune_interval_seconds: Optional minimum seconds between
+            compaction passes.
+        retention_prune_every_n_inserts: Optional insertion cadence for
+            compaction passes.
 
     Outputs:
         Initialized JsonLogging instance ready to append JSON lines to the
@@ -56,14 +70,25 @@ class JsonLogging(BaseStatsStore):
         self,
         file_path: str,
         async_logging: bool = False,
+        max_logging_queue: int = 16384,
+        batch_writes: bool = False,
+        batch_time_sec: float = 15.0,
+        batch_max_size: int = 1000,
+        retention_max_records: Optional[int] = None,
+        retention_days: Optional[float] = None,
+        retention_max_bytes: Optional[int] = None,
+        retention_prune_interval_seconds: Optional[float] = None,
+        retention_prune_every_n_inserts: Optional[int] = None,
         **_: Any,
     ) -> None:
         self._healthy = False
+        self._io_lock = threading.RLock()
 
         # Normalize and create the target directory if needed.
         path = os.path.abspath(os.path.expanduser(str(file_path)))
         dir_path = os.path.dirname(path)
-        if dir_path:
+        # pragma: nocover - os.path.abspath() yields a parent directory on supported paths.
+        if dir_path:  # pragma: no branch
             try:
                 os.makedirs(dir_path, exist_ok=True)
             except Exception:  # pragma: no cover - defensive
@@ -84,6 +109,51 @@ class JsonLogging(BaseStatsStore):
 
         # Configure logging behaviour for BaseStatsStore insert_query_log.
         self._async_logging = bool(async_logging)
+        # BaseStatsStore worker queue capacity
+        try:
+            self._max_logging_queue = int(max_logging_queue)
+        except Exception:
+            self._max_logging_queue = 16384
+        self._batch_writes = bool(batch_writes)
+        self._batch_time_sec = float(batch_time_sec)
+        self._batch_max_size = int(batch_max_size)
+        self._pending_lines: List[str] = []
+        self._last_flush = time.time()
+        self._query_log_retention_max_records = (
+            BaseStatsStore._normalize_retention_max_records(retention_max_records)
+        )
+        self._query_log_retention_days = BaseStatsStore._normalize_retention_days(
+            retention_days
+        )
+        self._query_log_retention_max_bytes = (
+            BaseStatsStore._normalize_retention_max_bytes(retention_max_bytes)
+        )
+        self._query_log_retention_prune_interval_seconds = (
+            BaseStatsStore._normalize_retention_prune_interval_seconds(
+                retention_prune_interval_seconds
+            )
+        )
+        configured_prune_every_n_inserts = (
+            BaseStatsStore._normalize_retention_prune_every_n_inserts(
+                retention_prune_every_n_inserts
+            )
+        )
+        self._query_log_retention_prune_every_n_inserts = (
+            configured_prune_every_n_inserts
+        )
+        if (
+            self._query_log_retention_prune_every_n_inserts is None
+            and self._query_log_retention_prune_interval_seconds is None
+            and (
+                self._query_log_retention_max_records is not None
+                or self._query_log_retention_max_bytes is not None
+            )
+        ):
+            # JSON compaction rewrites file contents; avoid doing it on every
+            # insert by default when users configure record/byte retention.
+            self._query_log_retention_prune_every_n_inserts = 256
+        self._query_log_retention_seen_inserts = 0
+        self._query_log_retention_last_prune_ts = 0.0
 
         # Emit a header line that marks the start of a logging session. Downstream
         # tools can treat this as a lightweight metadata record preceding the
@@ -110,6 +180,54 @@ class JsonLogging(BaseStatsStore):
     # ------------------------------------------------------------------
     # Health and lifecycle
     # ------------------------------------------------------------------
+    def _maybe_flush_locked(self) -> None:
+        """Flush buffered log lines when size/time thresholds are reached.
+
+        Inputs:
+            None. Caller must hold ``self._io_lock``.
+
+        Outputs:
+            None.
+        """
+
+        if not self._batch_writes:
+            return
+        lines_len = len(self._pending_lines)
+        if lines_len == 0:
+            return
+
+        now = time.time()
+        age = now - self._last_flush
+        if lines_len >= self._batch_max_size or age >= self._batch_time_sec:
+            self._flush_locked()
+
+    def _flush_locked(self) -> None:
+        """Flush all pending JSON lines and run retention once per flush.
+
+        Inputs:
+            None. Caller must hold ``self._io_lock``.
+
+        Outputs:
+            None.
+        """
+
+        fh = getattr(self, "_fh", None)
+        if fh is None:
+            return
+        if not self._pending_lines:
+            return
+
+        try:
+            for item in self._pending_lines:
+                fh.write(item + "\n")
+            fh.flush()
+            self._pending_lines.clear()
+            self._last_flush = time.time()
+            self._apply_query_log_retention_locked()
+        except Exception:  # pragma: no cover - defensive
+            logger.exception("Failed to flush buffered JsonLogging entries")
+            self._healthy = False
+
     def health_check(self) -> bool:  # type: ignore[override]
         """Return True when the JSON logging backend is considered usable.
 
@@ -135,16 +253,16 @@ class JsonLogging(BaseStatsStore):
         """
 
         try:
-            fh = getattr(self, "_fh", None)
-            if fh is not None:
-                try:
-                    fh.flush()
-                except Exception:  # pragma: no cover - defensive
-                    logger.exception("Failed to flush JsonLogging file on close")
-                try:
-                    fh.close()
-                except Exception:  # pragma: no cover - defensive
-                    logger.exception("Failed to close JsonLogging file handle")
+            with self._io_lock:
+                if self._batch_writes:
+                    self._flush_locked()
+                fh = getattr(self, "_fh", None)
+                if fh is not None:
+                    try:
+                        fh.close()
+                    except Exception:  # pragma: no cover - defensive
+                        logger.exception("Failed to close JsonLogging file handle")
+                self._fh = None
         finally:
             self._healthy = False
 
@@ -179,8 +297,8 @@ class JsonLogging(BaseStatsStore):
             result_json: JSON-encoded result payload from the resolver.
 
         Outputs:
-            None; best-effort append to the configured log file. Failures are
-            logged and cause the backend to be marked unhealthy.
+            None; best-effort append to the configured log file. Append/rewrite
+            I/O failures are logged and mark the backend unhealthy.
         """
 
         if not self.health_check():
@@ -223,9 +341,131 @@ class JsonLogging(BaseStatsStore):
             return
 
         try:
-            fh = self._fh
-            fh.write(line + "\n")
-            fh.flush()
+            with self._io_lock:
+                fh = self._fh
+                # pragma: nocover - concurrent close() can clear _fh after health_check().
+                if fh is None:  # pragma: no cover - defensive race
+                    return
+                if not self._batch_writes:
+                    fh.write(line + "\n")
+                    fh.flush()
+                    self._apply_query_log_retention_locked()
+                    return
+
+                self._pending_lines.append(line)
+                self._maybe_flush_locked()
         except Exception:  # pragma: no cover - defensive
             logger.exception("Failed to append JSON query_log entry to file")
+            self._healthy = False
+
+    def _apply_query_log_retention_locked(self) -> None:
+        """Brief: Enforce configured retention by compacting the JSON log file.
+
+        Inputs:
+            None. Caller must hold ``self._io_lock``.
+
+        Outputs:
+            None; rewrites the JSONL file when compaction changes the retained
+            record set.
+        """
+
+        cutoff_ts = BaseStatsStore._retention_cutoff_ts(
+            self._query_log_retention_days,
+            now_ts=time.time(),
+        )
+        max_records = self._query_log_retention_max_records
+        max_bytes = self._query_log_retention_max_bytes
+        if cutoff_ts is None and max_records is None and max_bytes is None:
+            return
+
+        if not self._should_run_query_log_retention_prune(now_ts=time.time()):
+            return
+
+        fh = getattr(self, "_fh", None)
+        # pragma: nocover - _fh may be cleared if retention runs during/after close().
+        if fh is None:  # pragma: no cover - defensive race
+            return
+
+        try:
+            fh.flush()
+        except Exception:  # pragma: no cover - defensive
+            logger.exception("Failed to flush JsonLogging file before retention prune")
+            return
+
+        try:
+            with open(self._file_path, "r", encoding="utf-8") as read_fh:
+                raw_lines = read_fh.read().splitlines()
+        except Exception:  # pragma: no cover - defensive
+            logger.exception("Failed to read JsonLogging file for retention prune")
+            return
+
+        if not raw_lines:
+            return
+
+        header_line: Optional[str] = None
+        record_lines = raw_lines
+        try:
+            first_obj = json.loads(raw_lines[0])
+            if isinstance(first_obj, dict) and "log_start" in first_obj:
+                header_line = raw_lines[0]
+                record_lines = raw_lines[1:]
+        except Exception:
+            header_line = None
+            record_lines = raw_lines
+
+        filtered_records: list[str] = []
+        for raw in record_lines:
+            if not raw:
+                continue
+            if cutoff_ts is not None:
+                try:
+                    obj = json.loads(raw)
+                    ts_val = obj.get("ts") if isinstance(obj, dict) else None
+                    if ts_val is not None and float(ts_val) < float(cutoff_ts):
+                        continue
+                except Exception:
+                    # Keep malformed lines so retention compaction does not
+                    # silently discard data unexpectedly.
+                    pass
+            filtered_records.append(raw)
+
+        if max_records is not None and len(filtered_records) > int(max_records):
+            filtered_records = filtered_records[-int(max_records) :]
+
+        if max_bytes is not None:
+            byte_cap = int(max_bytes)
+
+            def _line_bytes(line: str) -> int:
+                return len(line.encode("utf-8")) + 1
+
+            header_bytes = _line_bytes(header_line) if header_line is not None else 0
+            retained_bytes = header_bytes + sum(
+                _line_bytes(item) for item in filtered_records
+            )
+            while filtered_records and retained_bytes > byte_cap:
+                removed = filtered_records.pop(0)
+                retained_bytes -= _line_bytes(removed)
+
+        rewritten_lines: list[str] = []
+        if header_line is not None:
+            rewritten_lines.append(header_line)
+        rewritten_lines.extend(filtered_records)
+
+        if rewritten_lines == raw_lines:
+            return
+
+        try:
+            fh.close()
+        except Exception:  # pragma: no cover - defensive
+            logger.exception("Failed to close JsonLogging file before rewrite")
+
+        try:
+            with open(self._file_path, "w", encoding="utf-8") as out_fh:
+                for item in rewritten_lines:
+                    out_fh.write(item + "\n")
+            self._fh = open(self._file_path, "a", encoding="utf-8")
+        except Exception:  # pragma: no cover - defensive
+            logger.exception(
+                "Failed to rewrite JsonLogging file during retention prune"
+            )
             self._healthy = False

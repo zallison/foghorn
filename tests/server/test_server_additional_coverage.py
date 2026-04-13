@@ -13,7 +13,9 @@ from dnslib import QTYPE, RCODE, RR, A, DNSRecord
 
 import foghorn.servers.server as srv
 from foghorn.plugins.resolve import base as plugin_base
-from foghorn.servers.server import DNSUDPHandler, send_query_with_failover
+from foghorn.servers.udp_server import DNSUDPHandler
+
+send_query_with_failover = srv.send_query_with_failover
 
 
 class _Sock:
@@ -78,11 +80,9 @@ class _Stats:
 
 
 @pytest.mark.parametrize("path", ["cache_hit", "upstream_ok", "all_failed"])
-def test_stats_hooks_are_called(monkeypatch, path):
+def test_stats_hooks_are_called(monkeypatch, path, set_runtime_snapshot):
     q = DNSRecord.question("stats.example", "A")
     data = q.pack()
-    DNSUDPHandler.plugins = []
-    DNSUDPHandler.upstream_addrs = [{"host": "h", "port": 53}]
 
     # Be explicit about cache isolation for this parametrized test.
     try:
@@ -91,9 +91,6 @@ def test_stats_hooks_are_called(monkeypatch, path):
         plugin_base.DNS_CACHE = InMemoryTTLCache()
     except Exception:  # pragma: no cover
         pass
-
-    # ensure no pre plugins
-    monkeypatch.setattr(DNSUDPHandler, "_apply_pre_plugins", lambda *a, **k: None)
 
     # cache priming when needed
     cache_key = ("stats.example", QTYPE.A)
@@ -106,7 +103,7 @@ def test_stats_hooks_are_called(monkeypatch, path):
         monkeypatch.setattr(
             srv,
             "send_query_with_failover",
-            lambda request, upstreams, timeout_ms, qname, qtype, max_concurrent=1: (
+            lambda request, upstreams, timeout_ms, qname, qtype, max_concurrent=1, on_attempt_result=None: (
                 _mk_ok_reply(q),
                 upstreams[0],
                 "ok",
@@ -117,7 +114,7 @@ def test_stats_hooks_are_called(monkeypatch, path):
         monkeypatch.setattr(
             srv,
             "send_query_with_failover",
-            lambda request, upstreams, timeout_ms, qname, qtype, max_concurrent=1: (
+            lambda request, upstreams, timeout_ms, qname, qtype, max_concurrent=1, on_attempt_result=None: (
                 None,
                 None,
                 "all_failed",
@@ -125,7 +122,11 @@ def test_stats_hooks_are_called(monkeypatch, path):
         )
 
     stats = _Stats()
-    DNSUDPHandler.stats_collector = stats
+    set_runtime_snapshot(
+        plugins=[],
+        upstream_addrs=[{"host": "h", "port": 53}],
+        stats_collector=stats,
+    )
 
     h, sock = _mk_handler(data)
     h.handle()
@@ -139,47 +140,57 @@ def test_stats_hooks_are_called(monkeypatch, path):
     else:
         assert "record_cache_miss" in kinds
         assert "record_response_rcode" in kinds
-    # cleanup
-    DNSUDPHandler.stats_collector = None
 
 
-# ---- EDNS ensure call path across modes ----
-@pytest.mark.parametrize("mode", ["ignore", "passthrough", "validate"])
-def test_ensure_edns_called_in_handle_without_crashing(mode, monkeypatch):
-    # We don't assert on OPT content due to dnslib version differences; just ensure call path executes.
-    q = DNSRecord.question("edns.example", "A")
-    data = q.pack()
-    DNSUDPHandler.plugins = []
-    DNSUDPHandler.upstream_addrs = [
-        {"host": "h", "port": 53}
-    ]  # ensure EDNS path reached
+# ---- EDNS normalization helper coverage ----
+def test_ensure_edns_request_does_not_add_opt_when_missing() -> None:
+    """Brief: _ensure_edns_request does not add EDNS(0) when the client omitted it.
 
-    # count calls to _ensure_edns
-    called = {"n": 0}
+    Inputs:
+      - None.
 
-    def fake_ensure(self, req):
-        called["n"] += 1
-        return None
+    Outputs:
+      - None; asserts no OPT RR is injected.
+    """
 
-    monkeypatch.setattr(DNSUDPHandler, "_ensure_edns", fake_ensure)
-    # avoid real forwarding
-    monkeypatch.setattr(
-        DNSUDPHandler,
-        "_forward_with_failover_helper",
-        lambda self, request, upstreams, qname, qtype: (None, None, "all_failed"),
-    )
+    from foghorn.servers.server import _ensure_edns_request
 
-    h, sock = _mk_handler(data)
-    h.dnssec_mode = mode
-    h.handle()
+    req = DNSRecord.question("edns.example", "A")
+    assert not any(rr.rtype == QTYPE.OPT for rr in (req.ar or []))
 
-    assert called["n"] == 1
-    # response should be SERVFAIL due to no upstreams, but no exception from EDNS handling
-    resp = DNSRecord.parse(sock.sent[-1][0])
-    assert resp.header.rcode == RCODE.SERVFAIL
+    _ensure_edns_request(req, dnssec_mode="validate", edns_udp_payload=1232)
+
+    opts = [rr for rr in (req.ar or []) if rr.rtype == QTYPE.OPT]
+    assert len(opts) == 0
 
 
-def test_handle_pre_deny_records_stats_and_query_result():
+def test_ensure_edns_request_preserves_client_do_bit() -> None:
+    """Brief: _ensure_edns_request preserves the client's DO bit when OPT exists.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts DO bit remains set when client requested it.
+    """
+
+    from dnslib import EDNS0
+    from foghorn.servers.server import _ensure_edns_request
+
+    req = DNSRecord.question("edns-do.example", "A")
+    req.add_ar(EDNS0(udp_len=1232, flags="do"))
+
+    _ensure_edns_request(req, dnssec_mode="ignore", edns_udp_payload=1232)
+
+    opts = [rr for rr in (req.ar or []) if rr.rtype == QTYPE.OPT]
+    assert len(opts) == 1
+    flags = int(getattr(opts[0], "ttl", 0) or 0) & 0xFFFF
+    assert bool(flags & 0x8000) is True
+
+
+def test_handle_pre_deny_records_stats_and_query_result(
+    monkeypatch, set_runtime_snapshot
+):
     """Brief: pre-resolve deny path records stats and NXDOMAIN.
 
     Inputs:
@@ -199,16 +210,25 @@ def test_handle_pre_deny_records_stats_and_query_result():
             return None
 
     q = DNSRecord.question("predeny-stats.example", "A")
-    DNSUDPHandler.plugins = [_PreDeny()]
-    DNSUDPHandler.upstream_addrs = [{"host": "8.8.8.8", "port": 53}]
+
+    def _forbidden_send_query_with_failover(*_a, **_kw):
+        raise AssertionError(
+            "send_query_with_failover should not be called for pre-plugin deny"
+        )
+
+    monkeypatch.setattr(
+        srv, "send_query_with_failover", _forbidden_send_query_with_failover
+    )
 
     stats = _Stats()
-    DNSUDPHandler.stats_collector = stats
+    set_runtime_snapshot(
+        plugins=[_PreDeny()],
+        upstream_addrs=[{"host": "h", "port": 53}],
+        stats_collector=stats,
+    )
 
     h, sock = _mk_handler(q.pack())
     h.handle()
-
-    DNSUDPHandler.stats_collector = None
 
     wire = sock.sent[-1][0]
     resp = DNSRecord.parse(wire)
@@ -220,7 +240,9 @@ def test_handle_pre_deny_records_stats_and_query_result():
     assert "record_query_result" in kinds
 
 
-def test_handle_pre_override_records_stats_and_query_result():
+def test_handle_pre_override_records_stats_and_query_result(
+    monkeypatch, set_runtime_snapshot
+):
     """Brief: pre-resolve override path records stats and uses override reply.
 
     Inputs:
@@ -242,16 +264,25 @@ def test_handle_pre_override_records_stats_and_query_result():
             return None
 
     q = DNSRecord.question("preoverride-stats.example", "A")
-    DNSUDPHandler.plugins = [_PreOverride()]
-    DNSUDPHandler.upstream_addrs = [{"host": "8.8.8.8", "port": 53}]
+
+    def _forbidden_send_query_with_failover(*_a, **_kw):
+        raise AssertionError(
+            "send_query_with_failover should not be called for pre-plugin override"
+        )
+
+    monkeypatch.setattr(
+        srv, "send_query_with_failover", _forbidden_send_query_with_failover
+    )
 
     stats = _Stats()
-    DNSUDPHandler.stats_collector = stats
+    set_runtime_snapshot(
+        plugins=[_PreOverride()],
+        upstream_addrs=[{"host": "h", "port": 53}],
+        stats_collector=stats,
+    )
 
     h, sock = _mk_handler(q.pack())
     h.handle()
-
-    DNSUDPHandler.stats_collector = None
 
     wire = sock.sent[-1][0]
     resp = DNSRecord.parse(wire)
@@ -263,7 +294,7 @@ def test_handle_pre_override_records_stats_and_query_result():
     assert "record_query_result" in kinds
 
 
-def test_handle_no_upstreams_with_stats_records_query_result():
+def test_handle_no_upstreams_with_stats_records_query_result(set_runtime_snapshot):
     """Brief: No upstreams with stats enabled records SERVFAIL and query result.
 
     Inputs:
@@ -274,16 +305,12 @@ def test_handle_no_upstreams_with_stats_records_query_result():
     """
 
     q = DNSRecord.question("no-upstreams-stats.example", "A")
-    DNSUDPHandler.plugins = []
-    DNSUDPHandler.upstream_addrs = []
 
     stats = _Stats()
-    DNSUDPHandler.stats_collector = stats
+    set_runtime_snapshot(plugins=[], upstream_addrs=[], stats_collector=stats)
 
     h, sock = _mk_handler(q.pack())
     h.handle()
-
-    DNSUDPHandler.stats_collector = None
 
     wire = sock.sent[-1][0]
     resp = DNSRecord.parse(wire)
@@ -294,7 +321,9 @@ def test_handle_no_upstreams_with_stats_records_query_result():
     assert "record_query_result" in kinds
 
 
-def test_handle_all_failed_with_stats_records_upstream_rcode(monkeypatch):
+def test_handle_all_failed_with_stats_records_upstream_rcode(
+    monkeypatch, set_runtime_snapshot
+):
     """Brief: All-upstreams-failed path records upstream result and upstream rcode.
 
     Inputs:
@@ -305,17 +334,13 @@ def test_handle_all_failed_with_stats_records_upstream_rcode(monkeypatch):
     """
 
     q = DNSRecord.question("allfailed-stats.example", "A")
-    DNSUDPHandler.plugins = []
-    DNSUDPHandler.upstream_addrs = [
-        {"transport": "doh", "url": "https://resolver/dns-query"}
-    ]
 
     # Simulate an all-failed DoH upstream where send_query_with_failover still
     # reports which upstream was attempted.
     monkeypatch.setattr(
         srv,
         "send_query_with_failover",
-        lambda request, upstreams, timeout_ms, qname, qtype, max_concurrent=1: (
+        lambda request, upstreams, timeout_ms, qname, qtype, max_concurrent=1, on_attempt_result=None: (
             None,
             {"url": "https://resolver/dns-query"},
             "all_failed",
@@ -323,43 +348,100 @@ def test_handle_all_failed_with_stats_records_upstream_rcode(monkeypatch):
     )
 
     stats = _Stats()
-    DNSUDPHandler.stats_collector = stats
+    set_runtime_snapshot(
+        plugins=[],
+        upstream_addrs=[{"transport": "doh", "url": "https://resolver/dns-query"}],
+        stats_collector=stats,
+    )
 
     h, sock = _mk_handler(q.pack())
     h.handle()
 
-    DNSUDPHandler.stats_collector = None
-
     kinds = [k for k, _ in stats.calls]
     assert "record_upstream_result" in kinds
     assert "record_upstream_rcode" in kinds
+    query_result_entries = [
+        payload for kind, payload in stats.calls if kind == "record_query_result"
+    ]
+    assert query_result_entries
+    _, query_kwargs = query_result_entries[-1]
+    result_ctx = query_kwargs.get("result") or {}
+    assert result_ctx.get("source") == "upstream"
+    assert result_ctx.get("upstream") == "https://resolver/dns-query"
+    assert result_ctx.get("upstream_url") == "https://resolver/dns-query"
+
+
+def test_handle_upstream_success_records_query_result_upstream_id_and_url(
+    monkeypatch, set_runtime_snapshot
+):
+    """Brief: Successful upstream responses persist upstream id/url in result context.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts query_log result.source=upstream includes upstream/upstream_url.
+    """
+
+    q = DNSRecord.question("upstream-context.example", "A")
+
+    monkeypatch.setattr(
+        srv,
+        "send_query_with_failover",
+        lambda request, upstreams, timeout_ms, qname, qtype, max_concurrent=1, on_attempt_result=None: (
+            _mk_ok_reply(q),
+            {"transport": "doh", "url": "https://resolver/dns-query"},
+            "ok",
+        ),
+    )
+
+    stats = _Stats()
+    set_runtime_snapshot(
+        plugins=[],
+        upstream_addrs=[{"transport": "doh", "url": "https://resolver/dns-query"}],
+        stats_collector=stats,
+    )
+
+    h, _sock = _mk_handler(q.pack())
+    h.handle()
+
+    query_result_entries = [
+        payload for kind, payload in stats.calls if kind == "record_query_result"
+    ]
+    assert query_result_entries
+    _, query_kwargs = query_result_entries[-1]
+    result_ctx = query_kwargs.get("result") or {}
+    assert result_ctx.get("source") == "upstream"
+    assert result_ctx.get("upstream") == "https://resolver/dns-query"
+    assert result_ctx.get("upstream_url") == "https://resolver/dns-query"
 
 
 # ---- DNSSEC validate branches ----
-def testfoghorn_dnssec_dnssec_validate_upstream_ad_pass(monkeypatch):
-    DNSUDPHandler.plugins = []
-    DNSUDPHandler.upstream_addrs = [{"host": "8.8.8.8", "port": 53}]
+def testfoghorn_dnssec_dnssec_validate_upstream_ad_pass(
+    monkeypatch, set_runtime_snapshot
+):
 
     base_q = DNSRecord.question("ad.example", "A")
     ok = _mk_ok_reply(base_q, ad=1)
-
-    monkeypatch.setattr(DNSUDPHandler, "_apply_pre_plugins", lambda *a, **k: None)
 
     # Force the shared resolver path (used by UDP and others) to return an AD=1
     # NOERROR reply so that validate+upstream_ad can classify it as secure.
     monkeypatch.setattr(
         srv,
         "send_query_with_failover",
-        lambda req, ups, timeout_ms, qname, qtype, max_concurrent=1: (
+        lambda req, ups, timeout_ms, qname, qtype, max_concurrent=1, on_attempt_result=None: (
             ok,
             ups[0],
             "ok",
         ),
     )
 
-    # validate mode, upstream_ad at the handler class level (used by _resolve_core).
-    DNSUDPHandler.dnssec_mode = "validate"
-    DNSUDPHandler.dnssec_validation = "upstream_ad"
+    set_runtime_snapshot(
+        plugins=[],
+        upstream_addrs=[{"host": "8.8.8.8", "port": 53}],
+        dnssec_mode="validate",
+        dnssec_validation="upstream_ad",
+    )
 
     h1, sock1 = _mk_handler(base_q.pack())
     h1.handle()
@@ -367,10 +449,7 @@ def testfoghorn_dnssec_dnssec_validate_upstream_ad_pass(monkeypatch):
     assert r1.header.rcode == RCODE.NOERROR
 
 
-def testfoghorn_dnssec_dnssec_validate_local_true(monkeypatch):
-    DNSUDPHandler.plugins = []
-    DNSUDPHandler.upstream_addrs = [{"host": "9.9.9.9", "port": 53}]
-    monkeypatch.setattr(DNSUDPHandler, "_apply_pre_plugins", lambda *a, **k: None)
+def testfoghorn_dnssec_dnssec_validate_local_true(monkeypatch, set_runtime_snapshot):
 
     q = DNSRecord.question("local.example", "A")
     ok = _mk_ok_reply(q)
@@ -379,7 +458,7 @@ def testfoghorn_dnssec_dnssec_validate_local_true(monkeypatch):
     monkeypatch.setattr(
         srv,
         "send_query_with_failover",
-        lambda req, ups, timeout_ms, qname, qtype, max_concurrent=1: (
+        lambda req, ups, timeout_ms, qname, qtype, max_concurrent=1, on_attempt_result=None: (
             ok,
             ups[0],
             "ok",
@@ -396,16 +475,21 @@ def testfoghorn_dnssec_dnssec_validate_local_true(monkeypatch):
         lambda *a, **k: "secure",
     )
 
-    # validate mode, local validation at the handler class level.
-    DNSUDPHandler.dnssec_mode = "validate"
-    DNSUDPHandler.dnssec_validation = "local"
+    set_runtime_snapshot(
+        plugins=[],
+        upstream_addrs=[{"host": "9.9.9.9", "port": 53}],
+        dnssec_mode="validate",
+        dnssec_validation="local",
+    )
 
     h1, s1 = _mk_handler(q.pack())
     h1.handle()
     assert DNSRecord.parse(s1.sent[-1][0]).header.rcode == RCODE.NOERROR
 
 
-def test_resolve_core_dnssec_upstream_ad_shared_helper(monkeypatch):
+def test_resolve_core_dnssec_upstream_ad_shared_helper(
+    monkeypatch, set_runtime_snapshot
+):
     """Brief: _resolve_core uses the shared DNSSEC helper for upstream_ad.
 
     Inputs:
@@ -415,32 +499,30 @@ def test_resolve_core_dnssec_upstream_ad_shared_helper(monkeypatch):
       - Ensures dnssec_status is 'dnssec_secure' and stats hook is invoked.
     """
 
-    DNSUDPHandler.plugins = []
-    DNSUDPHandler.upstream_addrs = [{"host": "8.8.8.8", "port": 53}]
-
     q = DNSRecord.question("ad-core.example", "A")
     ok = _mk_ok_reply(q, ad=1)
 
     monkeypatch.setattr(
         srv,
         "send_query_with_failover",
-        lambda req, ups, timeout_ms, qname, qtype, max_concurrent=1: (
+        lambda req, ups, timeout_ms, qname, qtype, max_concurrent=1, on_attempt_result=None: (
             ok,
             {"host": "8.8.8.8", "port": 53},
             "ok",
         ),
     )
 
-    DNSUDPHandler.dnssec_mode = "validate"
-    DNSUDPHandler.dnssec_validation = "upstream_ad"
-    DNSUDPHandler.edns_udp_payload = 1232
-
     stats = _Stats()
-    DNSUDPHandler.stats_collector = stats
+    set_runtime_snapshot(
+        plugins=[],
+        upstream_addrs=[{"host": "8.8.8.8", "port": 53}],
+        dnssec_mode="validate",
+        dnssec_validation="upstream_ad",
+        edns_udp_payload=1232,
+        stats_collector=stats,
+    )
 
     result = srv._resolve_core(q.pack(), "127.0.0.1")
-
-    DNSUDPHandler.stats_collector = None
 
     assert DNSRecord.parse(result.wire).header.rcode == RCODE.NOERROR
     assert result.dnssec_status == "dnssec_secure"
@@ -449,7 +531,9 @@ def test_resolve_core_dnssec_upstream_ad_shared_helper(monkeypatch):
     assert "record_dnssec_status" in kinds
 
 
-def test_no_upstreams_with_client_edns_preserves_opt_payload(monkeypatch):
+def test_no_upstreams_with_client_edns_preserves_opt_payload(
+    monkeypatch, set_runtime_snapshot
+):
     """Brief: SERVFAIL/no-upstreams path echoes client EDNS OPT and payload size.
 
     Inputs:
@@ -461,8 +545,7 @@ def test_no_upstreams_with_client_edns_preserves_opt_payload(monkeypatch):
 
     from dnslib import EDNS0 as _EDNS0
 
-    DNSUDPHandler.plugins = []
-    DNSUDPHandler.upstream_addrs = []
+    set_runtime_snapshot(plugins=[], upstream_addrs=[])
 
     # Build a query with an EDNS0 OPT advertising a custom UDP payload.
     q = DNSRecord.question("no-up-edns.example", "A")
@@ -503,20 +586,9 @@ def test_schedule_cache_refresh_runs_worker_and_ignores_errors(monkeypatch):
 
     monkeypatch.setattr(srv, "resolve_query_bytes", _fake_resolve)
 
-    # Replace threading.Thread so that the worker runs synchronously for coverage.
-    class _FakeThread:
-        def __init__(self, target, name=None, daemon=None):  # noqa: D401, ANN001
-            """Record target/name/daemon and immediately run the worker."""
-
-            assert callable(target)
-            self.target = target
-            self.name = name
-            self.daemon = daemon
-
-        def start(self) -> None:
-            self.target()
-
-    monkeypatch.setattr(srv.threading, "Thread", _FakeThread)
+    # Replace the bounded background submit helper so that the worker runs
+    # synchronously for coverage.
+    monkeypatch.setattr(srv, "_bg_submit", lambda _key, fn: fn())
 
     q = DNSRecord.question("refresh.example", "A")
     wire = q.pack()
@@ -526,30 +598,9 @@ def test_schedule_cache_refresh_runs_worker_and_ignores_errors(monkeypatch):
     assert calls["seen"] == [(wire, "127.0.0.1")]
 
 
-def test_set_response_id_bytes_normal_and_short():
-    """Brief: _set_response_id_bytes rewrites first two bytes only when long enough.
-
-    Inputs:
-        - None (pure function under test).
-
-    Outputs:
-        - None; asserts both normal and short-wire behaviors.
-    """
-
-    # Normal case: two or more bytes.
-    original = b"\x12\x34rest"
-    out = srv._set_response_id_bytes(original, 0xBEEF)
-    assert out[:2] == bytes([0xBE, 0xEF])
-    assert out[2:] == b"rest"
-
-    # Short wire: returned unchanged.
-    short = b"\x01"
-    out_short = srv._set_response_id_bytes(short, 0xBEEF)
-    assert out_short == short
-
-
 def test_handle_pre_plugin_deny_with_client_edns_produces_nxdomain_with_opt(
     monkeypatch,
+    set_runtime_snapshot,
 ):
     """Brief: Pre-plugin deny path echoes client EDNS OPT into NXDOMAIN.
 
@@ -575,8 +626,7 @@ def test_handle_pre_plugin_deny_with_client_edns_produces_nxdomain_with_opt(
 
             return None
 
-    DNSUDPHandler.plugins = [_DenyPlugin()]
-    DNSUDPHandler.upstream_addrs = []
+    set_runtime_snapshot(plugins=[_DenyPlugin()], upstream_addrs=[])
 
     q = DNSRecord.question("pre-deny-edns.example", "A")
     q.add_ar(_EDNS0(udp_len=1800))

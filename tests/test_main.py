@@ -20,10 +20,10 @@ from foghorn.main import main
 
 def test_normalize_upstream_config_list_only_and_timeout_default():
     """
-    Brief: normalize_upstream_config accepts list-only upstreams and top-level timeout.
+    Brief: normalize_upstream_config accepts v2 upstream layout and resolver timeout.
 
     Inputs:
-      - cfg: with list upstreams and optional top-level timeout.
+      - cfg: with upstreams.endpoints and optional server.resolver timeout_ms.
 
     Outputs:
       - None: Asserts upstreams parsed and timeout default/override behavior.
@@ -31,11 +31,13 @@ def test_normalize_upstream_config_list_only_and_timeout_default():
     # List form with explicit timeout
     ups, to = normalize_upstream_config(
         {
-            "upstreams": [
-                {"host": "1.1.1.1", "port": 53},
-                {"host": "1.0.0.1", "port": 53},
-            ],
-            "foghorn": {"timeout_ms": 1500},
+            "upstreams": {
+                "endpoints": [
+                    {"host": "1.1.1.1", "port": 53},
+                    {"host": "1.0.0.1", "port": 53},
+                ]
+            },
+            "server": {"resolver": {"timeout_ms": 1500}},
         }
     )
     assert ups == [{"host": "1.1.1.1", "port": 53}, {"host": "1.0.0.1", "port": 53}]
@@ -44,9 +46,11 @@ def test_normalize_upstream_config_list_only_and_timeout_default():
     # Default timeout when not provided
     ups2, to2 = normalize_upstream_config(
         {
-            "upstreams": [
-                {"host": "8.8.8.8", "port": 53},
-            ]
+            "upstreams": {
+                "endpoints": [
+                    {"host": "8.8.8.8", "port": 53},
+                ]
+            }
         }
     )
     assert ups2 == [{"host": "8.8.8.8", "port": 53}]
@@ -107,7 +111,7 @@ def test_load_plugins_uses_registry(monkeypatch):
     plugins = load_plugins(
         [
             "a",
-            {"module": "pkg.P2", "config": {"x": 1, "cache": {"module": "none"}}},
+            {"type": "pkg.P2", "config": {"x": 1, "cache": {"module": "none"}}},
         ]
     )
     assert type(plugins[0]).__name__ == "P1"
@@ -174,6 +178,7 @@ def test_main_starts_server_and_handles_keyboardinterrupt(monkeypatch):
         "  resolver:\n"
         "    mode: forward\n"
         "    timeout_ms: 777\n"
+        "    use_asyncio: false\n"
         "  cache:\n"
         "    backend: in_memory_ttl\n"
         "    config:\n"
@@ -187,48 +192,43 @@ def test_main_starts_server_and_handles_keyboardinterrupt(monkeypatch):
         "plugins: []\n"
     )
 
-    class DummyServer:
-        def __init__(
-            self,
-            host,
-            port,
-            upstreams,
-            plugins,
-            timeout,
-            timeout_ms,
-            min_cache_ttl,
-            stats_collector=None,
-            **_extra,
-        ):
-            # Capture the core positional arguments; ignore any additional
-            # keyword arguments (e.g., dnssec_mode, edns_udp_payload,
-            # dnssec_validation) that main() may pass through to DNSServer.
-            self.args = (
-                host,
-                port,
-                upstreams,
-                plugins,
-                timeout,
-                timeout_ms,
-                min_cache_ttl,
-                stats_collector,
-            )
-
-        def serve_forever(self):
-            raise KeyboardInterrupt
+    import socketserver
+    import threading
+    import time
 
     called = {}
+
+    class DummyUDPServer:
+        def __init__(self, addr, handler_cls):
+            called["udp_addr"] = addr
+            called["handler_cls"] = handler_cls
+            self.daemon_threads = False
+            self._stop = threading.Event()
+
+        def serve_forever(self):
+            self._stop.wait()
+
+        def shutdown(self):
+            self._stop.set()
+
+        def server_close(self):
+            called["server_close"] = True
 
     def dummy_init_logging(cfg):
         called["init_logging"] = cfg
 
-    monkeypatch.setattr(main_mod, "DNSServer", DummyServer)
+    def _raise_keyboardinterrupt(_seconds: float) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(socketserver, "ThreadingUDPServer", DummyUDPServer)
+    monkeypatch.setattr(time, "sleep", _raise_keyboardinterrupt)
     monkeypatch.setattr(main_mod, "init_logging", dummy_init_logging)
 
     with patch("builtins.open", mock_open(read_data=yaml_data)):
         rc = main(["--config", "conf.yaml"])
 
     assert rc == 0
+    assert called["udp_addr"] == ("127.0.0.1", 5354)
 
 
 def test_normalize_upstream_config_rejects_non_mapping_entries():
@@ -265,6 +265,7 @@ def test_main_returns_one_on_exception_alt(monkeypatch):
         "  resolver:\n"
         "    mode: forward\n"
         "    timeout_ms: 2000\n"
+        "    use_asyncio: false\n"
         "upstreams:\n"
         "  strategy: failover\n"
         "  max_concurrent: 1\n"
@@ -273,14 +274,24 @@ def test_main_returns_one_on_exception_alt(monkeypatch):
         "      port: 53\n"
     )
 
-    class DummyServer:
-        def __init__(self, *a, **kw):
-            pass
+    import socketserver
+    import time
+
+    class DummyUDPServer:
+        def __init__(self, *_a, **_kw):
+            self.daemon_threads = False
 
         def serve_forever(self):
             raise ValueError("boom2")
 
-    monkeypatch.setattr(main_mod, "DNSServer", DummyServer)
+        def shutdown(self):
+            return None
+
+        def server_close(self):
+            return None
+
+    monkeypatch.setattr(socketserver, "ThreadingUDPServer", DummyUDPServer)
+    monkeypatch.setattr(time, "sleep", lambda _s: None)
     monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
 
     with patch("builtins.open", mock_open(read_data=yaml_data)):

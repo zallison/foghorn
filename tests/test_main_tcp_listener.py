@@ -1,5 +1,5 @@
 """
-Brief: Ensure main() uses legacy_host for TCP/DoT listener defaults (no NameError) and starts TCP when enabled.
+Brief: Ensure main() applies listener defaults safely and starts TCP when enabled.
 
 Inputs:
   - None
@@ -11,9 +11,10 @@ Outputs:
 from unittest.mock import mock_open, patch
 
 import foghorn.main as main_mod
+import foghorn.main_config_helpers as main_cfg_helpers
 
 
-def test_main_tcp_listener_uses_legacy_host_and_starts(monkeypatch):
+def test_main_tcp_listener_uses_default_bind_host_and_starts(monkeypatch):
     """
     Brief: Enabling listen.tcp should not reference undefined 'host' and should call serve_tcp.
 
@@ -23,7 +24,7 @@ def test_main_tcp_listener_uses_legacy_host_and_starts(monkeypatch):
     Outputs:
       - None: Asserts main() returns 0 without NameError and serve_tcp was invoked once
     """
-    # Config: UDP enabled (so main exits via KeyboardInterrupt), TCP enabled
+    # Config: UDP disabled (avoid starting a real UDP listener), TCP enabled
     # using v2 server/upstreams layout.
     yaml_data = (
         "upstreams:\n"
@@ -35,7 +36,7 @@ def test_main_tcp_listener_uses_legacy_host_and_starts(monkeypatch):
         "server:\n"
         "  listen:\n"
         "    udp:\n"
-        "      enabled: true\n"
+        "      enabled: false\n"
         "      host: 127.0.0.1\n"
         "      port: 5354\n"
         "    tcp:\n"
@@ -73,7 +74,6 @@ def test_main_tcp_listener_uses_legacy_host_and_starts(monkeypatch):
         def join(self, timeout=None):
             return
 
-    import sys
     import threading as real_threading
 
     class _FakeThreadingModule:
@@ -90,8 +90,21 @@ def test_main_tcp_listener_uses_legacy_host_and_starts(monkeypatch):
 
     monkeypatch.setattr(main_mod, "DNSServer", DummyServer)
     monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
-    # Ensure `import threading` inside main() gets our shim
-    monkeypatch.setitem(sys.modules, "threading", fake_threading)
+    monkeypatch.setattr(main_mod, "threading", fake_threading)
+
+    # main._start_asyncio_server imports threading dynamically via importlib so
+    # tests can override it. Patch importlib.import_module('threading') to return
+    # our shim without mutating sys.modules.
+    import importlib
+
+    real_import_module = importlib.import_module
+
+    def _fake_import_module(name, package=None):  # type: ignore[no-untyped-def]
+        if name == "threading":
+            return fake_threading
+        return real_import_module(name, package=package)
+
+    monkeypatch.setattr(importlib, "import_module", _fake_import_module)
 
     with patch("builtins.open", mock_open(read_data=yaml_data)):
         rc = main_mod.main(["--config", "x.yaml"])
@@ -101,14 +114,14 @@ def test_main_tcp_listener_uses_legacy_host_and_starts(monkeypatch):
 
 
 def test_listen_dns_populates_udp_and_tcp(monkeypatch):
-    """Brief: server.listen.dns host/port and flags drive UDP/TCP defaults.
+    """Brief: server.listen.dns host/port default listener bind values.
 
     Inputs:
       - monkeypatch: pytest monkeypatch fixture.
 
     Outputs:
       - None; asserts DNSServer and TCP listener receive the dns.host/port
-        values when no explicit udp/tcp blocks are present.
+        values when listener blocks omit host/port overrides.
     """
 
     yaml_data = (
@@ -119,12 +132,14 @@ def test_listen_dns_populates_udp_and_tcp(monkeypatch):
         "  strategy: failover\n"
         "  max_concurrent: 1\n"
         "server:\n"
+        "  limits:\n"
+        "    allow_unsafe_threaded_listeners: true\n"
         "  listen:\n"
         "    dns:\n"
         "      host: 0.0.0.0\n"
         "      port: 5300\n"
-        "      udp: true\n"
-        "      tcp: true\n"
+        "    tcp:\n"
+        "      enabled: true\n"
         "  resolver:\n"
         "    mode: forward\n"
         "    timeout_ms: 2000\n"
@@ -133,23 +148,23 @@ def test_listen_dns_populates_udp_and_tcp(monkeypatch):
 
     udp_info = {"host": None, "port": None}
 
-    class DummyServer:
-        def __init__(
-            self,
-            host,
-            port,
-            upstreams,
-            plugins,
-            timeout,
-            timeout_ms,
-            min_cache_ttl,
-            stats_collector=None,
-            **_extra,
-        ):
+    # main() uses socketserver.ThreadingUDPServer for threaded UDP listeners,
+    # not dnslib.server.DNSServer.
+    class DummyUDPServer:
+        def __init__(self, addr, handler_cls):  # type: ignore[no-untyped-def]
+            host, port = addr
             udp_info["host"] = host
             udp_info["port"] = port
+            self._handler_cls = handler_cls
+            self.daemon_threads = False
 
         def serve_forever(self):  # pragma: no cover - exercised via thread wrapper
+            return
+
+        def shutdown(self):  # pragma: no cover - no-op for tests
+            return
+
+        def server_close(self):  # pragma: no cover - no-op for tests
             return
 
     tcp_calls = {"count": 0, "host": None, "port": None}
@@ -179,7 +194,6 @@ def test_listen_dns_populates_udp_and_tcp(monkeypatch):
             return
 
     import threading as real_threading
-    import sys
 
     class _FakeThreadingModule:
         """Test helper: module-like shim that overrides Thread but proxies others."""
@@ -195,14 +209,14 @@ def test_listen_dns_populates_udp_and_tcp(monkeypatch):
 
     from foghorn.servers import tcp_server as tcp_server_mod
 
-    monkeypatch.setattr(main_mod, "DNSServer", DummyServer)
+    import socketserver as real_socketserver
+
+    monkeypatch.setattr(real_socketserver, "ThreadingUDPServer", DummyUDPServer)
+    monkeypatch.setattr(main_mod, "DNSServer", object)
     monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
     monkeypatch.setattr(main_mod, "start_webserver", lambda *a, **k: None)
     monkeypatch.setattr(tcp_server_mod, "serve_tcp_threaded", fake_serve_tcp_threaded)
     monkeypatch.setattr(tcp_server_mod, "serve_tcp", lambda *a, **k: None)
-    # Ensure imports of threading inside main() see our fake module and that
-    # the already-imported main_mod.threading uses DummyThread.Thread.
-    monkeypatch.setitem(sys.modules, "threading", fake_threading)
     monkeypatch.setattr(main_mod, "threading", fake_threading)
 
     with patch("builtins.open", mock_open(read_data=yaml_data)):
@@ -214,3 +228,60 @@ def test_listen_dns_populates_udp_and_tcp(monkeypatch):
     assert tcp_calls["count"] == 1
     assert tcp_calls["host"] == "0.0.0.0"
     assert tcp_calls["port"] == 5300
+
+
+def test_build_listener_configs_overload_response_backward_compatible_defaults() -> (
+    None
+):
+    """Brief: Listener overload_response defaults stay backward-compatible without global override.
+
+    Inputs:
+      - server_cfg with listener blocks but no global overload_response.
+
+    Outputs:
+      - None; asserts UDP defaults to servfail and TCP/DoT/DoH default to drop.
+    """
+
+    server_cfg = {"listen": {"udp": {}, "tcp": {}, "dot": {}, "doh": {}}}
+
+    _listen, udp_cfg, tcp_cfg, dot_cfg, doh_cfg, _host, _port = (
+        main_cfg_helpers._build_listener_configs(server_cfg=server_cfg)
+    )
+
+    assert udp_cfg["overload_response"] == "servfail"
+    assert tcp_cfg["overload_response"] == "drop"
+    assert dot_cfg["overload_response"] == "drop"
+    assert doh_cfg["overload_response"] == "drop"
+
+
+def test_build_listener_configs_overload_response_global_and_per_listener_override() -> (
+    None
+):
+    """Brief: Global overload_response applies to all listeners unless a listener override is set.
+
+    Inputs:
+      - server_cfg with global overload_response and selected listener overrides.
+
+    Outputs:
+      - None; asserts expected precedence and invalid override normalization fallback.
+    """
+
+    server_cfg = {
+        "listen": {
+            "overload_response": "refused",
+            "udp": {"enabled": True},
+            "tcp": {"enabled": True, "overload_response": "drop"},
+            "dot": {"enabled": True, "overload_response": "invalid-value"},
+            "doh": {"enabled": True},
+        }
+    }
+
+    _listen, udp_cfg, tcp_cfg, dot_cfg, doh_cfg, _host, _port = (
+        main_cfg_helpers._build_listener_configs(server_cfg=server_cfg)
+    )
+
+    assert udp_cfg["overload_response"] == "refused"
+    assert tcp_cfg["overload_response"] == "drop"
+    # Invalid per-listener values normalize back to the effective default.
+    assert dot_cfg["overload_response"] == "refused"
+    assert doh_cfg["overload_response"] == "refused"

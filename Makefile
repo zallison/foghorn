@@ -7,17 +7,20 @@
 # (Keep YAML files, so we exclude *.yaml and *.yml from the delete patterns)
 IGNORE_EXTS :=  .yaml .yml .pem .key .cert .srl
 
-## Docker
+## :Docker:
 #########
 # prefix (default: username) and tag (default: latest).
 PREFIX ?= ${USER}
 TAG ?= latest
 # Name to use for the container
-CONTAINER_NAME ?= foghorn
+CONTAINER_NAME=foghorn
+# prefix/image_name
+IMAGE_NAME ?= foghorn
 # Location of container config/data.
 CONTAINER_DATA ?= ./.docker
 # Only used if your config.yaml uses LISTEN as a variable
 LISTEN ?= 0.0.0.0
+LISTEN_PORT ?= 53
 # Label for docker_hosts.py
 FH_PRIORITY ?= 100
 # Default ports
@@ -25,7 +28,7 @@ ADMINPORT ?= 5380
 UDPPORT ?= 53
 TCPPORT ?= 53
 
-## SSL
+## :SSL:
 ######
 # Common Name, aka server name
 CNAME ?= $(shell hostname)
@@ -39,17 +42,14 @@ CA_PEM ?=  ${KEYDIR}/foghorn_ca.pem
 SERVER :=  ${KEYDIR}/foghorn_${CNAME}
 SERVER_PEM ?= ${SERVER}.pem
 
-## Python
+## :Python:
 #########
 # Build the project: create a venv, install the package in editable mode
 # Name of the virtual-env directory
 VENV ?= ./venv
 
-## END VARIABLES
-################
 
-
-## Show Variables:
+## :Variables:Helpers:
 ##################
 # Print ALL make variables (debug / introspection only)
 .PHONY: vars-print-all-all
@@ -77,7 +77,7 @@ vars-make: vars-header-Make var-print-IGNORE_EXTS
 
 # Variables for Docker
 .PHONY: vars-docker
-vars-docker: vars-header-Docker var-print-PREFIX var-print-TAG var-print-CONTAINER_DATA var-print-CONTAINER_NAME var-print-LISTEN var-print-FH_PRIORITY var-print-ADMINPORT var-print-TCPPORT var-print-UDPPORT
+vars-docker: vars-header-Docker var-print-PREFIX var-print-TAG var-print-CONTAINER_DATA var-print-IMAGE_NAME var-print-LISTEN var-print-LISTEN_PORT var-print-FH_PRIORITY var-print-ADMINPORT var-print-TCPPORT var-print-UDPPORT
 	@echo
 
 # Variables for openssl
@@ -91,13 +91,13 @@ vars-python: vars-header-Python var-print-VENV
 	@echo
 
 
-## Local running
+## :python: running locally
 ################
 .PHONY: run
 run: $(VENV)/bin/foghorn
 	. ${VENV}/bin/activate
 	mkdir var 2>/dev/null || true
-	LISTEN=${LISTEN} ${VENV}/bin/foghorn --config config/config.yaml
+	LISTEN=${LISTEN} LISTEN_PORT=${LISTEN_PORT} ${VENV}/bin/foghorn --config config/config.yaml
 
 .PHONY: env
 env:
@@ -106,14 +106,22 @@ env:
 	$(VENV)/bin/pip install "."
 
 $(VENV)/bin/foghorn: pyproject.toml
+	${MAKE} clean
 	$(MAKE) env-dev
 
-# Ensure the schema is up to date
+# :Schema: Ensure the schema is up to date
 # Add newline to end of config to make linting happy.
 .PHONY: schema
 schema:
 	./scripts/generate_foghorn_schema.py -o assets/config-schema.json > /dev/null
 	echo >> assets/config-schema.json
+.PHONY: ui-bundle
+ui-bundle:
+	python ./scripts/build_admin_ui_bundle.py
+
+.PHONY: ui-bundle-runtime
+ui-bundle-runtime:
+	python ./scripts/build_admin_ui_bundle.py --runtime-only
 
 
 .PHONY: env-dev
@@ -122,8 +130,8 @@ env-dev: env
 	$(VENV)/bin/pip install -e ".[dev]"
 
 
-## DNSSEC
-#########
+## :DNSSEC:
+#############
 
 # Sign a zonefile and write out a zonefile, with all DNSSEC records (RRSIG, NSSIG)
 .PHONY: dnssec-sign-zone
@@ -144,6 +152,31 @@ dnssec-sign-zone: $(VENV)/bin/foghorn
 	  --algorithm "$$ALGO" \
 	  --validity-days "$$VALIDITY_DAYS"
 
+## :DNS:Update:
+##################
+
+# Generate a TSIG key for DNS UPDATE authentication
+.PHONY: gen-tsig-key
+gen-tsig-key: $(VENV)/bin/foghorn
+	. ${VENV}/bin/activate
+	@NAME=$${NAME:-dynamic-key.example.com} ; \
+	ALGO=$${ALGO:-hmac-sha256} ; \
+	echo "Generating TSIG key: $$NAME ($$ALGO)" ; \
+	${VENV}/bin/python scripts/generate_dns_update_keys.py \
+	  --tsig \
+	  --name "$$NAME" \
+	  --algorithm "$$ALGO" \
+	  --config-snippet
+
+# Generate a PSK token for DNS UPDATE authentication
+.PHONY: gen-psk-token
+gen-psk-token: $(VENV)/bin/foghorn
+	. ${VENV}/bin/activate
+	@echo "Generating PSK token" ; \
+	${VENV}/bin/python scripts/generate_dns_update_keys.py \
+	  --psk \
+	  --config-snippet
+
 # ------------------------------------------------------------
 # Run tests
 # ------------------------------------------------------------
@@ -157,23 +190,21 @@ test: $(VENV)/bin/foghorn env-dev
 
 
 # ------------------------------------------------------------
-# Clean temporary artefacts
+# Clean temporary artifacts
 # ------------------------------------------------------------
 .PHONY: clean
 clean:
 	@echo "=== Removing virtual environment and var directory ==="
 	rm -rf $(VENV) var build docker-build coverage.json schema.json dist
 	@echo "=== Removing temporary files and byte‑code ==="
-# Delete __pycache__ directories
 	find . -type d -name "__pycache__" -exec rm -rf {} +;
-# Delete .pyc, .tmp, backup (~) and vim swap files
 	find . -type f \
 	\( -name '*.pyc' -o -name '*.tmp' -o -name '*~' -o -name '#*' -o -name '*.swp' \) -delete
 
 
 # ###############
 # ---------------
-# OpenSSL Keys
+# :OpenSSL:Keys:
 #  - Generates CA
 #  - make ssl-cert
 # ---------------
@@ -212,7 +243,7 @@ $(CA_KEY): ssl-key-dir
 		echo "Skipping $(CA_KEY) - already exists"; \
 	fi
 
-# Generate ${SERVER} key, CSR, and sign with CA
+# :ssl:Server: Generate ${SERVER} key, CSR, and sign with CA
 ${SERVER}.crt: ${SERVER}.csr | $(CA_CERT)
 	@echo "== Generating ${SERVER}.crt"
 	openssl x509 -req -in ${SERVER}.csr -CA $(CA_CERT) -CAkey $(CA_KEY) -CAcreateserial -out ${SERVER}.crt -days 365 -sha256
@@ -225,98 +256,80 @@ ${SERVER}.key: ${CA_CERT}
 	@echo "== Generating ${SERVER}.key"
 	openssl genrsa -out ${SERVER}.key 2048
 
-$(CA_PEM): $(CA_CERT)
-	@echo "== Generating $(CA_PEM) from $(CA_CERT)"
-	openssl x509 -in "$(CA_CERT)" -out "$(CA_PEM)" -outform PEM
-
 $(SERVER_PEM): ${SERVER}.crt ${SERVER}.key
 	@echo "== Generating ${SERVER}.pem (cert + key)"
 	cat ${SERVER}.crt ${SERVER}.key > ${SERVER}.pem
+
+# :ssl:CA:
+$(CA_PEM): $(CA_CERT)
+	@echo "== Generating $(CA_PEM) from $(CA_CERT)"
+	openssl x509 -in "$(CA_CERT)" -out "$(CA_PEM)" -outform PEM
 
 # Clean up
 ssl-clean-keys:
 	rm -f ${KEYDIR}/*.key ${KEYDIR}/*.csr ${KEYDIR}/*.crt ${KEYDIR}/*.srl
 
-# ################
+
 # ----------------
-# End openssl keys
+# :End:openssl keys:
 # ----------------
-# ################
-
-
-# ---------------
-# Github Helpers
-# ---------------
-
-.PHONY: github-push
-github-push: clean tests
-	git add -A
-	git diff --quiet --cached && git diff --quiet --exit-code && git status --porcelain --ignore-submodules=all | grep -q . || { \
-		echo "ERROR: Repository has uncommitted changes or untracked files. Commit or stash them before pushing."; \
-		exit 1; \
-	}
-	git push origin $(shell git rev-parse --abbrev-ref HEAD)
-
-
-# GitHub PR creation target
-create-pr:
-	@echo "Creating GitHub PR for $(shell git rev-parse --abbrev-ref HEAD) branch..."
-	@PR_BODY="$(shell echo '## Changes\n\n$(shell git log --oneline $(shell git merge-base HEAD origin/$(shell git rev-parse --abbrev-ref HEAD))..HEAD)')"
-	@PR_TITLE="$(shell echo '$(shell git rev-parse --abbrev-ref HEAD): $(shell git log -1 --pretty=%s)')"
-	@curl -X POST \
-		-H "Authorization: token $(shell echo ${GITHUB_TOKEN} | base64)" \
-		-H "Accept: application/vnd.github.v3+json" \
-		-d "{\"title\": \"$(PR_TITLE)\", \"body\": \"$(PR_BODY)\", \"head\": \"$(shell git rev-parse --abbrev-ref HEAD)\", \"base\": \"main\"}" \
-		https://api.github.com/repos/PREFIX/Container_name/pulls
 
 
 
 # ---------------
-# Docker Helpers
+# :Docker:Helpers:
 # ---------------
 .PHONY: docker
-docker: clean docker-build docker-run docker-logs
+docker: docker-build docker-run docker-logs
 
 .PHONY: docker-build
 docker-build:
 	rsync -qr --exclude='*/__pycache__/*' --delete-during LICENSE.txt ./entrypoint.sh ./src ./pyproject.toml ./Dockerfile ./docker-compose.yaml ./assets ./docs ./scripts docker-build/
-	docker build ./docker-build -t ${PREFIX}/${CONTAINER_NAME}:${TAG}
+	docker build ./docker-build -t ${PREFIX}/${IMAGE_NAME}:${TAG}
 
 .PHONY: docker-clean
 docker-clean:
-	docker rmi -f ${PREFIX}/${CONTAINER_NAME}:${TAG} || true
+	docker rmi -f ${PREFIX}/${IMAGE_NAME}:${TAG} || true
 	rm -rf docker-build || true
 
 .PHONY: docker-run
 docker-run: docker-build
-	docker rm -f foghorn
-	docker run -d --privileged --net=host --name foghorn -v ${CONTAINER_DATA}:/foghorn/config/ \
+	docker rm -f ${CONTAINER_NAME}
+	docker run -d --net=host --name foghorn -v ${CONTAINER_DATA}:/foghorn/config/ \
+        --privileged \
+		--name "${CONTAINER_NAME}" \
 		--label "com.foghorn.priority=${FH_PRIORITY}" \
-		-v /etc/hosts:/etc/hosts:ro --restart unless-stopped  ${PREFIX}/${CONTAINER_NAME}:${TAG}
+		-v /etc/hosts:/etc/hosts:ro \
+		-e LISTEN=${LISTEN} \
+		-e LISTEN_PORT=${LISTEN_PORT} \
+        --restart unless-stopped \
+        ${PREFIX}/${IMAGE_NAME}:${TAG}
 
 # Port forwarding
 .PHONY: docker-run-not-host
 docker-run-not-host: docker-build
 	docker rm -f foghorn
-	docker run -d --privileged --name foghorn \
+	docker run -d --name foghorn \
+        --privileged \
+		--name "${CONTAINER_NAME}" \
 	    -v ${CONTAINER_DATA}:/foghorn/config/ \
 		-p ${UDPPORT}:5335/udp \
 		-p ${TCPPORT}:5335/tcp \
 		-p ${ADMINPORT}:5380/tcp \
 	 	-v /etc/hosts:/etc/hosts:ro \
 		--restart unless-stopped \
-		${PREFIX}/${CONTAINER_NAME}:${TAG}
+		${PREFIX}/${IMAGE_NAME}:${TAG}
 
 .PHONY: docker-logs
 docker-logs:
-	docker logs -f foghorn
+	docker logs -f ${CONTAINER_NAME}
 
 .PHONY: docker-ship
 docker-ship: clean docker-build
-	docker push ${PREFIX}/${CONTAINER_NAME}:${TAG}
+	docker push ${PREFIX}/${IMAGE_NAME}:${TAG}
 
 # ---------------
-# Packaging
+# :pypi:Packaging:
 # ---------------
 
 .PHONY: package-build
@@ -332,14 +345,9 @@ package-publish-dev: package-build
 	twine upload --repository testpypi dist/* --verbose
 
 
-# ----------------------
-# end of code, show help
-# ----------------------
-
-
-# ------------------------------------------------------------
-# Help
-# ------------------------------------------------------------
+# -------
+# :Help:
+# -------
 .PHONY: help
 help:
 	@echo "Building, testing, and running:"
@@ -347,34 +355,46 @@ help:
 	@echo "  env              - Create virtual environment in $(VENV)"
 	@echo "  env-dev          - Install project in editable mode with dev dependencies into $(VENV)"
 	@echo "  run              - Execute foghorn --config config/config.yaml using $(VENV)"
-	@echo "  schema           - Regenerate assets/config-schema.json"
 	@echo "  test             - Run pytest with coverage and update README coverage badge"
+	@echo "  schema           - Regenerate assets/config-schema.json"
+
+	@echo "DNSSEC helper:"
 	@echo "  dnssec-sign-zone - Sign a DNS zone file with DNSSEC records (see target for ZONE/INPUT/OUTPUT args)"
-	@echo "Variable inspection:"
-	@echo "  vars-print-all-all - Print all make variables (debug/introspection)"
-	@echo "  vars-print-all     - Print grouped Foghorn-related variables (make/docker/SSL/Python)"
-	@echo "  var-print-FOO      - Print a single variable named FOO"
+	@echo "DNS UPDATE helpers:"
+	@echo "  gen-tsig-key     - Generate a TSIG key for DNS UPDATE (optional: NAME=dynamic-key.example.com ALGO=hmac-sha256)"
+	@echo "  gen-psk-token    - Generate a PSK token for DNS UPDATE"
+
 	@echo "Build and run containers:"
-	@echo "  docker-build     - Build docker image ${PREFIX}/${CONTAINER_NAME}:${TAG}"
-	@echo "  docker-clean     - Remove docker image ${PREFIX}/${CONTAINER_NAME}:${TAG}"
+	@echo "  docker-build     - Build docker image ${PREFIX}/${IMAGE_NAME}:${TAG}"
+	@echo "  docker-clean     - Remove docker image ${PREFIX}/${IMAGE_NAME}:${TAG}"
 	@echo "  docker-logs      - Follow docker container logs"
 	@echo "  docker-run       - Run docker container (ports 53/udp, 53/tcp, 5380/tcp)"
 	@echo "  docker-run-not-host - Run docker container with explicit port mappings instead of --net=host"
 	@echo "  docker           - Docker start to finish: clean → build → run → logs"
+
 	@echo "OpenSSL CA and signed certs:"
 	@echo "  ssl-ca           - Generate only the CA key and certificate under ${KEYDIR} (.crt)"
 	@echo "  ssl-ca-pem       - Generate a PEM-encoded CA certificate ${CA_PEM} for use as a trust anchor"
 	@echo "  ssl-cert         - Generate a CA and server certificate/key pair under ${KEYDIR} for CN=${CNAME} (.crt/.key)"
 	@echo "  ssl-cert-pem     - Generate a combined server PEM (${SERVER_PEM}) containing cert + key"
 	@echo "  ssl-clean-keys   - Remove generated CA and server key/cert files from ${KEYDIR}"
+
 	@echo "Git / GitHub helpers:"
 	@echo "  github-push      - Run clean/tests and push current branch, enforcing a clean git state"
 	@echo "  create-pr        - Create a GitHub PR for the current branch using the GitHub API"
+
 	@echo "Package targets:"
-	@echo "  docker-ship      - Clean, build, and push docker image ${PREFIX}/${CONTAINER_NAME}:${TAG}"
+	@echo "  docker-ship      - Clean, build, and push docker image ${PREFIX}/${IMAGE_NAME}:${TAG}"
 	@echo "  package-build    - Build the Python package into dist/"
 	@echo "  package-publish  - Publish the package to pypi"
 	@echo "  package-publish-dev - Publish the package to testpypi"
+	@echo "  ui-bundle        - Build embedded single-file admin UI JS bundle for CDN use"
+	@echo "  ui-bundle-runtime - Build runtime-only admin UI JS bundle (no embedded HTML/CSS)"
+
+	@echo "Variable inspection:"
+	@echo "  vars-print-all-all - Print all make variables (debug/introspection)"
+	@echo "  vars-print-all     - Print grouped Foghorn-related variables (make/docker/SSL/Python)"
+	@echo "  var-print-FOO      - Print a single variable named FOO"
 
 
 # EOF

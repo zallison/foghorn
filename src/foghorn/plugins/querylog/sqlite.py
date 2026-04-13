@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import sqlite3
 import threading
@@ -26,6 +27,11 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from foghorn.plugins.querylog.base import BaseStatsStore
+from foghorn.plugins.sql_safety import resolve_query_log_group_column
+from foghorn.security_limits import (
+    MAX_QUERY_LOG_AGG_GROUPED_RESULTS,
+    enforce_query_log_aggregate_bucket_limit,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +46,9 @@ def _normalize_domain(domain: str) -> str:
         Normalized lowercase domain without trailing dot.
     """
 
-    return domain.rstrip(".").lower()
+    from foghorn.utils import dns_names
+
+    return dns_names.normalize_name(domain)
 
 
 def _is_subdomain(domain: str) -> bool:
@@ -97,6 +105,15 @@ class SqliteStatsStore(BaseStatsStore):
         batch_time_sec: float = 15.0,
         batch_max_size: int = 1000,
         async_logging: bool = False,
+        max_logging_queue: int = 16384,
+        retention_max_records: Optional[int] = None,
+        retention_days: Optional[float] = None,
+        retention_max_bytes: Optional[int] = None,
+        retention_prune_interval_seconds: Optional[float] = None,
+        retention_prune_every_n_inserts: Optional[int] = None,
+        retention_vacuum_on_prune: bool = False,
+        retention_vacuum_interval_seconds: Optional[float] = None,
+        sqlite_auto_vacuum: Optional[str] = None,
         **_: Any,
     ) -> None:
         """Initialize SQLite backend and ensure schema exists.
@@ -112,10 +129,46 @@ class SqliteStatsStore(BaseStatsStore):
         """
 
         self._db_path = db_path
+        self._sqlite_auto_vacuum = self._normalize_sqlite_auto_vacuum(
+            sqlite_auto_vacuum
+        )
         self._conn = self._init_connection()
 
         # Logging/queuing behaviour
         self._async_logging = bool(async_logging)
+        # BaseStatsStore worker queue capacity
+        try:
+            self._max_logging_queue = int(max_logging_queue)
+        except Exception:
+            self._max_logging_queue = 16384
+        self._query_log_retention_max_records = (
+            BaseStatsStore._normalize_retention_max_records(retention_max_records)
+        )
+        self._query_log_retention_days = BaseStatsStore._normalize_retention_days(
+            retention_days
+        )
+        self._query_log_retention_max_bytes = (
+            BaseStatsStore._normalize_retention_max_bytes(retention_max_bytes)
+        )
+        self._query_log_retention_prune_interval_seconds = (
+            BaseStatsStore._normalize_retention_prune_interval_seconds(
+                retention_prune_interval_seconds
+            )
+        )
+        self._query_log_retention_prune_every_n_inserts = (
+            BaseStatsStore._normalize_retention_prune_every_n_inserts(
+                retention_prune_every_n_inserts
+            )
+        )
+        self._query_log_retention_seen_inserts = 0
+        self._query_log_retention_last_prune_ts = 0.0
+        self._retention_vacuum_on_prune = bool(retention_vacuum_on_prune)
+        self._retention_vacuum_interval_seconds = (
+            BaseStatsStore._normalize_retention_prune_interval_seconds(
+                retention_vacuum_interval_seconds
+            )
+        )
+        self._retention_last_vacuum_ts = 0.0
 
         # Batching configuration
         self._batch_writes = bool(batch_writes)
@@ -126,6 +179,45 @@ class SqliteStatsStore(BaseStatsStore):
         self._lock = threading.RLock()
         self._pending_ops: List[Tuple[str, Tuple[Any, ...]]] = []
         self._last_flush: float = time.time()
+
+    @staticmethod
+    def _normalize_sqlite_auto_vacuum(raw: object) -> int | None:
+        """Brief: Normalize sqlite auto_vacuum mode configuration.
+
+        Inputs:
+            raw: Raw mode string/number from backend config.
+
+        Outputs:
+            int | None: SQLite PRAGMA auto_vacuum mode:
+                - 0 (none), 1 (full), or 2 (incremental)
+                Returns None when the value is missing or invalid.
+        """
+
+        if raw is None:
+            return None
+
+        if isinstance(raw, str):
+            text = raw.strip().lower()
+            mapping = {
+                "none": 0,
+                "off": 0,
+                "0": 0,
+                "full": 1,
+                "on": 1,
+                "1": 1,
+                "incremental": 2,
+                "2": 2,
+            }
+            return mapping.get(text)
+
+        try:
+            value = int(raw)  # type: ignore[arg-type]
+        except Exception:
+            return None
+
+        if value in {0, 1, 2}:
+            return int(value)
+        return None
 
     def _init_connection(self) -> sqlite3.Connection:
         """Create SQLite connection and ensure schema exists.
@@ -164,6 +256,17 @@ class SqliteStatsStore(BaseStatsStore):
             conn.execute("PRAGMA journal_mode=WAL")
         except Exception:  # pragma: no cover - environment specific
             pass
+        try:
+            auto_vacuum_mode = getattr(self, "_sqlite_auto_vacuum", None)
+            if auto_vacuum_mode is not None:
+                conn.execute(f"PRAGMA auto_vacuum={int(auto_vacuum_mode)}")
+                # Apply auto_vacuum mode change immediately when possible.
+                conn.execute("VACUUM")
+        except Exception:  # pragma: no cover - environment specific
+            logger.debug(
+                "SqliteStatsStore failed to apply auto_vacuum mode",
+                exc_info=True,
+            )
 
         # Aggregate counters table
         conn.execute(
@@ -352,10 +455,190 @@ class SqliteStatsStore(BaseStatsStore):
                 result_json,
             )
             self._execute(sql, params)
+            self._apply_query_log_retention()
         except Exception as exc:  # pragma: no cover - defensive
             logger.error(
                 "SqliteStatsStore insert_query_log error: %s", exc, exc_info=True
             )
+
+    def _apply_query_log_retention(self) -> None:
+        """Brief: Enforce configured query-log retention limits.
+
+        Inputs:
+            None.
+
+        Outputs:
+            None; applies age, record-count, and optional byte-cap pruning.
+        """
+        now_ts = time.time()
+
+        cutoff_ts = BaseStatsStore._retention_cutoff_ts(
+            self._query_log_retention_days,
+            now_ts=now_ts,
+        )
+        max_records = self._query_log_retention_max_records
+        max_bytes = self._query_log_retention_max_bytes
+
+        if cutoff_ts is None and max_records is None and max_bytes is None:
+            return
+        if not self._should_run_query_log_retention_prune(now_ts=now_ts):
+            return
+
+        try:
+            changed = False
+            with self._lock:
+                # Retention needs to operate on committed rows. Flush any pending
+                # batched writes first so prune decisions see current state.
+                if self._batch_writes:
+                    self._flush_locked()
+
+                with self._conn:
+                    if cutoff_ts is not None:
+                        cur = self._conn.execute(
+                            "DELETE FROM query_log WHERE ts < ?",
+                            (float(cutoff_ts),),
+                        )
+                        changed = changed or bool(getattr(cur, "rowcount", 0))
+
+                    if max_records is not None:
+                        changed = (
+                            self._prune_query_log_to_max_records_locked(
+                                int(max_records)
+                            )
+                            or changed
+                        )
+
+                if max_bytes is not None:
+                    changed = (
+                        self._prune_query_log_to_max_bytes_locked(int(max_bytes))
+                        or changed
+                    )
+
+                if changed:
+                    self._maybe_run_retention_vacuum_locked(now_ts=now_ts)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.error(
+                "SqliteStatsStore retention prune failed: %s", exc, exc_info=True
+            )
+
+    def _prune_query_log_to_max_records_locked(self, max_records: int) -> bool:
+        """Brief: Remove oldest rows beyond a max-record retention boundary.
+
+        Inputs:
+            max_records: Maximum rows to retain in query_log.
+
+        Outputs:
+            bool: True when one or more rows were deleted.
+        """
+
+        if max_records <= 0:
+            return False
+
+        cutoff_row = self._conn.execute(
+            (
+                "SELECT ts, id FROM query_log "
+                "ORDER BY ts DESC, id DESC LIMIT 1 OFFSET ?"
+            ),
+            (int(max_records),),
+        ).fetchone()
+        if cutoff_row is None:
+            return False
+
+        cutoff_ts = float(cutoff_row[0])
+        cutoff_id = int(cutoff_row[1])
+        cur = self._conn.execute(
+            ("DELETE FROM query_log " "WHERE ts < ? OR (ts = ? AND id <= ?)"),
+            (cutoff_ts, cutoff_ts, cutoff_id),
+        )
+        return bool(getattr(cur, "rowcount", 0))
+
+    def _prune_query_log_to_max_bytes_locked(self, max_bytes: int) -> bool:
+        """Brief: Remove oldest query-log rows until estimated bytes fit a cap.
+
+        Inputs:
+            max_bytes: Maximum estimated bytes to retain in query_log.
+
+        Outputs:
+            bool: True when one or more rows were deleted.
+        """
+
+        if max_bytes <= 0:
+            return False
+
+        changed = False
+        max_passes = 32
+        for _ in range(max_passes):
+            row = self._conn.execute(
+                """
+                SELECT
+                    COALESCE(
+                        SUM(
+                            LENGTH(client_ip)
+                            + LENGTH(name)
+                            + LENGTH(qtype)
+                            + LENGTH(COALESCE(upstream_id, ''))
+                            + LENGTH(COALESCE(rcode, ''))
+                            + LENGTH(COALESCE(status, ''))
+                            + LENGTH(COALESCE(error, ''))
+                            + LENGTH(COALESCE(first, ''))
+                            + LENGTH(result_json)
+                            + 64
+                        ),
+                        0
+                    ),
+                    COUNT(1)
+                FROM query_log
+                """
+            ).fetchone()
+            total_bytes = int(row[0] or 0) if row else 0
+            total_rows = int(row[1] or 0) if row else 0
+            if total_bytes <= max_bytes or total_rows <= 0:
+                break
+
+            over = max(1, total_bytes - int(max_bytes))
+            ratio = float(over) / float(max(total_bytes, 1))
+            rows_to_delete = max(1, min(total_rows, int(math.ceil(ratio * total_rows))))
+            with self._conn:
+                cur = self._conn.execute(
+                    "DELETE FROM query_log WHERE id IN (SELECT id FROM query_log ORDER BY ts ASC, id ASC LIMIT ?)",
+                    (int(rows_to_delete),),
+                )
+            if not bool(getattr(cur, "rowcount", 0)):
+                break
+            changed = True
+
+        return changed
+
+    def _maybe_run_retention_vacuum_locked(self, *, now_ts: float) -> None:
+        """Brief: Run optional SQLite vacuum maintenance after retention prune.
+
+        Inputs:
+            now_ts: Current Unix timestamp used for interval gating.
+
+        Outputs:
+            None.
+        """
+
+        if not self._retention_vacuum_on_prune:
+            return
+
+        interval = self._retention_vacuum_interval_seconds
+        if interval is not None:
+            try:
+                last = float(getattr(self, "_retention_last_vacuum_ts", 0.0) or 0.0)
+            except Exception:
+                last = 0.0
+            if last > 0.0 and (float(now_ts) - last) < float(interval):
+                return
+
+        try:
+            if getattr(self, "_sqlite_auto_vacuum", None) == 2:
+                self._conn.execute("PRAGMA incremental_vacuum")
+            else:
+                self._conn.execute("VACUUM")
+            self._retention_last_vacuum_ts = float(now_ts)
+        except Exception:  # pragma: no cover - defensive
+            logger.exception("SqliteStatsStore retention vacuum failed")
 
     def select_query_log(
         self,
@@ -363,6 +646,9 @@ class SqliteStatsStore(BaseStatsStore):
         qtype: Optional[str] = None,
         qname: Optional[str] = None,
         rcode: Optional[str] = None,
+        status: Optional[str] = None,
+        source: Optional[str] = None,
+        ede_code: Optional[str] = None,
         start_ts: Optional[float] = None,
         end_ts: Optional[float] = None,
         page: int = 1,
@@ -388,9 +674,12 @@ class SqliteStatsStore(BaseStatsStore):
         client_ip_s = str(client_ip).strip() if client_ip is not None else None
         qtype_s = str(qtype).strip().upper() if qtype is not None else None
         rcode_s = str(rcode).strip().upper() if rcode is not None else None
+        status_s = str(status).strip().lower() if status is not None else None
+        source_s = str(source).strip().lower() if source is not None else None
+        ede_code_s = str(ede_code).strip() if ede_code is not None else None
         qname_s = None
         if qname is not None:
-            qname_s = str(qname).strip().rstrip(".").lower()
+            qname_s = _normalize_domain(qname)
 
         where: List[str] = []
         params: List[Any] = []
@@ -402,11 +691,45 @@ class SqliteStatsStore(BaseStatsStore):
             where.append("qtype = ?")
             params.append(qtype_s)
         if qname_s:
-            where.append("name = ?")
+            where.append("(name = ? OR name LIKE ?)")
             params.append(qname_s)
+            params.append(f"%.{qname_s}")
         if rcode_s:
             where.append("rcode = ?")
             params.append(rcode_s)
+        if status_s:
+            where.append("LOWER(COALESCE(status, '')) = ?")
+            params.append(status_s)
+        if source_s:
+            where.append("(LOWER(result_json) LIKE ? OR LOWER(result_json) LIKE ?)")
+            params.append(f'%"source":"{source_s}"%')
+            params.append(f'%"source": "{source_s}"%')
+        if ede_code_s:
+            try:
+                ede_code_i = int(ede_code_s)
+            except Exception:
+                where.append("1 = 0")
+            else:
+                if ede_code_i < 0:
+                    where.append("1 = 0")
+                else:
+                    ede_code_txt = str(ede_code_i)
+                    where.append(
+                        "("
+                        "LOWER(result_json) LIKE ? OR "
+                        "LOWER(result_json) LIKE ? OR "
+                        "LOWER(result_json) LIKE ? OR "
+                        "LOWER(result_json) LIKE ? OR "
+                        "LOWER(result_json) LIKE ? OR "
+                        "LOWER(result_json) LIKE ?"
+                        ")"
+                    )
+                    params.append(f'%"ede_code":{ede_code_txt},%')
+                    params.append(f'%"ede_code":{ede_code_txt}' + "}%")
+                    params.append(f'%"ede_code": {ede_code_txt},%')
+                    params.append(f'%"ede_code": {ede_code_txt}' + "}%")
+                    params.append(f'%"ede_code":"{ede_code_txt}"%')
+                    params.append(f'%"ede_code": "{ede_code_txt}"%')
         if isinstance(start_ts, (int, float)):
             where.append("ts >= ?")
             params.append(float(start_ts))
@@ -424,7 +747,8 @@ class SqliteStatsStore(BaseStatsStore):
         total = 0
         try:
             cur = self._conn.execute(
-                f"SELECT COUNT(1) FROM query_log{where_sql}", tuple(params)
+                f"SELECT COUNT(1) FROM query_log{where_sql}",  # noqa: S608 - where_sql contains only fixed allowlisted clauses with bound params
+                tuple(params),
             )  # type: ignore[attr-defined]
             row = cur.fetchone()
             total = int(row[0]) if row else 0
@@ -440,10 +764,10 @@ class SqliteStatsStore(BaseStatsStore):
         items: List[Dict[str, Any]] = []
         try:
             sql = (
-                "SELECT id, ts, client_ip, name, qtype, upstream_id, rcode, status, error, first, result_json "
+                "SELECT id, ts, client_ip, name, qtype, upstream_id, rcode, status, error, first, result_json "  # noqa: S608 - where_sql contains only fixed allowlisted clauses
                 f"FROM query_log{where_sql} "
                 "ORDER BY ts DESC, id DESC "
-                "LIMIT ? OFFSET ?"
+                "LIMIT ? OFFSET ?"  # noqa: S608 - where_sql contains only fixed allowlisted clauses
             )
             cur2 = self._conn.execute(
                 sql, tuple(params + [page_size_i, offset])
@@ -542,7 +866,7 @@ class SqliteStatsStore(BaseStatsStore):
         rcode_s = str(rcode).strip().upper() if rcode is not None else None
         qname_s = None
         if qname is not None:
-            qname_s = str(qname).strip().rstrip(".").lower()
+            qname_s = _normalize_domain(qname)
 
         where: List[str] = ["ts >= ?", "ts < ?"]
         params: List[Any] = [start_f, end_f]
@@ -554,27 +878,16 @@ class SqliteStatsStore(BaseStatsStore):
             where.append("qtype = ?")
             params.append(qtype_s)
         if qname_s:
-            where.append("name = ?")
+            where.append("(name = ? OR name LIKE ?)")
             params.append(qname_s)
+            params.append(f"%.{qname_s}")
         if rcode_s:
             where.append("rcode = ?")
             params.append(rcode_s)
 
         where_sql = " WHERE " + " AND ".join(where)
 
-        group_col = None
-        group_label = None
-        if group_by:
-            gb = str(group_by).strip().lower()
-            mapping = {
-                "client_ip": "client_ip",
-                "qtype": "qtype",
-                "qname": "name",
-                "rcode": "rcode",
-            }
-            if gb in mapping:
-                group_col = mapping[gb]
-                group_label = gb
+        group_col, group_label = resolve_query_log_group_column(group_by)
 
         # Reads should include any queued batched ops.
         if self._batch_writes:
@@ -585,15 +898,21 @@ class SqliteStatsStore(BaseStatsStore):
         try:
             if group_col:
                 sql = (
-                    "SELECT CAST(((ts - ?) / ?) AS INTEGER) AS bucket, "
+                    "SELECT CAST(((ts - ?) / ?) AS INTEGER) AS bucket, "  # noqa: S608 - group_col and where_sql are allowlisted
                     f"{group_col} AS group_value, "
                     "COUNT(1) AS c "
                     f"FROM query_log{where_sql} "
                     "GROUP BY bucket, group_value "
-                    "ORDER BY bucket ASC"
+                    "ORDER BY bucket ASC "
+                    "LIMIT ?"  # noqa: S608 - group_col and where_sql are allowlisted
                 )
                 cur = self._conn.execute(
-                    sql, tuple([start_f, interval_i] + params)
+                    sql,
+                    tuple(
+                        [start_f, interval_i]
+                        + params
+                        + [int(MAX_QUERY_LOG_AGG_GROUPED_RESULTS) + 1]
+                    ),
                 )  # type: ignore[attr-defined]
                 for bucket, group_value, c in cur:
                     try:
@@ -613,10 +932,10 @@ class SqliteStatsStore(BaseStatsStore):
                     )
             else:
                 sql = (
-                    "SELECT CAST(((ts - ?) / ?) AS INTEGER) AS bucket, COUNT(1) AS c "
+                    "SELECT CAST(((ts - ?) / ?) AS INTEGER) AS bucket, COUNT(1) AS c "  # noqa: S608 - where_sql contains only fixed allowlisted clauses
                     f"FROM query_log{where_sql} "
                     "GROUP BY bucket "
-                    "ORDER BY bucket ASC"
+                    "ORDER BY bucket ASC"  # noqa: S608 - where_sql contains only fixed allowlisted clauses
                 )
                 cur = self._conn.execute(
                     sql, tuple([start_f, interval_i] + params)
@@ -641,11 +960,20 @@ class SqliteStatsStore(BaseStatsStore):
 
         # Dense fill for the common single-series case.
         if not group_col:
-            import math
-
-            num = int(math.ceil((end_f - start_f) / float(interval_i)))
-            if num < 0:
-                num = 0
+            try:
+                num = enforce_query_log_aggregate_bucket_limit(
+                    start_f, end_f, interval_i
+                )
+            except ValueError as exc:
+                logger.warning(
+                    "SqliteStatsStore aggregate_query_log_counts rejected: %s", exc
+                )
+                return {
+                    "start_ts": start_f,
+                    "end_ts": end_f,
+                    "interval_seconds": interval_i,
+                    "items": [],
+                }
 
             by_bucket = {b: c for (b, _g, c) in rows}
             items: List[Dict[str, Any]] = []
@@ -697,6 +1025,10 @@ class SqliteStatsStore(BaseStatsStore):
         """Return True if the counts table contains at least one row."""
 
         try:
+            # Reads should include any queued batched ops.
+            if self._batch_writes:
+                with self._lock:
+                    self._flush_locked()
             cur = self._conn.execute("SELECT 1 FROM counts LIMIT 1")  # type: ignore[attr-defined]
             return cur.fetchone() is not None
         except Exception as exc:  # pragma: no cover - defensive
@@ -708,6 +1040,10 @@ class SqliteStatsStore(BaseStatsStore):
 
         result: Dict[str, Dict[str, int]] = {}
         try:
+            # Reads should include any queued batched ops.
+            if self._batch_writes:
+                with self._lock:
+                    self._flush_locked()
             cur = self._conn.cursor()  # type: ignore[attr-defined]
             cur.execute("SELECT scope, key, value FROM counts")
             for scope, key, value in cur:
@@ -725,6 +1061,10 @@ class SqliteStatsStore(BaseStatsStore):
         """Return True if the query_log table contains at least one row."""
 
         try:
+            # Reads should include any queued batched ops.
+            if self._batch_writes:
+                with self._lock:
+                    self._flush_locked()
             cur = self._conn.execute("SELECT 1 FROM query_log LIMIT 1")  # type: ignore[attr-defined]
             return cur.fetchone() is not None
         except Exception as exc:  # pragma: no cover - defensive

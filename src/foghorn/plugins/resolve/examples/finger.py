@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
 from dnslib import QTYPE, RR, TXT, DNSHeader, DNSRecord
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, validator, ConfigDict
 
 from foghorn.plugins.resolve.base import (
     BasePlugin,
@@ -15,7 +15,7 @@ from foghorn.plugins.resolve.base import (
     PluginDecision,
     plugin_aliases,
 )
-from foghorn.utils.register_caches import registered_lru_cached
+from foghorn.utils.register_caches import registered_lru_cache
 
 logger = logging.getLogger(__name__)
 
@@ -75,8 +75,7 @@ class FingerConfig(BaseModel):
     allow_users: List[str] = Field(default_factory=list)
     deny_users: List[str] = Field(default_factory=list)
 
-    class Config:
-        extra = "allow"
+    model_config = ConfigDict(extra="allow")
 
     @validator("domain", pre=True)
     def _normalize_domain(cls, v: object) -> str:  # type: ignore[override]
@@ -111,7 +110,7 @@ class FingerConfig(BaseModel):
         return text
 
 
-@registered_lru_cached(maxsize=4096)
+@registered_lru_cache(maxsize=4096)
 def _is_user_allowed_cached(
     username: str,
     policy: str,

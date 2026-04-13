@@ -143,7 +143,7 @@ def test_mdns_bridge_service_node_a_and_txt_returned_together() -> None:
     @@
         Outputs:
           - Asserts that A or TXT queries for a service-node name include TXT for the
-            service and A/AAAA for the underlying host.
+            service and A/AAAA for the underlying host, with extra data in additionals.
     """
 
     from foghorn.plugins.resolve.mdns import MdnsBridge
@@ -164,6 +164,7 @@ def test_mdns_bridge_service_node_a_and_txt_returned_together() -> None:
             service_node: ["path=/", "version=1"],
         },
         a={
+            service_node: ["192.0.2.20"],
             host: ["192.0.2.10"],
         },
     )
@@ -177,9 +178,10 @@ def test_mdns_bridge_service_node_a_and_txt_returned_together() -> None:
     assert decision is not None
     resp = DNSRecord.parse(decision.response)
 
-    assert any(rr.rtype == QTYPE.TXT for rr in resp.rr)
+    assert any(rr.rtype == QTYPE.A for rr in resp.rr)
+    assert any(rr.rtype == QTYPE.TXT for rr in resp.ar)
     assert any(
-        rr.rtype == QTYPE.A and str(rr.rname).rstrip(".") == host for rr in resp.rr
+        rr.rtype == QTYPE.A and str(rr.rname).rstrip(".") == host for rr in resp.ar
     )
 
     # TXT query for the service-node should similarly include host A/AAAA.
@@ -190,8 +192,193 @@ def test_mdns_bridge_service_node_a_and_txt_returned_together() -> None:
 
     assert any(rr.rtype == QTYPE.TXT for rr in resp.rr)
     assert any(
-        rr.rtype == QTYPE.A and str(rr.rname).rstrip(".") == host for rr in resp.rr
+        rr.rtype == QTYPE.A and str(rr.rname).rstrip(".") == host for rr in resp.ar
     )
+
+
+def test_mdns_bridge_response_max_rrs_sets_tc_and_caps_answers() -> None:
+    """Brief: Response caps enforce a total RR limit and set truncation.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - Asserts response TC is set and RR count is capped.
+    """
+
+    from foghorn.plugins.resolve.mdns import MdnsBridge
+
+    plugin = MdnsBridge(
+        network_enabled=False,
+        ttl=120,
+        domain=".mdns",
+        response_max_rrs=1,
+    )
+    plugin.setup()
+
+    host = "myhost.mdns"
+    plugin._test_seed_records(
+        a={
+            host: [
+                "192.0.2.10",
+                "192.0.2.11",
+            ],
+        },
+    )
+
+    ctx = PluginContext(client_ip="127.0.0.1")
+    req = _make_query(host, int(QTYPE.A))
+    decision = plugin.pre_resolve(host, int(QTYPE.A), req, ctx)
+    assert decision is not None
+
+    resp = DNSRecord.parse(decision.response)
+    answers = [rr for rr in resp.rr if rr.rtype == QTYPE.A]
+    assert len(answers) == 1
+    assert resp.header.tc == 1
+    assert len(resp.rr) + len(resp.ar) <= 1
+
+
+def test_mdns_bridge_limits_txt_strings_and_bytes() -> None:
+    """Brief: TXT responses respect string and byte caps.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - Asserts TXT RR data is truncated by string and byte limits.
+    """
+
+    from foghorn.plugins.resolve.mdns import MdnsBridge
+
+    instance = "svc._http._tcp.mdns"
+
+    plugin_strings = MdnsBridge(
+        network_enabled=False,
+        ttl=120,
+        domain=".mdns",
+        response_max_txt_strings=2,
+        response_max_txt_bytes=100,
+    )
+    plugin_strings.setup()
+    plugin_strings._test_seed_records(
+        txt={instance: ["k1=v1", "k2=v2", "k3=v3"]},
+    )
+
+    ctx = PluginContext(client_ip="127.0.0.1")
+    req = _make_query(instance, int(QTYPE.TXT))
+    decision = plugin_strings.pre_resolve(instance, int(QTYPE.TXT), req, ctx)
+    assert decision is not None
+
+    resp = DNSRecord.parse(decision.response)
+    txt_rrs = [rr for rr in resp.rr if rr.rtype == QTYPE.TXT]
+    assert txt_rrs
+    txt_values = list(txt_rrs[0].rdata.data)
+    assert len(txt_values) == 2
+
+    plugin_bytes = MdnsBridge(
+        network_enabled=False,
+        ttl=120,
+        domain=".mdns",
+        response_max_txt_strings=10,
+        response_max_txt_bytes=6,
+    )
+    plugin_bytes.setup()
+    plugin_bytes._test_seed_records(
+        txt={instance: ["a=1", "b=2", "c=3"]},
+    )
+
+    decision = plugin_bytes.pre_resolve(instance, int(QTYPE.TXT), req, ctx)
+    assert decision is not None
+
+    resp = DNSRecord.parse(decision.response)
+    txt_rrs = [rr for rr in resp.rr if rr.rtype == QTYPE.TXT]
+    assert txt_rrs
+    txt_values = list(txt_rrs[0].rdata.data)
+    assert len(txt_values) == 2
+    assert sum(len(b) for b in txt_values) <= 6
+
+
+def test_mdns_bridge_limits_ips_per_host() -> None:
+    """Brief: Per-host IP caps limit A/AAAA answers.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - Asserts A answers are limited to the configured cap.
+    """
+
+    from foghorn.plugins.resolve.mdns import MdnsBridge
+
+    host = "myhost.mdns"
+    plugin = MdnsBridge(
+        network_enabled=False,
+        ttl=120,
+        domain=".mdns",
+        response_max_ips_per_host=1,
+    )
+    plugin.setup()
+    plugin._test_seed_records(
+        a={
+            host: [
+                "192.0.2.10",
+                "192.0.2.11",
+                "192.0.2.12",
+            ],
+        },
+    )
+
+    ctx = PluginContext(client_ip="127.0.0.1")
+    req = _make_query(host, int(QTYPE.A))
+    decision = plugin.pre_resolve(host, int(QTYPE.A), req, ctx)
+    assert decision is not None
+
+    resp = DNSRecord.parse(decision.response)
+    answers = [rr for rr in resp.rr if rr.rtype == QTYPE.A]
+    assert len(answers) == 1
+
+
+def test_mdns_bridge_disables_additional_glue() -> None:
+    """Brief: Disabling glue suppresses additional TXT/A/AAAA records.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - Asserts additional section is empty when glue is disabled.
+    """
+
+    from foghorn.plugins.resolve.mdns import MdnsBridge
+
+    suffix = "mdns"
+    host = f"myhost.{suffix}"
+    service_node = f"_http._tcp.{host}"
+
+    plugin = MdnsBridge(
+        network_enabled=False,
+        ttl=120,
+        domain=".mdns",
+        enable_additional_glue=False,
+    )
+    plugin.setup()
+    plugin._test_seed_records(
+        txt={
+            service_node: ["path=/", "version=1"],
+        },
+        a={
+            service_node: ["192.0.2.20"],
+            host: ["192.0.2.10"],
+        },
+    )
+
+    ctx = PluginContext(client_ip="127.0.0.1")
+    req = _make_query(service_node, int(QTYPE.A))
+    decision = plugin.pre_resolve(service_node, int(QTYPE.A), req, ctx)
+    assert decision is not None
+
+    resp = DNSRecord.parse(decision.response)
+    assert any(rr.rtype == QTYPE.A for rr in resp.rr)
+    assert resp.ar == []
 
 
 def test_mdns_bridge_service_type_a_aaaa_return_ptr() -> None:
@@ -207,6 +394,7 @@ def test_mdns_bridge_service_type_a_aaaa_return_ptr() -> None:
         network_enabled=False,
         ttl=120,
         domain=".mdns",
+        enable_rrtype_fallback=True,
     )
     plugin.setup()
 
@@ -360,7 +548,7 @@ def test_mdns_bridge_ptr_glue_hosts_match_owner_suffix() -> None:
     ptr_targets = {str(rr.rdata).rstrip(".") for rr in resp.rr if rr.rtype == QTYPE.PTR}
     assert ptr_targets == {"roku_ultra._airplay._tcp.local"}
 
-    a_hosts = {str(rr.rname).rstrip(".") for rr in resp.rr if rr.rtype == QTYPE.A}
+    a_hosts = {str(rr.rname).rstrip(".") for rr in resp.ar if rr.rtype == QTYPE.A}
     assert "roku_ultra.local" in a_hosts
     assert "roku_ultra.zaa" not in a_hosts
 
@@ -924,6 +1112,7 @@ def test_mdns_bridge_dns_sd_tcp_a_query_returns_ptr_via_alias() -> None:
         network_enabled=False,
         ttl=120,
         domain=".mdns",
+        enable_rrtype_fallback=True,
     )
     plugin.setup()
 
@@ -1009,6 +1198,7 @@ def test_mdns_bridge_tcp_a_query_returns_ptr_via_alias() -> None:
         network_enabled=False,
         ttl=120,
         domain=".mdns",
+        enable_rrtype_fallback=True,
     )
     plugin.setup()
 

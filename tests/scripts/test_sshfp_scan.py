@@ -10,13 +10,12 @@ Outputs:
 
 from __future__ import annotations
 
-from typing import List
-
-import pytest
-
 import importlib.util
 import pathlib
 import sys
+from typing import List
+
+import pytest
 
 # Load the sshfp_scan script as a module so we can call main() directly
 _SCRIPTS_DIR = pathlib.Path(__file__).resolve().parents[2] / "scripts"
@@ -127,3 +126,76 @@ def test_zone_format_output(
     # Domain should be normalized to lower-case without trailing dot, TTL from
     # --zone-ttl, and value as "alg fptype fingerprint".
     assert captured.out.strip() == "host1.example|SSHFP|600|1 1 deadbeef"
+
+
+def test_reverse_ptr_enabled_by_default_for_ip_targets(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Brief: Reverse PTR lookup is enabled by default for IP targets.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+      - capsys: pytest capture fixture.
+
+    Outputs:
+      - Asserts that ``socket.gethostbyaddr`` is called for IP inputs and that
+        output includes both the original IP owner and PTR hostnames.
+    """
+
+    def fake_collect_sshfp_records(*, hostname: str, port: int, timeout: float):  # type: ignore[override]
+        return [f"{hostname} IN SSHFP 1 1 deadbeef"]
+
+    def fake_gethostbyaddr(host: str) -> tuple[str, list[str], list[str]]:
+        assert host == "192.0.2.10"
+        return (
+            "PTR.EXAMPLE.",
+            ["alias.example.", "ptr.example.", "192.0.2.10"],
+            ["192.0.2.10"],
+        )
+
+    monkeypatch.setattr(
+        sshfp_scan.ssh_keyscan, "collect_sshfp_records", fake_collect_sshfp_records
+    )
+    monkeypatch.setattr(sshfp_scan.socket, "gethostbyaddr", fake_gethostbyaddr)
+
+    exit_code = sshfp_scan.main(["192.0.2.10"])
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert captured.out.splitlines() == [
+        "192.0.2.10 IN SSHFP 1 1 deadbeef",
+        "ptr.example IN SSHFP 1 1 deadbeef",
+        "alias.example IN SSHFP 1 1 deadbeef",
+    ]
+
+
+def test_no_reverse_ptr_disables_ptr_lookup(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Brief: --no-reverse-ptr disables reverse lookup and PTR owner emission.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+      - capsys: pytest capture fixture.
+
+    Outputs:
+      - Asserts that when the opt-out flag is set, ``socket.gethostbyaddr`` is
+        not called and output contains only the original owner.
+    """
+
+    def fake_collect_sshfp_records(*, hostname: str, port: int, timeout: float):  # type: ignore[override]
+        return [f"{hostname} IN SSHFP 1 1 deadbeef"]
+
+    def fail_if_called(_host: str):  # noqa: ANN001
+        raise AssertionError("reverse PTR should not be called with --no-reverse-ptr")
+
+    monkeypatch.setattr(
+        sshfp_scan.ssh_keyscan, "collect_sshfp_records", fake_collect_sshfp_records
+    )
+    monkeypatch.setattr(sshfp_scan.socket, "gethostbyaddr", fail_if_called)
+
+    exit_code = sshfp_scan.main(["--no-reverse-ptr", "192.0.2.10"])
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert captured.out.strip() == "192.0.2.10 IN SSHFP 1 1 deadbeef"

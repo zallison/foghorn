@@ -1,0 +1,72 @@
+# Query-log hardening profile
+#
+# Goal:
+# - Keep useful query-log visibility
+# - Bound disk/memory growth under flood traffic
+# - Reduce duplicate/similar rows that add little value
+#
+# Notes:
+# - query_log_sampling applies to persistent query_log writes, not in-memory totals.
+# - stats.source_backend must point at one of logging.backends[*].id.
+
+server:
+  listen:
+    udp:
+      enabled: true
+      host: 0.0.0.0
+      port: 53
+  resolver:
+    mode: forward
+    timeout_ms: 2000
+    use_asyncio: true
+
+upstreams:
+  strategy: failover
+  max_concurrent: 1
+  endpoints:
+    - host: 1.1.1.1
+      port: 53
+      transport: udp
+
+logging:
+  async: true
+  max_logging_queue: 4096
+  query_log_only: false
+
+  # Global retention defaults for query-log capable backends.
+  query_log_retention:
+    max_records: 500000
+    days: 7
+    max_bytes: 2147483648
+    prune_interval_seconds: 30
+    prune_every_n_inserts: 200
+
+  # Sampling before persistent query_log insert.
+  # 0.25 ~= keep one of every four rows.
+  query_log_sampling:
+    enabled: true
+    sample_rate: 0.25
+    # rate: 0.25  # compatibility alias
+
+  # Suppress repeated rows over a short interval.
+  query_log_dedupe:
+    window_seconds: 2
+    max_entries: 50000
+
+  backends:
+    - id: local-log
+      backend: sqlite
+      config:
+        db_path: ./config/var/stats.db
+        batch_writes: true
+        # Optional per-backend retention overrides:
+        # retention_max_records: 250000
+        # retention_days: 3
+        # retention_max_bytes: 1073741824
+        # retention_prune_interval_seconds: 15
+        # retention_prune_every_n_inserts: 100
+
+stats:
+  enabled: true
+  source_backend: local-log
+  interval_seconds: 300

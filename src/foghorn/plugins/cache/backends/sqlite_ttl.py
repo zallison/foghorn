@@ -2,14 +2,20 @@ from __future__ import annotations
 
 import logging
 import os
-import pickle
 import sqlite3
 import threading
 import time
 from typing import Any, Optional, Tuple
-
+from foghorn.plugins.cache.safe_codec import (
+    RAW_BYTES_FLAG,
+    SAFE_SERIALIZED_FLAG,
+    safe_deserialize,
+    safe_serialize,
+)
+from foghorn.plugins.sql_safety import validate_sql_identifier
 
 _logger = logging.getLogger(__name__)
+_SQLITE_NAMESPACE_MAX_LENGTH = 63
 
 
 class SQLite3TTLCache:
@@ -55,6 +61,7 @@ class SQLite3TTLCache:
         table: Optional[str] = None,
         journal_mode: str = "WAL",
         create_dir: bool = True,
+        maxsize: int | None = None,
     ) -> None:
         """Brief: Initialize the sqlite TTL cache and ensure schema exists.
 
@@ -63,16 +70,33 @@ class SQLite3TTLCache:
           - table: table name.
           - journal_mode: sqlite journal mode.
           - create_dir: create parent directory for on-disk db_path.
+          - maxsize: Optional positive integer capacity bound. When set, the
+            cache performs best-effort eviction by deleting rows with the
+            earliest expiry after inserts.
 
         Outputs:
           - None.
         """
 
         self.db_path = str(db_path)
-
-        self.namespace = str(namespace or "ttl_cache")
+        # namespace/table is interpolated into SQL text and therefore must be a
+        # validated identifier token instead of user-controlled raw text.
+        table_name = table if table is not None else namespace
+        self.namespace = validate_sql_identifier(
+            str(table_name or "ttl_cache"),
+            field_name="namespace",
+            max_length=_SQLITE_NAMESPACE_MAX_LENGTH,
+        )
         self.journal_mode = str(journal_mode or "WAL")
         self.create_dir = bool(create_dir)
+
+        try:
+            max_i = int(maxsize) if maxsize is not None else None
+        except Exception:
+            max_i = None
+        if isinstance(max_i, int) and max_i <= 0:
+            max_i = None
+        self.maxsize: int | None = max_i
 
         # Per-cache access counters used by admin snapshots. These are best-effort
         # only and do not affect core cache semantics.
@@ -81,10 +105,12 @@ class SQLite3TTLCache:
         self.cache_misses: int = 0
 
         # Eviction counters (best-effort) for diagnostics.
-        # evictions_total: total rows removed due to TTL expiry.
+        # evictions_total: total rows removed due to TTL expiry or maxsize.
         # evictions_ttl: TTL-based purges.
+        # evictions_capacity: best-effort size-based evictions.
         self.evictions_total: int = 0
         self.evictions_ttl: int = 0
+        self.evictions_capacity: int = 0
 
         self._lock = threading.RLock()
         self._conn = self._init_connection()
@@ -148,8 +174,8 @@ class SQLite3TTLCache:
         """
 
         if isinstance(obj, (bytes, bytearray, memoryview)):
-            return bytes(obj), 0
-        return pickle.dumps(obj, protocol=pickle.HIGHEST_PROTOCOL), 1
+            return bytes(obj), RAW_BYTES_FLAG
+        return safe_serialize(obj), SAFE_SERIALIZED_FLAG
 
     @staticmethod
     def _decode(payload: bytes, is_pickle: int) -> Any:
@@ -163,9 +189,11 @@ class SQLite3TTLCache:
           - Any: Decoded object.
         """
 
-        if int(is_pickle) == 1:
-            return pickle.loads(payload)
-        return payload
+        if int(is_pickle) == RAW_BYTES_FLAG:
+            return bytes(payload)
+        if int(is_pickle) == SAFE_SERIALIZED_FLAG:
+            return safe_deserialize(payload)
+        raise ValueError("Unsupported cache payload encoding flag")
 
     def get(self, key: Any) -> Any | None:
         """Brief: Lookup a cached entry enforcing expiry.
@@ -186,7 +214,7 @@ class SQLite3TTLCache:
 
             cur = self._conn.cursor()
             cur.execute(
-                f"SELECT value_blob, value_is_pickle, expiry FROM {table} WHERE key_blob=? AND key_is_pickle=?",
+                f"SELECT value_blob, value_is_pickle, expiry FROM {table} WHERE key_blob=? AND key_is_pickle=?",  # noqa: S608 - table identifier validated in __init__
                 (key_blob, int(key_is_pickle)),
             )
             row = cur.fetchone()
@@ -202,7 +230,7 @@ class SQLite3TTLCache:
             # Malformed row: drop it and treat as a miss for diagnostics.
             cur = self._conn.cursor()
             cur.execute(
-                f"DELETE FROM {table} WHERE key_blob=? AND key_is_pickle=?",
+                f"DELETE FROM {table} WHERE key_blob=? AND key_is_pickle=?",  # noqa: S608 - table identifier validated in __init__
                 (key_blob, int(key_is_pickle)),
             )
             self._conn.commit()
@@ -212,7 +240,7 @@ class SQLite3TTLCache:
         if now >= expiry_f:
             cur = self._conn.cursor()
             cur.execute(
-                f"DELETE FROM {table} WHERE key_blob=? AND key_is_pickle=?",
+                f"DELETE FROM {table} WHERE key_blob=? AND key_is_pickle=?",  # noqa: S608 - table identifier validated in __init__
                 (key_blob, int(key_is_pickle)),
             )
             self._conn.commit()
@@ -237,7 +265,7 @@ class SQLite3TTLCache:
         except Exception:
             cur = self._conn.cursor()
             cur.execute(
-                f"DELETE FROM {table} WHERE key_blob=? AND key_is_pickle=?",
+                f"DELETE FROM {table} WHERE key_blob=? AND key_is_pickle=?",  # noqa: S608 - table identifier validated in __init__
                 (key_blob, int(key_is_pickle)),
             )
             self._conn.commit()
@@ -270,7 +298,7 @@ class SQLite3TTLCache:
             self.calls_total += 1
             cur = self._conn.cursor()
             cur.execute(
-                f"SELECT value_blob, value_is_pickle, expiry, ttl FROM {table} WHERE key_blob=? AND key_is_pickle=?",
+                f"SELECT value_blob, value_is_pickle, expiry, ttl FROM {table} WHERE key_blob=? AND key_is_pickle=?",  # noqa: S608 - table identifier validated in __init__
                 (key_blob, int(key_is_pickle)),
             )
             row = cur.fetchone()
@@ -307,6 +335,71 @@ class SQLite3TTLCache:
 
         return value, remaining, ttl_i
 
+    def _enforce_maxsize_locked(self) -> int:
+        """Brief: Best-effort size enforcement by deleting rows with oldest expiry.
+
+        Inputs:
+          - None (uses self.maxsize and the current sqlite table).
+
+        Outputs:
+          - int: Number of rows removed.
+
+        Notes:
+          - This is intentionally best-effort; failures should not affect normal
+            caching behaviour.
+          - Eviction policy is "almost_expired" (oldest expiry first).
+        """
+
+        if not isinstance(self.maxsize, int) or self.maxsize <= 0:
+            return 0
+
+        table = self.namespace
+        try:
+            cur = self._conn.cursor()
+            cur.execute(  # noqa: S608 - table identifier validated in __init__
+                f"SELECT COUNT(*) FROM {table}",  # noqa: S608 - table identifier validated in __init__
+            )
+            row = cur.fetchone()
+            count = int(row[0]) if row and row[0] is not None else 0
+        except Exception:
+            return 0
+
+        over = int(count - int(self.maxsize))
+        if over <= 0:
+            return 0
+
+        try:
+            cur2 = self._conn.cursor()
+            cur2.execute(
+                f"SELECT key_blob, key_is_pickle FROM {table} ORDER BY expiry ASC LIMIT ?",  # noqa: S608 - table identifier validated in __init__
+                (int(over),),
+            )
+            victims = list(cur2.fetchall() or [])
+        except Exception:
+            return 0
+
+        if not victims:
+            return 0
+
+        removed = 0
+        try:
+            cur3 = self._conn.cursor()
+            cur3.executemany(
+                f"DELETE FROM {table} WHERE key_blob=? AND key_is_pickle=?",  # noqa: S608 - table identifier validated in __init__
+                [(v[0], int(v[1])) for v in victims],
+            )
+            removed = int(cur3.rowcount or 0)
+        except Exception:
+            removed = 0
+
+        if removed > 0:
+            try:
+                self.evictions_total += removed
+                self.evictions_capacity += removed
+            except Exception:  # pragma: no cover
+                pass
+        return int(removed)
+
     def set(self, key: Any, ttl: int, value: Any) -> None:
         """Brief: Store a value under a key with TTL.
 
@@ -328,7 +421,7 @@ class SQLite3TTLCache:
         table = self.namespace
         with self._lock:
             self._conn.execute(
-                f"INSERT OR REPLACE INTO {table} (key_blob, key_is_pickle, expiry, ttl, value_blob, value_is_pickle) "
+                f"INSERT OR REPLACE INTO {table} (key_blob, key_is_pickle, expiry, ttl, value_blob, value_is_pickle) "  # noqa: S608 - table identifier validated in __init__
                 "VALUES (?, ?, ?, ?, ?, ?)",
                 (
                     key_blob,
@@ -339,6 +432,13 @@ class SQLite3TTLCache:
                     int(value_is_pickle),
                 ),
             )
+
+            # Best-effort size enforcement.
+            try:
+                self._enforce_maxsize_locked()
+            except Exception:
+                pass
+
             self._conn.commit()
 
     def delete(self, key: Any) -> int:
@@ -356,7 +456,7 @@ class SQLite3TTLCache:
         with self._lock:
             cur = self._conn.cursor()
             cur.execute(
-                f"DELETE FROM {table} WHERE key_blob=? AND key_is_pickle=?",
+                f"DELETE FROM {table} WHERE key_blob=? AND key_is_pickle=?",  # noqa: S608 - table identifier validated in __init__
                 (key_blob, int(key_is_pickle)),
             )
             removed = int(cur.rowcount or 0)
@@ -377,7 +477,10 @@ class SQLite3TTLCache:
         table = self.namespace
         with self._lock:
             cur = self._conn.cursor()
-            cur.execute(f"DELETE FROM {table} WHERE expiry <= ?", (float(now),))
+            cur.execute(  # noqa: S608 - table identifier validated in __init__
+                f"DELETE FROM {table} WHERE expiry <= ?",  # noqa: S608 - table identifier validated in __init__
+                (float(now),),
+            )
             removed = int(cur.rowcount or 0)
             self._conn.commit()
         if removed > 0:

@@ -1,18 +1,29 @@
 from __future__ import annotations
 
+import hashlib
+import html
 import ipaddress
 import logging
 import threading
-import html
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple, Final
+from pydantic import BaseModel, Field, validator, ConfigDict
+from foghorn.utils.register_caches import registered_lru_cache
 
-from dnslib import A, AAAA, PTR, QTYPE, RR, SRV, TXT, DNSHeader, DNSRecord
-from pydantic import BaseModel, Field, validator
+from dnslib import (
+    AAAA,
+    PTR,
+    QTYPE,
+    RR,
+    SRV,
+    TXT,
+    A,
+    DNSHeader,
+    DNSRecord,
+)
 
-from cachetools import LRUCache, Cache
-from foghorn.utils.register_caches import registered_cached
 
 from foghorn.plugins.resolve.base import (
     AdminPageSpec,
@@ -21,6 +32,8 @@ from foghorn.plugins.resolve.base import (
     PluginDecision,
     plugin_aliases,
 )
+
+from foghorn.utils import dns_names
 
 logger = logging.getLogger(__name__)
 
@@ -96,7 +109,6 @@ DEFAULT_MDNS_SERVICE_TYPES: List[str] = [
     "_rdm._tcp.local",
     "_rtspu._udp.local",
     "_sane._tcp.local",
-    "_services._dns-sd._udp.local",
     "_sips._tcp.local",
     "_slp._udp.local",
     "_smb._tcp.local",
@@ -130,13 +142,7 @@ DEFAULT_MDNS_SERVICE_TYPES: List[str] = [
 # host A/AAAA glue records. When a PTR response has more than this many
 # targets, the answer will contain only PTRs to avoid overly large
 # responses and surprising behavior.
-PTR_ADDITIONAL_HOST_LIMIT = 2
-
-# Short-lived caches for hot, pure-ish helper methods. These are strictly
-# internal to the plugin and do not affect resolver statistics semantics.
-_MDNS_NORMALIZE_OWNER_CACHE: Cache = LRUCache(maxsize=4096)
-_MDNS_MIRROR_SUFFIXES_CACHE: Cache = LRUCache(maxsize=4096)
-_MDNS_SANITIZE_QNAME_CACHE: Cache = LRUCache(maxsize=2048)
+PTR_ADDITIONAL_HOST_LIMIT: Final[int] = 2
 
 
 class MdnsBridgeConfig(BaseModel):
@@ -160,6 +166,15 @@ class MdnsBridgeConfig(BaseModel):
       - service_types: Optional list[str] of service types to browse directly
         (e.g., `_http._tcp.local.`). Useful when `_services._dns-sd._udp.local.`
         is not advertised on the network.
+      - cache_ttl_seconds: int TTL for cached records in memory (0 disables).
+      - cache_prune_interval_seconds: int minimum seconds between prune passes.
+      - cache_max_entries: int hard cap on tracked cache owners (0 disables).
+      - response_max_rrs: int maximum total RRs per synthesized response (0 disables).
+      - response_max_ips_per_host: int maximum A/AAAA records per host in additionals (0 disables).
+      - response_max_txt_strings: int maximum TXT strings to emit per RR (0 disables).
+      - response_max_txt_bytes: int maximum UTF-8 bytes to emit per TXT RR (0 disables).
+      - enable_rrtype_fallback: bool enabling non-standard A/AAAA fallback to PTR/TXT.
+      - enable_additional_glue: bool controlling whether extra TXT/A/AAAA are added as additionals.
 
     Outputs:
       - MdnsBridgeConfig instance.
@@ -252,9 +267,17 @@ class MdnsBridgeConfig(BaseModel):
     include_ipv4: bool = True
     include_ipv6: bool = True
     info_timeout_ms: int = Field(default=1500, ge=0)
+    cache_ttl_seconds: int = Field(default=1800, ge=0)
+    cache_prune_interval_seconds: int = Field(default=60, ge=0)
+    cache_max_entries: int = Field(default=20000, ge=0)
+    response_max_rrs: int = Field(default=100, ge=0)
+    response_max_ips_per_host: int = Field(default=4, ge=0)
+    response_max_txt_strings: int = Field(default=16, ge=0)
+    response_max_txt_bytes: int = Field(default=1024, ge=0)
+    enable_rrtype_fallback: bool = False
+    enable_additional_glue: bool = True
 
-    class Config:
-        extra = "allow"
+    model_config = ConfigDict(extra="allow")
 
 
 @dataclass(frozen=True)
@@ -364,7 +387,7 @@ class MdnsBridge(BasePlugin):
 
         # Prefer per-plugin logger when available.
         log = getattr(self, "logger", logger)
-        log.info(
+        log.debug(
             "MdnsBridge setup: dns_domain=%s mdns_domain=%s network_enabled=%s include_ipv4=%s include_ipv6=%s ttl=%s info_timeout_ms=%s",
             str(getattr(self._config_model, "domain", ".local")),
             ".local",
@@ -410,11 +433,35 @@ class MdnsBridge(BasePlugin):
         self._a: Dict[str, Set[str]] = {}
         self._aaaa: Dict[str, Set[str]] = {}
         self._service_state: Dict[str, _ServiceState] = {}
+        self._last_seen_owner: Dict[str, float] = {}
+        self._canonical_instance_raw: Dict[str, str] = {}
+        self._last_prune_ts = 0.0
 
         self._ttl = int(self._config_model.ttl or 0)
         self._include_ipv4 = bool(self._config_model.include_ipv4)
         self._include_ipv6 = bool(self._config_model.include_ipv6)
         self._info_timeout_ms = int(self._config_model.info_timeout_ms or 0)
+        self._cache_ttl_seconds = int(self._config_model.cache_ttl_seconds or 0)
+        self._cache_prune_interval_seconds = int(
+            self._config_model.cache_prune_interval_seconds or 0
+        )
+        self._cache_max_entries = int(self._config_model.cache_max_entries or 0)
+        self._response_max_rrs = int(self._config_model.response_max_rrs or 0)
+        self._response_max_ips_per_host = int(
+            self._config_model.response_max_ips_per_host or 0
+        )
+        self._response_max_txt_strings = int(
+            self._config_model.response_max_txt_strings or 0
+        )
+        self._response_max_txt_bytes = int(
+            self._config_model.response_max_txt_bytes or 0
+        )
+        self._enable_rrtype_fallback = bool(
+            getattr(self._config_model, "enable_rrtype_fallback", False)
+        )
+        self._enable_additional_glue = bool(
+            getattr(self._config_model, "enable_additional_glue", True)
+        )
 
         self._zc = None
         self._browsers = []
@@ -428,8 +475,8 @@ class MdnsBridge(BasePlugin):
 
         try:
             from zeroconf import (
-                IPVersion,
                 InterfaceChoice,
+                IPVersion,
                 ServiceBrowser,
                 ServiceInfo,
                 ServiceStateChange,
@@ -487,7 +534,7 @@ class MdnsBridge(BasePlugin):
                 unicast=bool(self._config_model.zeroconf_unicast),
                 ip_version=ip_version,
             )
-            log.info("MdnsBridge: Zeroconf initialized successfully")
+            log.debug("MdnsBridge: Zeroconf initialized successfully")
         except PermissionError as exc:
             log.error(
                 "MdnsBridge: Zeroconf failed to bind mDNS sockets (EPERM). interfaces=%r ip_version=%r unicast=%r",
@@ -556,7 +603,7 @@ class MdnsBridge(BasePlugin):
         configured_types = list(getattr(self._config_model, "service_types", []) or [])
         effective_service_types = configured_types or list(DEFAULT_MDNS_SERVICE_TYPES)
 
-        for service_type in effective_service_types:
+        for service_type in dict.fromkeys(effective_service_types):
             try:
                 self._start_type_browser(str(service_type))
             except Exception:
@@ -566,7 +613,7 @@ class MdnsBridge(BasePlugin):
                     exc_info=True,
                 )
 
-    @registered_cached(cache=_MDNS_NORMALIZE_OWNER_CACHE)
+    @registered_lru_cache(maxsize=4096)
     def _normalize_owner(
         self, name: str
     ) -> str:  # pragma: nocover defensive normalization
@@ -579,11 +626,11 @@ class MdnsBridge(BasePlugin):
           - str: Lowercased name without trailing dot.
         """
 
-        try:
-            return str(name).rstrip(".").lower()
-        except Exception:
-            return str(name).lower().rstrip(".")
+        from foghorn.utils import dns_names
 
+        return dns_names.normalize_name(name)
+
+    @registered_lru_cache(maxsize=4096)
     def _to_dns_domain(self, fqdn: str) -> str:  # pragma: nocover suffix rewrite helper
         """Brief: Map a `.local` mDNS name to the configured DNS suffix.
 
@@ -605,7 +652,7 @@ class MdnsBridge(BasePlugin):
             return base[: -len(self._mdns_domain)] + self._dns_domain
         return base
 
-    @registered_cached(cache=_MDNS_MIRROR_SUFFIXES_CACHE)
+    @registered_lru_cache(maxsize=1024)
     def _mirror_suffixes(
         self, fqdn: str
     ) -> List[str]:  # pragma: nocover suffix mapping helper
@@ -682,9 +729,12 @@ class MdnsBridge(BasePlugin):
         )
 
         for o in owners:
+            self._touch_owner(o)
             s = self._ptr.setdefault(o, set())
             for t in targets:
+                self._touch_owner(t)
                 s.add(t)
+        self._prune_cache()
 
     def _ptr_remove(
         self, owner: str, target: str
@@ -709,6 +759,7 @@ class MdnsBridge(BasePlugin):
                 s.discard(t)
             if not s:
                 self._ptr.pop(o, None)
+                self._last_seen_owner.pop(o, None)
 
     def _service_node_name(
         self, service_type: str, host: str
@@ -794,10 +845,7 @@ class MdnsBridge(BasePlugin):
           - None; internal `_service_state` mapping is updated in-place.
         """
 
-        try:
-            base_name = self._normalize_owner(instance_name)
-        except Exception:
-            base_name = str(instance_name or "").rstrip(".").lower()
+        base_name = self._normalize_owner(instance_name)
 
         if not base_name:
             return
@@ -809,10 +857,7 @@ class MdnsBridge(BasePlugin):
 
         host_norm = ""
         if host is not None:
-            try:
-                host_norm = self._normalize_owner(host)
-            except Exception:
-                host_norm = str(host or "").rstrip(".").lower()
+            host_norm = self._normalize_owner(host)
 
         variants = self._mirror_suffixes(base_name)
         with self._lock:
@@ -838,6 +883,7 @@ class MdnsBridge(BasePlugin):
                     host=new_host,
                     up_since=new_up_since,
                 )
+                self._touch_owner(key)
 
     def _start_type_browser(
         self, service_type: str
@@ -881,6 +927,48 @@ class MdnsBridge(BasePlugin):
 
         log.debug("MdnsBridge: started explicit ServiceBrowser for %s", t)
 
+    def _stop_type_browser(
+        self, service_type: str
+    ) -> None:  # pragma: nocover zeroconf browser wiring
+        """Brief: Stop and detach a ServiceBrowser for a specific mDNS service type.
+
+        Inputs:
+          - service_type: Service type name (e.g., `_http._tcp.local.`). May be
+            provided without a trailing dot.
+
+        Outputs:
+          - None. Removes the browser from self._type_browsers and
+            self._browsers, then best-effort cancels it.
+        """
+
+        log = getattr(self, "logger", logger)
+        t = str(service_type or "").strip()
+        if not t:
+            return
+        if not t.endswith("."):
+            t = t + "."
+
+        browser = None
+        key = self._normalize_owner(t)
+        with self._lock:
+            browser = self._type_browsers.pop(key, None)
+            if browser is None:
+                return
+            self._browsers = [b for b in self._browsers if b is not browser]
+
+        cancel = getattr(browser, "cancel", None)
+        if callable(cancel):
+            try:
+                cancel()
+            except Exception:
+                log.debug(
+                    "MdnsBridge: failed to cancel ServiceBrowser for %s",
+                    t,
+                    exc_info=True,
+                )
+
+        log.debug("MdnsBridge: stopped ServiceBrowser for %s", t)
+
     def _on_service_type_event(self, zeroconf, service_type: str, name: str, state_change) -> None:  # type: ignore[no-untyped-def]  # pragma: nocover callback from zeroconf
         """Brief: Handle PTR events for `_services._dns-sd._udp.<domain>.`.
 
@@ -896,22 +984,21 @@ class MdnsBridge(BasePlugin):
 
         _ = service_type
         log = getattr(self, "logger", logger)
-        with self._lock:
-            if getattr(state_change, "name", "") == "Removed":
-                log.debug(
-                    "MdnsBridge: service type removed: %s (mdns_domain=%s)",
-                    name,
-                    self._mdns_domain,
-                )
+        if getattr(state_change, "name", "") == "Removed":
+            log.debug(
+                "MdnsBridge: service type removed: %s (mdns_domain=%s)",
+                name,
+                self._mdns_domain,
+            )
+            with self._lock:
                 self._ptr_remove(
                     f"_services._dns-sd._udp{self._mdns_domain}.",
                     name,
                 )
-                # Best-effort: stop tracking per-type browser state.
-                key = self._normalize_owner(name)
-                self._type_browsers.pop(key, None)
-                return
+            self._stop_type_browser(name)
+            return
 
+        with self._lock:
             log.debug(
                 "MdnsBridge: service type added/updated: %s (mdns_domain=%s)",
                 name,
@@ -973,10 +1060,12 @@ class MdnsBridge(BasePlugin):
                 for k in self._mirror_suffixes(name):
                     self._srv.pop(k, None)
                     self._txt.pop(k, None)
+                    self._last_seen_owner.pop(k, None)
                 if canonical_instance is not None:
                     for k in self._mirror_suffixes(canonical_instance):
                         self._srv.pop(k, None)
                         self._txt.pop(k, None)
+                        self._last_seen_owner.pop(k, None)
                 try:
                     if canonical_instance is not None:
                         # Preserve the last known host by omitting the host
@@ -1060,6 +1149,8 @@ class MdnsBridge(BasePlugin):
                 safe_label = self._sanitize_qname(name)
                 st_norm = self._normalize_owner(service_type)
                 canonical_instance = f"{safe_label}.{st_norm}"
+            if canonical_instance is not None:
+                self._register_canonical_instance(canonical_instance, raw_instance=name)
             self._ptr_add(service_type, canonical_instance)
         except Exception:
             log.debug(
@@ -1082,24 +1173,24 @@ class MdnsBridge(BasePlugin):
                 exc_info=True,
             )
 
-    @registered_cached(cache=_MDNS_SANITIZE_QNAME_CACHE)
+    @registered_lru_cache(maxsize=1024)
     def _sanitize_qname(
         self, name: str
     ) -> str:  # pragma: nocover string sanitization helper
-        """Brief: Derive a DNS-safe, synthetic hostname from an mDNS instance.
+        """Brief: Derive a DNS-safe, collision-resistant hostname label.
 
         Inputs:
           - name: Raw instance name (e.g., "[LG] Living Room TV._airplay._tcp.local").
 
         Outputs:
-          - str: Lowercased name derived from the instance label (portion before
+          - str: Lowercased label derived from the instance label (portion before
             the first dot) where any character outside ``[A-Za-z0-9]`` is
             replaced with ``_``, and multiple consecutive ``_`` are collapsed to
-            a single ``_``. A leading ``_`` will naturally appear only when the
-            original first character is invalid.
+            a single ``_``. A short deterministic hash suffix is appended to
+            reduce collisions.
 
         Example:
-          - "[LG] Living Room TV._airplay._tcp.local" -> "_LG_LIVING_ROOM_TV".
+          - "[LG] Living Room TV._airplay._tcp.local" -> "_lg_living_room_tv_1a2b3c4d".
         """
 
         try:
@@ -1135,8 +1226,124 @@ class MdnsBridge(BasePlugin):
         # invalid, fall back to a single underscore.
         core = "".join(collapsed).strip("_")
         if not core:
-            return "_"
-        return core
+            core = "_"
+
+        try:
+            digest = hashlib.sha256(label.encode("utf-8", errors="replace")).hexdigest()
+        except Exception:
+            digest = hashlib.sha256(repr(label).encode("utf-8")).hexdigest()
+        short_hash = digest[:8]
+        max_base_len = max(1, 63 - 1 - len(short_hash))
+        base = core[:max_base_len]
+        return f"{base}_{short_hash}"
+
+    def _register_canonical_instance(self, canonical: str, raw_instance: str) -> None:
+        """Brief: Track canonical instance mapping and log collisions.
+
+        Inputs:
+          - canonical: Canonical instance owner name.
+          - raw_instance: Raw instance name observed from mDNS.
+
+        Outputs:
+          - None.
+        """
+
+        if not canonical or not raw_instance:
+            return
+        prev = self._canonical_instance_raw.get(canonical)
+        if prev and prev != raw_instance:
+            log = getattr(self, "logger", logger)
+            log.warning(
+                "MdnsBridge: canonical instance collision canonical=%s",
+                canonical,
+            )
+        else:
+            self._canonical_instance_raw[canonical] = raw_instance
+        self._touch_owner(canonical)
+
+    def _touch_owner(self, owner: str) -> None:
+        """Brief: Record a last-seen timestamp for a cache owner.
+
+        Inputs:
+          - owner: Normalized owner name (no trailing dot).
+
+        Outputs:
+          - None.
+        """
+
+        if not owner:
+            return
+        try:
+            now = time.time()
+        except Exception:
+            return
+        self._last_seen_owner[owner] = now
+
+    def _prune_cache(self) -> None:
+        """Brief: Evict stale or excess cache owners based on configured bounds.
+
+        Inputs:
+          - None.
+
+        Outputs:
+          - None.
+        """
+
+        ttl_seconds = int(getattr(self, "_cache_ttl_seconds", 0) or 0)
+        max_entries = int(getattr(self, "_cache_max_entries", 0) or 0)
+        if ttl_seconds <= 0 and max_entries <= 0:
+            return
+        try:
+            now = time.time()
+        except Exception:
+            return
+
+        interval = int(getattr(self, "_cache_prune_interval_seconds", 0) or 0)
+        last_prune = float(getattr(self, "_last_prune_ts", 0.0) or 0.0)
+        if interval > 0 and (now - last_prune) < interval:
+            return
+        self._last_prune_ts = now
+
+        owners_to_drop: Set[str] = set()
+        if ttl_seconds > 0:
+            cutoff = now - ttl_seconds
+            for owner, ts in list(self._last_seen_owner.items()):
+                try:
+                    if float(ts) < cutoff:
+                        owners_to_drop.add(owner)
+                except Exception:
+                    owners_to_drop.add(owner)
+
+        if max_entries > 0 and len(self._last_seen_owner) > max_entries:
+            excess = len(self._last_seen_owner) - max_entries
+            if excess > 0:
+                ordered = sorted(self._last_seen_owner.items(), key=lambda kv: kv[1])
+                for owner, _ in ordered[:excess]:
+                    owners_to_drop.add(owner)
+
+        if not owners_to_drop:
+            return
+
+        # Drop owners from all caches.
+        for owner in owners_to_drop:
+            self._ptr.pop(owner, None)
+            self._srv.pop(owner, None)
+            self._txt.pop(owner, None)
+            self._a.pop(owner, None)
+            self._aaaa.pop(owner, None)
+            self._service_state.pop(owner, None)
+            self._canonical_instance_raw.pop(owner, None)
+            self._last_seen_owner.pop(owner, None)
+
+        # Remove dropped owners from any PTR target sets.
+        if self._ptr:
+            for owner, targets in list(self._ptr.items()):
+                if not targets:
+                    continue
+                targets.difference_update(owners_to_drop)
+                if not targets:
+                    self._ptr.pop(owner, None)
+                    self._last_seen_owner.pop(owner, None)
 
     def _ingest_service_info(self, info, canonical_instance_name: Optional[str] = None) -> None:  # type: ignore[no-untyped-def]  # pragma: nocover network-derived data path
         """Brief: Convert a zeroconf ServiceInfo into DNS RRset caches.
@@ -1285,6 +1492,7 @@ class MdnsBridge(BasePlugin):
                     port=port,
                     target=target_host + ".",
                 )
+                self._touch_owner(inst)
                 if txt_values:
                     self._txt[inst] = list(txt_values)
                 else:
@@ -1295,6 +1503,7 @@ class MdnsBridge(BasePlugin):
             if txt_values:
                 for sn in service_nodes:
                     self._txt[sn] = list(txt_values)
+                    self._touch_owner(sn)
             else:
                 for sn in service_nodes:
                     self._txt.pop(sn, None)
@@ -1328,6 +1537,8 @@ class MdnsBridge(BasePlugin):
                             continue
                     if not v6:
                         self._aaaa.pop(host, None)
+                self._touch_owner(host)
+            self._prune_cache()
 
     def _enumerate_service_types_for_suffix(self, suffix: str) -> Set[str]:
         """Brief: Derive distinct service-type owners for a given DNS suffix.
@@ -1432,7 +1643,7 @@ class MdnsBridge(BasePlugin):
               - None; conditionally appends A/AAAA RRs to `reply`.
             """
 
-            if not host_name:
+            if not host_name or not self._enable_additional_glue:
                 return
             # Only append if the host is inside one of the configured suffixes; this
             # avoids surprising cross-domain glue.
@@ -1443,8 +1654,13 @@ class MdnsBridge(BasePlugin):
             if self._include_ipv4:
                 ips4 = self._a.get(host_name)
                 if ips4:
-                    for ip in sorted(ips4):
-                        reply.add_answer(
+                    ips = sorted(ips4)
+                    if self._response_max_ips_per_host > 0:
+                        ips = ips[: self._response_max_ips_per_host]
+                    for ip in ips:
+                        if not _can_add_rr():
+                            break
+                        reply.add_ar(
                             RR(
                                 rname=host_name + ".",
                                 rtype=QTYPE.A,
@@ -1457,8 +1673,13 @@ class MdnsBridge(BasePlugin):
             if self._include_ipv6:
                 ips6 = self._aaaa.get(host_name)
                 if ips6:
-                    for ip in sorted(ips6):
-                        reply.add_answer(
+                    ips = sorted(ips6)
+                    if self._response_max_ips_per_host > 0:
+                        ips = ips[: self._response_max_ips_per_host]
+                    for ip in ips:
+                        if not _can_add_rr():
+                            break
+                        reply.add_ar(
                             RR(
                                 rname=host_name + ".",
                                 rtype=QTYPE.AAAA,
@@ -1467,6 +1688,53 @@ class MdnsBridge(BasePlugin):
                                 rdata=AAAA(ip),
                             ),
                         )
+
+        def _limit_txt_values(values: List[str]) -> List[str]:
+            """Brief: Limit TXT strings and bytes for response emission.
+
+            Inputs:
+              - values: list[str] TXT strings.
+
+            Outputs:
+              - list[str]: Limited TXT values respecting configured caps.
+            """
+
+            if not values:
+                return []
+            out: List[str] = []
+            max_strings = self._response_max_txt_strings
+            max_bytes = self._response_max_txt_bytes
+            total_bytes = 0
+            for item in values:
+                if max_strings > 0 and len(out) >= max_strings:
+                    break
+                try:
+                    b = item.encode("utf-8", errors="replace")
+                except Exception:
+                    b = repr(item).encode("utf-8", errors="replace")
+                if max_bytes > 0 and total_bytes + len(b) > max_bytes:
+                    break
+                out.append(item)
+                total_bytes += len(b)
+            return out
+
+        def _can_add_rr() -> bool:
+            """Brief: Check response size cap before adding a record.
+
+            Inputs:
+              - None.
+
+            Outputs:
+              - bool: True when another RR can be added.
+            """
+
+            if self._response_max_rrs <= 0:
+                return True
+            total_rrs = len(reply.rr) + len(reply.ar)
+            if total_rrs >= self._response_max_rrs:
+                reply.header.tc = 1
+                return False
+            return True
 
         def _service_node_host_name(owner: str) -> Optional[str]:
             """Brief: Infer the underlying host name from a service-node owner.
@@ -1552,6 +1820,8 @@ class MdnsBridge(BasePlugin):
 
                 if ptr_targets:
                     for t in sorted(ptr_targets):
+                        if not _can_add_rr():
+                            break
                         reply.add_answer(
                             RR(
                                 rname=owner_wire,
@@ -1576,6 +1846,8 @@ class MdnsBridge(BasePlugin):
                     if synth_types:
                         ptr_targets = synth_types
                         for t in sorted(ptr_targets):
+                            if not _can_add_rr():
+                                break
                             reply.add_answer(
                                 RR(
                                     rname=owner_wire,
@@ -1603,6 +1875,8 @@ class MdnsBridge(BasePlugin):
                         if proto_filtered:
                             ptr_targets = proto_filtered
                             for t in sorted(ptr_targets):
+                                if not _can_add_rr():
+                                    break
                                 reply.add_answer(
                                     RR(
                                         rname=owner_wire,
@@ -1627,14 +1901,19 @@ class MdnsBridge(BasePlugin):
                         # as an additional so a single PTR query can reveal
                         # both the instance metadata and the host addresses.
                         txts_for_target = self._txt.get(target)
-                        if txts_for_target:
-                            reply.add_answer(
+                        if txts_for_target and self._enable_additional_glue:
+                            limited_txts = _limit_txt_values(list(txts_for_target))
+                            if not limited_txts:
+                                continue
+                            if not _can_add_rr():
+                                break
+                            reply.add_ar(
                                 RR(
                                     rname=target + ".",
                                     rtype=QTYPE.TXT,
                                     rclass=1,
                                     ttl=self._ttl,
-                                    rdata=TXT(list(txts_for_target)),
+                                    rdata=TXT(limited_txts),
                                 ),
                             )
 
@@ -1668,48 +1947,56 @@ class MdnsBridge(BasePlugin):
             if qtype_int in {int(QTYPE.SRV), int(QTYPE.ANY)}:
                 srv = self._srv.get(name_norm)
                 if srv is not None:
-                    reply.add_answer(
-                        RR(
-                            rname=owner_wire,
-                            rtype=QTYPE.SRV,
-                            rclass=1,
-                            ttl=self._ttl,
-                            rdata=SRV(
-                                srv.priority,
-                                srv.weight,
-                                srv.port,
-                                srv.target,
+                    if _can_add_rr():
+                        reply.add_answer(
+                            RR(
+                                rname=owner_wire,
+                                rtype=QTYPE.SRV,
+                                rclass=1,
+                                ttl=self._ttl,
+                                rdata=SRV(
+                                    srv.priority,
+                                    srv.weight,
+                                    srv.port,
+                                    srv.target,
+                                ),
                             ),
-                        ),
-                    )
+                        )
 
             # TXT
             if qtype_int in {int(QTYPE.TXT), int(QTYPE.ANY)}:
                 txts = self._txt.get(name_norm)
                 if txts:
-                    reply.add_answer(
-                        RR(
-                            rname=owner_wire,
-                            rtype=QTYPE.TXT,
-                            rclass=1,
-                            ttl=self._ttl,
-                            rdata=TXT(list(txts)),
-                        ),
-                    )
+                    limited_txts = _limit_txt_values(list(txts))
+                    if limited_txts and _can_add_rr():
+                        reply.add_answer(
+                            RR(
+                                rname=owner_wire,
+                                rtype=QTYPE.TXT,
+                                rclass=1,
+                                ttl=self._ttl,
+                                rdata=TXT(limited_txts),
+                            ),
+                        )
 
                     # Rule #1: TXT on a service-node like
                     # `<service>.<proto>.<host>.<suffix>`. When such a name is
                     # queried, also include `host.<suffix>` A/AAAA as
                     # additionals when present so callers can get addresses
                     # alongside metadata.
-                    if service_node_host:
+                    if service_node_host and self._enable_additional_glue:
                         _append_host_additionals(service_node_host)
 
             # A / AAAA
             if self._include_ipv4 and qtype_int in {int(QTYPE.A), int(QTYPE.ANY)}:
                 ips4 = self._a.get(name_norm)
                 if ips4:
-                    for ip in sorted(ips4):
+                    ips = sorted(ips4)
+                    if self._response_max_ips_per_host > 0:
+                        ips = ips[: self._response_max_ips_per_host]
+                    for ip in ips:
+                        if not _can_add_rr():
+                            break
                         reply.add_answer(
                             RR(
                                 rname=owner_wire,
@@ -1726,51 +2013,54 @@ class MdnsBridge(BasePlugin):
                     # cached PTR data. This helps clients that mistakenly issue A
                     # queries for `_service._proto` or browse names discover
                     # available instances.
-                    labels = name_norm.split(".")
-                    ptr_owner = name_norm
-                    # Reuse the alias mapping used in the PTR path so that
-                    # `_dns_sd._tcp.<suffix>` and `_tcp.<suffix>` enumerate the
-                    # same targets as `_services._dns-sd._udp.<suffix>` and
-                    # `_services.<suffix>`.
-                    if len(labels) >= 2:
-                        alias_suffix: Optional[str] = None
-                        allowed_suffixes = getattr(
-                            self, "_dns_domains", {self._dns_domain}
-                        )
-                        for suf in allowed_suffixes:
-                            if name_norm.endswith(suf):
-                                alias_suffix = suf
-                                break
-                        if alias_suffix:
-                            if labels[0] == "_dns_sd" and labels[1] == "_tcp":
-                                ptr_owner = f"_services._dns-sd._udp{alias_suffix}"
-                            elif labels[0] == "_tcp":
-                                ptr_owner = f"_services{alias_suffix}"
-                    # Fall back to treating `_service._proto.<suffix>` names as
-                    # service-type owners when no alias mapping applied.
-                    if ptr_owner == name_norm:
-                        if (
-                            len(labels) >= 3
-                            and labels[0].startswith("_")
-                            and labels[1] in {"_tcp", "_udp"}
-                        ):
-                            ptr_targets = self._ptr.get(name_norm)
-                        else:
-                            ptr_targets = None
-                    else:
-                        ptr_targets = self._ptr.get(ptr_owner)
-
-                    if ptr_targets:
-                        for t in sorted(ptr_targets):
-                            reply.add_answer(
-                                RR(
-                                    rname=owner_wire,
-                                    rtype=QTYPE.PTR,
-                                    rclass=1,
-                                    ttl=self._ttl,
-                                    rdata=PTR(t + "."),
-                                ),
+                    if self._enable_rrtype_fallback:
+                        labels = name_norm.split(".")
+                        ptr_owner = name_norm
+                        # Reuse the alias mapping used in the PTR path so that
+                        # `_dns_sd._tcp.<suffix>` and `_tcp.<suffix>` enumerate the
+                        # same targets as `_services._dns-sd._udp.<suffix>` and
+                        # `_services.<suffix>`.
+                        if len(labels) >= 2:
+                            alias_suffix: Optional[str] = None
+                            allowed_suffixes = getattr(
+                                self, "_dns_domains", {self._dns_domain}
                             )
+                            for suf in allowed_suffixes:
+                                if name_norm.endswith(suf):
+                                    alias_suffix = suf
+                                    break
+                            if alias_suffix:
+                                if labels[0] == "_dns_sd" and labels[1] == "_tcp":
+                                    ptr_owner = f"_services._dns-sd._udp{alias_suffix}"
+                                elif labels[0] == "_tcp":
+                                    ptr_owner = f"_services{alias_suffix}"
+                        # Fall back to treating `_service._proto.<suffix>` names as
+                        # service-type owners when no alias mapping applied.
+                        if ptr_owner == name_norm:
+                            if (
+                                len(labels) >= 3
+                                and labels[0].startswith("_")
+                                and labels[1] in {"_tcp", "_udp"}
+                            ):
+                                ptr_targets = self._ptr.get(name_norm)
+                            else:
+                                ptr_targets = None
+                        else:
+                            ptr_targets = self._ptr.get(ptr_owner)
+
+                        if ptr_targets:
+                            for t in sorted(ptr_targets):
+                                if not _can_add_rr():
+                                    break
+                                reply.add_answer(
+                                    RR(
+                                        rname=owner_wire,
+                                        rtype=QTYPE.PTR,
+                                        rclass=1,
+                                        ttl=self._ttl,
+                                        rdata=PTR(t + "."),
+                                    ),
+                                )
 
                 if qtype_int == int(QTYPE.A) and service_node_host:
                     # When querying A for a service-node name, also return TXT
@@ -1778,22 +2068,30 @@ class MdnsBridge(BasePlugin):
                     # additionals so callers get both metadata and addresses
                     # via a single lookup.
                     txts_for_service = self._txt.get(name_norm)
-                    if txts_for_service:
-                        reply.add_answer(
-                            RR(
-                                rname=owner_wire,
-                                rtype=QTYPE.TXT,
-                                rclass=1,
-                                ttl=self._ttl,
-                                rdata=TXT(list(txts_for_service)),
-                            ),
-                        )
-                    _append_host_additionals(service_node_host)
+                    if txts_for_service and self._enable_additional_glue:
+                        limited_txts = _limit_txt_values(list(txts_for_service))
+                        if limited_txts and _can_add_rr():
+                            reply.add_ar(
+                                RR(
+                                    rname=owner_wire,
+                                    rtype=QTYPE.TXT,
+                                    rclass=1,
+                                    ttl=self._ttl,
+                                    rdata=TXT(limited_txts),
+                                ),
+                            )
+                    if self._enable_additional_glue:
+                        _append_host_additionals(service_node_host)
 
             if self._include_ipv6 and qtype_int in {int(QTYPE.AAAA), int(QTYPE.ANY)}:
                 ips6 = self._aaaa.get(name_norm)
                 if ips6:
-                    for ip in sorted(ips6):
+                    ips = sorted(ips6)
+                    if self._response_max_ips_per_host > 0:
+                        ips = ips[: self._response_max_ips_per_host]
+                    for ip in ips:
+                        if not _can_add_rr():
+                            break
                         reply.add_answer(
                             RR(
                                 rname=owner_wire,
@@ -1806,45 +2104,48 @@ class MdnsBridge(BasePlugin):
                 elif qtype_int == int(QTYPE.AAAA):
                     # Same behavior for AAAA queries to service-type and
                     # DNS-SD browse names as for A queries above.
-                    labels = name_norm.split(".")
-                    ptr_owner = name_norm
-                    if len(labels) >= 2:
-                        alias_suffix = None  # type: ignore[assignment]
-                        allowed_suffixes = getattr(
-                            self, "_dns_domains", {self._dns_domain}
-                        )
-                        for suf in allowed_suffixes:
-                            if name_norm.endswith(suf):
-                                alias_suffix = suf
-                                break
-                        if alias_suffix:
-                            if labels[0] == "_dns_sd" and labels[1] == "_tcp":
-                                ptr_owner = f"_services._dns-sd._udp{alias_suffix}"
-                            elif labels[0] == "_tcp":
-                                ptr_owner = f"_services{alias_suffix}"
-                    if ptr_owner == name_norm:
-                        if (
-                            len(labels) >= 3
-                            and labels[0].startswith("_")
-                            and labels[1] in {"_tcp", "_udp"}
-                        ):
-                            ptr_targets = self._ptr.get(name_norm)
-                        else:
-                            ptr_targets = None
-                    else:
-                        ptr_targets = self._ptr.get(ptr_owner)
-
-                    if ptr_targets:
-                        for t in sorted(ptr_targets):
-                            reply.add_answer(
-                                RR(
-                                    rname=owner_wire,
-                                    rtype=QTYPE.PTR,
-                                    rclass=1,
-                                    ttl=self._ttl,
-                                    rdata=PTR(t + "."),
-                                ),
+                    if self._enable_rrtype_fallback:
+                        labels = name_norm.split(".")
+                        ptr_owner = name_norm
+                        if len(labels) >= 2:
+                            alias_suffix = None  # type: ignore[assignment]
+                            allowed_suffixes = getattr(
+                                self, "_dns_domains", {self._dns_domain}
                             )
+                            for suf in allowed_suffixes:
+                                if name_norm.endswith(suf):
+                                    alias_suffix = suf
+                                    break
+                            if alias_suffix:
+                                if labels[0] == "_dns_sd" and labels[1] == "_tcp":
+                                    ptr_owner = f"_services._dns-sd._udp{alias_suffix}"
+                                elif labels[0] == "_tcp":
+                                    ptr_owner = f"_services{alias_suffix}"
+                        if ptr_owner == name_norm:
+                            if (
+                                len(labels) >= 3
+                                and labels[0].startswith("_")
+                                and labels[1] in {"_tcp", "_udp"}
+                            ):
+                                ptr_targets = self._ptr.get(name_norm)
+                            else:
+                                ptr_targets = None
+                        else:
+                            ptr_targets = self._ptr.get(ptr_owner)
+
+                        if ptr_targets:
+                            for t in sorted(ptr_targets):
+                                if not _can_add_rr():
+                                    break
+                                reply.add_answer(
+                                    RR(
+                                        rname=owner_wire,
+                                        rtype=QTYPE.PTR,
+                                        rclass=1,
+                                        ttl=self._ttl,
+                                        rdata=PTR(t + "."),
+                                    ),
+                                )
 
         if not _added_any():
             return None
@@ -2086,8 +2387,8 @@ class MdnsBridge(BasePlugin):
             ipv4_list: List[str] = []
             ipv6_list: List[str] = []
             if srv is not None:
-                internal_host = (
-                    str(getattr(srv, "target", "") or "").rstrip(".").lower()
+                internal_host = dns_names.normalize_name(
+                    getattr(srv, "target", "") or ""
                 )
                 # Only report host entries that live under one of the configured
                 # DNS suffixes so the view stays consistent with the service

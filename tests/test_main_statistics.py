@@ -1,11 +1,11 @@
 """
-Brief: Tests main() statistics-enabled path initializes collector and reporter and passes collector to DNSServer.
+Brief: Tests main() statistics-enabled path initializes collector and reporter.
 
 Inputs:
-  - monkeypatch: to patch StatsCollector, StatsReporter, DNSServer, init_logging
+  - monkeypatch: to patch StatsCollector, StatsReporter, UDP listener start, init_logging.
 
 Outputs:
-  - None: asserts reporter.start() called and DNSServer received stats_collector
+  - None: asserts reporter.start() called and reporter received the constructed collector.
 """
 
 from unittest.mock import mock_open, patch
@@ -15,16 +15,16 @@ import foghorn.main as main_mod
 
 def test_main_statistics_enabled_initializes_and_starts_reporter(monkeypatch):
     """
-    Brief: main() with statistics.enabled=True creates StatsCollector/Reporter, starts reporter, and passes collector to DNSServer.
+    Brief: main() with stats.enabled=True creates StatsCollector/Reporter and starts reporter.
 
     Inputs:
-      - YAML config enabling statistics with custom flags and interval
+      - YAML config enabling statistics with custom flags and interval.
 
     Outputs:
-      - None: asserts reporter.start called and DNSServer constructed with provided stats_collector
+      - None: asserts reporter.start called and reporter wired with the constructed collector.
 
     Example config snippet:
-      statistics:
+      stats:
         enabled: true
         interval_seconds: 1
         track_uniques: false
@@ -51,6 +51,12 @@ def test_main_statistics_enabled_initializes_and_starts_reporter(monkeypatch):
         "    mode: forward\n"
         "    timeout_ms: 2000\n"
         "    use_asyncio: true\n"
+        "logging:\n"
+        "  query_log_sampling:\n"
+        "    sample_rate: 0.25\n"
+        "  query_log_dedupe:\n"
+        "    window_seconds: 2\n"
+        "    max_entries: 1234\n"
         "stats:\n"
         "  enabled: true\n"
         "  interval_seconds: 1\n"
@@ -68,6 +74,7 @@ def test_main_statistics_enabled_initializes_and_starts_reporter(monkeypatch):
     class DummyCollector:
         def __init__(self, **kw):
             constructed["collector_kwargs"] = kw
+            constructed["collector"] = self
 
         def warm_load_from_store(self) -> None:
             """Test stub: emulate real collector's warm_load_from_store()."""
@@ -101,35 +108,33 @@ def test_main_statistics_enabled_initializes_and_starts_reporter(monkeypatch):
         def stop(self):
             pass
 
-    class DummyServer:
-        def __init__(
-            self,
-            host,
-            port,
-            upstreams,
-            plugins,
-            *,
-            timeout,
-            timeout_ms,
-            min_cache_ttl,
-            stats_collector=None,
-            **_extra,
-        ):
-            constructed["dnserver_kwargs"] = {
-                "stats_collector": stats_collector,
-                "timeout_ms": timeout_ms,
-                "min_cache_ttl": min_cache_ttl,
-            }
+    from foghorn.servers import udp_asyncio_server as udp_asyncio_mod
 
-        def serve_forever(self):
-            # Immediately exit main loop
-            raise KeyboardInterrupt
+    class DummyThread:
+        def is_alive(self) -> bool:
+            return False
+
+        def join(self, timeout: float | None = None) -> None:  # noqa: ARG002
+            return None
+
+    class DummyUDPHandle:
+        def __init__(self) -> None:
+            self.thread = DummyThread()
+
+        def stop(self) -> None:
+            constructed["udp_stop_called"] = True
+
+    def fake_start_udp_asyncio_threaded(*_a, **_kw):  # type: ignore[no-untyped-def]
+        return DummyUDPHandle()
 
     # Patch dependencies in foghorn.main
     monkeypatch.setattr(main_mod, "StatsCollector", DummyCollector)
     monkeypatch.setattr(main_mod, "StatsReporter", DummyReporter)
-    monkeypatch.setattr(main_mod, "DNSServer", DummyServer)
+    monkeypatch.setattr(
+        udp_asyncio_mod, "start_udp_asyncio_threaded", fake_start_udp_asyncio_threaded
+    )
     monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
+    monkeypatch.setattr(main_mod, "start_webserver", lambda *a, **k: None)
 
     with patch("builtins.open", mock_open(read_data=yaml_data)):
         rc = main_mod.main(["--config", "stats.yaml"])
@@ -137,11 +142,8 @@ def test_main_statistics_enabled_initializes_and_starts_reporter(monkeypatch):
     assert rc == 0
     # Reporter should have been started
     assert constructed.get("reporter_started") is True
-    # DNSServer must receive the same collector instance
-    assert (
-        constructed["dnserver_kwargs"]["stats_collector"]
-        is constructed["reporter_args"]["collector"]
-    )
+    # Reporter must receive the same collector instance
+    assert constructed["reporter_args"]["collector"] is constructed.get("collector")
     # Validate collector kwargs reflect config
     ck = constructed["collector_kwargs"]
     assert ck["track_uniques"] is False
@@ -150,3 +152,6 @@ def test_main_statistics_enabled_initializes_and_starts_reporter(monkeypatch):
     assert ck["include_top_domains"] is True
     assert ck["top_n"] == 5
     assert ck["track_latency"] is True
+    assert ck["query_log_sample_rate"] == 0.25
+    assert ck["query_log_dedupe_window_seconds"] == 2
+    assert ck["query_log_dedupe_max_entries"] == 1234

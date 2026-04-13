@@ -1,18 +1,122 @@
 upstreams:
   endpoints:
-  - host: 1.1.1.1
-    port: 53
+    - host: 1.1.1.1
+      port: 53
+
 logging:
   python:
     level: info
+
 plugins:
-- type: zone
-  config:
-    file_paths:
-    - ./config/custom-records.txt
-    watchdog_enabled: true
-    watchdog_min_interval_seconds: 1.0
-    watchdog_poll_interval_seconds: 0.0
+  - type: zone
+    id: custom_records_example
+    enabled: true
+    comment: 'ZoneRecords example focused on local records files + full option coverage.'
+    config:
+      # BasePlugin options
+      abort_on_failure: false
+      enabled: true
+      comment: 'Config-level comment (ignored).'
+      priority: 60
+      pre_priority: 60
+      post_priority: 60
+      setup_priority: 60
+      targets:
+        ips:
+          - 0.0.0.0/0
+        listeners: any
+        domains:
+          - example.com
+        domains_mode: suffix
+        qtypes:
+          - '*'
+        opcodes:
+          - QUERY
+      targets_cache_ttl_seconds: 300
+      logging:
+        level: info
+        stderr: true
+      cache:
+        module: in_memory_ttl
+        config:
+          min_cache_ttl: 0
+
+      # ZoneRecords-specific options
+      file_path: ./config/var/records.txt
+      file_paths:
+        - ./config/var/records.txt
+        - ./config/var/extra-records.txt
+      bind_paths:
+        - ./config/var/example.com.zone
+        - path: ./config/var/0.2.0.192.in-addr.arpa.zone
+          origin: 0.2.0.192.in-addr.arpa.
+          ttl: 300
+      records:
+        - 'example.com|SOA|300|ns1.example.com. hostmaster.example.com. 1 3600 600 604800 300'
+        - 'www.example.com|A|300|192.0.2.10'
+      load_mode: merge
+      merge_policy: add
+      max_file_size_bytes: 16777216
+      max_records: 500000
+      max_record_value_length: 4096
+      auto_ptr_enabled: true
+      max_auto_ptr_records: 100000
+      soa_synthesis_enabled: true
+      watchdog_enabled: true
+      watchdog_min_interval_seconds: 1.0
+      watchdog_poll_interval_seconds: 60.0   # set to 0 to disable
+      ttl: 300
+      # Optional: QTYPE=ANY handling (disabled by default).
+      any_query_enabled: false
+      any_answer_rrset_limit: 16
+      any_answer_record_limit: 64
+      nxdomain_zones:
+        - internal.test
+
+      axfr_zones:
+        - zone: example.com
+          allow_no_dnssec: true
+          upstreams:
+            - host: 192.0.2.10
+              port: 853
+              timeout_ms: 5000
+              transport: dot
+              server_name: ns1.example.com
+              verify: true
+              ca_file: ./keys/foghorn_ca.pem
+          masters:
+            - host: 192.0.2.11
+              port: 53
+              timeout_ms: 5000
+              transport: tcp
+              server_name: axfr.example.com
+              verify: true
+              ca_file: ./keys/foghorn_ca.pem
+
+      axfr_notify:
+        - host: 192.0.2.53
+          port: 853
+          timeout_ms: 2000
+          transport: dot
+          server_name: notify.example.com
+          verify: true
+          ca_file: ./keys/foghorn_ca.pem
+      axfr_notify_allow_private_targets: false
+      axfr_notify_min_interval_seconds: 1.0
+      axfr_notify_rate_limit_per_target_per_minute: 60
+      axfr_notify_scheduled: 5
+
+      dnssec_signing:
+        enabled: false
+        keys_dir: ./config/var/keys
+        algorithm: ECDSAP256SHA256
+        generate: maybe
+        validity_days: 30
+        nsec3:
+          salt: A1B2C3
+          iterations: 10
+        use_tld: corp
+
 server:
   listen:
     udp:

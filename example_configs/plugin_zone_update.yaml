@@ -1,0 +1,137 @@
+# DNS UPDATE Example Configuration
+#
+# This demonstrates how to configure dynamic DNS (DDNS) for Foghorn
+#
+# Note: This is a plugin config only. For a complete Foghorn config,
+# add upstreams, server section, and other required top-level fields.
+
+upstreams:
+  endpoints:
+    - host: 8.8.8.8
+      port: 53
+      transport: udp
+  strategy: round_robin
+server:
+  listen:
+    dns:
+      host: 127.0.0.1
+      port: 5353
+plugins:
+  - id: zone-with-dynamic-updates
+    type: zone_records
+    config:
+      # Zone data sources (same as normal ZoneRecords)
+      records:
+        - "example.com|A|300|192.0.2.10"
+        - "www.example.com|CNAME|300|example.com"
+      ttl: 300
+      # Optional: QTYPE=ANY handling (disabled by default).
+      any_query_enabled: false
+      any_answer_rrset_limit: 16
+      any_answer_record_limit: 64
+
+      # DNS UPDATE configuration
+      dns_update:
+        enabled: true
+        zones:
+          - zone: example.com
+            # TSIG authentication (works on UDP/TCP/DoT/DoH)
+            tsig:
+              # Inline keys still work (existing behavior)
+              keys:
+                # Key 1: Single hostname authorization (e.g., for home.homelab.net)
+                - name: "dynamic-key-1"
+                  algorithm: "hmac-sha256"
+                  secret: "bHVyIGhhc2hlZCBrZXkgIGluIGJhc2U2NTY="
+                  # Allow only this specific A/AAAA record
+                  allow_names:
+                    - "home.homelab.net"
+                  # Restrict to private IP space only
+                  allow_update_ips:
+                    - "192.168.1.0/24"
+
+                # Key 2: Multiple hostname authorization (e.g., for *.dyn.example.com)
+                - name: "dynamic-key-2"
+                  algorithm: "hmac-sha256"
+                  secret: "YW5vdGhlciBoYXNoZWQga2V5"
+                  # Allow wildcard pattern
+                  allow_names:
+                    - "*.dyn.example.com"
+                  allow_names_files:
+                    - /etc/foghorn/dynamic-hosts.txt
+                  # Allow specific IP blocks
+                  allow_update_ips:
+                    - "10.0.0.0/8"
+                    - "172.16.0.0/12"
+
+                # Key 3: CDN scenario (public IPs only)
+                - name: "cdn-key"
+                  algorithm: "hmac-sha512"
+                  secret: "Y2RuIHNlY3JldCBrZXk="
+                  # Allow CDN endpoints
+                  allow_names:
+                    - "cdn.example.com"
+                    - "static.example.com"
+                  # Block private IPs, allow public only (no allow_update_ips set)
+                  block_update_ips:
+                    - "10.0.0.0/8"
+                    - "172.16.0.0/12"
+                    - "192.168.0.0/16"
+                    - "fc00::/7"
+
+
+              # Pluggable key sources; default supports `type: file`.
+              # Additional source types (database/api/etc.) can be registered
+              # in the TSIG key source loader registry.
+              key_sources:
+                - type: file
+                  path: ./example_configs/zone_update_tsig_key_source_file.yaml
+
+            # PSK authentication (restricted to DoT/DoH only)
+            psk:
+              tokens:
+                # Token 1: Single hostname via DoT (e.g., IoT device)
+                - token: "$2b$10$hashed-token-value"
+                  # Allow only this specific device hostname
+                  allow_names:
+                    - "thermostat.homelab.net"
+                  # Private IP only
+                  allow_update_ips:
+                    - "192.168.1.0/24"
+
+                # Token 2: Multiple services via DoH
+                - token: "$2b$10$another-hashed-token"
+                  # Wildcard pattern
+                  allow_names:
+                    - "*.svc.example.com"
+                  allow_names_files:
+                    - /etc/foghorn/psk-services.txt
+                  # Allow specific internal subnet
+                  allow_update_ips:
+                    - "10.0.0.0/8"
+
+            # Client authorization (who can send UPDATE)
+            allow_clients:
+              - "10.0.0.0/8"
+            allow_clients_files:
+              - /etc/foghorn/allowed-clients.txt
+
+            # Name restrictions
+            allow_names:
+              - "*.dyn.example.com"
+              - "www.example.com"
+            allow_names_files:
+              - /etc/foghorn/allowed-names.txt
+            block_names:
+              - "example.com"
+            block_names_files: /etc/foghorn/blocked-names.txt
+
+            # Value restrictions for A/AAAA records
+            allow_update_ips:
+              - "192.0.2.0/24"
+            allow_update_ips_files:
+              - /etc/foghorn/allowed-update-ips.txt
+            block_update_ips:
+              - "10.0.0.0/8"
+            block_update_ips_files:
+              - /etc/foghorn/blocked-update-ips.txt

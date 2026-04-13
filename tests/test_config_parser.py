@@ -8,28 +8,32 @@ Outputs:
 """
 
 from __future__ import annotations
+import ssl
 
 from typing import Any, Dict, List
 
 import pytest
 
 from foghorn.config import config_parser as cp
+from foghorn.main_config_helpers import _build_main_arg_parser
 from foghorn.plugins.resolve.base import BasePlugin
 
 
-def test_is_var_key_empty_and_uppercase() -> None:
-    """Brief: _is_var_key rejects empty and accepts ALL_UPPERCASE names.
+def test_is_var_key_empty_and_case_flexible_identifier() -> None:
+    """Brief: _is_var_key accepts identifier-style names with any letter case.
 
     Inputs:
       - None.
 
     Outputs:
-      - None; asserts behaviour for empty and valid keys.
+      - None; asserts behaviour for empty, valid, and invalid keys.
     """
 
     assert cp._is_var_key("") is False
     assert cp._is_var_key("TTL") is True
-    assert cp._is_var_key("ttl") is False
+    assert cp._is_var_key("ttl") is True
+    assert cp._is_var_key("MiXeD_123") is True
+    assert cp._is_var_key("bad-name") is False
 
 
 def test_parse_config_variables_non_mapping_raises() -> None:
@@ -48,20 +52,20 @@ def test_parse_config_variables_non_mapping_raises() -> None:
 
 
 def test_parse_config_variables_env_and_cli_validation() -> None:
-    """Brief: parse_config_variables filters env keys and validates CLI vars.
+    """Brief: parse_config_variables parses env/CLI vars and validates bad names.
 
     Inputs:
       - None.
 
     Outputs:
-      - None; asserts env lowercase keys are ignored and CLI validation errors.
+      - None; asserts env keys are parsed and CLI validation errors on bad keys.
     """
 
     cfg: Dict[str, Any] = {"variables": {"EXISTING": 1}}
     env = {"lower": "1", "UPPER": "2"}
     merged = cp.parse_config_variables(cfg, environ=env, cli_vars=["NEW=3"])
-    # lower should be ignored; UPPER and NEW merged as YAML scalars.
-    assert "lower" not in merged
+    # lowercase, uppercase, and CLI keys are merged as YAML scalars.
+    assert merged["lower"] == 1
     assert merged["UPPER"] == 2
     assert merged["NEW"] == 3
 
@@ -69,9 +73,9 @@ def test_parse_config_variables_env_and_cli_validation() -> None:
     with pytest.raises(ValueError):
         cp.parse_config_variables({"variables": {}}, cli_vars=["BAD"])
 
-    # Invalid variable name (not ALL_UPPERCASE).
+    # Invalid variable name (must match identifier pattern).
     with pytest.raises(ValueError):
-        cp.parse_config_variables({"variables": {}}, cli_vars=["bad=1"])
+        cp.parse_config_variables({"variables": {}}, cli_vars=["bad-name=1"])
 
 
 def test_parse_config_file_non_mapping_root_raises(tmp_path, monkeypatch) -> None:
@@ -106,20 +110,280 @@ def test_parse_config_file_non_mapping_root_raises(tmp_path, monkeypatch) -> Non
         cp.parse_config_file(str(p))
 
 
-def test_normalize_upstream_config_invalid_foghorn_and_timeout_fallback() -> None:
-    """Brief: normalize_upstream_config validates foghorn section and timeout.
+def test_parse_config_file_rejects_invalid_plugin_hooks_key(tmp_path) -> None:
+    """Brief: parse_config_file rejects unsupported plugins[].hooks key names.
+
+    Inputs:
+      - tmp_path: pytest temporary directory fixture.
+
+    Outputs:
+      - None; asserts ValueError for hooks key typo like pre-resolve.
+    """
+
+    cfg_path = tmp_path / "cfg.yaml"
+    cfg_path.write_text(
+        "\n".join(
+            [
+                "server:",
+                "  resolver:",
+                "    mode: forward",
+                "  listen:",
+                "    udp:",
+                "      enabled: true",
+                "upstreams:",
+                "  endpoints:",
+                "    - host: 1.1.1.1",
+                "      port: 53",
+                "plugins:",
+                "  - type: filter",
+                "    hooks:",
+                "      pre-resolve: 25",
+                "    config: {}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        ValueError, match=r"plugins\[0\]\.hooks contains unsupported key"
+    ):
+        cp.parse_config_file(str(cfg_path))
+
+
+def test_parse_config_file_unknown_keys_default_is_error(tmp_path) -> None:
+    """Brief: parse_config_file treats extra schema keys as fatal by default.
+
+    Inputs:
+      - tmp_path: pytest temporary directory fixture.
+
+    Outputs:
+      - None; asserts unknown top-level keys raise ValueError without overrides.
+    """
+
+    cfg_path = tmp_path / "cfg.yaml"
+    cfg_path.write_text(
+        "\n".join(
+            [
+                "server:",
+                "  resolver:",
+                "    mode: forward",
+                "  listen:",
+                "    udp:",
+                "      enabled: true",
+                "upstreams:",
+                "  endpoints:",
+                "    - host: 1.1.1.1",
+                "      port: 53",
+                "unexpected_key: true",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match=r"unexpected_key"):
+        cp.parse_config_file(str(cfg_path))
+
+
+def test_parse_config_file_unknown_keys_warn_override_still_supported(
+    tmp_path, caplog
+) -> None:
+    """Brief: parse_config_file allows warn override for unknown extra keys.
+
+    Inputs:
+      - tmp_path: pytest temporary directory fixture.
+      - caplog: pytest log-capture fixture.
+
+    Outputs:
+      - None; asserts unknown_keys='warn' returns config instead of raising.
+    """
+
+    cfg_path = tmp_path / "cfg.yaml"
+    cfg_path.write_text(
+        "\n".join(
+            [
+                "server:",
+                "  resolver:",
+                "    mode: forward",
+                "  listen:",
+                "    udp:",
+                "      enabled: true",
+                "upstreams:",
+                "  endpoints:",
+                "    - host: 1.1.1.1",
+                "      port: 53",
+                "unexpected_key: true",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    with caplog.at_level("WARNING", logger="foghorn.config.config_schema"):
+        cfg = cp.parse_config_file(str(cfg_path), unknown_keys="warn")
+
+    assert isinstance(cfg, dict)
+    assert any("unexpected_key" in rec.getMessage() for rec in caplog.records)
+
+
+def test_main_arg_parser_defaults_config_extras_to_error() -> None:
+    """Brief: Main CLI parser defaults --config-extras policy to error.
 
     Inputs:
       - None.
 
     Outputs:
-      - None; asserts foghorn must be mapping and timeout_ms fallback on error.
+      - None; asserts parsed default config_extras is 'error'.
     """
 
-    # foghorn present but not a mapping.
-    cfg_bad_foghorn = {"upstreams": [{"host": "1.1.1.1"}], "foghorn": [1, 2]}
-    with pytest.raises(ValueError, match="config.foghorn must be a mapping"):
-        cp.normalize_upstream_config(cfg_bad_foghorn)
+    parser = _build_main_arg_parser()
+    args = parser.parse_args([])
+    assert args.config_extras == "error"
+
+
+def test_parse_config_file_tls_ca_missing_is_fatal(tmp_path) -> None:
+    """Brief: parse_config_file raises when upstream TLS ca_file does not exist.
+
+    Inputs:
+      - tmp_path: pytest temporary directory fixture.
+
+    Outputs:
+      - None; asserts missing TLS CA bundle is treated as fatal by default.
+    """
+
+    missing_ca = tmp_path / "missing-ca.pem"
+    cfg_path = tmp_path / "cfg.yaml"
+    cfg_path.write_text(
+        "\n".join(
+            [
+                "server:",
+                "  resolver:",
+                "    mode: forward",
+                "upstreams:",
+                "  endpoints:",
+                "    - host: 1.1.1.1",
+                "      port: 853",
+                "      transport: dot",
+                "      tls:",
+                f"        ca_file: {missing_ca}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="does not exist"):
+        cp.parse_config_file(str(cfg_path))
+
+
+def test_parse_config_file_tls_ca_missing_nonfatal_when_abort_disabled(
+    tmp_path,
+    caplog,
+) -> None:
+    """Brief: parse_config_file warns (not raises) when abort_on_fail is disabled.
+
+    Inputs:
+      - tmp_path: pytest temporary directory fixture.
+      - caplog: pytest log-capture fixture.
+
+    Outputs:
+      - None; asserts missing CA file is logged and config still parses.
+    """
+
+    missing_ca = tmp_path / "missing-ca.pem"
+    cfg_path = tmp_path / "cfg.yaml"
+    cfg_path.write_text(
+        "\n".join(
+            [
+                "server:",
+                "  resolver:",
+                "    mode: forward",
+                "upstreams:",
+                "  endpoints:",
+                "    - host: 1.1.1.1",
+                "      port: 853",
+                "      transport: dot",
+                "      abort_on_fail: false",
+                "      tls:",
+                f"        ca_file: {missing_ca}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    with caplog.at_level("WARNING", logger="foghorn.config.config_parser"):
+        cfg = cp.parse_config_file(str(cfg_path))
+
+    assert isinstance(cfg, dict)
+    assert any(
+        "continuing because abort_on_fail/abort_on_failure is false" in r.message
+        for r in caplog.records
+    )
+
+
+def test_validate_tls_ca_file_reports_unreadable_path(tmp_path, monkeypatch) -> None:
+    """Brief: _validate_tls_ca_file raises clear errors for unreadable files.
+
+    Inputs:
+      - tmp_path: pytest temporary directory fixture.
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts unreadable CA files are rejected.
+    """
+
+    ca_file = tmp_path / "ca.pem"
+    ca_file.write_text("dummy", encoding="utf-8")
+
+    def _raise_permission_error(*_args, **_kwargs) -> object:
+        raise PermissionError("permission denied")
+
+    monkeypatch.setattr(cp, "open", _raise_permission_error, raising=False)
+
+    with pytest.raises(ValueError, match="not readable"):
+        cp._validate_tls_ca_file(
+            str(ca_file), location="upstreams.endpoints[0].tls.ca_file"
+        )
+
+
+def test_validate_tls_ca_file_reports_invalid_format(tmp_path, monkeypatch) -> None:
+    """Brief: _validate_tls_ca_file raises clear errors for invalid CA formats.
+
+    Inputs:
+      - tmp_path: pytest temporary directory fixture.
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts invalid PEM/CA content is rejected.
+    """
+
+    ca_file = tmp_path / "ca.pem"
+    ca_file.write_text("not a cert", encoding="utf-8")
+
+    def _raise_ssl_error(*_args, **_kwargs) -> object:
+        raise ssl.SSLError("bad cert")
+
+    monkeypatch.setattr(cp.ssl, "create_default_context", _raise_ssl_error)
+
+    with pytest.raises(ValueError, match="not a valid TLS CA bundle"):
+        cp._validate_tls_ca_file(
+            str(ca_file), location="upstreams.endpoints[0].tls.ca_file"
+        )
+
+
+def test_normalize_upstream_config_invalid_layout_and_timeout_fallback() -> None:
+    """Brief: normalize_upstream_config validates layout and timeout fallback.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts v2 layout validation and timeout_ms fallback on error.
+    """
+
+    # Upstreams must use the v2 mapping layout with an endpoints list.
+    cfg_bad_upstreams = {"upstreams": [{"host": "1.1.1.1"}]}
+    with pytest.raises(
+        ValueError, match="config.upstreams must be a mapping with an 'endpoints' list"
+    ):
+        cp.normalize_upstream_config(cfg_bad_upstreams)
 
     # Invalid timeout_ms that cannot be converted to int falls back to default.
     class Bad:
@@ -129,11 +393,25 @@ def test_normalize_upstream_config_invalid_foghorn_and_timeout_fallback() -> Non
             raise TypeError("no int")
 
     cfg_timeout = {
-        "upstreams": [{"host": "1.1.1.1"}],
-        "foghorn": {"timeout_ms": Bad()},
+        "upstreams": {"endpoints": [{"host": "1.1.1.1"}]},
+        "server": {"resolver": {"timeout_ms": Bad()}},
     }
     upstreams, timeout_ms = cp.normalize_upstream_config(cfg_timeout)
     assert upstreams and timeout_ms == 2000
+
+
+def test_normalize_upstream_backup_config_returns_empty_when_missing() -> None:
+    """Brief: normalize_upstream_backup_config returns [] when backup is absent.
+
+    Inputs:
+      - cfg without upstreams.backup.
+
+    Outputs:
+      - Empty list.
+    """
+
+    cfg = {"upstreams": {"endpoints": [{"host": "1.1.1.1", "port": 53}]}}
+    assert cp.normalize_upstream_backup_config(cfg) == []
 
 
 class DummyPlugin(BasePlugin):
@@ -286,7 +564,7 @@ def test_load_plugins_rejects_uppercase_comment_keys(monkeypatch) -> None:
     with pytest.raises(ValueError, match="use 'comment' \(lowercase\)"):
         cp.load_plugins(
             [
-                {"module": "dummy", "Comment": "oops"},
+                {"type": "dummy", "Comment": "oops"},
             ]
         )
 
@@ -294,7 +572,7 @@ def test_load_plugins_rejects_uppercase_comment_keys(monkeypatch) -> None:
     with pytest.raises(ValueError, match="plugins\[\]\.config: use 'comment'"):
         cp.load_plugins(
             [
-                {"module": "dummy", "config": {"Comment": "oops"}},
+                {"type": "dummy", "config": {"Comment": "oops"}},
             ]
         )
 
@@ -325,16 +603,15 @@ def test_load_plugins_enabled_and_priority_propagation_and_cache_error(
 
     # First spec: disabled via config.enabled -> skipped.
     disabled_spec = {
-        "module": "dummy",
+        "type": "dummy",
         "config": {"enabled": False},
     }
 
     # Second spec: enabled with generic priority and cache config that errors.
     bad_cache_spec = {
-        "module": "dummy",
-        "priority": 5,
+        "type": "dummy",
+        "hooks": {"priority": 5},
         "config": {
-            "priority": 7,
             "cache": {"module": "sqlite3", "config": {}},
         },
     }
@@ -353,8 +630,8 @@ def test_load_plugins_enabled_and_priority_propagation_and_cache_error(
 
     specs = [
         {
-            "module": "dummy",
-            "priority": 9,
+            "type": "dummy",
+            "hooks": {"priority": 9},
             "config": {
                 "cache": {"module": "none"},
             },
@@ -371,3 +648,128 @@ def test_load_plugins_enabled_and_priority_propagation_and_cache_error(
     assert init_cfg.get("setup_priority") == 9
     # Cache instance should be injected into plugin config.
     assert "cache" in init_cfg
+
+
+def test_load_plugins_hooks_priority_shorthands_and_precedence(monkeypatch) -> None:
+    """Brief: load_plugins supports hooks-based priority shorthands.
+
+    Inputs:
+      - monkeypatch: Pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts hooks.pre_resolve/hooks.post_resolve accept int or
+        {priority: int}, hooks.priority sets all three, and deprecated
+        *_priority/priority fields are rejected.
+    """
+
+    monkeypatch.setattr(cp, "discover_plugins", lambda: {})
+    monkeypatch.setattr(cp, "get_plugin_class", lambda ident, reg=None: DummyPlugin)
+
+    # hooks.pre_resolve as int; hooks.post_resolve as {priority: ...}
+    DummyPlugin.last_init = None
+    plugins = cp.load_plugins(
+        [
+            {
+                "type": "dummy",
+                "hooks": {"pre_resolve": 11, "post_resolve": {"priority": 22}},
+            }
+        ]
+    )
+    assert len(plugins) == 1
+    init_cfg = DummyPlugin.last_init or {}
+    assert init_cfg.get("pre_priority") == 11
+    assert init_cfg.get("post_priority") == 22
+    # setup should be untouched (defaults to BasePlugin class default).
+    assert "setup_priority" not in init_cfg
+
+    # hooks.priority sets all three.
+    DummyPlugin.last_init = None
+    plugins2 = cp.load_plugins(
+        [
+            {
+                "type": "dummy",
+                "hooks": {"priority": 7},
+            }
+        ]
+    )
+    assert len(plugins2) == 1
+    init_cfg2 = DummyPlugin.last_init or {}
+    assert init_cfg2.get("pre_priority") == 7
+    assert init_cfg2.get("post_priority") == 7
+    assert init_cfg2.get("setup_priority") == 7
+
+    # hooks.setup overrides setup priority.
+    DummyPlugin.last_init = None
+    plugins2b = cp.load_plugins(
+        [
+            {
+                "type": "dummy",
+                "hooks": {"priority": 7, "setup": 9},
+            }
+        ]
+    )
+    assert len(plugins2b) == 1
+    init_cfg2b = DummyPlugin.last_init or {}
+    assert init_cfg2b.get("pre_priority") == 7
+    assert init_cfg2b.get("post_priority") == 7
+    assert init_cfg2b.get("setup_priority") == 9
+
+    # hooks.setup can also be {priority: ...}.
+    DummyPlugin.last_init = None
+    plugins2c = cp.load_plugins(
+        [
+            {
+                "type": "dummy",
+                "hooks": {"setup": {"priority": 12}},
+            }
+        ]
+    )
+    assert len(plugins2c) == 1
+    init_cfg2c = DummyPlugin.last_init or {}
+    assert init_cfg2c.get("setup_priority") == 12
+
+    # Hook-specific values override hooks.priority.
+    DummyPlugin.last_init = None
+    plugins3 = cp.load_plugins(
+        [
+            {
+                "type": "dummy",
+                "hooks": {"priority": 3, "pre_resolve": 9},
+            }
+        ]
+    )
+    assert len(plugins3) == 1
+    init_cfg3 = DummyPlugin.last_init or {}
+    assert init_cfg3.get("pre_priority") == 9
+    assert init_cfg3.get("post_priority") == 3
+    assert init_cfg3.get("setup_priority") == 3
+
+    # Deprecated spec-level priorities are rejected.
+    with pytest.raises(
+        ValueError,
+        match="plugins\\[\\]: 'priority' is no longer supported; use hooks\\.\\* priorities",
+    ):
+        cp.load_plugins(
+            [
+                {
+                    "type": "dummy",
+                    "hooks": {"priority": 1},
+                    "priority": 96,
+                }
+            ]
+        )
+
+    # Deprecated config-level priorities are also rejected.
+    with pytest.raises(
+        ValueError,
+        match="plugins\\[\\]\\.config: 'priority' is no longer supported; use hooks\\.\\* priorities",
+    ):
+        cp.load_plugins(
+            [
+                {
+                    "type": "dummy",
+                    "hooks": {"priority": 1},
+                    "config": {"priority": 94},
+                }
+            ]
+        )

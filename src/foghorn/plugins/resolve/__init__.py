@@ -13,11 +13,10 @@ import pkgutil
 from types import ModuleType
 from typing import List
 
-__all__: List[str] = [
-    m.name.split(".")[-1]
-    for m in pkgutil.walk_packages(__path__, prefix=__name__ + ".")
-    if not m.ispkg
-]
+# Expose direct modules for star-import and introspection, but avoid importing
+# submodules at package import time (some optional plugins may have extra deps,
+# and unit tests should not fail due to unrelated plugin modules).
+__all__: List[str] = [m.name for m in pkgutil.iter_modules(__path__) if not m.ispkg]
 
 
 def __getattr__(name: str) -> ModuleType:

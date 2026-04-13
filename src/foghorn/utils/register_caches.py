@@ -5,12 +5,11 @@ import logging
 from functools import lru_cache
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from cachetools import TTLCache, LFUCache, RRCache, FIFOCache, LRUCache, cached
+from cachetools import FIFOCache, LFUCache, LRUCache, RRCache, TTLCache, cached
 from cachetools.keys import hashkey
 
-
 # In-process registry of functions/methods decorated with cache-aware helpers
-# (registered_cached / registered_lru_cached / registered_foghorn_ttl /
+# (registered_cached / registered_lru_cache / registered_foghorn_ttl /
 # registered_sqlite_ttl). This is best-effort and intended for diagnostics in
 # the admin UI rather than as a hard configuration API.
 _REGISTERED_CACHED_FUNCS: List[Dict[str, Any]] = []
@@ -53,7 +52,7 @@ class _CacheProxy:
 def _make_counter_entry(func: Callable[..., Any]) -> Dict[str, Any]:
     """Create a base registry entry with shared counter fields.
 
-    This helper is used by both registered_cached and registered_lru_cached so
+    This helper is used by both registered_cached and registered_lru_cache so
     that the decorated caches table can treat them uniformly.
     """
 
@@ -216,7 +215,7 @@ def registered_cached(
     return _outer
 
 
-def registered_lru_cached(
+def registered_lru_cache(
     *lru_args: Any, **lru_kwargs: Any
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     """Brief: Wrap functools.lru_cache and record decorated functions for admin UI.
@@ -328,6 +327,38 @@ def registered_lru_cached(
         return _wrapper
 
     return _outer
+
+
+def registered_ttl_cache(
+    *,
+    maxsize: int,
+    ttl: int,
+) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    """Brief: Wrap cachetools.TTLCache caching with registry-aware metadata.
+
+    Inputs:
+      - maxsize: Maximum number of cached entries (>= 0).
+      - ttl: Entry time-to-live in seconds (>= 0).
+
+    Outputs:
+      - Decorator that applies registered_cached with a TTLCache backend.
+    """
+    try:
+        maxsize_int = int(maxsize)
+    except Exception:
+        maxsize_int = 0
+    if maxsize_int < 0:
+        maxsize_int = 0
+
+    try:
+        ttl_int = int(ttl)
+    except Exception:
+        ttl_int = 0
+    if ttl_int < 0:
+        ttl_int = 0
+
+    cache = TTLCache(maxsize=maxsize_int, ttl=ttl_int)
+    return registered_cached(cache=cache)
 
 
 def get_registered_cached() -> List[Dict[str, Any]]:

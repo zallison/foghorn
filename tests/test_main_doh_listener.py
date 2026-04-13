@@ -32,6 +32,8 @@ def test_main_doh_listener_starts(monkeypatch):
         "  max_concurrent: 1\n"
         "server:\n"
         "  listen:\n"
+        "    udp:\n"
+        "      enabled: false\n"
         "    doh:\n"
         "      enabled: true\n"
         "      host: 127.0.0.1\n"
@@ -83,6 +85,23 @@ def test_main_doh_listener_starts(monkeypatch):
     monkeypatch.setattr(main_mod, "DNSServer", DummyServer)
     monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
     monkeypatch.setitem(sys.modules, "threading", fake_threading)
+
+    # UDP is disabled in this test config, and DoH handles are not tracked in
+    # main()'s loop_threads list, so force the keepalive loop to exit by
+    # overriding time.sleep while still proxying time.time and other attributes.
+    import time as real_time
+
+    class _FakeTimeModule:
+        def __init__(self, real_module):  # type: ignore[no-untyped-def]
+            self._real = real_module
+
+        def sleep(self, _sec: float) -> None:  # noqa: ARG002
+            raise KeyboardInterrupt
+
+        def __getattr__(self, name):  # type: ignore[no-untyped-def]
+            return getattr(self._real, name)
+
+    monkeypatch.setitem(sys.modules, "time", _FakeTimeModule(real_time))
 
     with patch("builtins.open", mock_open(read_data=yaml_data)):
         rc = main_mod.main(["--config", "x.yaml"])
