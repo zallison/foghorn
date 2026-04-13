@@ -7,21 +7,22 @@ import pkgutil
 import re
 from typing import Dict, Iterable, Optional, Type
 
+from foghorn.utils.register_caches import registered_lru_cache
+
 from .base import CachePlugin
-from foghorn.utils.register_caches import registered_lru_cached
 
 _CAMEL_1 = re.compile(r"(.)([A-Z][a-z]+)")
 _CAMEL_2 = re.compile(r"([a-z0-9])([A-Z])")
 
 
-@registered_lru_cached(maxsize=1024)
+@registered_lru_cache(maxsize=1024)
 def _camel_to_snake(name: str) -> str:
     s1 = _CAMEL_1.sub(r"\1_\2", name)
     s2 = _CAMEL_2.sub(r"\1_\2", s1)
     return s2.lower()
 
 
-@registered_lru_cached(maxsize=1024)
+@registered_lru_cache(maxsize=1024)
 def _default_alias_for(cls: Type[CachePlugin]) -> str:
     name = cls.__name__
     # Common suffixes used by cache implementations.
@@ -32,7 +33,7 @@ def _default_alias_for(cls: Type[CachePlugin]) -> str:
     return _camel_to_snake(name)
 
 
-@registered_lru_cached(maxsize=1024)
+@registered_lru_cache(maxsize=1024)
 def _normalize(alias: str) -> str:
     return alias.strip().lower().replace("-", "_")
 
@@ -45,7 +46,7 @@ def _iter_cache_plugin_modules(
         yield modinfo.name
 
 
-@registered_lru_cached(maxsize=4)
+@registered_lru_cache(maxsize=4)
 def discover_cache_plugins(
     package_name: str = "foghorn.plugins.cache",
 ) -> Dict[str, Type[CachePlugin]]:
@@ -143,6 +144,10 @@ def load_cache_plugin(cfg: Optional[object]) -> CachePlugin:
         return cls()
 
     if isinstance(cfg, dict):
+        if "class" in cfg or "type" in cfg:
+            raise ValueError(
+                "cache config keys 'class' and 'type' are no longer supported; use 'module'"
+            )
         # Special-case explicit null module as an alias for disabling caching.
         # Omitting the cache key entirely still means "use the default cache".
         if "module" in cfg and cfg.get("module") is None:
@@ -151,8 +156,6 @@ def load_cache_plugin(cfg: Optional[object]) -> CachePlugin:
             module = cfg.get("module")
             if isinstance(module, str):
                 module = module.strip() or None
-            if module is None:
-                module = cfg.get("class") or cfg.get("type")
             if module is None:
                 module = "in_memory_ttl"
 

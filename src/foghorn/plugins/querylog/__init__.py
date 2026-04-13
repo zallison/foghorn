@@ -56,6 +56,35 @@ class MultiStatsStore(BaseStatsStore):
 
         self._backends = list(backends)
 
+        # Derive an effective queue capacity for BaseStatsStore async operations.
+        # When multiple backends specify a capacity, prefer the smallest value
+        # (stricter wins) to avoid unbounded memory growth.
+        effective_max: int | None = None
+        for b in self._backends:
+            raw = None
+            try:
+                raw = getattr(b, "_max_logging_queue", None)
+                if raw is None:
+                    raw = getattr(b, "max_logging_queue", None)
+            except Exception:
+                raw = None
+            if raw is None:
+                continue
+            try:
+                v = int(raw)
+            except Exception:
+                continue
+            if effective_max is None:
+                effective_max = v
+            else:
+                effective_max = min(effective_max, v)
+
+        if effective_max is not None:
+            try:
+                self._max_logging_queue = int(effective_max)
+            except Exception:
+                self._max_logging_queue = 16384
+
     # Health and lifecycle -------------------------------------------------
     def health_check(self) -> bool:
         """Brief: Return True when the primary backend reports healthy.
@@ -271,6 +300,9 @@ class MultiStatsStore(BaseStatsStore):
         qtype: Optional[str] = None,
         qname: Optional[str] = None,
         rcode: Optional[str] = None,
+        status: Optional[str] = None,
+        source: Optional[str] = None,
+        ede_code: Optional[str] = None,
         start_ts: Optional[float] = None,
         end_ts: Optional[float] = None,
         page: int = 1,
@@ -282,6 +314,9 @@ class MultiStatsStore(BaseStatsStore):
             qtype=qtype,
             qname=qname,
             rcode=rcode,
+            status=status,
+            source=source,
+            ede_code=ede_code,
             start_ts=start_ts,
             end_ts=end_ts,
             page=page,

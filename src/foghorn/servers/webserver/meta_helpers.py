@@ -3,12 +3,11 @@ from __future__ import annotations
 import importlib.metadata as importlib_metadata
 import json
 import os
-from typing import Any, Dict
+from typing import Any, Dict, Final
 
 from .stats_helpers import _utc_now_iso
 
-
-_GITHUB_URL = "https://github.com/zallison/foghorn"
+_GITHUB_URL: Final[str] = "https://github.com/zallison/foghorn"
 
 try:  # pragma: no cover - defensive fallback matches _core behaviour
     FOGHORN_VERSION = importlib_metadata.version("foghorn")

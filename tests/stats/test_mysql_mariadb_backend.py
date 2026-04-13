@@ -16,7 +16,13 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import pytest
 
-from foghorn.plugins.querylog.mysql_mariadb import MySqlStatsStore
+from foghorn.plugins.querylog.mysql_mariadb import (
+    MySqlStatsStore,
+    _driver_order_from_config,
+    _import_mysql_driver,
+    _normalize_driver_fallbacks,
+    _normalize_mysql_driver_name,
+)
 
 
 class _FakeCursor:
@@ -154,6 +160,7 @@ class _FakeConn:
     def __init__(self, **kwargs: Any) -> None:
         self.kwargs = dict(kwargs)
         self.closed = False
+        self.commit_calls = 0
         self.counts: Dict[tuple[str, str], int] = {}
         self.query_log_rows: int = 0
         self.select_rows: List[Tuple[Any, ...]] | None = None
@@ -181,6 +188,7 @@ class _FakeConn:
         Outputs:
           - None.
         """
+        self.commit_calls += 1
         return None
 
     def close(self) -> None:
@@ -203,8 +211,27 @@ def fake_mysql_driver(monkeypatch: pytest.MonkeyPatch):
       - monkeypatch: pytest monkeypatch fixture.
 
     Outputs:
-      - None; modifies sys.modules so _import_mysql_driver sees the fake driver.
+      - types.ModuleType for mysql.connector; installed into sys.modules.
     """
+
+    # The backend defaults to preferring mariadb when available. Many test
+    # environments have a real mariadb package installed, so ensure we don't
+    # accidentally connect to a real DB unless the test explicitly installs a
+    # fake mariadb module.
+    import builtins
+
+    real_import = builtins.__import__
+
+    def fake_import(name, globals=None, locals=None, fromlist=(), level=0):  # type: ignore[no-untyped-def]
+        if name == "mariadb":
+            mod = sys.modules.get("mariadb")
+            if mod is not None and getattr(mod, "__file__", None) is None:
+                return real_import(name, globals, locals, fromlist, level)
+            raise ModuleNotFoundError(name)
+        return real_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
     driver_mod = types.ModuleType("mysql.connector")
 
     def _connect(**kwargs: Any) -> _FakeConn:
@@ -217,25 +244,52 @@ def fake_mysql_driver(monkeypatch: pytest.MonkeyPatch):
 
     monkeypatch.setitem(sys.modules, "mysql", mysql_pkg)
     monkeypatch.setitem(sys.modules, "mysql.connector", driver_mod)
+    return driver_mod
 
 
-def _make_backend(fake_mysql_driver) -> MySqlStatsStore:  # type: ignore[no-untyped-def]
-    """Brief: Helper to construct a backend using the fake MySQL driver.
+@pytest.fixture
+def fake_mariadb_driver(monkeypatch: pytest.MonkeyPatch):
+    """Brief: Install a fake mariadb module that returns _FakeConn objects.
 
     Inputs:
-      - fake_mysql_driver: fixture ensuring the fake driver is installed.
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - types.ModuleType for mariadb; installed into sys.modules.
+    """
+
+    driver_mod = types.ModuleType("mariadb")
+
+    def _connect(**kwargs: Any) -> _FakeConn:
+        return _FakeConn(**kwargs)
+
+    driver_mod.connect = _connect  # type: ignore[attr-defined]
+
+    monkeypatch.setitem(sys.modules, "mariadb", driver_mod)
+    return driver_mod
+
+
+def _make_backend(**kwargs: Any) -> MySqlStatsStore:
+    """Brief: Helper to construct a backend with standard connection params.
+
+    Inputs:
+      - **kwargs: Extra constructor kwargs forwarded to MySqlStatsStore.
 
     Outputs:
       - MySqlStatsStore instance with an in-memory _FakeConn.
     """
-    return MySqlStatsStore(
-        host="127.0.0.42",
-        port=3307,
-        user="user",
-        password="pw",
-        database="db",
-        connect_kwargs={"ssl": True},
-    )
+
+    base = {
+        "host": "127.0.0.42",
+        "port": 3307,
+        "user": "user",
+        "password": "pw",
+        "database": "db",
+        "connect_kwargs": {"ssl": True},
+        "async_logging": False,
+    }
+    base.update(kwargs)
+    return MySqlStatsStore(**base)
 
 
 def test_constructor_builds_connection_kwargs(fake_mysql_driver) -> None:  # type: ignore[no-untyped-def]
@@ -247,7 +301,8 @@ def test_constructor_builds_connection_kwargs(fake_mysql_driver) -> None:  # typ
     Outputs:
       - None; asserts host/port/database/user/password/connect_kwargs wiring.
     """
-    backend = _make_backend(fake_mysql_driver)
+
+    backend = _make_backend()
     conn = backend._conn  # type: ignore[attr-defined]
     assert isinstance(conn, _FakeConn)
     assert conn.kwargs["host"] == "127.0.0.42"
@@ -256,6 +311,148 @@ def test_constructor_builds_connection_kwargs(fake_mysql_driver) -> None:  # typ
     assert conn.kwargs["user"] == "user"
     assert conn.kwargs["password"] == "pw"
     assert conn.kwargs["ssl"] is True
+
+
+def test_constructor_defaults_to_async_logging(fake_mysql_driver) -> None:  # type: ignore[no-untyped-def]
+    """Brief: Constructor enables async logging by default for SQL write decoupling.
+
+    Inputs:
+      - fake_mysql_driver: fixture installing fake driver.
+
+    Outputs:
+      - None; asserts async logging default is enabled.
+    """
+
+    backend = MySqlStatsStore(
+        host="127.0.0.42",
+        port=3307,
+        user="user",
+        password="pw",
+        database="db",
+        connect_kwargs={"ssl": True},
+    )
+    assert backend._async_logging is True
+
+
+def test_driver_defaults_to_mariadb_when_available(
+    fake_mysql_driver, fake_mariadb_driver
+) -> None:  # type: ignore[no-untyped-def]
+    """Brief: When both drivers are importable, default selection prefers mariadb."""
+
+    backend = _make_backend()
+    assert backend._driver is fake_mariadb_driver  # type: ignore[attr-defined]
+    assert backend._placeholder == "?"  # type: ignore[attr-defined]
+
+
+def test_driver_can_be_forced_to_mysql_connector(
+    fake_mysql_driver, fake_mariadb_driver
+) -> None:  # type: ignore[no-untyped-def]
+    """Brief: Explicit driver config overrides the default preference."""
+
+    backend = _make_backend(driver="mysql-connector-python")
+    assert backend._driver is fake_mysql_driver  # type: ignore[attr-defined]
+    assert backend._placeholder == "%s"  # type: ignore[attr-defined]
+
+
+def test_driver_can_be_forced_to_mysql_alias(
+    fake_mysql_driver, fake_mariadb_driver
+) -> None:  # type: ignore[no-untyped-def]
+    """Brief: The 'mysql' driver alias selects mysql-connector-python."""
+
+    backend = _make_backend(driver="mysql")
+    assert backend._driver is fake_mysql_driver  # type: ignore[attr-defined]
+    assert backend._placeholder == "%s"  # type: ignore[attr-defined]
+
+
+def test_driver_name_normalization_edges() -> None:
+    """Brief: Driver-name normalization handles aliases, auto, and invalid input.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts canonicalization and validation errors.
+    """
+
+    assert _normalize_mysql_driver_name(None) is None
+    assert _normalize_mysql_driver_name(" auto ") is None
+    assert _normalize_mysql_driver_name("maria_db") == "mariadb"
+    assert _normalize_mysql_driver_name("mysql.connector") == "mysql-connector-python"
+    assert _normalize_mysql_driver_name("connector") == "mysql-connector-python"
+    assert _normalize_mysql_driver_name(123) is None
+
+    with pytest.raises(ValueError):
+        _normalize_mysql_driver_name("unknown-driver")
+
+
+def test_driver_fallback_normalization_edges() -> None:
+    """Brief: Driver fallback normalization handles strings, lists, and disables.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts canonical fallback parsing behaviour.
+    """
+
+    assert _normalize_driver_fallbacks(None) is None
+    assert _normalize_driver_fallbacks("auto") is None
+    assert _normalize_driver_fallbacks("none") == []
+    assert _normalize_driver_fallbacks("mysql") == ["mysql-connector-python"]
+    assert _normalize_driver_fallbacks(["mariadb", None, "mysql"]) == [
+        "mariadb",
+        "mysql-connector-python",
+    ]
+    assert _normalize_driver_fallbacks(42) is None
+
+
+def test_driver_order_computation_edges() -> None:
+    """Brief: Driver-order helper applies explicit preference and deduplication.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts order for auto/default and explicit fallback policies.
+    """
+
+    assert _driver_order_from_config() == ["mariadb", "mysql-connector-python"]
+    assert _driver_order_from_config(driver_fallback="none") == ["mariadb"]
+    assert _driver_order_from_config(driver="mysql") == [
+        "mysql-connector-python",
+        "mariadb",
+    ]
+    assert _driver_order_from_config(
+        driver="mysql",
+        driver_fallback=["mysql", "mariadb", "mysql"],
+    ) == ["mysql-connector-python", "mariadb"]
+
+
+def test_import_driver_raises_when_none_available(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Brief: Driver import helper raises RuntimeError when imports fail.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts RuntimeError from import exhaustion.
+    """
+
+    import builtins
+
+    real_import = builtins.__import__
+
+    def fake_import(name, globals=None, locals=None, fromlist=(), level=0):  # type: ignore[no-untyped-def]
+        if name in {"mariadb", "mysql.connector"}:
+            raise ImportError(name)
+        return real_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
+    with pytest.raises(RuntimeError):
+        _import_mysql_driver(driver="auto", driver_fallback="none")
 
 
 def test_health_check_true_and_false(fake_mysql_driver, monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -268,7 +465,7 @@ def test_health_check_true_and_false(fake_mysql_driver, monkeypatch) -> None:  #
     Outputs:
       - None; asserts both True and False branches.
     """
-    backend = _make_backend(fake_mysql_driver)
+    backend = _make_backend()
     assert backend.health_check() is True
 
     class BoomConn:
@@ -290,7 +487,7 @@ def test_close_closes_connection(fake_mysql_driver) -> None:  # type: ignore[no-
     Outputs:
       - None; asserts the fake connection is marked closed.
     """
-    backend = _make_backend(fake_mysql_driver)
+    backend = _make_backend()
     conn = backend._conn  # type: ignore[attr-defined]
     assert conn.closed is False
     backend.close()
@@ -306,7 +503,7 @@ def test_counts_increment_set_export_and_has_counts(fake_mysql_driver) -> None: 
     Outputs:
       - None; asserts increment_count, set_count, has_counts, export_counts.
     """
-    backend = _make_backend(fake_mysql_driver)
+    backend = _make_backend()
     conn: _FakeConn = backend._conn  # type: ignore[assignment]
 
     # Initially no rows.
@@ -336,7 +533,7 @@ def test_query_log_presence_and_selection(fake_mysql_driver) -> None:  # type: i
     Outputs:
       - None; asserts total count and JSON decoding behaviour.
     """
-    backend = _make_backend(fake_mysql_driver)
+    backend = _make_backend()
     conn: _FakeConn = backend._conn  # type: ignore[assignment]
 
     # No rows yet.
@@ -432,7 +629,7 @@ def test_aggregate_query_log_counts_early_and_dense(fake_mysql_driver) -> None: 
     Outputs:
       - None; asserts early-return branch and zero-filled dense buckets.
     """
-    backend = _make_backend(fake_mysql_driver)
+    backend = _make_backend()
 
     # Early return when interval is invalid or window is empty.
     res_bad = backend.aggregate_query_log_counts(
@@ -472,7 +669,7 @@ def test_aggregate_query_log_counts_group_by(fake_mysql_driver) -> None:  # type
     Outputs:
       - None; asserts grouped items shape and labels.
     """
-    backend = _make_backend(fake_mysql_driver)
+    backend = _make_backend()
     conn: _FakeConn = backend._conn  # type: ignore[assignment]
     conn.aggregate_rows_group = [
         (0, "A", 2),
@@ -502,7 +699,7 @@ def test_rebuild_counts_from_query_log(fake_mysql_driver) -> None:  # type: igno
     Outputs:
       - None; asserts several key counters are populated.
     """
-    backend = _make_backend(fake_mysql_driver)
+    backend = _make_backend()
     conn: _FakeConn = backend._conn  # type: ignore[assignment]
 
     conn.rebuild_rows = [
@@ -546,7 +743,7 @@ def test_rebuild_counts_if_needed_branches(fake_mysql_driver, monkeypatch) -> No
     Outputs:
       - None; asserts that helper calls are gated correctly.
     """
-    backend = _make_backend(fake_mysql_driver)
+    backend = _make_backend()
 
     calls: Dict[str, int] = {"rebuild": 0}
 
@@ -576,3 +773,171 @@ def test_rebuild_counts_if_needed_branches(fake_mysql_driver, monkeypatch) -> No
     monkeypatch.setattr(backend, "has_counts", lambda: False)
     backend.rebuild_counts_if_needed(force_rebuild=False, logger_obj=None)
     assert calls["rebuild"] == 2
+
+
+def test_batch_writes_flush_on_read_paths(fake_mysql_driver) -> None:  # type: ignore[no-untyped-def]
+    """Brief: Batched count writes flush when read paths are invoked.
+
+    Inputs:
+      - fake_mysql_driver: fixture installing fake driver.
+
+    Outputs:
+      - None; asserts write commit is deferred until a read flushes the batch.
+    """
+
+    backend = _make_backend(
+        batch_writes=True,
+        batch_max_size=100,
+        batch_time_sec=9999.0,
+    )
+    conn: _FakeConn = backend._conn  # type: ignore[assignment]
+    baseline_commits = int(conn.commit_calls)
+
+    backend.increment_count("totals", "batched", 1)
+    assert conn.commit_calls == baseline_commits
+
+    exported = backend.export_counts()
+    assert conn.commit_calls == (baseline_commits + 1)
+    assert exported["totals"]["batched"] == 1
+
+
+def test_batch_writes_defer_retention_until_flush(
+    fake_mysql_driver, monkeypatch
+) -> None:  # type: ignore[no-untyped-def]
+    """Brief: Query-log retention runs once after a batched flush.
+
+    Inputs:
+      - fake_mysql_driver: fixture installing fake driver.
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts retention is not evaluated at enqueue time.
+    """
+
+    backend = _make_backend(
+        batch_writes=True,
+        batch_max_size=100,
+        batch_time_sec=9999.0,
+    )
+    retention_calls: List[str] = []
+    monkeypatch.setattr(
+        backend,
+        "_apply_query_log_retention",
+        lambda: retention_calls.append("called"),
+    )
+
+    backend.insert_query_log(
+        ts=1.0,
+        client_ip="203.0.113.1",
+        name="example.org",
+        qtype="A",
+        upstream_id="up1",
+        rcode="NOERROR",
+        status="ok",
+        error=None,
+        first="1.2.3.4",
+        result_json="{}",
+    )
+    assert retention_calls == []
+
+    assert backend.has_query_log() is True
+    assert retention_calls == ["called"]
+
+
+def test_prune_query_log_to_max_records_branches(fake_mysql_driver) -> None:  # type: ignore[no-untyped-def]
+    """Brief: max-record pruning handles invalid cap, empty cutoff, and deletion.
+
+    Inputs:
+      - fake_mysql_driver: fixture installing fake driver.
+
+    Outputs:
+      - None; asserts branch behavior for key pruning paths.
+    """
+
+    backend = _make_backend()
+    assert backend._prune_query_log_to_max_records(0) is False
+
+    class _Cursor:
+        def __init__(
+            self,
+            *,
+            fetchone_value: Optional[Tuple[Any, ...]] = None,
+            rowcount: int = 0,
+        ) -> None:
+            self._fetchone_value = fetchone_value
+            self.rowcount = rowcount
+
+        def execute(self, _sql: str, _params: Tuple[Any, ...]) -> None:
+            return None
+
+        def fetchone(self) -> Optional[Tuple[Any, ...]]:
+            return self._fetchone_value
+
+    class _Conn:
+        def __init__(self, cursors: List[_Cursor]) -> None:
+            self._cursors = list(cursors)
+
+        def cursor(self) -> _Cursor:
+            return self._cursors.pop(0)
+
+    backend._conn = _Conn([_Cursor(fetchone_value=None)])  # type: ignore[assignment]
+    assert backend._prune_query_log_to_max_records(5) is False
+
+    backend._conn = _Conn(  # type: ignore[assignment]
+        [
+            _Cursor(fetchone_value=(100.0, 7)),
+            _Cursor(rowcount=2),
+        ]
+    )
+    assert backend._prune_query_log_to_max_records(5) is True
+
+
+def test_prune_query_log_to_max_bytes_branches(fake_mysql_driver) -> None:  # type: ignore[no-untyped-def]
+    """Brief: max-bytes pruning exits early and deletes oldest rows iteratively.
+
+    Inputs:
+      - fake_mysql_driver: fixture installing fake driver.
+
+    Outputs:
+      - None; asserts early return and changed=True iteration path.
+    """
+
+    backend = _make_backend()
+    assert backend._prune_query_log_to_max_bytes(0) is False
+
+    class _AggCursor:
+        def __init__(self, row: Optional[Tuple[Any, ...]]) -> None:
+            self._row = row
+
+        def execute(
+            self,
+            _sql: str,
+            _params: Optional[Tuple[Any, ...]] = None,
+        ) -> None:
+            return None
+
+        def fetchone(self) -> Optional[Tuple[Any, ...]]:
+            return self._row
+
+    class _DeleteCursor:
+        def __init__(self, rowcount: int) -> None:
+            self.rowcount = rowcount
+
+        def execute(self, _sql: str, _params: Tuple[Any, ...]) -> None:
+            return None
+
+    class _Conn:
+        def __init__(self, cursors: List[Any]) -> None:
+            self._cursors = list(cursors)
+
+        def cursor(self) -> Any:
+            return self._cursors.pop(0)
+
+    backend._conn = _Conn(  # type: ignore[assignment]
+        [
+            _AggCursor((200, 10)),
+            _DeleteCursor(3),
+            _AggCursor((80, 7)),
+        ]
+    )
+    assert backend._prune_query_log_to_max_bytes(100) is True

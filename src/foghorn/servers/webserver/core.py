@@ -22,17 +22,17 @@ import shutil
 import signal
 import socket
 import sqlite3
+import sys
 import threading
 import time
 import urllib.parse
-import sys
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
 import yaml
 from cachetools import TTLCache
-from foghorn.utils.register_caches import registered_cached, registered_lru_cached
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import (
@@ -43,6 +43,8 @@ from fastapi.responses import (
 )
 from pydantic import BaseModel
 
+from foghorn.utils.register_caches import registered_cached, registered_lru_cache
+
 # psutil is an optional dependency. stats_helpers.get_system_info() consults
 # foghorn.servers.webserver.psutil so tests can monkeypatch it.
 try:  # pragma: no cover - optional dependency
@@ -50,61 +52,59 @@ try:  # pragma: no cover - optional dependency
 except Exception:  # pragma: no cover - environment dependent
     psutil = None
 
-from .meta_helpers import (
-    _get_about_payload,
-    _get_package_build_info,
-    FOGHORN_VERSION,
-    _GITHUB_URL,
+from . import config_helpers as _config_helpers
+from . import stats_helpers as _stats_helpers
+from .config_helpers import (
+    _get_config_raw_json,
+    _get_config_raw_text,
+    _get_redact_keys,
+    _get_sanitized_config_yaml_cached,
+    _get_web_cfg,
+    _parse_utc_datetime,
+    _redact_yaml_text_preserving_layout,
+    _split_yaml_value_and_comment,
+    _ts_to_utc_iso,
+    sanitize_config,
 )
 from .http_helpers import (
     _build_auth_dependency,
     _json_safe,
-    _schedule_sighup_after_config_save,
     resolve_www_root,
 )
-from .rate_limit_helpers import _collect_rate_limit_stats
-from .types_and_buffers import LogEntry, WebServerHandle
-
 from .logging_utils import (
     RingBuffer,
     _Suppress2xxAccessFilter,
     install_uvicorn_2xx_suppression,
 )
+from .meta_helpers import (
+    _GITHUB_URL,
+    FOGHORN_VERSION,
+    _get_about_payload,
+    _get_package_build_info,
+)
+from .rate_limit_helpers import _collect_rate_limit_stats
 
 # Helper modules split out from this monolithic implementation; we import and
 # re-export their symbols so that tests and callers can continue to access them
 # via ``foghorn.servers.webserver``.
 from .runtime import (
-    _ListenerRuntime,
     RuntimeState,
-    _thread_is_alive,
     _expected_listeners_from_config,
+    _ListenerRuntime,
+    _thread_is_alive,
     evaluate_readiness,
 )
-from .config_helpers import (
-    _get_web_cfg,
-    _get_redact_keys,
-    _split_yaml_value_and_comment,
-    _redact_yaml_text_preserving_layout,
-    _get_config_raw_text,
-    _get_config_raw_json,
-    _ts_to_utc_iso,
-    _parse_utc_datetime,
-    sanitize_config,
-    _get_sanitized_config_yaml_cached,
-)
-from . import config_helpers as _config_helpers
-from . import stats_helpers as _stats_helpers
 from .stats_helpers import (
-    _trim_top_fields,
     _build_stats_payload_from_snapshot,
     _build_traffic_payload_from_snapshot,
-    _get_stats_snapshot_cached,
-    get_system_info,
-    _read_proc_meminfo,
     _find_rate_limit_db_paths_from_config,
+    _get_stats_snapshot_cached,
+    _read_proc_meminfo,
+    _trim_top_fields,
     _utc_now_iso,
+    get_system_info,
 )
+from .types_and_buffers import LogEntry, WebServerHandle
 
 # Re-export stats snapshot cache internals so tests can configure and inspect
 # them via foghorn.servers.webserver.
@@ -117,19 +117,17 @@ _last_stats_snapshots = _stats_helpers._last_stats_snapshots
 # value from this module when available.
 _SYSTEM_INFO_CACHE_TTL_SECONDS = _stats_helpers._SYSTEM_INFO_CACHE_TTL_SECONDS
 
-from .routes_static import _register_static_routes
-from .routes_stats import _register_stats_routes
-from .routes_core import (
-    _register_core_routes,
-    _register_config_routes,
-    _register_query_log_routes,
-    _register_plugin_routes,
-)
-
+from ...plugins.resolve.base import AdminPageSpec
 from ...stats import StatsCollector, StatsSnapshot, get_process_uptime_seconds
 from ..udp_server import DNSUDPHandler
-from ...plugins.resolve.base import AdminPageSpec
-
+from .routes_core import (
+    _register_config_routes,
+    _register_core_routes,
+    _register_plugin_routes,
+    _register_query_log_routes,
+)
+from .routes_static import _register_static_routes
+from .routes_stats import _register_stats_routes
 
 logger = logging.getLogger("foghorn.webserver")
 
@@ -177,7 +175,7 @@ def create_app(
       >>> app = create_app(collector, {"webserver": {"enabled": True}}, config_path="config.yaml")
     """
 
-    web_cfg = (config.get("webserver") or {}) if isinstance(config, dict) else {}
+    web_cfg = _config_helpers._get_web_cfg(config)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -194,7 +192,21 @@ def create_app(
         install_uvicorn_2xx_suppression()
         yield
 
-    app = FastAPI(title="Foghorn Admin HTTP API", lifespan=lifespan)
+    enable_api = bool(web_cfg.get("enable_api", True))
+    enable_schema = bool(web_cfg.get("enable_schema", True))
+    enable_docs = bool(web_cfg.get("enable_docs", True))
+
+    # FastAPI only supports Swagger UI when OpenAPI is enabled.
+    docs_url = "/docs" if enable_docs and enable_schema else None
+    openapi_url = "/openapi.json" if enable_schema else None
+
+    app = FastAPI(
+        title="Foghorn Admin HTTP API",
+        lifespan=lifespan,
+        docs_url=docs_url,
+        redoc_url=None,
+        openapi_url=openapi_url,
+    )
 
     # Allow configuration to tune the system info cache TTL used by
     # get_system_info(), while keeping a conservative default.
@@ -260,11 +272,13 @@ def create_app(
     auth_dep = _build_auth_dependency(web_cfg)
 
     # Register route groups via helper functions to keep create_app concise.
-    _register_core_routes(app)
-    _register_stats_routes(app, auth_dep, FOGHORN_VERSION)
-    _register_config_routes(app, auth_dep)
-    _register_query_log_routes(app, auth_dep)
-    _register_plugin_routes(app, auth_dep)
+    if enable_api:
+        _register_core_routes(app)
+        _register_stats_routes(app, auth_dep, FOGHORN_VERSION)
+        _register_config_routes(app, auth_dep)
+        _register_query_log_routes(app, auth_dep)
+        _register_plugin_routes(app, auth_dep)
+
     _register_static_routes(app, web_cfg, www_root, auth_dep)
 
     return app

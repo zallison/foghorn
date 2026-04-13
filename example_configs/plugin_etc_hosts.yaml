@@ -1,23 +1,55 @@
 upstreams:
   endpoints:
-  - host: 1.1.1.1
-    port: 53
-  - host: 8.8.8.8
-    port: 53
+    - host: 1.1.1.1
+      port: 53
+    - host: 8.8.8.8
+      port: 53
+
 logging:
-  level: info
+  python:
+    level: info
+
 plugins:
-- type: docker-hosts
-  config:
-    endpoints:
-    - unix:///var/run/docker.sock
-    reload_interval_seconds: 60
-- type: etc-hosts
-  config:
-    files:
-    - /etc/hosts
-    watchdog_enabled: true
-    ttl: 900
+  - type: etc-hosts
+    id: etc_hosts_example
+    enabled: true
+    comment: 'EtcHosts example (resolve from /etc/hosts-style files).'
+    config:
+      # BasePlugin options
+      abort_on_failure: false
+      enabled: true
+      comment: 'Config-level comment (ignored).'
+      priority: 50
+      pre_priority: 50
+      post_priority: 50
+      setup_priority: 50
+      targets:
+        ips:
+          - 0.0.0.0/0
+        listeners: any
+        qtypes:
+          - '*'
+        opcodes:
+          - QUERY
+      targets_cache_ttl_seconds: 300
+      logging:
+        level: info
+        stderr: true
+      cache:
+        module: in_memory_ttl
+        config:
+          min_cache_ttl: 0
+
+      # EtcHosts-specific options
+      file_path: /etc/hosts
+      file_paths:
+        - /etc/hosts
+        - ./config/hosts.extra
+      watchdog_enabled: true
+      watchdog_min_interval_seconds: 1.0
+      watchdog_poll_interval_seconds: 60.0   # set to 0 to disable
+      ttl: 900
+
 server:
   listen:
     udp:

@@ -4,12 +4,84 @@ Foghorn is a versatile DNS server designed for flexibility and performance. Buil
 
 With built-in admin and API server support, Foghorn empowers you to monitor and manage its operations efficiently. Plugins extend its functionality by providing their own status pages, seamlessly integrated into the admin dashboard. Newer releases add DNSSEC signing helpers, zone transfers (AXFR/IXFR), RFC 8914 Extended DNS Errors (EDE), and SSH host key utilities so you can treat DNS as a first-class security and operations tool.
 
-[![Python Tests](https://github.com/zallison/foghorn/actions/workflows/pytest.yml/badge.svg)](https://github.com/zallison/foghorn/actions/workflows/pytest.yml) ![Test Coverage](https://img.shields.io/badge/test_coverage-90%25-blue) [![Docker Pulls](https://img.shields.io/docker/pulls/zallison/foghorn)](https://hub.docker.com/r/zallison/foghorn/)  [![PyPI Downloads](https://static.pepy.tech/personalized-badge/foghorn?period=total&units=INTERNATIONAL_SYSTEM&left_color=GRAY&right_color=BLUE&left_text=downloads)](https://pepy.tech/projects/foghorn)  [![BuyMeACoffee](https://raw.githubusercontent.com/pachadotdev/buymeacoffee-badges/main/bmc-blue.svg)](https://www.buymeacoffee.com/foghorndns)
+[![Python Tests](https://github.com/zallison/foghorn/actions/workflows/pytest.yml/badge.svg)](https://github.com/zallison/foghorn/actions/workflows/pytest.yml) ![Test Coverage](https://img.shields.io/badge/test_coverage-89%25-blue) [![Docker Pulls](https://img.shields.io/docker/pulls/zallison/foghorn)](https://hub.docker.com/r/zallison/foghorn/)  [![PyPI Downloads](https://static.pepy.tech/personalized-badge/foghorn?period=total&units=INTERNATIONAL_SYSTEM&left_color=GRAY&right_color=BLUE&left_text=downloads)](https://pepy.tech/projects/foghorn)  [![BuyMeACoffee](https://raw.githubusercontent.com/pachadotdev/buymeacoffee-badges/main/bmc-blue.svg)](https://www.buymeacoffee.com/foghorndns)
 
-<img src="https://raw.githubusercontent.com/zallison/foghorn/refs/heads/main/assets/screenshot-1.png" width=300px />
+<img src="https://raw.githubusercontent.com/zallison/foghorn/refs/heads/main/assets/screenshot-1.png" height="300" /> <img src="https://raw.githubusercontent.com/zallison/foghorn/refs/heads/main/assets/screenshot-2.png" height="300" /> <img src="https://raw.githubusercontent.com/zallison/foghorn/refs/heads/main/assets/screenshot-3.png" height="300" /> <img src="https://raw.githubusercontent.com/zallison/foghorn/refs/heads/main/assets/screenshot-4.png" height="300" />
 
+## Foghorn DNS Server
 
-The configuration file is validated against a JSON Schema, but you rarely need to read the schema directly. This guide walks through the main sections (`vars`, `server`, `upstreams`, `logging`, `stats`, and `plugins`), then shows concrete examples for every built‑in plugin.
+### Overview
+- **Foghorn** is a DNS server that lets you do almost anything.
+- Nearly *everything* is configurable, tunable, and observable via the admin Web UI, even down to Python function cache settings.
+- Plugins and the resolver do most of the heavy lifting.
+- Out of the box, with no plugins enabled, it behaves like a standard DNS server with:
+  - UDP / TCP
+  - DoT (DNS over TLS)
+  - DoH (DNS over HTTPS)
+  - DNSSEC support for secure DNS
+  - DNS
+- Enabling TLS is straightforward. The `Makefile` includes targets to generate a CA and sign keys.
+
+---
+
+### Query Pipeline
+- Queries flow through a pipeline of plugins. A plugin can appear multiple times with different configurations.
+- Plugins execute in priority order. The first plugin that produces a final answer immediately short-circuits the pipeline.
+- If no pre-resolve plugin responds, the configured resolver, either forwarder or recursive, runs.
+- The result then flows through a post-resolve pipeline, if configured, sent to the client, then added to the logging queue.
+
+---
+
+### Plugins
+Key plugins include:
+
+- **[ACL](docs/plugins/resolve/access_control.md)**: Access control
+- **[EtcHosts](docs/plugins/resolve/etc_hosts.md)**: Serve a hosts-file-style set of A/AAAA records via DNS. Ideal for small, simple setups.
+- **[FileDownloader](docs/plugins/resolve/file_downloader.md) + [Filter](docs/plugins/resolve/filter.md)**: Download blocklists and filter queries, similar to Pi-hole. Can return:
+  - An IP
+  - `REFUSED`
+  - `SERVFAIL`
+  - Or silently drop the connection
+- **[ZoneRecords](docs/plugins/resolve/zone_records.md)**: Load BIND9 zone files and/or define arbitrary records without creating a full zone. Supports combining multiple files and enabling DNSSEC.
+- **[UpstreamRouter](docs/plugins/resolve/upstream_router.md)**: Route queries to different upstreams based on name, for example forwarding `.corp` to a VPN resolver.
+- Additional plugins for:
+  - [Rate limiting](docs/plugins/resolve/rate_limit.md) - Static or Dynamic
+  - [Docker host discovery](docs/plugins/resolve/docker_hosts.md) - Add containers to DNS
+  - [Zeroconf / mDNS / Bonjour](docs/plugins/resolve/mdns_bridge.md) - Forward mDNS over DNS, also the admin UI offers observability.
+  - [Simulating unreliable upstreams](docs/plugins/resolve/flaky_server.md) for development, including on-the-wire fuzzing. Seedable for testing purposes.
+
+Some plugins ship with configuration *profiles* (preset bundles) stored as YAML in
+`src/foghorn/plugins/resolve/*_profiles.yaml` (for example `rate_limit_profiles.yaml`).
+
+"Targets" let you limit the scope of the plugin to given client IPs, domain names, query types, listener type, and more.
+
+Creating new plugins is simple. You can implement custom DNS logic without writing an entire DNS server. For example, the “finger-over-dns” example plugin can be built in under an hour.
+
+---
+
+### Highly Customizable
+- Fine-grained controls let you tune behavior precisely.
+- Resize and configure the Python function cache to match your workload.
+- Variables allow multiple servers to share the same configuration with small differences, such as listen address.
+- Environment variables make it easy to adjust behavior in CI/CD environments.
+
+---
+
+### Fits Into Your Infrastructure
+- Flexible caching backends:
+  - In-memory
+  - SQL databases
+  - Valkey or Redis
+  - MongoDB
+- Logging integrates with your existing systems, can log to multiple targets.:
+  - File-based logging
+  - SQL databases
+  - InfluxDB
+  - MQTT
+
+---
+
+# Full Documentation
 
 ## Table of Contents
 - [0. Thanks](#0-thanks)
@@ -58,6 +130,7 @@ The configuration file is validated against a JSON Schema, but you rarely need t
 - [Developer notes and contribution guide](docs/README-DEV.md)
 - [Makefile targets and build helpers](docs/MAKEFILE.md)
 - [Pi-hole replacement example configuration](docs/PiholeConfig.md)
+- [Query-log hardening and sampling](docs/query-log-hardening.md)
 - [OpenSSL make targets (certificate helpers)](docs/open-ssl-make-easy.md)
 - [DNS RFC compliance, EDNS/EDE, and AXFR/IXFR notes](docs/RFCs.md)
 - [SSH host keys, SSHFP records, and DNSSEC integration](docs/openssh-key-records.md)
@@ -83,6 +156,37 @@ Foghorn can be installed a few different ways, depending on how you prefer to ru
   pip install foghorn
   This gives you the foghorn CLI and library directly on your host system.
 ```
+
+### Minimal / headless installs (optional dependencies)
+
+Foghorn can run as a small UDP/TCP DNS server with lightweight plugins (for example
+`hosts` / `EtcHosts`) without enabling DNSSEC validation, DoH, or the admin HTTP UI.
+
+However, some features depend on optional third-party packages. If you remove those
+packages from your image/environment:
+
+- **DNSSEC local validation** (`server.dnssec.mode: validate` with
+  `server.dnssec.validation: local|local_extended`) requires **dnspython** and
+  **cryptography**. If enabled but missing, Foghorn will exit with an error.
+- **Admin HTTP UI** (`server.http`) and **DoH listener** (`server.listen.doh.enabled: true`)
+  require **fastapi** (and the DoH path uses **uvicorn**). If enabled but missing,
+  Foghorn will exit with an error.
+- **Plugins** may require extra dependencies. During startup, plugins that fail to
+  import due to missing dependencies are **skipped by default**.
+  To make a plugin import failure fatal, set `abort_on_failure: true` inside that
+  plugin's `config` block.
+
+Example (require `ssh_keys` plugin deps at startup):
+```yaml
+plugins:
+  - type: ssh_keys
+	config:
+	  abort_on_failure: true
+```
+
+Developer strict mode: to make *plugin discovery* itself strict (raise on ImportError
+while scanning plugin modules), set `FOGHORN_STRICT_PLUGIN_DISCOVERY=1`.
+
 •  From source (GitHub)
   If you want to track development, hack on plugins, or run a specific commit/branch, clone the repository and install it in editable mode:
   ```bash
@@ -122,7 +226,7 @@ server:
 		host: 0.0.0.0
 		port: 53
   cache:
-	module: memory  # memory | sqlite | redis | memcached | mongodb | none
+	module: memory  # memory | sqlite | redis | memcached | mysql | mariadb | postgres | mongodb | none
 
 upstreams:
   strategy: failover        # failover | round_robin | random
@@ -153,12 +257,22 @@ For local development there is a `Makefile` with a few convenience targets:
 - `make env` / `make env-dev` – create the virtualenv in `./venv` and install dependencies (with dev extras for `env-dev`).
 - `make build` – prepare the development environment (keeps the JSON schema up to date).
 - `make schema` – regenerate `assets/config-schema.json` from the Python code.
+- `make ui-bundle` – build a single JavaScript admin UI bundle with embedded HTML/CSS/JS at `dist/foghorn-admin-ui.cdn.js`.
+- `make ui-bundle-runtime` – build a runtime-only JavaScript admin UI bundle at `dist/foghorn-admin-ui.cdn.js`.
 - `make test` – run the test suite with coverage.
 - `make dnssec-sign-zone` – sign a BIND-style zone file with DNSSEC using the bundled helper script, writing a signed zone that can be served by the ZoneRecords plugin.
 - `make clean` – remove the venv, build artefacts, and temporary files.
 - `make docker`, `make docker-build`, `make docker-run`, `make docker-logs`, `make docker-clean`, `make docker-ship` – build and run Docker images/containers.
 - `make package-build` / `make package-publish` / `make package-publish-dev` – build and (optionally) publish Python packages.
 - `make ssl-cert` – generate a self-signed TLS key and certificate under `./var` using `openssl req -x509`.
+
+### Rendering config diagrams (Graphviz dot)
+
+If you have a `diagram.dot` and want to render it to `diagram.png`:
+
+```bash
+dot -Tpng diagram.dot -o diagram.png
+```
 
 ---
 
@@ -217,7 +331,7 @@ Key parts of `server`:
 	  `lfu`, `fifo`, `random`, or `almost_expired`).
   - `modify` / `decorated_overrides` / `func_caches`: optional overrides for
 	internal helper caches (functions decorated with `registered_cached`,
-	`registered_lru_cached`, `registered_foghorn_ttl`, or
+	`registered_lru_cache`, `registered_foghorn_ttl`, or
 	`registered_sqlite_ttl`). These let you tune TTL and maxsize for specific
 	helpers without code changes.
 	- Valid `backend` values for `func_caches` entries are:
@@ -271,7 +385,10 @@ Without `trust-ad`, glibc clears the AD flag before handing answers to applicati
 - `server.enable_ede`
   - Optional toggle for RFC 8914 Extended DNS Errors; when true and the client advertises EDNS(0), Foghorn can attach EDE options to certain policy or upstream-failure responses and surface per-code stats in the admin UI.
 - `server.resolver`
-  - Timeouts, recursion depth, and whether Foghorn runs as a forwarder or recursive resolver.
+  - Timeouts, recursion depth, and resolver mode:
+	- `forward` (default): forward to configured `upstreams`.
+	- `recursive`: walk from root servers.
+	- `master` / `none`: authoritative-only (no forwarding; cache miss -> REFUSED).
 - `server.http`
   - Admin web UI listener configuration.
 
@@ -282,6 +399,11 @@ Without `trust-ad`, glibc clears the AD flag before handing answers to applicati
 - `strategy`: `failover` (try in order), `round_robin`, or `random`.
 - `max_concurrent`: maximum simultaneous outstanding upstream queries.
 - `endpoints`: list of `upstream_host` definitions.
+
+Notes:
+- If an upstream returns `SERVFAIL`, malformed DNS bytes, or a **mismatched response** (TXID/question), Foghorn treats that upstream as failed for that query and continues failover.
+- Skip/failover events are logged at **DEBUG**, but de-duplicated *per upstream* until that upstream succeeds again (to avoid log spam).
+- To surface these events, set `logging.python.level: debug`.
 
 An `upstream_host` entry:
 
@@ -387,6 +509,82 @@ stats:
 	  - example.com
 ```
 
+#### Query-log flood hardening (no code changes)
+
+If query logging is enabled on an exposed resolver, set explicit limits so
+flood traffic cannot grow persistence usage without bounds.
+
+Recommended controls:
+
+- `logging.query_log_retention` global defaults:
+  - `max_records`: cap row count.
+  - `days`: cap age.
+  - `max_bytes`: cap estimated backend storage size.
+  - `prune_interval_seconds`: avoid pruning on every insert.
+  - `prune_every_n_inserts`: run prune on an insert cadence.
+- `logging.max_logging_queue`: keep async queue bounded (default is bounded; do
+  not set `<= 0` unless you explicitly want unbounded memory growth).
+- `logging.query_log_only`: when true, skip mirroring aggregate counters to the
+  persistence backend and keep only raw query-log rows.
+- `logging.query_log_sampling.enabled`: when false, suppress persistent
+  query-log writes from the stats collector.
+- `logging.query_log_sampling.sample_rate`: keep only a fraction of query-log
+  rows (for example `0.1` for ~10%).
+- `logging.query_log_sampling.rate`: compatibility alias for `sample_rate`.
+- `logging.query_log_sample_rate`: legacy compatibility alias.
+- `logging.query_log_dedupe.window_seconds`: suppress repeated identical
+  query-log rows inside a short window.
+- Full hardening profile: `example_configs/logging/query_log_hardening.yaml`.
+- Detailed guide: `docs/query-log-hardening.md`.
+
+Rate-limit integration:
+
+- `rate` plugin `deny_log_first_n` logs only the first N denies for each active
+  blocked episode.
+- Remaining deny events set `PluginDecision.suppress_query_log` and are skipped
+  in persistent query logs until the episode cools down.
+
+Example hardening profile:
+
+```yaml
+logging:
+  async: true
+  max_logging_queue: 4096
+  query_log_only: false
+  query_log_retention:
+	max_records: 500000
+	days: 7
+	max_bytes: 2147483648
+	prune_interval_seconds: 30
+	prune_every_n_inserts: 200
+  query_log_sampling:
+	sample_rate: 0.25
+  query_log_dedupe:
+	window_seconds: 2
+	max_entries: 50000
+  backends:
+	- id: local-log
+	  backend: sqlite
+	  config:
+		db_path: ./config/var/stats.db
+		# Per-backend overrides (optional):
+		# retention_max_records: 250000
+		# retention_days: 3
+		# retention_max_bytes: 1073741824
+		# retention_prune_interval_seconds: 15
+		# retention_prune_every_n_inserts: 100
+```
+
+Backend-specific optional maintenance controls:
+
+- SQLite: `retention_vacuum_on_prune`, `retention_vacuum_interval_seconds`,
+  `sqlite_auto_vacuum` (`none`, `full`, `incremental`).
+- MongoDB: `retention_native_ttl` (enables a TTL index when `retention_days`
+  is set).
+- MySQL/MariaDB: `retention_optimize_on_prune`,
+  `retention_optimize_interval_seconds`.
+- PostgreSQL: `retention_vacuum_on_prune`, `retention_vacuum_interval_seconds`.
+
 ### 2.6 Plugins
 
 In the `plugins` list each entry is a `PluginInstance`:
@@ -420,24 +618,22 @@ You normally care about:
 
 Common plugin‑wide config options:
 
-Targeting:
+Targeting (preferred shape uses a nested `targets` block):
 
-- **Client targeting**
-  - `config.targets`: list (or single string) of CIDR/IPs to explicitly target. When set, only matching clients are affected.
-  - `config.targets_ignore`: list (or single string) of CIDR/IPs to skip. When only `targets_ignore` is set, all other clients are targeted by default.
-- **Listener / transport targeting**:
-  - `config.targets_listener`: restrict a plugin to specific listeners. Accepts one
-	or more of `"udp"`, `"tcp"`, `"dot"`, `"doh"`, or aliases:
-	  * `"secure"`               → `["dot", "doh"]`
-	  * `"unsecure"` / `"insecure"` → `["udp", "tcp"]`
-	  * `"any"`, `"*"`, or `null`   → no listener restriction.
-- **Domain targeting**:
-  - `config.targets_domains`: list (or single string) of domain names to match.
-  - `config.targets_domains_mode`: `"exact"` (qname must equal one of `targets_domains`), `"suffix"` (qname is that domain or ends with
-	`"." + domain`), or `"any"` (no domain restriction).
-- **qtype targeting**:
-  - `config.target_qtypes`: list of qtype names or `'*'` for all types, e.g.
-	`['A', 'AAAA']`, `['MX']` or `['*']`.
+- `config.targets` (object or legacy list/string)
+  - **Preferred object keys**:
+	- `ips`: list/string of CIDR/IPs to target.
+	- `ignore_ips`: list/string of CIDR/IPs to exclude.
+	- `listeners`: list/string of listeners (`udp`, `tcp`, `dot`, `doh`) or aliases:
+	  - `secure` → `dot` + `doh`
+	  - `unsecure`/`insecure` → `udp` + `tcp`
+	  - `any`/`*`/`null` → no restriction
+	- `domains`: list/string of domain names to match.
+	- `domains_mode`: `exact` or `suffix` (defaults to `suffix` when `domains` is set).
+	- `qtypes`: list/string of qtype names or `'*'` for all types (e.g. `['A', 'AAAA']`).
+	- `opcodes`: list/string of DNS opcodes (e.g. `['QUERY']`).
+	- `rcodes`: list/string of response codes for post‑resolve plugins (e.g. `['NOERROR', 'NXDOMAIN']`).
+  - **Legacy form**: if `targets` is a list/string, it is treated as `targets.ips`.
 
 Logging
 
@@ -450,31 +646,22 @@ Example with all common knobs:
 ```yaml
 plugins:
   - type: some-plugin
-	 id: example
-	 enabled: true
-	 logging:
-	   level: debug
-	 config:
-		# Client IP targeting
-	   targets:
-		 - 192.168.0.0/16
-		 - 10.10.10.0/24
-
-	   # JSON Lines
-	   targets_ignore: [ "192.168.0.10" ]
-
-	   # Listener / transport targeting: only DoT/DoH
-	   targets_listener:
-			- dot
-			- doh
-
-	   # Domain targeting: only *.corp.example
-	   targets_domains:
-		 - corp.example
-	   targets_domains_mode: suffix  # any | exact | suffix
-
-	   # qtype targeting: A/AAAA only
-		 target_qtypes: ['A', 'AAAA']  # '*' | ['A'] | ['A', 'AAAA']
+	id: example
+	enabled: true
+	logging:
+	  level: debug
+	config:
+	  targets:
+		ips:
+		  - 192.168.0.0/16
+		  - 10.10.10.0/24
+		ignore_ips: [ "192.168.0.10" ]
+		listeners: [ dot, doh ]
+		domains: [ corp.example ]
+		domains_mode: suffix  # exact | suffix
+		qtypes: [ 'A', 'AAAA' ]
+		opcodes: [ 'QUERY' ]
+		rcodes: [ 'NOERROR', 'NXDOMAIN' ]
 ```
 
 ---
@@ -631,8 +818,8 @@ Fetches remote blocklists/allowlists on a schedule and stores them as files for 
 ```yaml
 plugins:
   - type: lists
-	hooks: # Setup early so other plugins have their files available.
-	  setup:  { priority: 10 }
+	hooks:
+	  setup: { priority: 10 } # Setup early so other plugins have their files available.
 	config:
 	  download_path: ./config/var/lists
 	  interval_days: 1
@@ -651,10 +838,9 @@ Flexible domain/IP/pattern filter used to build adblockers and kid-safe DNS.
 ```yaml
 plugins:
   - type: filter
+	hooks:
+	  priority: 25 # Applies to pre_resolve + post_resolve + setup unless overridden.
 	config:
-	  hooks:
-		pre_resolve:  { priority: 25 } # Run early in block queries so other plugins don't do anything
-		post_resolve: { priority: 25 } # Post-resolve IP filtering and policy
 	  default: allow  # deny | allow
 	  targets:
 		- 10.0.1.0/24 # Kids subnet
@@ -718,9 +904,24 @@ plugins:
 	  network_enabled: true
 ```
 
+### Security hardening and DNS amplification protection
+
+Foghorn includes several built-in security protections to mitigate DoS/DDoS attacks and DNS amplification risks:
+
+- **DoH parameter size validation**: Oversized base64-encoded DNS parameters are rejected (HTTP 413) before decoding, preventing processing of megabyte-scale payloads.
+- **Recursive resolver depth limits**: Default `max_depth` is 12 (configurable via `server.resolver.max_depth`) to limit recursion depth and prevent abuse through deep delegation chains.
+- **Upstream health cleanup**: The `DNSUDPHandler._cleanup_upstream_health()` method periodically removes stale healthy entries from the `upstream_health` tracking dictionary to prevent unbounded memory growth.
+- **Rate limiting and concurrency controls**: The `rate` plugin provides per-client or per-(client,domain) rate limiting (see below). Combined with listener connection limits (`max_connections`, `max_connections_per_ip`) and per-connection query caps (`max_queries_per_connection`), this provides defense at multiple layers.
+- **DNS response size limits**: UDP responses are capped at 1232 bytes to minimize amplification potential. DoH response sizes are also limited to large payloads.
+
+When deploying Foghorn as an authoritative or recursive resolver on exposed interfaces, consider enabling these protections and monitoring the metrics exposed via the admin UI for query patterns and error rates.
+
 ### 4.8 Rate limiting (`rate`)
 
 Adaptive rate limiting per client or per (client,domain).
+Note: listener/transport protections (for example UDP inflight shedding and
+TCP/DoT connection limits) can trigger before plugin hooks run, so under heavy
+load some traffic may be dropped/refused before the `rate` plugin evaluates it.
 
 ```yaml
 plugins:
@@ -730,10 +931,12 @@ plugins:
 	  window_seconds: 10
 	  warmup_windows: 6
 	  burst_factor: 3.0
+	  burst_windows: 6
+	  stats_log_interval_seconds: 900
 	  min_enforce_rps: 50.0
 	  deny_response: nxdomain  # nxdomain | refused | servfail | noerror_empty | ip
 	  deny_response_ip4: 0.0.0.0
-	  db_path: ./config/var/rate_limit.db
+	  db_path: ./config/var/dbs/rate_limit.db
 ```
 
 ### 4.9 Per-domain upstream routing (`router`)
@@ -764,6 +967,8 @@ plugins:
 
 ### 4.10 Inline and file-based records (`zone`)
 
+The ZoneRecords ("zonerecords") plugin (`type: zone`) is for custom DNS answers. If you only need a handful of local overrides, you **do not** need to create and maintain an entire RFC-1035 zonefile — just use inline `records` or a simple `file_paths` records file.
+
 Define custom records either:
 
 - Inline using the `records` list and the pipe-delimited format
@@ -771,7 +976,12 @@ Define custom records either:
 - From one or more custom records files using `file_paths` (same
   pipe-delimited format as above).
 - From one or more RFC‑1035 style BIND zonefiles using `bind_paths`
-  (parsed via dnslib; supports `$ORIGIN`, `$TTL`, and normal RR syntax).
+  (parsed via dnslib; supports `$ORIGIN`, `$TTL`, and normal RR syntax). Each
+  bind_paths entry can be either a string path, or an object with `path`, plus
+  optional `origin`/`ttl` overrides.
+- Optional `path_allowlist` can restrict `file_paths` and `bind_paths` to a set
+  of allowed directory prefixes.
+  - Paths containing explicit `..` segments are rejected.
 
 All sources are merged into a single internal view per (name, qtype):
 
@@ -787,6 +997,36 @@ All sources are merged into a single internal view per (name, qtype):
 - IXFR server side currently implemented as a full AXFR-style transfer.
 - IXFR client side is not yet supported.
 
+Wildcard notes:
+- ZoneRecords treats a leading `*` label as matching **one or more** labels,
+  which differs from RFC 4592. For example, `*.example.org` matches both
+  `a.example.org` and `a.b.example.org`.
+
+Operational guidance:
+- Keep authoritative zone apex counts to less than **1,000 zones per instance**
+  unless you have benchmarked higher counts.
+
+Optional merge controls:
+
+- `load_mode`:
+  - `merge` (default) preserves any existing in-memory records and overlays new data.
+  - `replace` rebuilds the mapping on each load/reload.
+  - `first` uses the first configured source group in this order:
+	file_paths → bind_paths → axfr_zones → records (inline), and ignores the others.
+- `merge_policy`: `add` (default) appends distinct values into an RRset;
+  `overwrite` replaces an RRset when a later source defines the same
+  `(domain, qtype)`.
+- `nxdomain_zones`: optional list of zone suffixes where, if a name does not
+  exist in ZoneRecords, the plugin returns NXDOMAIN/NODATA instead of falling
+  through to upstream resolution.
+- `max_file_size_bytes`: max allowed bytes per source file in `file_paths` and
+  `bind_paths`.
+- `max_records`: max accepted record values per load cycle.
+- `max_record_value_length`: max per-record value length in characters.
+- `auto_ptr_enabled` / `max_auto_ptr_records`: enable and bound auto-generated
+  PTR values.
+- `soa_synthesis_enabled`: controls inferred SOA fallback when no SOA exists.
+
 ```yaml
 plugins:
   - type: zone
@@ -801,6 +1041,9 @@ plugins:
 	  records:
 		- 'printer.lan|A|300|192.168.1.50'
 		- 'files.lan|AAAA|300|2001:db8::50'
+	  # Optional: load/reload behaviour
+	  load_mode: merge     # replace | merge | first
+	  merge_policy: add    # add | overwrite
 	  ttl: 300
 ```
 
@@ -1183,6 +1426,9 @@ logging:
 		port: 3306
 		user: foghorn
 		database: foghorn_stats
+		# Optional: control which Python DB driver is used.
+		driver: auto                 # auto | mariadb | mysql-connector-python | mysql
+		driver_fallback: auto        # auto | none | <driver> | [<driver>, ...]
 
 stats:
   enabled: true
@@ -1332,7 +1578,7 @@ plugins:
   - type: acl
 	id: lan-only
 	hooks:
-	  pre_resolve: { priority: 10 }
+	  pre_resolve: 10
 	config:
 	  default: deny
 	  allow:
@@ -1341,7 +1587,7 @@ plugins:
   - type: docker
 	id: lan-docker
 	hooks:
-	  pre_resolve: { priority: 20 }
+	  pre_resolve: 20
 	config:
 	  targets: ${LAN}
 	  endpoints:
@@ -1351,14 +1597,14 @@ plugins:
   - type: mdns
 	id: enterprise-mdns
 	hooks:
-	  pre_resolve: { priority: 30 }
+	  pre_resolve: 30
 	  domain: 'devices.lan'
 	  ttl: 120
 
   - type: zone
 	id: zone-1-office
 	hooks:
-	  pre_resolve: { priority: 40 }
+	  pre_resolve: 40
 	config:
 	  pre_priority: 40
 	  targets: ${OFFICE}
@@ -1378,7 +1624,7 @@ plugins:
   - type: router
 	id: corp-router
 	hooks:
-	  pre_resolve: { priority: 60 }
+	  pre_resolve: 60
 	config:
 	  routes:
 		- suffix: corp.example
@@ -1389,7 +1635,7 @@ plugins:
   - type: filter
 	id: global-filter
 	hooks:
-	  pre_resolve: { priority: 80 }
+	  pre_resolve: 80
 	config:
 	  default: allow
 	  blocked_domains_files:
@@ -1398,7 +1644,7 @@ plugins:
 
 From here you can mix and match plugins, caches, and stats backends to shape Foghorn into exactly the DNS service you need.
 
-[![Python Tests](https://github.com/zallison/foghorn/actions/workflows/pytest.yml/badge.svg)](https://github.com/zallison/foghorn/actions/workflows/pytest.yml) ![Test Coverage](https://img.shields.io/badge/test_coverage-90%25-blue) [![Docker Pulls](https://img.shields.io/docker/pulls/zallison/foghorn)](https://hub.docker.com/r/zallison/foghorn/)  [![PyPI Downloads](https://static.pepy.tech/personalized-badge/foghorn?period=total&units=INTERNATIONAL_SYSTEM&left_color=GRAY&right_color=BLUE&left_text=downloads)](https://pepy.tech/projects/foghorn)  [![BuyMeACoffee](https://raw.githubusercontent.com/pachadotdev/buymeacoffee-badges/main/bmc-blue.svg)](https://www.buymeacoffee.com/foghorndns)
+[![Python Tests](https://github.com/zallison/foghorn/actions/workflows/pytest.yml/badge.svg)](https://github.com/zallison/foghorn/actions/workflows/pytest.yml) ![Test Coverage](https://img.shields.io/badge/test_coverage-89%25-blue) [![Docker Pulls](https://img.shields.io/docker/pulls/zallison/foghorn)](https://hub.docker.com/r/zallison/foghorn/)  [![PyPI Downloads](https://static.pepy.tech/personalized-badge/foghorn?period=total&units=INTERNATIONAL_SYSTEM&left_color=GRAY&right_color=BLUE&left_text=downloads)](https://pepy.tech/projects/foghorn)  [![BuyMeACoffee](https://raw.githubusercontent.com/pachadotdev/buymeacoffee-badges/main/bmc-blue.svg)](https://www.buymeacoffee.com/foghorndns)
 
 ## Stargazers over time
 [![Stargazers over time](https://starchart.cc/zallison/foghorn.svg?variant=adaptive)](https://starchart.cc/zallison/foghorn)

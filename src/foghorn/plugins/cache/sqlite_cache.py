@@ -4,6 +4,8 @@ import os
 import time
 from typing import Any, Optional, Tuple
 
+from dnslib import RCODE, DNSRecord
+
 from foghorn.plugins.cache.backends.sqlite_ttl import SQLite3TTLCache
 
 from .base import CachePlugin, cache_aliases
@@ -27,6 +29,10 @@ class SQLite3Cache(CachePlugin):
           - table (str): Backward-compatible alias for namespace.
           - min_cache_ttl (int): Optional cache TTL floor used by the resolver.
           - journal_mode (str): SQLite journal mode; defaults to 'WAL'.
+          - max_size (int): Maximum number of cached DNS responses (default 65536;
+            clamped to <= 65536).
+          - pct_nxdomain (float): Portion of max_size reserved for NXDOMAIN
+            responses (default 0.10).
 
     Outputs:
       - SQLite3Cache instance.
@@ -68,6 +74,25 @@ class SQLite3Cache(CachePlugin):
         self.db_path: str = resolved_db_path
         self.min_cache_ttl: int = max(0, int(config.get("min_cache_ttl", 0) or 0))
 
+        max_size_cfg = config.get("max_size", 65536)
+        try:
+            max_size_val = int(max_size_cfg) if max_size_cfg is not None else 65536
+        except Exception:
+            max_size_val = 65536
+        self.max_size = max(1, min(65536, int(max_size_val)))
+
+        pct_cfg = config.get("pct_nxdomain", 0.10)
+        try:
+            pct = float(pct_cfg) if pct_cfg is not None else 0.10
+        except Exception:
+            pct = 0.10
+        self.pct_nxdomain = max(0.0, min(1.0, float(pct)))
+
+        nxdomain_budget = int(round(self.max_size * self.pct_nxdomain))
+        nxdomain_budget = max(0, min(self.max_size - 1, int(nxdomain_budget)))
+        self.nxdomain_budget = int(nxdomain_budget)
+        self.positive_budget = int(self.max_size - self.nxdomain_budget)
+
         namespace = config.get("namespace", "dns_cache")
         if (
             not isinstance(namespace, str) or not namespace.strip()
@@ -89,12 +114,23 @@ class SQLite3Cache(CachePlugin):
             except Exception:  # pragma: nocover - defensive permission check
                 pass
 
+        base_ns = str(namespace or "dns_cache")
         self._cache = SQLite3TTLCache(
             backend_db_path,
-            namespace=str(namespace or "dns_cache"),
+            namespace=base_ns,
             journal_mode=str(journal_mode or "WAL"),
             create_dir=True,
+            maxsize=self.positive_budget,
         )
+        self._cache_nxdomain: SQLite3TTLCache | None = None
+        if self.nxdomain_budget > 0:
+            self._cache_nxdomain = SQLite3TTLCache(
+                backend_db_path,
+                namespace=f"{base_ns}_nxdomain",
+                journal_mode=str(journal_mode or "WAL"),
+                create_dir=True,
+                maxsize=self.nxdomain_budget,
+            )
 
     def get_http_snapshot(self) -> dict[str, object]:
         """Brief: Summarize current SQLite3 cache state for the admin web UI.
@@ -332,12 +368,14 @@ class SQLite3Cache(CachePlugin):
                 primary_row[key] = summary[key]
         caches.append(primary_row)
 
-        # Per-plugin target caches (BasePlugin._targets_cache) when available via
-        # the UDP handler's plugin list.
+        # Per-plugin target caches (BasePlugin._targets_cache) from shared
+        # runtime plugin state.
         try:
-            from foghorn.servers.udp_server import DNSUDPHandler  # type: ignore[import]
+            from foghorn.servers.dns_runtime_state import (
+                DNSRuntimeState,
+            )  # type: ignore[import]
 
-            plugins_list = getattr(DNSUDPHandler, "plugins", []) or []
+            plugins_list = getattr(DNSRuntimeState, "plugins", []) or []
         except (
             Exception
         ):  # pragma: nocover - import/attribute errors leave plugins_list empty
@@ -450,25 +488,6 @@ class SQLite3Cache(CachePlugin):
         layout: dict[str, object] = {
             "sections": [
                 {
-                    "id": "summary",
-                    "title": "Summary",
-                    "type": "kv",
-                    "path": "summary",
-                    "align": "right",
-                    "rows": [
-                        {"key": "db_path", "label": "Database path"},
-                        {"key": "namespace", "label": "Namespace"},
-                        {"key": "journal_mode", "label": "Journal mode"},
-                        {"key": "total_entries", "label": "Total entries"},
-                        {"key": "live_entries", "label": "Live entries"},
-                        {"key": "expired_entries", "label": "Expired entries"},
-                        {"key": "db_size_bytes", "label": "DB size (bytes)"},
-                        {"key": "calls_total", "label": "Calls"},
-                        {"key": "cache_hits", "label": "Hits"},
-                        {"key": "cache_misses", "label": "Misses"},
-                    ],
-                },
-                {
                     "id": "caches",
                     "title": "DNS and plugin target caches",
                     "type": "table",
@@ -512,6 +531,25 @@ class SQLite3Cache(CachePlugin):
                         {"key": "hit_pct", "label": "Hit %", "align": "right"},
                     ],
                 },
+                {
+                    "id": "summary",
+                    "title": "Summary",
+                    "type": "kv",
+                    "path": "summary",
+                    "align": "right",
+                    "rows": [
+                        {"key": "db_path", "label": "Database path"},
+                        {"key": "namespace", "label": "Namespace"},
+                        {"key": "journal_mode", "label": "Journal mode"},
+                        {"key": "total_entries", "label": "Total entries"},
+                        {"key": "live_entries", "label": "Live entries"},
+                        {"key": "expired_entries", "label": "Expired entries"},
+                        {"key": "db_size_bytes", "label": "DB size (bytes)"},
+                        {"key": "calls_total", "label": "Calls"},
+                        {"key": "cache_hits", "label": "Hits"},
+                        {"key": "cache_misses", "label": "Misses"},
+                    ],
+                },
             ]
         }
 
@@ -524,6 +562,31 @@ class SQLite3Cache(CachePlugin):
             "layout": layout,
         }
 
+    @staticmethod
+    def _is_nxdomain_wire(value: object) -> bool:
+        """Brief: Determine whether a cached value is an NXDOMAIN DNS response.
+
+        Inputs:
+          - value: Cached payload; expected to be wire-format bytes for DNS
+            response caching.
+
+        Outputs:
+          - bool: True when value parses as a DNS response with RCODE.NXDOMAIN.
+
+        Notes:
+          - Best-effort only: parse failures return False.
+        """
+
+        if not isinstance(value, (bytes, bytearray, memoryview)):
+            return False
+        try:
+            msg = DNSRecord.parse(bytes(value))
+            return int(getattr(getattr(msg, "header", None), "rcode", -1)) == int(
+                RCODE.NXDOMAIN
+            )
+        except Exception:
+            return False
+
     def get(self, key: Tuple[str, int]) -> Any | None:
         """Brief: Lookup a cached entry enforcing expiry.
 
@@ -534,7 +597,12 @@ class SQLite3Cache(CachePlugin):
           - Any | None: Cached value if present and not expired; otherwise None.
         """
 
-        return self._cache.get(key)
+        val = self._cache.get(key)
+        if val is not None:
+            return val
+        if self._cache_nxdomain is not None:
+            return self._cache_nxdomain.get(key)
+        return None
 
     def get_with_meta(
         self, key: Tuple[str, int]
@@ -548,7 +616,12 @@ class SQLite3Cache(CachePlugin):
           - (value_or_None, seconds_remaining_or_None, original_ttl_or_None)
         """
 
-        return self._cache.get_with_meta(key)
+        val, remaining, ttl = self._cache.get_with_meta(key)
+        if val is not None:
+            return val, remaining, ttl
+        if self._cache_nxdomain is not None:
+            return self._cache_nxdomain.get_with_meta(key)
+        return None, None, None
 
     def set(self, key: Tuple[str, int], ttl: int, value: Any) -> None:
         """Brief: Store a value under key with a TTL.
@@ -562,6 +635,21 @@ class SQLite3Cache(CachePlugin):
           - None.
         """
 
+        is_nxdomain = self._is_nxdomain_wire(value)
+
+        if is_nxdomain and self._cache_nxdomain is not None:
+            try:
+                self._cache.delete(key)
+            except Exception:
+                pass
+            self._cache_nxdomain.set(key, ttl, value)
+            return
+
+        if self._cache_nxdomain is not None:
+            try:
+                self._cache_nxdomain.delete(key)
+            except Exception:
+                pass
         self._cache.set(key, ttl, value)
 
     def purge(self) -> int:
@@ -574,7 +662,10 @@ class SQLite3Cache(CachePlugin):
           - int: Number of entries removed (best-effort).
         """
 
-        return int(self._cache.purge())
+        removed = int(self._cache.purge())
+        if self._cache_nxdomain is not None:
+            removed += int(self._cache_nxdomain.purge())
+        return int(removed)
 
     def close(self) -> None:
         """Brief: Close underlying sqlite resources.
@@ -592,6 +683,12 @@ class SQLite3Cache(CachePlugin):
             Exception
         ):  # pragma: nocover - defensive close during interpreter shutdown
             pass
+
+        if self._cache_nxdomain is not None:
+            try:
+                self._cache_nxdomain.close()
+            except Exception:  # pragma: nocover
+                pass
 
     def __del__(self) -> None:
         try:

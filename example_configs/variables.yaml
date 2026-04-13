@@ -10,7 +10,7 @@ variables:
   - 192.168.2.0/24
   - 172.16.16.16/32
   BLOCKED_IPS:
-  - ip: 192.168.27.0/24
+  - ips: 192.168.27.0/24
     action: remove
   - ip: 1.2.3.4
     action: replace
@@ -27,14 +27,16 @@ plugins:
     db_path: ${DATABASES}/greylist.db
 - type: filter
   config:
-    targets: $STAFF
+    targets:
+      ips: $STAFF
     db_path: ${DATABASES}/malware-blocklist.db
-    ttl: ${TTL}
+    ttl: $TTL
 - type: filter
   config:
-    targets: $STUDENTS
+    targets:
+      ips: $STUDENTS
     db_path: ${DATABASES}/strict-blocklist.db
-    ttl: ${TTL}
+    ttl: $TTL
     blocked_domains:
     - ads.${BAD_DOMAIN}
     - tracker.${BAD_DOMAIN}

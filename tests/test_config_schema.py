@@ -21,6 +21,10 @@ import foghorn.config.config_schema as config_schema_mod
 from foghorn.config.config_schema import get_default_schema_path, validate_config
 
 EXAMPLE_DIR = Path(__file__).resolve().parent.parent / "example_configs"
+SCHEMA_FRAGMENT_FILES = {
+    "zone_update_tsig_keys.yaml",
+    "zone_update_tsig_key_source_file.yaml",
+}
 
 
 def _example_yaml_paths() -> list[Path]:
@@ -36,12 +40,16 @@ def _example_yaml_paths() -> list[Path]:
       - Some editors create files like `.#+name.yaml` (Emacs lock) or `#name.yaml#`
         (Emacs autosave) or `name.yaml~` (backup). These should not be treated as
         real example configs.
+      - External TSIG key-source fixtures are intentionally partial YAML documents
+        and should not be validated as full root configurations.
     """
 
     paths: list[Path] = []
     for p in sorted(EXAMPLE_DIR.glob("*.yaml")):
         name = p.name
         if name.startswith(".") or name.startswith("#") or name.endswith("~"):
+            continue
+        if name in SCHEMA_FRAGMENT_FILES:
             continue
         if not p.is_file():
             continue
@@ -107,6 +115,70 @@ def test_invalid_config_raises_value_error(caplog) -> None:
     )
 
 
+def test_server_listen_host_port_are_rejected_as_obsolete() -> None:
+    """Brief: server.listen.host/port must be rejected as obsolete keys.
+
+    Inputs:
+      - None; builds a minimal v2-ish config mapping.
+
+    Outputs:
+      - None; asserts validate_config raises ValueError mentioning obsolete keys.
+    """
+
+    cfg = {
+        "server": {
+            "listen": {
+                "host": "127.0.0.1",
+                "port": 5335,
+                "udp": {"enabled": True},
+            },
+            "resolver": {"mode": "forward"},
+        },
+        "upstreams": {"endpoints": [{"host": "1.1.1.1", "port": 53}]},
+    }
+
+    with pytest.raises(ValueError) as excinfo:
+        validate_config(cfg, config_path="inline-config")
+
+    msg = str(excinfo.value)
+    assert "server.listen.host" in msg
+    assert "server.listen.port" in msg
+
+
+def test_server_listen_dns_udp_tcp_flags_are_rejected_as_obsolete() -> None:
+    """Brief: server.listen.dns.udp/tcp legacy flags must be rejected.
+
+    Inputs:
+      - None; builds a minimal v2-ish config mapping.
+
+    Outputs:
+      - None; asserts validate_config raises ValueError mentioning obsolete keys.
+    """
+
+    cfg = {
+        "server": {
+            "listen": {
+                "dns": {
+                    "host": "127.0.0.1",
+                    "port": 5335,
+                    "udp": True,
+                    "tcp": False,
+                },
+                "udp": {"enabled": True},
+            },
+            "resolver": {"mode": "forward"},
+        },
+        "upstreams": {"endpoints": [{"host": "1.1.1.1", "port": 53}]},
+    }
+
+    with pytest.raises(ValueError) as excinfo:
+        validate_config(cfg, config_path="inline-config")
+
+    msg = str(excinfo.value)
+    assert "server.listen.dns.udp" in msg
+    assert "server.listen.dns.tcp" in msg
+
+
 def test_get_default_schema_path_docker_fallback(monkeypatch) -> None:
     """Brief: get_default_schema_path uses the Docker fallback when image path exists.
 
@@ -161,17 +233,19 @@ def test_get_default_schema_path_last_resort_uses_project_root(monkeypatch) -> N
     assert p == expected
 
 
-def test_validate_config_schema_loading_errors_are_best_effort(
-    monkeypatch, caplog
-) -> None:
-    """Brief: validate_config logs schema loading failures and skips validation.
+def test_validate_config_schema_loading_errors_are_fatal(monkeypatch, caplog) -> None:
+    """Brief: validate_config raises when schema loading fails.
 
     Inputs:
       - monkeypatch: Pytest monkeypatch fixture used to make _load_schema raise.
-      - caplog: Pytest caplog fixture used to capture warning logs.
+      - caplog: Pytest caplog fixture used to capture error logs.
 
     Outputs:
-      - None; asserts that a warning is logged and no exception is raised.
+      - None; asserts that an error is logged and ValueError is raised.
+
+    Notes:
+      - Foghorn treats schema load failures as a deployment error and refuses to
+        proceed without schema validation unless skip_schema_validation is set.
     """
 
     def boom_load(_schema_path):  # noqa: D401, ARG001
@@ -192,12 +266,106 @@ def test_validate_config_schema_loading_errors_are_best_effort(
 
     fake_schema_path = config_schema_mod.Path("/nonexistent/schema.json")
 
-    with caplog.at_level("WARNING", logger="foghorn.config.config_schema"):
-        # Should not raise despite schema loading failure; behaviour is
-        # best-effort with a warning and skipped validation.
-        validate_config({}, schema_path=fake_schema_path, config_path="cfg.yaml")
+    with caplog.at_level("ERROR", logger="foghorn.config.config_schema"):
+        with pytest.raises(
+            ValueError, match=r"Failed to load or parse configuration schema"
+        ):
+            validate_config({}, schema_path=fake_schema_path, config_path="cfg.yaml")
 
     joined = "\n".join(r.getMessage() for r in caplog.records)
     assert "Failed to load or parse configuration schema" in joined
-    assert "skipping JSON Schema validation" in joined
+    assert "refusing to start without schema validation" in joined
     assert "disk failure" in joined
+
+
+def _minimal_forward_config() -> dict:
+    """Brief: Build a minimal forward-mode config mapping for validation tests.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - dict: Minimal configuration satisfying v2 schema requirements.
+    """
+
+    return {
+        "server": {
+            "resolver": {"mode": "forward"},
+            "listen": {"udp": {"enabled": True}},
+        },
+        "upstreams": {"endpoints": [{"host": "1.1.1.1", "port": 53}]},
+    }
+
+
+def test_comment_and_id_fields_accept_short_strings() -> None:
+    """Brief: comment/id fields are accepted on any mapping when strings <= 254 chars.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts validate_config does not raise for valid comment/id usage.
+    """
+
+    cfg = _minimal_forward_config()
+    cfg["comment"] = "root comment"
+    cfg["id"] = "root-id"
+    cfg["upstreams"]["comment"] = "upstreams comment"
+    cfg["upstreams"]["endpoints"][0]["comment"] = "endpoint comment"
+    cfg["upstreams"]["endpoints"][0]["id"] = "endpoint-id"
+    cfg["plugins"] = [
+        {
+            "type": "dummy",
+            "comment": "plugin entry comment",
+            "id": "plugin-entry-id",
+            "config": {"comment": "plugin config comment", "id": "plugin-config-id"},
+        }
+    ]
+
+    validate_config(cfg, config_path="inline-config")
+
+
+def test_comment_and_id_fields_reject_non_string_values() -> None:
+    """Brief: comment/id fields must be strings; non-strings raise ValueError.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts ValueError for invalid comment/id types.
+    """
+
+    cfg = _minimal_forward_config()
+    cfg["comment"] = 123
+
+    with pytest.raises(ValueError, match=r"comment must be a string"):
+        validate_config(cfg, config_path="inline-config")
+
+    cfg2 = _minimal_forward_config()
+    cfg2["id"] = {"not": "a string"}
+
+    with pytest.raises(ValueError, match=r"id must be a string"):
+        validate_config(cfg2, config_path="inline-config")
+
+
+def test_comment_and_id_fields_reject_overlong_values() -> None:
+    """Brief: comment/id fields over 254 chars raise ValueError.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts ValueError for overly long comment/id values.
+    """
+
+    cfg = _minimal_forward_config()
+    cfg["comment"] = "a" * 255
+
+    with pytest.raises(ValueError, match=r"comment exceeds 254 characters"):
+        validate_config(cfg, config_path="inline-config")
+
+    cfg2 = _minimal_forward_config()
+    cfg2["id"] = "b" * 255
+
+    with pytest.raises(ValueError, match=r"id exceeds 254 characters"):
+        validate_config(cfg2, config_path="inline-config")

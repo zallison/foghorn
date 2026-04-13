@@ -2,13 +2,202 @@ import logging
 import random
 import socketserver
 import time
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List
 
 from dnslib import QTYPE, RCODE, DNSRecord
 
-from ..plugins.resolve.base import BasePlugin, PluginDecision
+from ..plugins.resolve.base import PluginDecision
+from .dns_runtime_state import DNSRuntimeState
 
 logger = logging.getLogger("foghorn.server")
+
+
+def _client_udp_payload_limit(req: DNSRecord) -> int:
+    """Brief: Determine the client-advertised UDP response size limit.
+
+    Inputs:
+      - req: Parsed DNSRecord request.
+
+    Outputs:
+      - int: Client UDP payload limit in bytes. Returns 512 when the client did
+        not advertise EDNS(0) support.
+
+    Notes:
+      - For EDNS(0) requests, this returns the advertised UDP payload size from
+        the OPT RR (rclass), clamped to >= 512.
+    """
+
+    try:
+        additional = getattr(req, "ar", None) or []
+        for rr in additional:
+            if getattr(rr, "rtype", None) == QTYPE.OPT:
+                try:
+                    payload = int(getattr(rr, "rclass", 0) or 0)
+                except Exception:
+                    payload = 0
+                return max(512, payload) if payload > 0 else 512
+    except Exception:
+        return 512
+
+    return 512
+
+
+def _pack_minimal_tc_header(*, req_id: int, rcode: int, rd: bool = True) -> bytes:
+    """Brief: Build a minimal DNS response header with TC=1.
+
+    Inputs:
+      - req_id: DNS transaction id.
+      - rcode: Integer response code (0-15).
+      - rd: Whether to set the RD bit.
+
+    Outputs:
+      - bytes: 12-byte DNS header.
+
+    Notes:
+      - Used only as a last-resort when dnslib packing cannot produce a response
+        under a configured size ceiling.
+    """
+
+    try:
+        rid = int(req_id) & 0xFFFF
+    except Exception:
+        rid = 0
+
+    try:
+        rc = int(rcode) & 0xF
+    except Exception:
+        rc = int(RCODE.SERVFAIL) & 0xF
+
+    flags = 0x8000  # QR=1
+    flags |= 0x0200  # TC=1
+    flags |= 0x0080  # RA=1
+    if rd:
+        flags |= 0x0100
+    flags |= rc
+
+    # QD/AN/NS/AR all zero.
+    return (
+        int(rid).to_bytes(2, "big")
+        + int(flags).to_bytes(2, "big")
+        + (0).to_bytes(2, "big")
+        + (0).to_bytes(2, "big")
+        + (0).to_bytes(2, "big")
+        + (0).to_bytes(2, "big")
+    )
+
+
+def enforce_udp_response_size_ceiling(
+    query_wire: bytes,
+    response_wire: bytes,
+    *,
+    server_max_bytes: int | None = None,
+) -> bytes:
+    """Brief: Enforce a UDP response size ceiling; signal truncation with TC=1.
+
+    Inputs:
+      - query_wire: Wire-format DNS request bytes.
+      - response_wire: Wire-format DNS response bytes.
+      - server_max_bytes: Optional explicit server-side UDP ceiling override. When
+        None, this uses the active RuntimeSnapshot.edns_udp_payload as the server-side
+        ceiling.
+
+    Outputs:
+      - bytes: Response bytes. When the original response exceeds the effective
+        ceiling, a smaller response is synthesized with TC=1 so the client can
+        retry over TCP.
+
+    Effective ceiling:
+      - client_limit: client EDNS UDP payload size when present; otherwise 512.
+      - server_limit: server_max_bytes when set; otherwise RuntimeSnapshot.edns_udp_payload.
+      - effective = min(client_limit, server_limit)
+
+    Notes:
+      - This helper is designed for use on UDP listener hot paths and is best-effort.
+      - When packing a dnslib DNSRecord cannot fit under the ceiling (for example,
+        due to extreme configuration), a minimal 12-byte header-only response is
+        returned when possible.
+    """
+
+    if not response_wire:
+        return response_wire
+
+    try:
+        resp_bytes = bytes(response_wire)
+    except Exception:
+        return response_wire
+
+    # Parse request to determine client limit and to construct truncated replies.
+    try:
+        req = DNSRecord.parse(query_wire)
+    except Exception:
+        return resp_bytes
+
+    client_limit = _client_udp_payload_limit(req)
+
+    if server_max_bytes is None:
+        try:
+            from foghorn.runtime_config import get_runtime_snapshot
+
+            server_max_bytes = int(get_runtime_snapshot().edns_udp_payload or 1232)
+        except Exception:
+            server_max_bytes = 1232
+
+    try:
+        server_limit = max(0, int(server_max_bytes))
+    except Exception:
+        server_limit = 1232
+
+    effective = min(client_limit, server_limit) if server_limit > 0 else client_limit
+
+    if effective <= 0:
+        return resp_bytes
+
+    if len(resp_bytes) <= effective:
+        return resp_bytes
+
+    # Determine rcode from the oversized response when possible.
+    rcode = int(RCODE.SERVFAIL)
+    try:
+        parsed_resp = DNSRecord.parse(resp_bytes)
+        rcode = int(getattr(parsed_resp.header, "rcode", int(RCODE.SERVFAIL)))
+    except Exception:
+        rcode = int(RCODE.SERVFAIL)
+
+    # Build a minimal response based on the request.
+    try:
+        r = req.reply()
+        r.header.rcode = rcode
+        r.header.tc = 1
+
+        # Echo client EDNS OPT when possible so EDNS-capable clients can still
+        # see a consistent EDNS envelope.
+        try:
+            from . import server as _server_mod
+
+            _server_mod._echo_client_edns(req, r)
+        except Exception:
+            pass
+
+        out = r.pack()
+        if len(out) <= effective:
+            return _set_response_id(out, req.header.id)
+
+        # If OPT makes the response too large, retry without additional records.
+        try:
+            r.ar = []
+        except Exception:
+            pass
+
+        out2 = r.pack()
+        if len(out2) <= effective:
+            return _set_response_id(out2, req.header.id)
+
+        # Last resort: header-only truncated response.
+        rd_flag = bool(getattr(req.header, "rd", 1))
+        return _pack_minimal_tc_header(req_id=req.header.id, rcode=rcode, rd=rd_flag)
+    except Exception:
+        # Do not risk returning invalid bytes; keep the original response.
+        return resp_bytes
 
 
 def _set_response_id(wire: bytes, req_id: int) -> bytes:
@@ -42,7 +231,7 @@ def _edns_flags_for_mode(dnssec_mode: str) -> int:
     return 0x8000 if mode in ("passthrough", "validate") else 0
 
 
-class DNSUDPHandler(socketserver.BaseRequestHandler):
+class DNSUDPHandler(DNSRuntimeState, socketserver.BaseRequestHandler):
     """
     Handles UDP DNS requests.
     This class is instantiated for each incoming DNS query.
@@ -51,132 +240,6 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
         This handler is used internally by the DNSServer and is not
         typically instantiated directly by users.
     """
-
-    upstream_addrs: List[Dict] = []
-    plugins: List[BasePlugin] = []
-    timeout = 2.0
-    timeout_ms = 2000
-    min_cache_ttl = 60
-    stats_collector = None  # Optional StatsCollector instance
-    dnssec_mode = "ignore"  # ignore | passthrough | validate
-    dnssec_validation = "upstream_ad"  # upstream_ad | local | local_extended
-    edns_udp_payload = 1232
-
-    # Cache prefetch / stale-while-revalidate knobs controlled by DNSServer.
-    # When enabled, cache hits near expiry can trigger a background refresh via
-    # the shared resolver without delaying the client response.
-    cache_prefetch_enabled: bool = False
-    cache_prefetch_min_ttl: int = 0
-    cache_prefetch_max_ttl: int = 0  # 0 == no upper bound
-    cache_prefetch_refresh_before_expiry: float = 0.0
-    cache_prefetch_allow_stale_after_expiry: float = 0.0
-
-    # Resolver mode and recursion controls.
-    resolver_mode: str = "forward"  # forward | recursive
-    recursive_max_depth: int = 16
-    recursive_timeout_ms: int = 2000
-    recursive_per_try_timeout_ms: int = 2000
-    root_hints_path: Optional[str] = None
-
-    # Upstream selection strategy and concurrency controls (forward mode).
-    upstream_strategy: str = "failover"  # failover | round_robin | random
-    upstream_max_concurrent: int = 1
-    _upstream_rr_index: int = 0  # round-robin index shared across handler instances
-
-    # When False (default), queries for .local are never forwarded to upstreams
-    # and instead return NXDOMAIN unless a plugin (like MdnsBridge) answers them.
-    forward_local: bool = False
-
-    # Lazy health state for upstreams, keyed by a stable upstream identifier.
-    # Each entry contains:
-    #   - fail_count: consecutive failure count (for backoff growth).
-    #   - down_until: epoch timestamp until which this upstream is considered down.
-    upstream_health: Dict[str, Dict[str, float]] = {}
-
-    @staticmethod
-    def _upstream_id(up: Dict) -> str:
-        """Brief: Compute a stable identifier string for an upstream config.
-
-        Inputs:
-          - up: Upstream mapping (may contain 'url' for DoH or 'host'/'port').
-
-        Outputs:
-          - str: Identifier suitable for indexing upstream_health.
-        """
-
-        if not isinstance(up, dict):
-            return ""
-        url = up.get("url")
-        if url:
-            return str(url)
-        host = up.get("host")
-        port = up.get("port")
-        if host is None and port is None:
-            return ""
-        try:
-            return f"{host}:{int(port) if port is not None else 0}"
-        except Exception:
-            return str(host) if host is not None else ""
-
-    @classmethod
-    def _mark_upstreams_down(cls, upstreams: List[Dict], reason: Optional[str]) -> None:
-        """Brief: Mark a set of upstreams as temporarily down with backoff.
-
-        Inputs:
-          - upstreams: List of upstream config dicts.
-          - reason: Optional string reason (e.g. 'all_failed', 'timeout').
-
-        Outputs:
-          - None; updates cls.upstream_health in-place.
-        """
-
-        now = time.time()
-        # Base delay in seconds and maximum backoff cap.
-        base_delay = 5.0
-        max_delay = 300.0
-
-        for up in upstreams or []:
-            up_id = cls._upstream_id(up)
-            if not up_id:
-                continue
-            entry = cls.upstream_health.get(up_id) or {
-                "fail_count": 0,
-                "down_until": 0.0,
-            }
-            fail_count = int(entry.get("fail_count", 0)) + 1
-
-            # Simple Fibonacci-like growth: 1, 2, 3, 5, 8, ... scaled by base_delay.
-            a, b = 1, 1
-            for _ in range(max(0, fail_count - 1)):
-                a, b = b, a + b
-            delay = min(base_delay * float(a), max_delay)
-
-            cls.upstream_health[up_id] = {
-                "fail_count": float(fail_count),
-                "down_until": now + delay,
-            }
-
-    @classmethod
-    def _mark_upstream_ok(cls, upstream: Optional[Dict]) -> None:
-        """Brief: Reset health state for a single upstream on success.
-
-        Inputs:
-          - upstream: Upstream config dict or None.
-
-        Outputs:
-          - None; clears or resets the upstream's health entry.
-        """
-
-        if not upstream or not isinstance(upstream, dict):
-            return
-        up_id = cls._upstream_id(upstream)
-        if not up_id:
-            return
-        entry = cls.upstream_health.get(up_id)
-        if not entry:
-            return
-        # Mark as healthy immediately; keep a small fail_count history if desired.
-        cls.upstream_health[up_id] = {"fail_count": 0.0, "down_until": 0.0}
 
     def _cache_and_send_response(
         self,
@@ -613,108 +676,6 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
             pass
         return _set_response_id(r.pack(), request.header.id)
 
-    def _ensure_edns(self, req: DNSRecord) -> None:
-        """
-        Ensure the request carries an EDNS(0) OPT record with appropriate
-        payload size and DO bit based on dnssec_mode.
-
-        Inputs:
-          - req: DNSRecord to mutate in-place.
-
-        Outputs:
-          - None
-
-        Behaviour:
-          - If the client sent an OPT record, mirror its EDNS version and
-            advertised UDP payload size, clamped by this handler's
-            edns_udp_payload when non-zero.
-          - If no OPT was present, add one using edns_udp_payload as the
-            advertised UDP payload (with a minimum of 512 bytes).
-          - In both cases, the DO bit (DNSSEC OK) in the EDNS flags is set or
-            cleared according to dnssec_mode while preserving any other
-            existing EDNS flag bits.
-
-        Example:
-          >>> self._ensure_edns(req)
-        """
-        # Locate an existing OPT record, if any, in the additional section.
-        opt_idx = None
-        opt_rr = None
-        additional = getattr(req, "ar", []) or []
-        for idx, rr in enumerate(additional):
-            if rr.rtype == QTYPE.OPT:
-                opt_idx = idx
-                opt_rr = rr
-                break
-
-        # Decide DO flag based on dnssec_mode. For both passthrough and validate
-        # modes we must advertise DO=1 so that upstream resolvers return
-        # DNSSEC records (and, for upstream_ad, can set the AD bit).
-        do_bit = (
-            0x8000
-            if str(getattr(self, "dnssec_mode", "ignore")).lower()
-            in (
-                "passthrough",
-                "validate",
-            )
-            else 0
-        )
-
-        # Effective server-side maximum UDP payload we are willing to
-        # advertise. RFC 6891 requires at least 512 bytes when EDNS is used.
-        try:
-            server_max = int(getattr(self, "edns_udp_payload", 1232) or 1232)
-        except Exception:
-            server_max = 1232
-        if server_max < 512:
-            server_max = 512
-
-        # Case 1: client already sent an OPT; adjust its payload and DO bit
-        # while preserving EDNS version, extended RCODE, and other flags.
-        if opt_rr is not None:
-            try:
-                client_payload = int(getattr(opt_rr, "rclass", 0) or 0)
-            except Exception:
-                client_payload = 0
-            if client_payload <= 0:
-                payload = server_max
-            elif server_max > 0:
-                payload = min(client_payload, server_max)
-            else:
-                payload = client_payload
-
-            # Decode EDNS TTL into (ext_rcode, version, flags) so we can
-            # update only the DO bit in the flags field.
-            try:
-                ttl_val = int(getattr(opt_rr, "ttl", 0) or 0)
-            except Exception:
-                ttl_val = 0
-            ext_rcode = (ttl_val >> 24) & 0xFF
-            version = (ttl_val >> 16) & 0xFF
-            flags = ttl_val & 0xFFFF
-            # Clear existing DO bit and inject the desired value.
-            flags = (flags & ~0x8000) | do_bit
-            opt_rr.rclass = payload
-            opt_rr.ttl = (ext_rcode << 24) | (version << 16) | (flags & 0xFFFF)
-            return
-
-        # Case 2: no existing OPT; create one using the foghorn.servers.server
-        # EDNS0 helper so tests that monkeypatch EDNS0 continue to see calls.
-        from . import server as _server_mod
-
-        payload = server_max
-        flags_str = "do" if do_bit else ""
-
-        # EDNS0() constructs an OPT RR where the advertised UDP payload is
-        # encoded via udp_len/rclass and the DO bit is part of the TTL
-        # bitfield. We leave the EDNS version at its default (0).
-        opt_rr = _server_mod.EDNS0(udp_len=payload, flags=flags_str)
-
-        if opt_idx is None:
-            req.add_ar(opt_rr)
-        else:
-            req.ar[opt_idx] = opt_rr
-
     def handle(self):
         """Process a single UDP DNS query using the shared core resolver.
 
@@ -751,6 +712,10 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
             if not wire:
                 return
         except Exception:  # pragma: no cover - defensive: outermost guard
+            logger.exception(
+                "Unexpected UDP handler resolver failure for client %s",
+                client_ip,
+            )
             try:
                 # Best-effort SERVFAIL synthesis if the shared resolver fails
                 # unexpectedly.
@@ -773,36 +738,42 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
                     pass
                 wire = _set_response_id(r.pack(), req.header.id)
             except Exception:
-                # Worst-case: echo the original bytes so the socket still sends
-                # something back (useful for diagnosing corruption).
-                wire = data
-
-        # RFC 6891 compliance for non-EDNS clients: when the client did not
-        # advertise EDNS(0) support, avoid sending very large UDP responses.
-        # If the final wire payload exceeds the classic 512-byte limit, mark
-        # the response as truncated (TC=1) so compliant stub resolvers know to
-        # retry over TCP. We do not attempt to re-flow or aggressively truncate
-        # the message here; this is a conservative best-effort signal.
-        try:
-            req = DNSRecord.parse(data)
-        except Exception:  # pragma: no cover - defensive: corrupted query
-            req = None
-
-        if isinstance(req, DNSRecord):
-            # Detect whether the client advertised EDNS(0) via an OPT RR.
-            has_opt = any(
-                getattr(rr, "rtype", None) == QTYPE.OPT
-                for rr in (getattr(req, "ar", None) or [])
-            )
-            # Only apply the 512-byte clamp when the client did not send EDNS.
-            if not has_opt and isinstance(wire, (bytes, bytearray, memoryview)):
+                # Worst-case: never reflect the original query bytes. Return a
+                # minimal header-only SERVFAIL so clients don't loop on a QR=0 packet.
                 try:
-                    if len(wire) > 512:
-                        resp = DNSRecord.parse(bytes(wire))
-                        resp.header.tc = 1
-                        wire = _set_response_id(resp.pack(), resp.header.id)
-                except Exception:  # pragma: no cover - defensive: parsing/truncation
-                    pass
+                    rid = int.from_bytes(data[0:2], "big") if len(data) >= 2 else 0
+                except Exception:
+                    rid = 0
+                try:
+                    rd_flag = (
+                        bool(int.from_bytes(data[2:4], "big") & 0x0100)
+                        if len(data) >= 4
+                        else True
+                    )
+                except Exception:
+                    rd_flag = True
+                wire = _pack_minimal_tc_header(
+                    req_id=rid,
+                    rcode=int(RCODE.SERVFAIL),
+                    rd=rd_flag,
+                )
+
+        # Enforce UDP response ceiling; synthesize TC=1 response when needed.
+        try:
+            from foghorn.runtime_config import get_runtime_snapshot
+
+            server_max = get_runtime_snapshot().udp_max_response_bytes
+        except Exception:
+            server_max = None
+
+        try:
+            wire = enforce_udp_response_size_ceiling(
+                query_wire=data,
+                response_wire=wire,
+                server_max_bytes=server_max,
+            )
+        except Exception:  # pragma: no cover - defensive
+            pass
 
         sock.sendto(wire, self.client_address)
 
@@ -826,16 +797,21 @@ class _UDPHandler(socketserver.BaseRequestHandler):
 
     def handle(self) -> None:
         data, sock = self.request  # type: ignore
+        peer_ip = (
+            self.client_address[0]
+            if isinstance(self.client_address, tuple)
+            else "0.0.0.0"
+        )
         try:
-            peer_ip = (
-                self.client_address[0]
-                if isinstance(self.client_address, tuple)
-                else "0.0.0.0"
-            )
             resp = self.resolver(data, peer_ip)
             sock.sendto(resp, self.client_address)
-        except Exception:
-            pass  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+        except (ConnectionError, OSError, TimeoutError):
+            return
+        except Exception:  # pragma: no cover - defensive: unexpected transport failure
+            logger.exception(
+                "Unhandled exception in UDP request handler for client %s",
+                peer_ip,
+            )
 
 
 def serve_udp(host: str, port: int, resolver: Callable[[bytes, str], bytes]) -> None:

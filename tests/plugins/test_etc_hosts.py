@@ -296,8 +296,13 @@ def test_etc_hosts_polling_detects_file_changes(tmp_path):
     hosts_file = tmp_path / "hosts"
     hosts_file.write_text("127.0.0.1 localhost\n")
 
-    # Disable watchdog to focus this test purely on the polling helper.
-    plugin = EtcHosts(file_paths=[str(hosts_file)], watchdog_enabled=False)
+    # Disable watchdog + background polling thread to focus this test purely on
+    # the polling helper method.
+    plugin = EtcHosts(
+        file_paths=[str(hosts_file)],
+        watchdog_enabled=False,
+        watchdog_poll_interval_seconds=0.0,
+    )
     plugin.setup()
 
     # First call should treat the baseline snapshot as a change.

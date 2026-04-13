@@ -46,16 +46,6 @@ def test_sigusr2_resets_stats_when_configured(monkeypatch, caplog):
         "stats:\n  enabled: true\n  sigusr2_resets_stats: true\n"
     )
 
-    class DummyServer:
-        def __init__(self, *a, **kw):
-            pass
-
-        def serve_forever(self):
-            # Trigger SIGUSR2 handler then exit
-            if captured["handler"] is not None:
-                captured["handler"](None, None)
-            raise KeyboardInterrupt
-
     class DummyPlugin:
         def __init__(self, **kw):
             self.called = False
@@ -63,11 +53,17 @@ def test_sigusr2_resets_stats_when_configured(monkeypatch, caplog):
         def handle_sigusr2(self):
             self.called = True
 
+        def post_setup(self) -> None:
+            return None
+
     class FakeCollector:
         def __init__(self, *a, **kw):
             self.reset_called = False
 
-        def snapshot(self, reset=False):
+        def warm_load_from_store(self) -> None:
+            return None
+
+        def snapshot(self, reset: bool = False):
             if reset:
                 self.reset_called = True
 
@@ -86,12 +82,45 @@ def test_sigusr2_resets_stats_when_configured(monkeypatch, caplog):
             captured["handler"] = handler
         return None
 
+    from foghorn.servers import udp_asyncio_server as udp_asyncio_mod
+    import time
+
+    class DummyAliveThread:
+        def is_alive(self) -> bool:
+            return True
+
+        def join(self, timeout=None) -> None:  # noqa: ARG002
+            return None
+
+    class DummyUDPHandle:
+        def __init__(self) -> None:
+            self.thread = DummyAliveThread()
+
+        def stop(self) -> None:
+            return None
+
+    called = {"sent": False}
+
+    def _sleep_once(_sec: float) -> None:
+        assert captured["handler"] is not None
+        if not called["sent"]:
+            called["sent"] = True
+            captured["handler"](None, None)
+            return None
+        raise KeyboardInterrupt
+
     dummy_plugins = [DummyPlugin(), DummyPlugin()]
     monkeypatch.setattr(main_mod, "load_plugins", lambda specs: dummy_plugins)
-    monkeypatch.setattr(main_mod, "DNSServer", DummyServer)
+    monkeypatch.setattr(
+        udp_asyncio_mod,
+        "start_udp_asyncio_threaded",
+        lambda *_a, **_kw: DummyUDPHandle(),
+    )
     monkeypatch.setattr(main_mod, "StatsCollector", FakeCollector)
     monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
+    monkeypatch.setattr(main_mod, "start_webserver", lambda *a, **k: None)
     monkeypatch.setattr(main_mod.signal, "signal", fake_signal)
+    monkeypatch.setattr(time, "sleep", _sleep_once)
 
     with patch("builtins.open", mock_open(read_data=yaml_data)):
         caplog.set_level(logging.INFO)
@@ -105,6 +134,6 @@ def test_sigusr2_resets_stats_when_configured(monkeypatch, caplog):
     )
     # Ensure plugin invocation count still logged
     assert any(
-        "SIGUSR2: invoked handle_sigusr2 on 2 plugins" in r.message
+        "SIGUSR2: invoked signal handler hook on 2 plugins" in r.message
         for r in caplog.records
     )

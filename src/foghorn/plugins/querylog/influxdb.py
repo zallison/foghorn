@@ -24,10 +24,13 @@ Notes:
 
 import json
 import logging
+import math
+import threading
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import requests
+from requests.exceptions import RequestException
 
 from .base import BaseStatsStore
 
@@ -118,10 +121,7 @@ def _format_line_protocol(
 class InfluxLogging(BaseStatsStore):
     """InfluxDB-backed logging-only backend for DNS query logs.
 
-    # Aliases used by the stats backend registry.
-    aliases = ("influx", "influxdb")
-
-    Inputs (constructor):
+      Inputs (constructor):
         write_url: HTTP endpoint for InfluxDB line-protocol writes
             (for example, "http://127.0.0.1:8086/api/v2/write").
         org: Optional organization identifier (v2); appended as a query
@@ -139,6 +139,9 @@ class InfluxLogging(BaseStatsStore):
         Initialized InfluxLogging instance ready to accept query-log entries.
     """
 
+    # Aliases used by the stats backend registry.
+    aliases = ("influx", "influxdb")
+
     def __init__(
         self,
         write_url: str,
@@ -149,19 +152,51 @@ class InfluxLogging(BaseStatsStore):
         timeout: float = 2.0,
         session_kwargs: Optional[Dict[str, Any]] = None,
         async_logging: bool = True,
+        max_logging_queue: int = 16384,
+        batch_writes: bool = False,
+        batch_time_sec: float = 15.0,
+        batch_max_size: int = 1000,
+        retention_max_records: Optional[int] = None,
+        retention_days: Optional[float] = None,
         **_: Any,
     ) -> None:
         self._write_url = str(write_url)
         self._org = str(org) if org is not None else None
         self._bucket = str(bucket) if bucket is not None else None
         self._precision = str(precision or "ns")
-        self._timeout = float(timeout)
+        try:
+            timeout_value = float(timeout)
+            if timeout_value <= 0:
+                raise ValueError("timeout must be > 0")
+            self._timeout = timeout_value
+        except Exception:
+            logger.warning(
+                "Invalid InfluxLogging timeout %r; falling back to 2.0 seconds",
+                timeout,
+            )
+            self._timeout = 2.0
 
         # Logging behaviour: default to async for remote HTTP logging, but
         # allow callers to disable it via config.
         self._async_logging = bool(async_logging)
+        # BaseStatsStore worker queue capacity
+        try:
+            self._max_logging_queue = int(max_logging_queue)
+        except Exception:
+            self._max_logging_queue = 16384
+        self._batch_writes = bool(batch_writes)
+        self._batch_time_sec = float(batch_time_sec)
+        self._batch_max_size = int(batch_max_size)
+        self._batch_lock = threading.RLock()
+        self._pending_lines: List[str] = []
+        self._last_flush = time.time()
+        if retention_max_records is not None or retention_days is not None:
+            logger.debug(
+                "InfluxLogging does not support retention pruning; ignoring retention_max_records=%r retention_days=%r",
+                retention_max_records,
+                retention_days,
+            )
 
-        self._session = requests.Session(**(session_kwargs or {}))
         self._params: Dict[str, str] = {"precision": self._precision}
         if self._org is not None:
             self._params["org"] = self._org
@@ -172,6 +207,14 @@ class InfluxLogging(BaseStatsStore):
         if token is not None:
             headers["Authorization"] = f"Token {token}"
         self._headers = headers
+
+        try:
+            self._session = requests.Session(**(session_kwargs or {}))
+        except Exception:
+            logger.exception("Failed to initialize InfluxLogging HTTP session")
+            self._session = None
+            self._healthy = False
+            return
 
         # Mark backend as healthy; health_check can be refined after writes.
         self._healthy = True
@@ -189,19 +232,119 @@ class InfluxLogging(BaseStatsStore):
                 },
                 ts=time.time(),
             )
-            self._session.post(
+            resp = self._session.post(
                 self._write_url,
                 params=self._params,
                 data=line.encode("utf-8"),
                 headers=self._headers,
                 timeout=self._timeout,
             )
+            if resp.status_code >= 400:
+                logger.warning(
+                    "InfluxLogging start marker write failed with status %s: %s",
+                    resp.status_code,
+                    resp.text,
+                )
+        except RequestException as exc:  # pragma: no cover - environment specific
+            logger.warning(
+                "Failed to publish InfluxDB query_log start marker: %s",
+                exc,
+            )
         except Exception:  # pragma: no cover - environment specific
-            logger.exception("Failed to publish InfluxDB query_log start marker")
+            logger.exception(
+                "Unexpected error publishing InfluxDB query_log start marker"
+            )
 
     # ------------------------------------------------------------------
     # Health and lifecycle
     # ------------------------------------------------------------------
+    def _post_lines(self, lines: List[str]) -> bool:
+        """Post one or more line-protocol entries to the configured endpoint.
+
+        Inputs:
+            lines: One or more line-protocol entries.
+
+        Outputs:
+            bool: True when the request was attempted without transport-level
+                failures. False on transport errors.
+        """
+
+        if not lines:
+            return True
+        if not self._healthy:
+            return False
+
+        session = getattr(self, "_session", None)
+        if session is None:
+            logger.warning("InfluxLogging session unavailable; dropping buffered lines")
+            self._healthy = False
+            return False
+
+        payload = "\n".join(lines).encode("utf-8")
+        try:
+            resp = session.post(
+                self._write_url,
+                params=self._params,
+                data=payload,
+                headers=self._headers,
+                timeout=self._timeout,
+            )
+            if resp.status_code >= 400:
+                logger.warning(
+                    "InfluxLogging write failed with status %s: %s",
+                    resp.status_code,
+                    resp.text,
+                )
+            return True
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.error(
+                "Failed to write query_log to InfluxDB: %s",
+                exc,
+                exc_info=True,
+            )
+            self._healthy = False
+            return False
+
+    def _maybe_flush_locked(self) -> None:
+        """Flush buffered lines when configured batch thresholds are reached.
+
+        Inputs:
+            None. Caller must hold ``self._batch_lock``.
+
+        Outputs:
+            None.
+        """
+
+        if not self._batch_writes:
+            return
+        lines_len = len(self._pending_lines)
+        if lines_len == 0:
+            return
+
+        now = time.time()
+        age = now - self._last_flush
+        if lines_len >= self._batch_max_size or age >= self._batch_time_sec:
+            self._flush_locked()
+
+    def _flush_locked(self) -> None:
+        """Flush all currently buffered lines in a single HTTP request.
+
+        Inputs:
+            None. Caller must hold ``self._batch_lock``.
+
+        Outputs:
+            None.
+        """
+
+        if not self._pending_lines:
+            return
+
+        lines = list(self._pending_lines)
+        if not self._post_lines(lines):
+            return
+        self._pending_lines.clear()
+        self._last_flush = time.time()
+
     def health_check(self) -> bool:  # type: ignore[override]
         """Return True when the InfluxDB logging backend is considered usable.
 
@@ -225,6 +368,9 @@ class InfluxLogging(BaseStatsStore):
         """
 
         try:
+            if self._batch_writes:
+                with self._batch_lock:
+                    self._flush_locked()
             session = getattr(self, "_session", None)
             if session is not None:
                 session.close()
@@ -264,26 +410,36 @@ class InfluxLogging(BaseStatsStore):
             result_json: JSON-encoded result payload from the resolver.
 
         Outputs:
-            None; writes directly via the InfluxDB HTTP session.
+            None; writes immediately when async_logging is False, otherwise
+            enqueues the operation on the BaseStatsStore worker queue.
         """
 
-        # This backend is write-only and relatively low volume, so use a
-        # synchronous implementation here instead of the BaseStatsStore
-        # background queue. This keeps behavior simple and deterministic for
-        # callers and tests while still allowing other backends to use the
-        # shared async worker.
-        self._insert_query_log(
-            ts,
-            client_ip,
-            name,
-            qtype,
-            upstream_id,
-            rcode,
-            status,
-            error,
-            first,
-            result_json,
-        )
+        if getattr(self, "_async_logging", True):
+            super().insert_query_log(
+                ts,
+                client_ip,
+                name,
+                qtype,
+                upstream_id,
+                rcode,
+                status,
+                error,
+                first,
+                result_json,
+            )
+        else:
+            self._insert_query_log(
+                ts,
+                client_ip,
+                name,
+                qtype,
+                upstream_id,
+                rcode,
+                status,
+                error,
+                first,
+                result_json,
+            )
 
     def _insert_query_log(
         self,
@@ -318,6 +474,21 @@ class InfluxLogging(BaseStatsStore):
 
         if not self._healthy:
             return
+        session = getattr(self, "_session", None)
+        if session is None:
+            logger.warning(
+                "InfluxLogging session unavailable; dropping query_log entry"
+            )
+            self._healthy = False
+            return
+
+        try:
+            ts_value = float(ts)
+            if not math.isfinite(ts_value):
+                raise ValueError("timestamp must be finite")
+        except Exception:
+            logger.warning("Invalid query_log timestamp for InfluxLogging: %r", ts)
+            return
 
         # Parse result_json to derive lightweight fields when possible.
         result_obj: Optional[Dict[str, Any]]
@@ -329,7 +500,7 @@ class InfluxLogging(BaseStatsStore):
 
         fields: Dict[str, Any] = {
             "count": 1,
-            "ts": float(ts),
+            "ts": ts_value,
             "name": name,
             "error": error,
             "first": first,
@@ -348,29 +519,21 @@ class InfluxLogging(BaseStatsStore):
             "status": status,
         }
 
-        line = _format_line_protocol(
-            measurement="foghorn_query_log",
-            tags=tags,
-            fields=fields,
-            ts=float(ts),
-        )
-
         try:
-            resp = self._session.post(
-                self._write_url,
-                params=self._params,
-                data=line.encode("utf-8"),
-                headers=self._headers,
-                timeout=self._timeout,
+            line = _format_line_protocol(
+                measurement="foghorn_query_log",
+                tags=tags,
+                fields=fields,
+                ts=ts_value,
             )
-            if resp.status_code >= 400:
-                logger.warning(
-                    "InfluxLogging write failed with status %s: %s",
-                    resp.status_code,
-                    resp.text,
-                )
-        except Exception as exc:  # pragma: no cover - defensive
-            logger.error(
-                "Failed to write query_log to InfluxDB: %s", exc, exc_info=True
-            )
-            self._healthy = False
+        except Exception:
+            logger.exception("Failed to encode InfluxLogging query_log line protocol")
+            return
+
+        if not self._batch_writes:
+            self._post_lines([line])
+            return
+
+        with self._batch_lock:
+            self._pending_lines.append(line)
+            self._maybe_flush_locked()

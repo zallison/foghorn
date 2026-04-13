@@ -3,8 +3,9 @@ import types
 import pytest
 
 import foghorn.servers.webserver as webserver
-from foghorn.stats import StatsCollector
+import foghorn.servers.webserver.core as web_core
 from foghorn.servers.webserver import RingBuffer, create_app
+from foghorn.stats import StatsCollector
 
 
 def _reset_system_info_cache() -> None:
@@ -17,8 +18,8 @@ def _reset_system_info_cache() -> None:
       - None. Mutates module-level cache globals in foghorn.servers.webserver.
     """
 
-    webserver._last_system_info = None
-    webserver._last_system_info_ts = 0.0
+    web_core._last_system_info = None
+    web_core._last_system_info_ts = 0.0
 
 
 def test_get_system_info_uses_cache_for_quick_repeats(
@@ -41,8 +42,8 @@ def test_get_system_info_uses_cache_for_quick_repeats(
         call_counter["count"] += 1
         return {}
 
-    monkeypatch.setattr(webserver, "_read_proc_meminfo", fake_read_proc_meminfo)
-    monkeypatch.setattr(webserver, "_SYSTEM_INFO_CACHE_TTL_SECONDS", 1000.0)
+    monkeypatch.setattr(web_core, "_read_proc_meminfo", fake_read_proc_meminfo)
+    monkeypatch.setattr(web_core, "_SYSTEM_INFO_CACHE_TTL_SECONDS", 1000.0)
 
     first = webserver.get_system_info()
     second = webserver.get_system_info()
@@ -77,9 +78,9 @@ def test_get_system_info_expires_cache_after_ttl(
     def fake_time() -> float:
         return t["now"]
 
-    monkeypatch.setattr(webserver, "_read_proc_meminfo", fake_read_proc_meminfo)
+    monkeypatch.setattr(web_core, "_read_proc_meminfo", fake_read_proc_meminfo)
     monkeypatch.setattr(webserver.time, "time", fake_time)
-    monkeypatch.setattr(webserver, "_SYSTEM_INFO_CACHE_TTL_SECONDS", 1.0)
+    monkeypatch.setattr(web_core, "_SYSTEM_INFO_CACHE_TTL_SECONDS", 1.0)
 
     # First call populates cache
     webserver.get_system_info()
@@ -106,13 +107,13 @@ def test_system_info_ttl_overridden_by_config(monkeypatch: pytest.MonkeyPatch) -
     """
 
     # Start from a known TTL value
-    monkeypatch.setattr(webserver, "_SYSTEM_INFO_CACHE_TTL_SECONDS", 2.0, raising=False)
+    monkeypatch.setattr(web_core, "_SYSTEM_INFO_CACHE_TTL_SECONDS", 2.0, raising=False)
 
-    cfg = {"webserver": {"enabled": True, "system_info_ttl_seconds": 5.5}}
+    cfg = {"server": {"http": {"enabled": True, "system_info_ttl_seconds": 5.5}}}
     # Creating the app should apply the TTL override
     create_app(stats=None, config=cfg, log_buffer=RingBuffer())
 
-    assert webserver._SYSTEM_INFO_CACHE_TTL_SECONDS == pytest.approx(5.5)
+    assert web_core._SYSTEM_INFO_CACHE_TTL_SECONDS == pytest.approx(5.5)
 
 
 def test_system_info_basic_detail_skips_heavy_psutil(
@@ -175,9 +176,9 @@ def test_system_info_basic_detail_skips_heavy_psutil(
     fake_psutil = types.SimpleNamespace(Process=fake_process)
 
     _reset_system_info_cache()
-    monkeypatch.setattr(webserver, "psutil", fake_psutil, raising=True)
+    monkeypatch.setattr(web_core, "psutil", fake_psutil, raising=True)
 
-    cfg = {"webserver": {"enabled": True, "system_metrics_detail": "basic"}}
+    cfg = {"server": {"http": {"enabled": True, "system_metrics_detail": "basic"}}}
     create_app(
         stats=StatsCollector(track_uniques=False), config=cfg, log_buffer=RingBuffer()
     )

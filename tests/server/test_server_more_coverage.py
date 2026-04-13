@@ -8,11 +8,12 @@ Outputs:
   - None (pytest assertions)
 """
 
-from dnslib import NS, QTYPE, RCODE, RR, SOA, A, DNSRecord
+from dnslib import NS, QTYPE, RCODE, RR, SOA, A, DNSRecord, EDNS0
 
 import foghorn.servers.server as srv
 from foghorn.plugins.cache.in_memory_ttl import InMemoryTTLCache
 from foghorn.plugins.resolve import base as plugin_base
+from foghorn.servers.udp_server import DNSUDPHandler
 
 
 def test_compute_effective_ttl_variants():
@@ -46,6 +47,70 @@ def test_compute_effective_ttl_variants():
         pass
 
     assert srv.compute_effective_ttl(_Bad(), 15) == 15
+
+
+def test_compute_negative_ttl_soa_minimum_zero_disables_negative_caching():
+    """Brief: SOA minimum TTL=0 yields negative/referral TTL 0 (do not cache).
+
+    Inputs:
+      - DNSRecord with SOA in authority section, SOA times minimum=0.
+      - fallback_ttl: nonzero.
+
+    Outputs:
+      - None; asserts _compute_negative_ttl returns 0.
+    """
+
+    q = DNSRecord.question("negttl.example", "A")
+    r = q.reply()
+
+    # Authority SOA TTL is nonzero, but SOA minimum field is explicitly 0.
+    soa = SOA(
+        "ns.negttl.example.",
+        "hostmaster.negttl.example.",
+        (1, 3600, 600, 86400, 0),
+    )
+    r.add_auth(RR("negttl.example", QTYPE.SOA, rdata=soa, ttl=300))
+
+    assert srv._compute_negative_ttl(r, fallback_ttl=60) == 0
+
+
+def test_attach_ede_option_does_not_mutate_request_opt_rr(monkeypatch):
+    """Brief: Attaching EDE must not alias/mutate the request OPT RR.
+
+    Inputs:
+      - req: DNSRecord with an EDNS0 OPT RR.
+      - resp: synthetic reply without OPT.
+
+    Outputs:
+      - None; asserts req OPT rdata is unchanged while resp gains EDE.
+    """
+
+    class _Snap:
+        enable_ede = True
+
+    monkeypatch.setattr("foghorn.runtime_config.get_runtime_snapshot", lambda: _Snap())
+
+    req = DNSRecord.question("ede.example", "A")
+    req.add_ar(EDNS0(udp_len=1232))
+    req_opt = [rr for rr in (req.ar or []) if rr.rtype == QTYPE.OPT][0]
+
+    # dnslib represents OPT options as a list stored on rdata.
+    before = list(getattr(req_opt, "rdata", []) or [])
+
+    resp = req.reply()
+    # Ensure resp does not already carry an OPT.
+    resp.ar = []
+
+    srv._attach_ede_option(req, resp, 15, "blocked by policy")
+
+    after = list(getattr(req_opt, "rdata", []) or [])
+    assert after == before
+
+    resp_opts = [rr for rr in (resp.ar or []) if rr.rtype == QTYPE.OPT]
+    assert resp_opts
+    resp_rdata = getattr(resp_opts[0], "rdata", None)
+    assert isinstance(resp_rdata, list)
+    assert any(getattr(opt, "code", None) == 15 for opt in resp_rdata)
 
 
 def test__set_response_id_error_path_logged(caplog):
@@ -121,7 +186,7 @@ def test_send_query_with_failover_parse_error_then_success(monkeypatch, caplog):
     Inputs:
       - First returns garbage bytes; second returns valid reply.
     Outputs:
-      - Success from second; warning logged for parse failure.
+      - Success from second; debug log emitted for parse failure.
     """
     q = DNSRecord.question("example.com", "A")
     r_ok = q.reply()
@@ -140,12 +205,21 @@ def test_send_query_with_failover_parse_error_then_success(monkeypatch, caplog):
         {"host": "1.0.0.1", "port": 53, "transport": "udp"},
     ]
 
-    with caplog.at_level("WARNING"):
+    # send_query_with_failover de-dupes upstream skip warnings across the process,
+    # so ensure this test is deterministic regardless of test order.
+    upstream_key = srv._upstream_key_for_skip_warning(
+        upstreams[0], "1.1.1.1", 53, "udp"
+    )
+    srv._reset_upstream_skip_warning(upstream_key)
+
+    with caplog.at_level("DEBUG"):
         resp, used, reason = srv.send_query_with_failover(
             q, upstreams, 300, "example.com", QTYPE.A
         )
     assert reason == "ok" and used["host"] == "1.0.0.1"
-    assert any("Failed to parse response" in rec.message for rec in caplog.records)
+    assert any(
+        "failed to parse response" in rec.message.lower() for rec in caplog.records
+    )
 
 
 def test_send_query_with_failover_udp_legacy_send_path(monkeypatch):
@@ -184,7 +258,7 @@ def test__cache_and_send_response_parse_error_still_sends():
     Outputs:
       - Fake socket captured one sendto call.
     """
-    h = srv.DNSUDPHandler.__new__(srv.DNSUDPHandler)
+    h = DNSUDPHandler.__new__(DNSUDPHandler)
 
     class _Sock:
         def __init__(self):
@@ -208,7 +282,7 @@ def test__cache_and_send_response_parse_error_still_sends():
     assert len(sock.sent) == 1
 
 
-def test_handle_pre_deny_sends_nxdomain_and_returns(monkeypatch):
+def test_handle_pre_deny_sends_nxdomain_and_returns(monkeypatch, set_runtime_snapshot):
     """
     Brief: pre plugin deny should short-circuit with NXDOMAIN.
 
@@ -218,7 +292,7 @@ def test_handle_pre_deny_sends_nxdomain_and_returns(monkeypatch):
       - Single send of NXDOMAIN response.
     """
     q = DNSRecord.question("predeny.example", "A")
-    h = srv.DNSUDPHandler.__new__(srv.DNSUDPHandler)
+    h = DNSUDPHandler.__new__(DNSUDPHandler)
 
     class _Sock:
         def __init__(self):
@@ -238,31 +312,21 @@ def test_handle_pre_deny_sends_nxdomain_and_returns(monkeypatch):
         def post_resolve(self, qname, qtype, data, ctx):
             return None
 
-    srv.DNSUDPHandler.plugins = [_PreDeny()]
-    srv.DNSUDPHandler.upstream_addrs = [{"host": "8.8.8.8", "port": 53}]
+    set_runtime_snapshot(
+        plugins=[_PreDeny()],
+        upstream_addrs=[{"host": "8.8.8.8", "port": 53}],
+        resolver_mode="forward",
+        forward_local=False,
+    )
 
     h.handle()
     assert len(sock.sent) == 1
     assert DNSRecord.parse(sock.sent[0][0]).header.rcode == RCODE.NXDOMAIN
 
 
-def testfoghorn_dnssec_dnssec_validate_mode_upstream_ad_and_local_paths(monkeypatch):
-    """Brief: dnssec_mode=validate enforces AD bit with upstream/local validation.
-
-    Inputs:
-      - dnssec_mode=validate with dnssec_validation set to upstream_ad and
-        local.
-
-    Outputs:
-      - Upstream path without AD bit yields SERVFAIL.
-      - Local path with validator raising yields SERVFAIL.
-    """
-    # Ensure clean slate
-    srv.DNSUDPHandler.plugins = []
-    plugin_base.DNS_CACHE = InMemoryTTLCache()
-
-
-def test_resolve_query_bytes_negative_caches_nxdomain_with_soa(monkeypatch):
+def test_resolve_query_bytes_negative_caches_nxdomain_with_soa(
+    monkeypatch, set_runtime_snapshot
+):
     """Brief: resolve_query_bytes should cache NXDOMAIN with SOA authority.
 
     Inputs:
@@ -295,17 +359,39 @@ def test_resolve_query_bytes_negative_caches_nxdomain_with_soa(monkeypatch):
     calls = {"n": 0}
 
     def fake_failover(
-        req, upstreams, timeout_ms, qname, qtype, max_concurrent=None
+        req,
+        upstreams,
+        timeout_ms,
+        qname,
+        qtype,
+        max_concurrent=None,
+        on_attempt_result=None,
     ):  # noqa: ANN001
         calls["n"] += 1
         return wire, upstreams[0], "ok"
 
+    # Ensure clean state before applying monkeypatch
+    plugin_base.DNS_CACHE = InMemoryTTLCache()
+    # Reset any runtime health state that might affect this test
+    try:
+        from foghorn.servers.dns_runtime_state import DNSRuntimeState
+
+        for key in list(DNSRuntimeState.upstream_health.keys()):
+            DNSRuntimeState.upstream_health[key] = {}  # noqa: SLF001
+    except Exception:
+        pass
+    DNSRuntimeState.upstream_probe_percent = None  # noqa: SLF001
+    DNSRuntimeState._upstream_rr_index = 0  # noqa: SLF001
+
     monkeypatch.setattr(srv, "send_query_with_failover", fake_failover)
 
-    plugin_base.DNS_CACHE = InMemoryTTLCache()
-    srv.DNSUDPHandler.upstream_addrs = [{"host": "1.1.1.1", "port": 53}]
-    srv.DNSUDPHandler.plugins = []
-    srv.DNSUDPHandler.min_cache_ttl = 5
+    set_runtime_snapshot(
+        upstream_addrs=[{"host": "1.1.1.1", "port": 53}],
+        plugins=[],
+        min_cache_ttl=5,
+        resolver_mode="forward",
+        forward_local=False,
+    )
 
     resp1 = srv.resolve_query_bytes(q.pack(), "127.0.0.1")
     resp2 = srv.resolve_query_bytes(q.pack(), "127.0.0.1")
@@ -316,7 +402,9 @@ def test_resolve_query_bytes_negative_caches_nxdomain_with_soa(monkeypatch):
     assert calls["n"] == 1
 
 
-def test_resolve_query_bytes_caches_delegation_with_ns(monkeypatch):
+def test_resolve_query_bytes_caches_delegation_with_ns(
+    monkeypatch, set_runtime_snapshot
+):
     """Brief: resolve_query_bytes should cache referrals with NS in authority.
 
     Inputs:
@@ -343,7 +431,13 @@ def test_resolve_query_bytes_caches_delegation_with_ns(monkeypatch):
     calls = {"n": 0}
 
     def fake_failover(
-        req, upstreams, timeout_ms, qname, qtype, max_concurrent=None
+        req,
+        upstreams,
+        timeout_ms,
+        qname,
+        qtype,
+        max_concurrent=None,
+        on_attempt_result=None,
     ):  # noqa: ANN001
         calls["n"] += 1
         return wire, upstreams[0], "ok"
@@ -351,9 +445,13 @@ def test_resolve_query_bytes_caches_delegation_with_ns(monkeypatch):
     monkeypatch.setattr(srv, "send_query_with_failover", fake_failover)
 
     plugin_base.DNS_CACHE = InMemoryTTLCache()
-    srv.DNSUDPHandler.upstream_addrs = [{"host": "2.2.2.2", "port": 53}]
-    srv.DNSUDPHandler.plugins = []
-    srv.DNSUDPHandler.min_cache_ttl = 5
+    set_runtime_snapshot(
+        upstream_addrs=[{"host": "2.2.2.2", "port": 53}],
+        plugins=[],
+        min_cache_ttl=5,
+        resolver_mode="forward",
+        forward_local=False,
+    )
 
     resp1 = srv.resolve_query_bytes(q.pack(), "127.0.0.1")
     resp2 = srv.resolve_query_bytes(q.pack(), "127.0.0.1")
@@ -363,83 +461,8 @@ def test_resolve_query_bytes_caches_delegation_with_ns(monkeypatch):
     # Only the first call should have reached the fake upstream.
     assert calls["n"] == 1
 
-    # The remainder of this file continues with dnssec validation tests.
-    # Ensure clean slate for those tests.
-    srv.DNSUDPHandler.plugins = []
-    plugin_base.DNS_CACHE = InMemoryTTLCache()
 
-    name = "dnssec.example"
-    q = DNSRecord.question(name, "A")
-
-    # Wire without AD bit
-    r_noad = q.reply()
-    r_noad.header.ad = 0
-    wire_noad = r_noad.pack()
-
-    # Wire with AD (not used for local path)
-    r_ad = q.reply()
-    r_ad.header.ad = 1
-    wire_ok = r_ad.pack()
-
-    def fake_forward_noad(self, request, upstreams, qname, qtype):
-        return wire_noad, upstreams[0], "ok"
-
-    def fake_forward_ok(self, request, upstreams, qname, qtype):
-        return wire_ok, upstreams[0], "ok"
-
-    # Case 1: validate with upstream_ad -> no AD -> treated as insecure but not SERVFAIL
-    h1 = srv.DNSUDPHandler.__new__(srv.DNSUDPHandler)
-
-    class _Sock:
-        def __init__(self):
-            self.sent = []
-
-        def sendto(self, data, addr):
-            self.sent.append((data, addr))
-
-    sock1 = _Sock()
-    h1.request = (q.pack(), sock1)
-    h1.client_address = ("127.0.0.1", 1)
-    h1.dnssec_mode = "validate"
-    srv.DNSUDPHandler.upstream_addrs = [{"host": "8.8.8.8", "port": 53}]
-    monkeypatch.setattr(
-        srv.DNSUDPHandler, "_forward_with_failover_helper", fake_forward_noad
-    )
-    h1.handle()
-    # Upstream path without AD should now be treated as insecure/unsigned,
-    # not forced to SERVFAIL.
-    assert DNSRecord.parse(sock1.sent[-1][0]).header.rcode == RCODE.NOERROR
-
-    # Case 3: local validator raises -> treated as insecure (exercise exception path)
-    h3 = srv.DNSUDPHandler.__new__(srv.DNSUDPHandler)
-    sock3 = _Sock()
-    h3.request = (q.pack(), sock3)
-    h3.client_address = ("127.0.0.1", 3)
-    h3.dnssec_mode = "validate"
-    h3.dnssec_validation = "local"
-    # Replace the stub with a raising one before handle() imports it
-    import sys
-    import types
-
-    fake_mod2 = types.ModuleType("foghorn.dnssecfoghorn.dnssec.dnssec_validate")
-
-    def _raise(*a, **k):
-        raise RuntimeError("boom")
-
-    fake_mod2.validate_response_local = _raise
-    monkeypatch.setitem(
-        sys.modules, "foghorn.dnssecfoghorn.dnssec.dnssec_validate", fake_mod2
-    )
-    monkeypatch.setattr(
-        srv.DNSUDPHandler, "_forward_with_failover_helper", fake_forward_noad
-    )
-    h3.handle()
-    # Local validator exceptions should no longer force SERVFAIL; the
-    # response should flow through unchanged.
-    assert DNSRecord.parse(sock3.sent[-1][0]).header.rcode == RCODE.NOERROR
-
-
-def test_resolve_query_bytes_post_hooks(monkeypatch):
+def test_resolve_query_bytes_post_hooks(monkeypatch, set_runtime_snapshot):
     """
     Brief: resolve_query_bytes honors post deny and post override decisions.
 
@@ -451,12 +474,25 @@ def test_resolve_query_bytes_post_hooks(monkeypatch):
     q = DNSRecord.question("hook.example", "A")
     r_ok = q.reply()
 
-    def fake_forward(req, upstreams, timeout_ms, qname, qtype, max_concurrent=None):
+    def fake_forward(
+        req,
+        upstreams,
+        timeout_ms,
+        qname,
+        qtype,
+        max_concurrent=None,
+        on_attempt_result=None,
+    ):
         return r_ok.pack(), {"host": "1.1.1.1", "port": 53}, "ok"
 
     monkeypatch.setattr(srv, "send_query_with_failover", fake_forward)
     plugin_base.DNS_CACHE = InMemoryTTLCache()
-    srv.DNSUDPHandler.upstream_addrs = [{"host": "1.1.1.1", "port": 53}]
+    set_runtime_snapshot(
+        upstream_addrs=[{"host": "1.1.1.1", "port": 53}],
+        plugins=[],
+        resolver_mode="forward",
+        forward_local=False,
+    )
 
     class _PostDeny:
         post_priority = 1
@@ -467,7 +503,12 @@ def test_resolve_query_bytes_post_hooks(monkeypatch):
         def post_resolve(self, qname, qtype, data, ctx):
             return srv.PluginDecision(action="deny")
 
-    srv.DNSUDPHandler.plugins = [_PostDeny()]
+    set_runtime_snapshot(
+        upstream_addrs=[{"host": "1.1.1.1", "port": 53}],
+        plugins=[_PostDeny()],
+        resolver_mode="forward",
+        forward_local=False,
+    )
     out1 = srv.resolve_query_bytes(q.pack(), "127.0.0.1")
     assert DNSRecord.parse(out1).header.rcode == RCODE.NXDOMAIN
 
@@ -482,6 +523,102 @@ def test_resolve_query_bytes_post_hooks(monkeypatch):
             rep.header.rcode = RCODE.NXDOMAIN
             return srv.PluginDecision(action="override", response=rep.pack())
 
-    srv.DNSUDPHandler.plugins = [_PostOverride()]
+    plugin_base.DNS_CACHE = InMemoryTTLCache()
+    set_runtime_snapshot(
+        upstream_addrs=[{"host": "1.1.1.1", "port": 53}],
+        plugins=[_PostOverride()],
+        resolver_mode="forward",
+        forward_local=False,
+    )
     out2 = srv.resolve_query_bytes(q.pack(), "127.0.0.1")
     assert DNSRecord.parse(out2).header.rcode == RCODE.NXDOMAIN
+
+
+def test_resolve_query_bytes_search_qualifies_single_label(
+    monkeypatch, set_runtime_snapshot
+):
+    """Brief: Single-label queries are search-qualified before upstream forwarding.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+      - set_runtime_snapshot: fixture that applies runtime snapshot overrides.
+
+    Outputs:
+      - None; asserts failover receives the qualified qname.
+    """
+    q = DNSRecord.question("lemur", "A")
+    seen = {"qname": None}
+
+    def fake_forward(
+        req,
+        upstreams,
+        timeout_ms,
+        qname,
+        qtype,
+        max_concurrent=None,
+        on_attempt_result=None,
+    ):
+        seen["qname"] = qname
+        return req.reply().pack(), {"host": "1.1.1.1", "port": 53}, "ok"
+
+    monkeypatch.setattr(srv, "send_query_with_failover", fake_forward)
+    plugin_base.DNS_CACHE = InMemoryTTLCache()
+    set_runtime_snapshot(
+        upstream_addrs=[{"host": "1.1.1.1", "port": 53}],
+        plugins=[],
+        resolver_mode="forward",
+        forward_local=False,
+        search_domain="zaa",
+        qualify_single_label=True,
+        qualify_non_proper_tld=False,
+        non_proper_tld_mode="suffix",
+    )
+
+    wire = srv.resolve_query_bytes(q.pack(), "127.0.0.1")
+    assert DNSRecord.parse(wire).header.rcode == RCODE.NOERROR
+    assert seen["qname"] == "lemur.zaa"
+
+
+def test_resolve_query_bytes_search_does_not_qualify_dnskey(
+    monkeypatch, set_runtime_snapshot
+):
+    """Brief: DNSSEC qtypes are excluded from search-domain qualification.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+      - set_runtime_snapshot: fixture that applies runtime snapshot overrides.
+
+    Outputs:
+      - None; asserts failover receives the original single-label DNSKEY qname.
+    """
+    q = DNSRecord.question("zaa", "DNSKEY")
+    seen = {"qname": None}
+
+    def fake_forward(
+        req,
+        upstreams,
+        timeout_ms,
+        qname,
+        qtype,
+        max_concurrent=None,
+        on_attempt_result=None,
+    ):
+        seen["qname"] = qname
+        return req.reply().pack(), {"host": "1.1.1.1", "port": 53}, "ok"
+
+    monkeypatch.setattr(srv, "send_query_with_failover", fake_forward)
+    plugin_base.DNS_CACHE = InMemoryTTLCache()
+    set_runtime_snapshot(
+        upstream_addrs=[{"host": "1.1.1.1", "port": 53}],
+        plugins=[],
+        resolver_mode="forward",
+        forward_local=False,
+        search_domain="home.arpa",
+        qualify_single_label=True,
+        qualify_non_proper_tld=False,
+        non_proper_tld_mode="suffix",
+    )
+
+    wire = srv.resolve_query_bytes(q.pack(), "127.0.0.1")
+    assert DNSRecord.parse(wire).header.rcode == RCODE.NOERROR
+    assert seen["qname"] == "zaa"

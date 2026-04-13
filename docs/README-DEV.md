@@ -61,7 +61,7 @@ Important directories and modules:
   - `registry.py`: discovers stats backends and resolves aliases; provides `discover_stats_backends` and `get_stats_backend_class`.
   - `sqlite.py`, `mysql_mariadb.py`, `postgresql.py`, `mongodb.py`, `influxdb.py`, `mqtt_logging.py`: built‑in stats/query-log backends.
 - `src/foghorn/utils/register_caches.py`
-  - Registers decorated helper functions (`registered_cached`, `registered_lru_cached`, `registered_foghorn_ttl`, `registered_sqlite_ttl`) and applies config‑driven overrides (`apply_decorated_cache_overrides`).
+  - Registers decorated helper functions (`registered_cached`, `registered_lru_cache`, `registered_foghorn_ttl`, `registered_sqlite_ttl`) and applies config‑driven overrides (`apply_decorated_cache_overrides`).
 - `src/foghorn/stats.py`
   - Higher-level statistics collector and reporter built on top of `BaseStatsStore`.
 - `src/foghorn/servers/`
@@ -98,6 +98,10 @@ make schema
 
 Plugins can participate in schema generation in two ways:
 
+Note: when plugin configuration fields change (for example, `zone` / ZoneRecords
+adding `load_mode` and `merge_policy`), you should regenerate
+`assets/config-schema.json` and ensure example configs remain schema-valid.
+
 1. **Typed config model**
    - Implement a `get_config_model()` `@classmethod` that returns a Pydantic `BaseModel` subclass.
    - The generator calls `model_json_schema()` (Pydantic v2) or `schema()` (v1) and embeds the result.
@@ -119,17 +123,18 @@ Key pieces:
 
 - `BasePlugin` in `resolve/base.py`:
   - Handles per-instance name, logging, and priorities (`pre_priority`, `post_priority`, `setup_priority`).
-  - Implements client targeting via `targets()` using CIDR lists (`targets` and
-    `targets_ignore`) plus a per-client TTL cache (`targets_cache_ttl_seconds`).
-  - Implements listener/transport targeting via `targets()` using
-    `targets_listener`, which is normalized into a set of listener names
-    (`udp`, `tcp`, `dot`, `doh`) with aliases such as `secure` (dot+doh) and
+  - Implements client targeting via `targets()` using the nested `targets.ips` /
+    `targets.ignore_ips` config plus a per-client TTL cache (`targets_cache_ttl_seconds`).
+  - Implements listener/transport targeting via `targets.listeners`, normalized into
+    `udp`, `tcp`, `dot`, `doh` with aliases such as `secure` (dot+doh) and
     `unsecure`/`insecure` (udp+tcp).
-  - Implements domain targeting via `targets()` using `targets_domains` and
-    `targets_domains_mode` (exact/suffix/any) against a normalized qname
-    attached to the `PluginContext` when available.
-  - Implements qtype targeting via `targets_qtype()` driven by
-    `target_qtypes` / `apply_to_qtypes`.
+  - Implements domain targeting via `targets.domains` and `targets.domains_mode`
+    (exact/suffix/any) against a normalized qname attached to the `PluginContext`
+    when available.
+  - Implements qtype targeting via `targets.qtypes` (and optional per-plugin
+    `apply_to_qtypes`).
+  - Implements opcode and response-code targeting via `targets.opcodes` and
+    `targets.rcodes` (the latter for post-resolve plugins).
   - Provides hook methods:
     - `pre_resolve(qname, qtype, req, ctx)`
     - `post_resolve(qname, qtype, response_wire, ctx)`
@@ -138,7 +143,16 @@ Key pieces:
 - `resolve/registry.py`:
   - Walks the `foghorn.plugins` package using `pkgutil.walk_packages`.
   - Registers each `BasePlugin` subclass under a default alias derived from its class name plus any explicit `aliases` attribute.
+  - By default, **skips** plugin modules that raise `ImportError` during discovery
+    (missing optional dependencies) and records the errors for better diagnostics.
+  - Set `FOGHORN_STRICT_PLUGIN_DISCOVERY=1` to make discovery strict (re-raise ImportError).
   - `get_plugin_class()` resolves identifiers either as aliases or dotted import paths.
+
+- `config/config_parser.py:load_plugins()`:
+  - When a plugin referenced in config cannot be imported (due to missing optional deps
+    or skipped discovery), the plugin is **skipped by default**.
+  - To make an import failure fatal for a specific plugin, set `abort_on_failure: true`
+    in that plugin's `config` block.
 
 Built‑in resolve plugins include (by alias only):
 
@@ -196,7 +210,7 @@ There are two distinct caching layers in Foghorn:
 
 2. **Function/helper caches** (configured via `server.cache.modify` / `decorated_overrides` / `func_caches`)
    - Implemented in `foghorn.utils.register_caches`.
-   - Helpers such as `registered_cached`, `registered_lru_cached`, `registered_foghorn_ttl`, and `registered_sqlite_ttl` wrap individual functions or methods.
+   - Helpers such as `registered_cached`, `registered_lru_cache`, `registered_foghorn_ttl`, and `registered_sqlite_ttl` wrap individual functions or methods.
    - Each decorated function creates a registry entry containing module, name, backend type (`ttlcache`, `lru_cache`, `foghorn_ttl`, `sqlite_ttl`, `lfu_cache`, `rr_cache`), TTL and maxsize hints, and hit/miss counters.
    - `apply_decorated_cache_overrides()` reads an array of overrides from configuration and can adjust TTL or maxsize at runtime without code changes.
 
@@ -368,6 +382,10 @@ The `Makefile` in the project root provides shortcuts for common tasks. Importan
   - Activate the venv, create `var/` if needed, and run `foghorn --config config/config.yaml`.
 - `make schema`
   - Run `scripts/generate_foghorn_schema.py` and refresh `assets/config-schema.json`.
+- `make ui-bundle`
+  - Build `dist/foghorn-admin-ui.cdn.js` as a single JavaScript artifact with embedded admin HTML/CSS/JS for CDN delivery.
+- `make ui-bundle-runtime`
+  - Build `dist/foghorn-admin-ui.cdn.js` with runtime JavaScript only (no embedded HTML/CSS).
 - `make test`
   - Run pytest with coverage over `src`, reusing the dev environment if present.
 - `make clean`

@@ -19,15 +19,18 @@ Outputs:
 
 from __future__ import annotations
 
+import logging
 import os
+import ssl
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import yaml
 
-from .config_schema import validate_config
 from ..plugins.cache.registry import load_cache_plugin
 from ..plugins.resolve.base import BasePlugin
 from ..plugins.resolve.registry import discover_plugins, get_plugin_class
+from .plugin_profiles import resolve_plugin_profile
+from .config_schema import validate_config
 
 
 def _is_var_key(key: str) -> bool:
@@ -37,18 +40,29 @@ def _is_var_key(key: str) -> bool:
       - key: Candidate variable name.
 
     Outputs:
-      - bool: True when the name is ALL_UPPERCASE and matches [A-Z_][A-Z0-9_]*.
+      - bool: True when the name matches [A-Za-z_][A-Za-z0-9_]*.
     """
 
     if not key:
-        return False
-    if key != key.upper():
         return False
 
     # Keep in sync with config_schema variable name rules.
     import re as _re
 
-    return bool(_re.fullmatch(r"[A-Z_][A-Z0-9_]*", key))
+    return bool(_re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key))
+
+
+def _is_interpolation_var_key(key: str) -> bool:
+    """Brief: Check whether a variable key should participate in interpolation.
+
+    Inputs:
+      - key: Candidate variable name.
+
+    Outputs:
+      - bool: True when key is a valid identifier and has no lowercase letters.
+    """
+
+    return _is_var_key(key) and key.upper() == key
 
 
 def _parse_yaml_value(text: str) -> Any:
@@ -90,7 +104,9 @@ def parse_config_variables(
     Notes:
       - Accepts both top-level 'variables' (preferred) and legacy 'vars'. When
         both are present, 'variables' wins.
-      - Only ALL_UPPERCASE keys matching [A-Z_][A-Z0-9_]* are considered.
+      - Keys must match [A-Za-z_][A-Za-z0-9_]*.
+      - Keys from config-file 'variables'/'vars' that are not ALL_CAPS are
+        ignored for interpolation (reserved for YAML anchors).
       - Values are parsed as YAML so list/dict/int/bool values can be provided.
 
     Example:
@@ -107,13 +123,26 @@ def parse_config_variables(
     if variables_base is not None:
         if not isinstance(variables_base, dict):
             raise ValueError("config.variables must be a mapping when present")
-        merged: Dict[str, Any] = dict(variables_base)
+        merged = {
+            k: v
+            for k, v in variables_base.items()
+            if isinstance(k, str) and _is_interpolation_var_key(k)
+        }
     elif vars_base is not None:
         if not isinstance(vars_base, dict):
             raise ValueError("config.vars must be a mapping when present")
-        merged = dict(vars_base)
+        merged = {
+            k: v
+            for k, v in vars_base.items()
+            if isinstance(k, str) and _is_interpolation_var_key(k)
+        }
     else:
         merged = {}
+
+    # Track which variable keys were sourced from the config file. This is used
+    # by config_schema normalization to restrict whole-node injection to
+    # config-authored variables only (environment variables are interpolation-only).
+    cfg["__schema_validation_config_var_keys"] = sorted(str(k) for k in merged.keys())
 
     env = environ or dict(os.environ)
     for k, v in env.items():
@@ -132,8 +161,7 @@ def parse_config_variables(
         k = str(k).strip()
         if not _is_var_key(k):
             raise ValueError(
-                "Invalid variable name %r (must be ALL_UPPERCASE and match [A-Z_][A-Z0-9_]*)"
-                % k
+                "Invalid variable name %r (must match [A-Za-z_][A-Za-z0-9_]*)" % k
             )
         merged[k] = _parse_yaml_value(raw)
 
@@ -144,11 +172,182 @@ def parse_config_variables(
     return merged
 
 
+def _coerce_bool_flag(value: object, *, default: bool) -> bool:
+    """Brief: Coerce a config value to bool with string-aware parsing.
+
+    Inputs:
+      - value: Candidate boolean-like value.
+      - default: Fallback boolean used when value is None or unrecognized.
+
+    Outputs:
+      - bool: Parsed boolean value.
+    """
+
+    if value is None:
+        return bool(default)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in {"1", "true", "yes", "on"}:
+            return True
+        if text in {"0", "false", "no", "off"}:
+            return False
+    return bool(default)
+
+
+def _resolve_abort_on_fail_flag(container: Dict[str, Any], *, default: bool) -> bool:
+    """Brief: Resolve abort behavior from a config mapping.
+
+    Inputs:
+      - container: Mapping that may include abort_on_fail or abort_on_failure.
+      - default: Fallback when no explicit abort flag is present.
+
+    Outputs:
+      - bool: Effective abort behavior.
+
+    Notes:
+      - Supports both 'abort_on_fail' and 'abort_on_failure'; when both are
+        present, 'abort_on_fail' takes precedence.
+    """
+
+    if "abort_on_fail" in container:
+        return _coerce_bool_flag(container.get("abort_on_fail"), default=default)
+    if "abort_on_failure" in container:
+        return _coerce_bool_flag(container.get("abort_on_failure"), default=default)
+    return bool(default)
+
+
+def _iter_tls_ca_file_checks(
+    cfg: Dict[str, Any],
+) -> List[Tuple[str, str, bool]]:
+    """Brief: Collect TLS ca_file validation checks from upstream config.
+
+    Inputs:
+      - cfg: Parsed configuration mapping.
+
+    Outputs:
+      - list[tuple[str, str, bool]] where each item is:
+        - ca_file path string
+        - human-readable config location
+        - effective abort_on_fail behavior
+    """
+    checks: List[Tuple[str, str, bool]] = []
+    upstream_cfg = cfg.get("upstreams")
+    if not isinstance(upstream_cfg, dict):
+        return checks
+
+    def _collect_from_endpoints(raw: object, path_prefix: str) -> None:
+        if not isinstance(raw, list):
+            return
+        for idx, endpoint in enumerate(raw):
+            if not isinstance(endpoint, dict):
+                continue
+            tls_cfg = endpoint.get("tls")
+            if not isinstance(tls_cfg, dict):
+                continue
+            raw_ca_file = tls_cfg.get("ca_file")
+            if raw_ca_file is None:
+                continue
+            ca_file = str(raw_ca_file).strip()
+            if not ca_file:
+                continue
+
+            endpoint_abort = _resolve_abort_on_fail_flag(endpoint, default=True)
+            tls_abort = _resolve_abort_on_fail_flag(tls_cfg, default=endpoint_abort)
+            checks.append(
+                (
+                    ca_file,
+                    f"{path_prefix}[{idx}].tls.ca_file",
+                    tls_abort,
+                )
+            )
+
+    _collect_from_endpoints(upstream_cfg.get("endpoints"), "upstreams.endpoints")
+
+    backup_cfg = upstream_cfg.get("backup")
+    if isinstance(backup_cfg, dict):
+        _collect_from_endpoints(
+            backup_cfg.get("endpoints"),
+            "upstreams.backup.endpoints",
+        )
+
+    return checks
+
+
+def _validate_tls_ca_file(ca_file: str, *, location: str) -> None:
+    """Brief: Validate a TLS CA bundle path for existence, readability, and format.
+
+    Inputs:
+      - ca_file: Filesystem path to CA bundle file.
+      - location: Config key path used in error messages.
+
+    Outputs:
+      - None.
+
+    Raises:
+      - ValueError: When the CA bundle path is missing, unreadable, or invalid.
+    """
+    if not os.path.exists(ca_file):
+        raise ValueError(
+            f"{location}: CA file {ca_file!r} does not exist",
+        )
+    if not os.path.isfile(ca_file):
+        raise ValueError(
+            f"{location}: CA file {ca_file!r} is not a regular file",
+        )
+    try:
+        with open(ca_file, "rb"):
+            pass
+    except OSError as exc:
+        raise ValueError(
+            f"{location}: CA file {ca_file!r} is not readable: {exc}",
+        ) from exc
+
+    try:
+        ssl.create_default_context(cafile=ca_file)
+    except (ssl.SSLError, OSError, ValueError) as exc:
+        raise ValueError(
+            f"{location}: CA file {ca_file!r} is not a valid TLS CA bundle: {exc}",
+        ) from exc
+
+
+def _validate_tls_ca_files(cfg: Dict[str, Any]) -> None:
+    """Brief: Validate all configured TLS CA bundle paths.
+
+    Inputs:
+      - cfg: Parsed and schema-validated configuration mapping.
+
+    Outputs:
+      - None.
+
+    Notes:
+      - For each TLS ca_file, failures are fatal by default.
+      - When abort_on_fail/abort_on_failure is explicitly false on the endpoint
+        or tls block, failures are logged and startup continues.
+    """
+    logger = logging.getLogger("foghorn.config.config_parser")
+
+    for ca_file, location, abort_on_fail in _iter_tls_ca_file_checks(cfg):
+        try:
+            _validate_tls_ca_file(ca_file, location=location)
+        except ValueError as exc:
+            if abort_on_fail:
+                raise
+            logger.warning(
+                "%s (continuing because abort_on_fail/abort_on_failure is false)",
+                exc,
+            )
+
+
 def parse_config_file(
     config_path: str,
     *,
     cli_vars: Optional[List[str]] = None,
-    unknown_keys: str = "warn",
+    unknown_keys: str = "error",
+    skip_schema_validation: bool = False,
 ) -> Dict[str, Any]:
     """Brief: Read, variable-merge, and schema-validate a v2 YAML config file.
 
@@ -158,6 +357,7 @@ def parse_config_file(
       - unknown_keys: Policy for unknown config keys not described by the
         JSON Schema ("ignore", "warn", or "error"). See
         ``foghorn.config.config_schema.validate_config`` for semantics.
+      - skip_schema_validation: When true, bypass JSON Schema validation.
 
     Outputs:
       - dict: Parsed configuration mapping (mutated by validate_config).
@@ -181,72 +381,52 @@ def parse_config_file(
 
     # Expand and validate variables, then run JSON Schema validation.
     parse_config_variables(cfg, cli_vars=list(cli_vars or []))
-    validate_config(cfg, config_path=config_path, unknown_keys=unknown_keys)
+    validate_config(
+        cfg,
+        config_path=config_path,
+        unknown_keys=unknown_keys,
+        skip_schema_validation=bool(skip_schema_validation),
+    )
+    _validate_tls_ca_files(cfg)
 
     return cfg
 
 
-def normalize_upstream_config(
-    cfg: Dict[str, Any],
-) -> Tuple[List[Dict[str, Union[str, int, dict]]], int]:
-    """Brief: Normalize upstream configuration to endpoints + timeout.
+def _normalize_upstream_endpoints_list(
+    upstream_raw: List[Any],
+) -> List[Dict[str, Union[str, int, dict]]]:
+    """Brief: Normalize a raw upstream endpoints list.
 
     Inputs:
-      - cfg: dict containing parsed YAML. Supports both:
-        - v2 layout (preferred):
-
-            upstreams:
-              strategy: failover|round_robin|random
-              max_concurrent: int
-              endpoints: [...]
-
-            server:
-              resolver:
-                timeout_ms: int
-
-        - legacy layout (still accepted for direct helper usage/tests):
-
-            upstreams: [...]
-            foghorn:
-              timeout_ms: int
+      - upstream_raw: List of upstream endpoint mappings.
 
     Outputs:
-      - (upstreams, timeout_ms):
-        - upstreams: list[dict] with keys like {'host': str, 'port': int} or DoH
-          metadata (transport/url/method/headers/tls).
-        - timeout_ms: int timeout in milliseconds applied per upstream attempt.
+      - list[dict]: Normalized upstream endpoint mappings compatible with
+        foghorn.servers.server.send_query_with_failover.
 
     Raises:
-      - ValueError: For invalid types or missing required fields.
+      - ValueError: When items are not mappings or required fields are missing.
+
+    Notes:
+      - This helper is shared by normalize_upstream_config() and
+        normalize_upstream_backup_config() so that the 'endpoints' and
+        'upstreams.backup.endpoints' blocks share identical parsing rules.
     """
-
-    upstream_block = cfg.get("upstreams")
-
-    # Accept either the v2 object-with-endpoints or the legacy list form so that
-    # callers outside main() (for example unit tests) can continue to exercise
-    # the helper without constructing a full v2 root.
-    if isinstance(upstream_block, dict) and "endpoints" in upstream_block:
-        upstream_raw = upstream_block.get("endpoints")
-    else:
-        upstream_raw = upstream_block
-
-    if not isinstance(upstream_raw, list):
-        raise ValueError(
-            "config.upstreams must be a list or an object with an 'endpoints' list",
-        )
 
     upstreams: List[Dict[str, Union[str, int, dict]]] = []
     for u in upstream_raw:
         if not isinstance(u, dict):
             raise ValueError("each upstream entry must be a mapping")
 
-        transport = str(u.get("transport", "udp")).lower()
+        transport = str(u.get("transport", "udp")).strip().lower()
 
         if transport == "doh":
             rec: Dict[str, Union[str, int, dict]] = {
                 "transport": "doh",
                 "url": str(u["url"]),
             }
+            if "id" in u and str(u.get("id", "")).strip():
+                rec["id"] = str(u.get("id")).strip()
             if "method" in u:
                 rec["method"] = str(u.get("method"))
             if "headers" in u and isinstance(u["headers"], dict):
@@ -260,10 +440,15 @@ def normalize_upstream_config(
             raise ValueError("each upstream entry must include 'host'")
 
         default_port = 853 if transport == "dot" else 53
+        raw_port = u.get("port")
+        if raw_port is None or (isinstance(raw_port, str) and not raw_port.strip()):
+            raw_port = default_port
         rec2: Dict[str, Union[str, int, dict]] = {
             "host": str(u["host"]),
-            "port": int(u.get("port", default_port)),
+            "port": int(raw_port),
         }
+        if "id" in u and str(u.get("id", "")).strip():
+            rec2["id"] = str(u.get("id")).strip()
         if "transport" in u:
             rec2["transport"] = transport
         if "tls" in u and isinstance(u["tls"], dict):
@@ -272,33 +457,102 @@ def normalize_upstream_config(
             rec2["pool"] = u["pool"]
         upstreams.append(rec2)
 
-    # Timeout source: prefer v2 server.resolver.timeout_ms when present, falling
-    # back to legacy foghorn.timeout_ms for older callers/tests.
-    timeout_ms = 2000
+    return upstreams
 
-    server_cfg = cfg.get("server")
-    if isinstance(server_cfg, dict):
-        resolver_cfg = server_cfg.get("resolver") or {}
-        if not isinstance(resolver_cfg, dict) and resolver_cfg is not None:
-            raise ValueError("config.server.resolver must be a mapping when present")
-        if isinstance(resolver_cfg, dict):
-            try:
-                timeout_ms = int(resolver_cfg.get("timeout_ms", timeout_ms))
-            except (TypeError, ValueError):
-                timeout_ms = 2000
-    # Legacy foghorn-based timeout support (used only when server.resolver is
-    # absent) to keep tests and direct helper calls working.
-    else:
-        foghorn_cfg = cfg.get("foghorn") or {}
-        if not isinstance(foghorn_cfg, dict) and foghorn_cfg is not None:
-            raise ValueError("config.foghorn must be a mapping when present")
-        if isinstance(foghorn_cfg, dict):
-            try:
-                timeout_ms = int(foghorn_cfg.get("timeout_ms", timeout_ms))
-            except (TypeError, ValueError):
-                timeout_ms = 2000
+
+def normalize_upstream_config(
+    cfg: Dict[str, Any],
+) -> Tuple[List[Dict[str, Union[str, int, dict]]], int]:
+    """Brief: Normalize upstream configuration to endpoints + timeout.
+
+    Inputs:
+      - cfg: dict containing parsed YAML with v2 layout:
+
+            upstreams:
+              strategy: failover|round_robin|random
+              max_concurrent: int
+              endpoints: [...]
+
+            server:
+              resolver:
+                timeout_ms: int
+
+    Outputs:
+      - (upstreams, timeout_ms):
+        - upstreams: list[dict] with keys like {'host': str, 'port': int} or DoH
+          metadata (transport/url/method/headers/tls).
+        - timeout_ms: int timeout in milliseconds applied per upstream attempt.
+
+    Raises:
+      - ValueError: For invalid types or missing required fields.
+    """
+
+    upstream_block = cfg.get("upstreams")
+    if not isinstance(upstream_block, dict):
+        raise ValueError("config.upstreams must be a mapping with an 'endpoints' list")
+
+    upstream_raw = upstream_block.get("endpoints")
+    if not isinstance(upstream_raw, list):
+        raise ValueError("config.upstreams.endpoints must be a list")
+
+    upstreams = _normalize_upstream_endpoints_list(upstream_raw)
+
+    timeout_ms = 2000
+    server_cfg = cfg.get("server") or {}
+    if not isinstance(server_cfg, dict):
+        raise ValueError("config.server must be a mapping when present")
+
+    resolver_cfg = server_cfg.get("resolver") or {}
+    if not isinstance(resolver_cfg, dict):
+        raise ValueError("config.server.resolver must be a mapping when present")
+    try:
+        timeout_ms = int(resolver_cfg.get("timeout_ms", timeout_ms))
+    except (TypeError, ValueError):
+        timeout_ms = 2000
 
     return upstreams, timeout_ms
+
+
+def normalize_upstream_backup_config(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Brief: Normalize upstreams.backup.endpoints to a list of upstream dicts.
+
+    Inputs:
+      - cfg: Parsed configuration mapping.
+
+    Outputs:
+      - list[dict]: Normalized backup upstream endpoints.
+
+    Notes:
+      - This is a v2-only helper. When upstreams.backup.endpoints is missing,
+        returns an empty list.
+      - Backup endpoints are normalized using the same parsing rules as primary
+        upstream endpoints.
+
+    Example:
+      >>> cfg = {'upstreams': {'endpoints': [{'host': '1.1.1.1'}], 'backup': {'endpoints': [{'host': '8.8.8.8'}]}}}
+      >>> normalize_upstream_backup_config(cfg)[0]['host']
+      '8.8.8.8'
+    """
+
+    upstream_cfg = cfg.get("upstreams")
+    if not isinstance(upstream_cfg, dict):
+        return []
+
+    backup_cfg = upstream_cfg.get("backup")
+    if backup_cfg is None:
+        return []
+    if not isinstance(backup_cfg, dict):
+        raise ValueError("config.upstreams.backup must be a mapping when present")
+
+    raw = backup_cfg.get("endpoints")
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise ValueError(
+            "config.upstreams.backup.endpoints must be a list when present"
+        )
+
+    return [dict(x) for x in _normalize_upstream_endpoints_list(raw)]
 
 
 def _validate_plugin_config(plugin_cls: type[BasePlugin], config: dict | None) -> dict:
@@ -475,31 +729,20 @@ def load_plugins(plugin_specs: List[dict]) -> List[BasePlugin]:
     Inputs:
       - plugin_specs: List of plugin specs. Each item is either:
         - str: a dotted module path or short alias, or
-        - dict: plugin entry mapping supporting either legacy or v2 shapes:
-          Legacy keys (still accepted):
-            - module: dotted module path or alias
-            - name: optional friendly plugin label
-          v2 keys (preferred):
-            - type: plugin type/alias (maps to the same aliases used by
-              discover_plugins/get_plugin_class)
-            - id: optional stable identifier for this plugin instance; when
-              present and non-empty, it is treated as the effective plugin
-              instance name for logging/statistics.
-          Common keys (both layouts):
+        - dict: plugin entry mapping with v2 keys:
+            - type: plugin type/alias (maps to discover_plugins/get_plugin_class)
+            - id/name: optional identifier for the plugin instance
             - config: plugin-specific configuration mapping
             - enabled: bool (default True). When false, the plugin is skipped.
             - comment: optional human-only string (ignored)
-            - pre_priority/post_priority/setup_priority: BasePlugin hook priorities
-            - priority: shorthand that sets all three priority fields above
+            - hooks.pre_resolve / hooks.post_resolve / hooks.setup:
+              per-hook priorities as int or {priority: int}
+            - hooks.priority: shorthand setting all three hook priorities
 
     Outputs:
       - list[BasePlugin]: Initialized plugin instances.
 
     Notes:
-      - Priority keys are treated as BasePlugin options and are not passed into
-        per-plugin config model/schema validation.
-      - When both explicit priority keys and `priority` are present, explicit
-        keys win.
       - `Comment` is rejected; use `comment`.
       - Each plugin instance must have a unique name. When a config entry omits
         `name` and `id`, a name derived from the plugin's primary alias (or
@@ -516,31 +759,66 @@ def load_plugins(plugin_specs: List[dict]) -> List[BasePlugin]:
         plugin_name: Optional[object]
         raw_config: Dict[str, Any]
 
-        spec_priority: object | None = None
-        spec_pre: object | None = None
-        spec_post: object | None = None
-        spec_setup: object | None = None
         spec_enabled: object | None = None
+
+        # Hooks shorthands (preferred):
+        # - hooks.pre_resolve: <int> or {priority: <int>}
+        # - hooks.post_resolve: <int> or {priority: <int>}
+        # - hooks.priority: <int> sets pre/post/setup priorities
+        hooks_priority: object | None = None
+        hooks_pre: object | None = None
+        hooks_post: object | None = None
+        hooks_setup: object | None = None
 
         if isinstance(spec, str):
             module_path = spec
             plugin_name = None
             raw_config = {}
         elif isinstance(spec, dict):
-            # Prefer the v2 "type" field (plugin alias) when present, but retain
-            # support for the legacy "module" key so existing configs continue
-            # to work. The effective identifier is passed to get_plugin_class(),
-            # which accepts either aliases or dotted import paths.
-            module_path = spec.get("module") or spec.get("type")
+            if "module" in spec:
+                raise ValueError(
+                    "plugins[]: 'module' is no longer supported; use 'type'"
+                )
+
+            module_path = spec.get("type")
             # Prefer explicit "name" when provided; otherwise fall back to the
             # v2 "id" field so operator-assigned instance IDs become the
             # human-visible plugin names.
             plugin_name = spec.get("name") or spec.get("id")
 
-            spec_priority = spec.get("priority")
-            spec_pre = spec.get("pre_priority")
-            spec_post = spec.get("post_priority")
-            spec_setup = spec.get("setup_priority")
+            # Hooks are the preferred way to set per-hook priorities.
+            hooks_obj = spec.get("hooks")
+            if isinstance(hooks_obj, dict):
+                hooks_priority = hooks_obj.get("priority")
+
+                pre_obj = hooks_obj.get("pre_resolve")
+                if isinstance(pre_obj, dict):
+                    hooks_pre = pre_obj.get("priority")
+                elif pre_obj is not None:
+                    hooks_pre = pre_obj
+
+                post_obj = hooks_obj.get("post_resolve")
+                if isinstance(post_obj, dict):
+                    hooks_post = post_obj.get("priority")
+                elif post_obj is not None:
+                    hooks_post = post_obj
+
+                setup_obj = hooks_obj.get("setup")
+                if isinstance(setup_obj, dict):
+                    hooks_setup = setup_obj.get("priority")
+                elif setup_obj is not None:
+                    hooks_setup = setup_obj
+
+            for legacy_key in (
+                "priority",
+                "pre_priority",
+                "post_priority",
+                "setup_priority",
+            ):
+                if legacy_key in spec:
+                    raise ValueError(
+                        f"plugins[]: '{legacy_key}' is no longer supported; use hooks.* priorities"
+                    )
             spec_enabled = spec.get("enabled")
 
             if "Comment" in spec:
@@ -558,6 +836,16 @@ def load_plugins(plugin_specs: List[dict]) -> List[BasePlugin]:
             continue
 
         cfg_enabled = raw_config.get("enabled")
+        for legacy_key in (
+            "priority",
+            "pre_priority",
+            "post_priority",
+            "setup_priority",
+        ):
+            if legacy_key in raw_config:
+                raise ValueError(
+                    f"plugins[].config: '{legacy_key}' is no longer supported; use hooks.* priorities"
+                )
         if "Comment" in raw_config:
             raise ValueError(
                 "plugins[].config: use 'comment' (lowercase) rather than 'Comment'"
@@ -570,30 +858,48 @@ def load_plugins(plugin_specs: List[dict]) -> List[BasePlugin]:
         if not bool(enabled_obj):
             continue
 
-        cfg_priority = raw_config.get("priority")
-        cfg_pre = raw_config.get("pre_priority")
-        cfg_post = raw_config.get("post_priority")
-        cfg_setup = raw_config.get("setup_priority")
+        # Hooks are encouraged as the default priority mechanism.
+        pre_priority: object | None = None
+        post_priority: object | None = None
+        setup_priority: object | None = None
 
-        generic_priority = spec_priority if spec_priority is not None else cfg_priority
-
-        pre_priority = cfg_pre if cfg_pre is not None else spec_pre
-        post_priority = cfg_post if cfg_post is not None else spec_post
-        setup_priority = cfg_setup if cfg_setup is not None else spec_setup
-
-        if pre_priority is None and generic_priority is not None:
-            pre_priority = generic_priority
-        if post_priority is None and generic_priority is not None:
-            post_priority = generic_priority
-        if setup_priority is None and generic_priority is not None:
-            setup_priority = generic_priority
+        # 1) Hook-specific priorities (preferred; take precedence).
+        if hooks_priority is not None:
+            pre_priority = hooks_priority
+            post_priority = hooks_priority
+            setup_priority = hooks_priority
+        if hooks_pre is not None:
+            pre_priority = hooks_pre
+        if hooks_post is not None:
+            post_priority = hooks_post
+        if hooks_setup is not None:
+            setup_priority = hooks_setup
 
         plugin_specific_config = dict(raw_config)
 
         # Resolve plugin class eagerly so we can derive a stable, human-friendly
         # instance name when the config omits "name". The effective instance
         # name is used for logging, statistics, and HTTP routing.
-        plugin_cls = get_plugin_class(module_path, alias_registry)
+        #
+        # In minimal/headless builds, optional plugin dependencies may be absent.
+        # When this happens, skip the plugin by default unless the plugin config
+        # explicitly sets abort_on_failure=true.
+        import_abort_on_failure = bool(raw_config.get("abort_on_failure", False))
+        try:
+            plugin_cls = get_plugin_class(module_path, alias_registry)
+        except Exception as exc:
+            log = logging.getLogger("foghorn.config.plugins")
+            if import_abort_on_failure:
+                raise RuntimeError(
+                    f"Failed to load plugin {module_path!r} with abort_on_failure=true: {exc}"
+                ) from exc
+            log.warning(
+                "Skipping plugin %s because it could not be imported (%s). "
+                "Set abort_on_failure=true to make this fatal.",
+                module_path,
+                exc,
+            )
+            continue
 
         effective_name = _derive_plugin_instance_name(
             plugin_cls=plugin_cls,
@@ -602,16 +908,45 @@ def load_plugins(plugin_specs: List[dict]) -> List[BasePlugin]:
             used_names=seen_names,
         )
 
+        # Optional profile presets (e.g., config.profile: "lan") are merged
+        # before typed config validation so model defaults do not mask profile
+        # values. Explicit config keys still override profile values.
+        profile_name = str(plugin_specific_config.get("profile", "") or "").strip()
+        if profile_name:
+            try:
+                plugin_aliases = list(getattr(plugin_cls, "get_aliases", lambda: [])())
+            except Exception:
+                plugin_aliases = []
+            profile_plugin_type = ""
+            for alias in plugin_aliases:
+                alias_text = str(alias or "").strip()
+                if alias_text:
+                    profile_plugin_type = alias_text
+                    break
+            if not profile_plugin_type:
+                profile_plugin_type = (
+                    str(getattr(plugin_cls, "__module__", "") or "")
+                    .split(".")[-1]
+                    .strip()
+                )
+            if not profile_plugin_type:
+                profile_plugin_type = str(module_path)
+            plugin_specific_config = resolve_plugin_profile(
+                plugin_type=profile_plugin_type,
+                profile_name=profile_name,
+                explicit_cfg=plugin_specific_config,
+                profiles_files=[],
+                abort_on_failure=bool(
+                    plugin_specific_config.get("abort_on_failure", False)
+                ),
+            )
+
         # Per-plugin cache selection.
         cache_cfg = plugin_specific_config.pop("cache", None)
 
         for k in (
             "enabled",
             "comment",
-            "priority",
-            "pre_priority",
-            "post_priority",
-            "setup_priority",
         ):
             plugin_specific_config.pop(k, None)
 

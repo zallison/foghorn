@@ -1,0 +1,447 @@
+{
+  "annotations": {
+	"list": [
+	  {
+		"builtIn": 1,
+		"datasource": {
+		  "type": "grafana",
+		  "uid": "-- Grafana --"
+		},
+		"enable": true,
+		"hide": true,
+		"iconColor": "rgba(0, 211, 255, 1)",
+		"name": "Annotations & Alerts",
+		"target": {
+		  "limit": 100,
+		  "matchAny": false,
+		  "tags": [],
+		  "type": "dashboard"
+		},
+		"type": "dashboard"
+	  }
+	]
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+	{
+	  "datasource": {
+		"type": "influxdb",
+		"uid": "foghorn-influxdb"
+	  },
+	  "fieldConfig": {
+		"defaults": {
+		  "color": {
+			"mode": "thresholds"
+		  },
+		  "mappings": [],
+		  "thresholds": {
+			"mode": "absolute",
+			"steps": [
+			  {
+				"color": "green",
+				"value": null
+			  },
+			  {
+				"color": "red",
+				"value": 1
+			  }
+			]
+		  },
+		  "unit": "short"
+		},
+		"overrides": []
+	  },
+	  "gridPos": {
+		"h": 4,
+		"w": 6,
+		"x": 0,
+		"y": 0
+	  },
+	  "id": 1,
+	  "options": {
+		"colorMode": "value",
+		"graphMode": "none",
+		"justifyMode": "auto",
+		"orientation": "auto",
+		"percentChangeColorMode": "standard",
+		"reduceOptions": {
+		  "calcs": [
+			"lastNotNull"
+		  ],
+		  "fields": "",
+		  "values": false
+		},
+		"showPercentChange": false,
+		"textMode": "auto",
+		"wideLayout": true
+	  },
+	  "targets": [
+		{
+		  "query": "from(bucket: v.defaultBucket)\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"foghorn_querylog\" and r._field == \"count\")\n  |> sum()",
+		  "refId": "A"
+		}
+	  ],
+	  "title": "Total Queries",
+	  "type": "stat"
+	},
+	{
+	  "datasource": {
+		"type": "influxdb",
+		"uid": "foghorn-influxdb"
+	  },
+	  "fieldConfig": {
+		"defaults": {
+		  "color": {
+			"mode": "thresholds"
+		  },
+		  "mappings": [],
+		  "thresholds": {
+			"mode": "absolute",
+			"steps": [
+			  {
+				"color": "green",
+				"value": null
+			  },
+			  {
+				"color": "red",
+				"value": 1
+			  }
+			]
+		  },
+		  "unit": "short"
+		},
+		"overrides": []
+	  },
+	  "gridPos": {
+		"h": 4,
+		"w": 6,
+		"x": 6,
+		"y": 0
+	  },
+	  "id": 2,
+	  "options": {
+		"colorMode": "value",
+		"graphMode": "none",
+		"justifyMode": "auto",
+		"orientation": "auto",
+		"percentChangeColorMode": "standard",
+		"reduceOptions": {
+		  "calcs": [
+			"lastNotNull"
+		  ],
+		  "fields": "",
+		  "values": false
+		},
+		"showPercentChange": false,
+		"textMode": "auto",
+		"wideLayout": true
+	  },
+	  "targets": [
+		{
+		  "query": "from(bucket: v.defaultBucket)\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"foghorn_querylog\" and r._field == \"count\")\n  |> filter(fn: (r) => exists r.status and r.status != \"ok\")\n  |> sum()",
+		  "refId": "A"
+		}
+	  ],
+	  "title": "Errored Queries",
+	  "type": "stat"
+	},
+	{
+	  "datasource": {
+		"type": "influxdb",
+		"uid": "foghorn-influxdb"
+	  },
+	  "fieldConfig": {
+		"defaults": {
+		  "color": {
+			"mode": "palette-classic"
+		  },
+		  "custom": {
+			"drawStyle": "line",
+			"fillOpacity": 15,
+			"lineInterpolation": "linear",
+			"lineWidth": 2,
+			"pointSize": 2,
+			"showPoints": "never",
+			"spanNulls": false
+		  },
+		  "mappings": [],
+		  "thresholds": {
+			"mode": "absolute",
+			"steps": [
+			  {
+				"color": "green",
+				"value": null
+			  },
+			  {
+				"color": "red",
+				"value": 1000
+			  }
+			]
+		  },
+		  "unit": "short"
+		},
+		"overrides": []
+	  },
+	  "gridPos": {
+		"h": 8,
+		"w": 12,
+		"x": 0,
+		"y": 4
+	  },
+	  "id": 3,
+	  "options": {
+		"legend": {
+		  "calcs": [],
+		  "displayMode": "list",
+		  "placement": "bottom",
+		  "showLegend": true
+		},
+		"tooltip": {
+		  "mode": "single",
+		  "sort": "none"
+		}
+	  },
+	  "targets": [
+		{
+		  "query": "from(bucket: v.defaultBucket)\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"foghorn_querylog\" and r._field == \"count\")\n  |> aggregateWindow(every: 1m, fn: sum, createEmpty: false)\n  |> yield(name: \"queries_per_minute\")",
+		  "refId": "A"
+		}
+	  ],
+	  "title": "Query Volume (per minute)",
+	  "type": "timeseries"
+	},
+	{
+	  "datasource": {
+		"type": "influxdb",
+		"uid": "foghorn-influxdb"
+	  },
+	  "fieldConfig": {
+		"defaults": {
+		  "mappings": [],
+		  "thresholds": {
+			"mode": "absolute",
+			"steps": [
+			  {
+				"color": "green",
+				"value": null
+			  },
+			  {
+				"color": "red",
+				"value": 80
+			  }
+			]
+		  }
+		},
+		"overrides": []
+	  },
+	  "gridPos": {
+		"h": 6,
+		"w": 12,
+		"x": 12,
+		"y": 0
+	  },
+	  "id": 4,
+	  "options": {
+		"cellHeight": "sm",
+		"footer": {
+		  "countRows": false,
+		  "fields": "",
+		  "reducer": [
+			"sum"
+		  ],
+		  "show": false
+		},
+		"showHeader": true
+	  },
+	  "targets": [
+		{
+		  "query": "from(bucket: v.defaultBucket)\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"foghorn_querylog\" and r._field == \"count\")\n  |> group(columns: [\"rcode\"])\n  |> sum()\n  |> group()\n  |> keep(columns: [\"rcode\", \"_value\"])\n  |> sort(columns: [\"_value\"], desc: true)",
+		  "refId": "A"
+		}
+	  ],
+	  "title": "RCODE Distribution",
+	  "type": "table"
+	},
+	{
+	  "datasource": {
+		"type": "influxdb",
+		"uid": "foghorn-influxdb"
+	  },
+	  "fieldConfig": {
+		"defaults": {
+		  "mappings": [],
+		  "thresholds": {
+			"mode": "absolute",
+			"steps": [
+			  {
+				"color": "green",
+				"value": null
+			  },
+			  {
+				"color": "red",
+				"value": 80
+			  }
+			]
+		  }
+		},
+		"overrides": []
+	  },
+	  "gridPos": {
+		"h": 6,
+		"w": 12,
+		"x": 12,
+		"y": 6
+	  },
+	  "id": 5,
+	  "options": {
+		"cellHeight": "sm",
+		"footer": {
+		  "countRows": false,
+		  "fields": "",
+		  "reducer": [
+			"sum"
+		  ],
+		  "show": false
+		},
+		"showHeader": true
+	  },
+	  "targets": [
+		{
+		  "query": "from(bucket: v.defaultBucket)\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"foghorn_querylog\" and r._field == \"count\")\n  |> group(columns: [\"qtype\"])\n  |> sum()\n  |> group()\n  |> keep(columns: [\"qtype\", \"_value\"])\n  |> sort(columns: [\"_value\"], desc: true)",
+		  "refId": "A"
+		}
+	  ],
+	  "title": "QTYPE Distribution",
+	  "type": "table"
+	},
+	{
+	  "datasource": {
+		"type": "influxdb",
+		"uid": "foghorn-influxdb"
+	  },
+	  "fieldConfig": {
+		"defaults": {
+		  "mappings": [],
+		  "thresholds": {
+			"mode": "absolute",
+			"steps": [
+			  {
+				"color": "green",
+				"value": null
+			  },
+			  {
+				"color": "red",
+				"value": 80
+			  }
+			]
+		  }
+		},
+		"overrides": []
+	  },
+	  "gridPos": {
+		"h": 8,
+		"w": 12,
+		"x": 0,
+		"y": 12
+	  },
+	  "id": 6,
+	  "options": {
+		"cellHeight": "sm",
+		"footer": {
+		  "countRows": false,
+		  "fields": "",
+		  "reducer": [
+			"sum"
+		  ],
+		  "show": false
+		},
+		"showHeader": true
+	  },
+	  "targets": [
+		{
+		  "query": "from(bucket: v.defaultBucket)\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"foghorn_querylog\" and r._field == \"count\")\n  |> group(columns: [\"client_ip\"])\n  |> sum()\n  |> group()\n  |> keep(columns: [\"client_ip\", \"_value\"])\n  |> sort(columns: [\"_value\"], desc: true)\n  |> limit(n: 20)",
+		  "refId": "A"
+		}
+	  ],
+	  "title": "Top Client IPs",
+	  "type": "table"
+	},
+	{
+	  "datasource": {
+		"type": "influxdb",
+		"uid": "foghorn-influxdb"
+	  },
+	  "fieldConfig": {
+		"defaults": {
+		  "mappings": [],
+		  "thresholds": {
+			"mode": "absolute",
+			"steps": [
+			  {
+				"color": "green",
+				"value": null
+			  },
+			  {
+				"color": "red",
+				"value": 80
+			  }
+			]
+		  }
+		},
+		"overrides": []
+	  },
+	  "gridPos": {
+		"h": 8,
+		"w": 12,
+		"x": 12,
+		"y": 12
+	  },
+	  "id": 7,
+	  "options": {
+		"cellHeight": "sm",
+		"footer": {
+		  "countRows": false,
+		  "fields": "",
+		  "reducer": [
+			"sum"
+		  ],
+		  "show": false
+		},
+		"showHeader": true
+	  },
+	  "targets": [
+		{
+		  "query": "from(bucket: v.defaultBucket)\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"foghorn_querylog\" and r._field == \"name\")\n  |> duplicate(column: \"_value\", as: \"qname\")\n  |> group(columns: [\"qname\"])\n  |> count(column: \"_value\")\n  |> group()\n  |> keep(columns: [\"qname\", \"_value\"])\n  |> sort(columns: [\"_value\"], desc: true)\n  |> limit(n: 20)",
+		  "refId": "A"
+		}
+	  ],
+	  "title": "Top Queried Names",
+	  "type": "table"
+	}
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": [
+	"foghorn",
+	"dns",
+	"influxdb"
+  ],
+  "templating": {
+	"list": []
+  },
+  "time": {
+	"from": "now-24h",
+	"to": "now"
+  },
+  "timepicker": {},
+  "timezone": "",
+  "title": "Foghorn Query Log (InfluxDB)",
+  "uid": "foghorn-querylog",
+  "version": 1,
+  "weekStart": ""
+}

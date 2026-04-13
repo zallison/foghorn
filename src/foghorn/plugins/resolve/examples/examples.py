@@ -4,10 +4,10 @@ import logging
 from typing import List, Optional, Union
 
 from dnslib import AAAA, QTYPE, A, DNSRecord
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 
 from foghorn.plugins.resolve.base import plugin_aliases
-from foghorn.utils.register_caches import registered_lru_cached
+from foghorn.utils.register_caches import registered_lru_cache
 
 from .base import BasePlugin, PluginContext, PluginDecision
 
@@ -34,8 +34,7 @@ class ExamplesConfig(BaseModel):
     apply_to_qtypes: List[str] = Field(default_factory=lambda: ["*"])
     rewrite_first_ipv4: List[dict] = Field(default_factory=list)
 
-    class Config:
-        extra = "allow"
+    model_config = ConfigDict(extra="allow")
 
 
 @plugin_aliases("examples")
@@ -287,7 +286,7 @@ class Examples(BasePlugin):
         return None
 
 
-@registered_lru_cached(maxsize=1024)
+@registered_lru_cache(maxsize=1024)
 def _count_subdomains(qname: str, base_labels: int = 2) -> int:
     """
     Count subdomains as label_count - base_labels (never below 0).
@@ -312,7 +311,7 @@ def _count_subdomains(qname: str, base_labels: int = 2) -> int:
     return max(0, len(labels) - int(base_labels))
 
 
-@registered_lru_cached(maxsize=1024)
+@registered_lru_cache(maxsize=1024)
 def _length_without_dots(qname: str) -> int:
     """
     Compute domain length excluding dots.

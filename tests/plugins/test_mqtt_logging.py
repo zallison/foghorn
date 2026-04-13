@@ -11,8 +11,8 @@ Outputs:
 from __future__ import annotations
 
 import json
-import types
 import time
+import types
 
 
 def _install_fake_paho_client(monkeypatch):

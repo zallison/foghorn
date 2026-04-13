@@ -36,8 +36,8 @@ src_dir = project_root / "src"
 if src_dir.is_dir() and str(src_dir) not in sys.path:
     sys.path.insert(0, str(src_dir))
 
-from foghorn.plugins.resolve.base import BasePlugin
 from foghorn.plugins.resolve import registry as plugin_registry
+from foghorn.plugins.resolve.base import BasePlugin
 
 logger = logging.getLogger(__name__)
 
@@ -301,7 +301,8 @@ def _augment_variables_schema(base: Dict[str, Any]) -> None:
         `variables` is a legal top-level key. This helper adds a minimal schema
         that matches the semantics enforced by _normalize_variables_for_validation:
 
-        - keys must be ALL_CAPS identifiers matching ``[A-Z_][A-Z0-9_]*``;
+        - keys must be identifier-style names matching
+          ``[A-Za-z_][A-Za-z0-9_]*``;
         - values are arbitrary YAML/JSON values (left intentionally untyped).
     """
 
@@ -309,23 +310,35 @@ def _augment_variables_schema(base: Dict[str, Any]) -> None:
         root_props = base.get("properties")
         if not isinstance(root_props, dict):
             return
+        key_pattern = r"^[A-Za-z_][A-Za-z0-9_]*$"
+        description = (
+            "Optional mapping of variable names to arbitrary values. "
+            "These are expanded before validation and removed from the "
+            "runtime config."
+        )
+
+        def _normalize_variables_shape(schema_obj: Dict[str, Any]) -> None:
+            schema_obj["type"] = "object"
+            schema_obj["description"] = description
+            schema_obj["patternProperties"] = {
+                key_pattern: {
+                    # Accept any JSON type for variable values; runtime code
+                    # performs the actual substitution and type handling.
+                }
+            }
+            schema_obj["additionalProperties"] = False
+
+        existing_vars = root_props.get("vars")
+        if isinstance(existing_vars, dict):
+            _normalize_variables_shape(existing_vars)
+
+        existing_variables = root_props.get("variables")
+        if isinstance(existing_variables, dict):
+            _normalize_variables_shape(existing_variables)
 
         if "variables" not in root_props:
-            root_props["variables"] = {
-                "type": "object",
-                "description": (
-                    "Optional mapping of ALL_CAPS variable names to arbitrary "
-                    "values. These are expanded before validation and removed "
-                    "from the runtime config."
-                ),
-                "patternProperties": {
-                    r"^[A-Z_][A-Z0-9_]*$": {
-                        # Accept any JSON type for variable values; runtime code
-                        # performs the actual substitution and type handling.
-                    }
-                },
-                "additionalProperties": False,
-            }
+            root_props["variables"] = {}
+            _normalize_variables_shape(root_props["variables"])
     except Exception:  # pragma: no cover - defensive logging only
         logger.exception("Failed to augment variables schema")
 
@@ -449,6 +462,572 @@ def _augment_statistics_persistence_schema(base: Dict[str, Any]) -> None:
         logger.exception("Failed to augment statistics.persistence schema")
 
 
+def _augment_server_limits_and_listen_schema(base: Dict[str, Any]) -> None:
+    """Brief: Extend the base schema with DoS-hardening listener limit knobs.
+
+    Inputs:
+      - base: Mutable JSON Schema mapping loaded from assets/config-schema.json.
+
+    Outputs:
+      - None; ``base`` is updated in place when the expected server/listen/http
+        shapes exist.
+
+    Notes:
+      - This is intentionally additive and uses setdefault so repeated schema
+        generation is idempotent.
+    """
+
+    def _ensure_obj_schema(node: Any) -> Dict[str, Any] | None:
+        if not isinstance(node, dict):
+            return None
+        node.setdefault("type", "object")
+        node.setdefault("additionalProperties", True)
+        props = node.get("properties")
+        if not isinstance(props, dict):
+            props = {}
+            node["properties"] = props
+        return node
+
+    def _ensure_limit_keys(listener_node: Dict[str, Any]) -> None:
+        props = listener_node.get("properties")
+        if not isinstance(props, dict):
+            props = {}
+            listener_node["properties"] = props
+
+        props.setdefault(
+            "max_connections",
+            {
+                "type": "integer",
+                "minimum": 1,
+                "default": 1024,
+                "description": "Maximum concurrent connections accepted by this listener.",
+            },
+        )
+        props.setdefault(
+            "max_connections_per_ip",
+            {
+                "type": "integer",
+                "minimum": 1,
+                "default": 64,
+                "description": "Maximum concurrent connections from a single client IP.",
+            },
+        )
+        props.setdefault(
+            "max_queries_per_connection",
+            {
+                "type": "integer",
+                "minimum": 1,
+                "default": 100,
+                "description": "Maximum number of DNS queries processed per connection before closing it.",
+            },
+        )
+        props.setdefault(
+            "idle_timeout_seconds",
+            {
+                "type": "number",
+                "minimum": 0,
+                "default": 15.0,
+                "description": "Idle timeout (seconds) before closing an inactive connection.",
+            },
+        )
+
+    try:
+        root_props = base.get("properties")
+        if not isinstance(root_props, dict):
+            return
+
+        server_obj = root_props.get("server")
+        server_schema = _ensure_obj_schema(server_obj)
+        if server_schema is None:
+            return
+
+        server_props = server_schema.get("properties")
+        if not isinstance(server_props, dict):
+            return
+
+        # server.limits: global hardening knobs.
+        limits_obj = server_props.setdefault("limits", {"type": "object"})
+        limits_schema = _ensure_obj_schema(limits_obj)
+        if limits_schema is not None:
+            limits_props = limits_schema.get("properties")
+            if isinstance(limits_props, dict):
+                limits_props.setdefault(
+                    "resolver_executor_workers",
+                    {
+                        "type": ["integer", "null"],
+                        "minimum": 1,
+                        "description": (
+                            "Max workers for the shared resolver ThreadPoolExecutor used by asyncio "
+                            "listeners (TCP/DoT). Null uses a conservative default."
+                        ),
+                        "default": None,
+                    },
+                )
+                limits_props.setdefault(
+                    "bg_executor_workers",
+                    {
+                        "type": ["integer", "null"],
+                        "minimum": 1,
+                        "description": (
+                            "Max workers for the shared background ThreadPoolExecutor "
+                            "used by best-effort tasks (cache refresh/NOTIFY). Null "
+                            "uses a default of 4."
+                        ),
+                        "default": 4,
+                    },
+                )
+                limits_props.setdefault(
+                    "bg_executor_max_pending",
+                    {
+                        "type": ["integer", "null"],
+                        "minimum": 1,
+                        "description": (
+                            "Cap on accepted running+queued background tasks. Null "
+                            "derives capacity from bg_executor_workers * 32."
+                        ),
+                        "default": None,
+                    },
+                )
+
+        # server.listen.{udp,tcp,dot} hardening knobs.
+        listen_obj = server_props.get("listen")
+        listen_schema = _ensure_obj_schema(listen_obj)
+        if listen_schema is not None:
+            listen_props = listen_schema.get("properties")
+            if isinstance(listen_props, dict):
+                listen_props.setdefault(
+                    "overload_response",
+                    {
+                        "type": "string",
+                        "enum": ["servfail", "refused", "drop"],
+                        "default": "servfail",
+                        "description": (
+                            "Global overload response policy for listeners. "
+                            "When set, this value is used by listeners unless "
+                            "overridden by server.listen.<listener>.overload_response."
+                        ),
+                    },
+                )
+                for key in ("tcp", "dot"):
+                    child = listen_props.get(key)
+                    if not isinstance(child, dict):
+                        child = {"type": "object"}
+                        listen_props[key] = child
+                    child_schema = _ensure_obj_schema(child)
+                    if child_schema is not None:
+                        _ensure_limit_keys(child_schema)
+                        child_props = child_schema.get("properties")
+                        if isinstance(child_props, dict):
+                            child_props.setdefault(
+                                "overload_response",
+                                {
+                                    "type": "string",
+                                    "enum": ["servfail", "refused", "drop"],
+                                    "description": (
+                                        "Per-listener overload response policy "
+                                        "for connection-limit rejections."
+                                    ),
+                                },
+                            )
+
+                # UDP hardening knobs (asyncio UDP and response sizing).
+                udp_obj = listen_props.get("udp")
+                if not isinstance(udp_obj, dict):
+                    udp_obj = {"type": "object"}
+                    listen_props["udp"] = udp_obj
+                udp_schema = _ensure_obj_schema(udp_obj)
+                if udp_schema is not None:
+                    udp_props = udp_schema.get("properties")
+                    if isinstance(udp_props, dict):
+                        udp_props.setdefault(
+                            "use_asyncio",
+                            {
+                                "type": "boolean",
+                                "default": True,
+                                "description": "When true, prefer the asyncio UDP listener when available.",
+                            },
+                        )
+                        udp_props.setdefault(
+                            "allow_threaded_fallback",
+                            {
+                                "type": "boolean",
+                                "default": True,
+                                "description": (
+                                    "When false, refuse to fall back to the threaded ThreadingUDPServer when "
+                                    "asyncio UDP cannot start."
+                                ),
+                            },
+                        )
+                        udp_props.setdefault(
+                            "exit_on_asyncio_failure",
+                            {
+                                "type": "boolean",
+                                "default": False,
+                                "description": (
+                                    "When true, exit non-zero if the asyncio UDP listener fails to start, instead "
+                                    "of falling back to a threaded UDP server."
+                                ),
+                            },
+                        )
+                        udp_props.setdefault(
+                            "max_inflight",
+                            {
+                                "type": "integer",
+                                "minimum": 1,
+                                "default": 1024,
+                                "description": "Global cap on in-flight UDP queries for asyncio UDP listener.",
+                            },
+                        )
+                        udp_props.setdefault(
+                            "max_inflight_per_ip",
+                            {
+                                "type": "integer",
+                                "minimum": 1,
+                                "default": 64,
+                                "description": "Per-client-IP cap on in-flight UDP queries for asyncio UDP listener.",
+                            },
+                        )
+                        udp_props.setdefault(
+                            "max_inflight_by_cidr",
+                            {
+                                "type": "array",
+                                "description": (
+                                    "Optional CIDR bucket limits for UDP in-flight queries. Each entry is {cidr, max_inflight}. "
+                                    "When multiple buckets match a client IP, the most-specific (largest prefixlen) wins."
+                                ),
+                                "items": {
+                                    "type": "object",
+                                    "additionalProperties": False,
+                                    "properties": {
+                                        "cidr": {
+                                            "type": "string",
+                                            "description": "CIDR block (e.g. '10.0.0.0/8' or '2001:db8::/32').",
+                                        },
+                                        "max_inflight": {
+                                            "type": "integer",
+                                            "minimum": 1,
+                                            "description": "Maximum in-flight UDP queries for clients within this CIDR.",
+                                        },
+                                    },
+                                    "required": ["cidr", "max_inflight"],
+                                },
+                            },
+                        )
+                        udp_props.setdefault(
+                            "max_query_bytes",
+                            {
+                                "type": "integer",
+                                "minimum": 12,
+                                "default": 4096,
+                                "description": (
+                                    "Maximum UDP query payload bytes accepted by the UDP listener. "
+                                    "Packets smaller than 12 bytes (DNS header) or larger than this limit are dropped silently."
+                                ),
+                            },
+                        )
+                        udp_props.setdefault(
+                            "max_response_bytes",
+                            {
+                                "type": ["integer", "null"],
+                                "minimum": 0,
+                                "default": None,
+                                "description": (
+                                    "Optional explicit UDP response size ceiling. When null, defaults to server.dnssec.udp_payload_size. "
+                                    "Effective ceiling per query is min(client advertised EDNS UDP size (or 512 without EDNS), server ceiling)."
+                                ),
+                            },
+                        )
+                        udp_props.setdefault(
+                            "overload_response",
+                            {
+                                "type": "string",
+                                "enum": ["servfail", "refused", "drop"],
+                                "description": (
+                                    "Per-listener overload response policy for "
+                                    "UDP in-flight limit shedding."
+                                ),
+                            },
+                        )
+
+                for key in ("doh",):
+                    child = listen_props.get(key)
+                    if not isinstance(child, dict):
+                        child = {"type": "object"}
+                        listen_props[key] = child
+
+                # listen.doh.allow_threaded_fallback
+                doh_obj = listen_props.get("doh")
+                doh_schema = _ensure_obj_schema(doh_obj)
+                if doh_schema is not None:
+                    doh_props = doh_schema.get("properties")
+                    if isinstance(doh_props, dict):
+                        doh_props.setdefault(
+                            "overload_response",
+                            {
+                                "type": "string",
+                                "enum": ["servfail", "refused", "drop"],
+                                "description": (
+                                    "Per-listener overload response policy for "
+                                    "DoH overload handling."
+                                ),
+                            },
+                        )
+                        doh_props.setdefault(
+                            "allow_threaded_fallback",
+                            {
+                                "type": "boolean",
+                                "default": True,
+                                "description": (
+                                    "When false, refuse to start the threaded stdlib DoH fallback when "
+                                    "FastAPI/uvicorn or asyncio is unavailable."
+                                ),
+                            },
+                        )
+
+        # server.http.*
+        http_obj = server_props.get("http")
+        http_schema = _ensure_obj_schema(http_obj)
+        if http_schema is not None:
+            http_props = http_schema.get("properties")
+            if isinstance(http_props, dict):
+                http_props.setdefault(
+                    "allow_threaded_fallback",
+                    {
+                        "type": "boolean",
+                        "default": True,
+                        "description": (
+                            "When false, refuse to start the threaded stdlib admin HTTP fallback when "
+                            "FastAPI/uvicorn or asyncio is unavailable."
+                        ),
+                    },
+                )
+                http_props.setdefault(
+                    "enable_api",
+                    {
+                        "type": "boolean",
+                        "default": True,
+                        "description": (
+                            "When false, do not serve the admin API endpoints (e.g. /api/v1/stats, /config, /logs)."
+                        ),
+                    },
+                )
+                http_props.setdefault(
+                    "enable_schema",
+                    {
+                        "type": "boolean",
+                        "default": True,
+                        "description": "When false, disable OpenAPI schema generation and /openapi.json.",
+                    },
+                )
+                http_props.setdefault(
+                    "enable_docs",
+                    {
+                        "type": "boolean",
+                        "default": True,
+                        "description": "When false, disable Swagger UI at /docs (requires enable_schema=true).",
+                    },
+                )
+
+        # server.axfr.*
+        axfr_obj = server_props.get("axfr")
+        axfr_schema = _ensure_obj_schema(axfr_obj)
+        if axfr_schema is None:
+            axfr_schema = {"type": "object", "additionalProperties": True}
+            server_props["axfr"] = axfr_schema
+            axfr_schema = _ensure_obj_schema(axfr_schema)
+        if axfr_schema is not None:
+            axfr_props = axfr_schema.get("properties")
+            if isinstance(axfr_props, dict):
+                axfr_props.setdefault(
+                    "enabled",
+                    {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Enable serving AXFR/IXFR over TCP/DoT.",
+                    },
+                )
+                axfr_props.setdefault(
+                    "allow_clients",
+                    {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Client IP/CIDR allowlist for AXFR/IXFR requests. "
+                            "When empty, all transfers are denied."
+                        ),
+                        "default": [],
+                    },
+                )
+                axfr_props.setdefault(
+                    "max_zone_rrs",
+                    {
+                        "type": ["integer", "null"],
+                        "minimum": 1,
+                        "default": None,
+                        "description": (
+                            "Optional maximum RR count per zone transfer. "
+                            "Transfers exceeding this limit are refused."
+                        ),
+                    },
+                )
+                axfr_props.setdefault(
+                    "max_concurrent_transfers",
+                    {
+                        "type": "integer",
+                        "minimum": 1,
+                        "default": 4,
+                        "description": "Maximum concurrent AXFR/IXFR sessions.",
+                    },
+                )
+                axfr_props.setdefault(
+                    "rate_limit_per_client_per_second",
+                    {
+                        "type": "number",
+                        "minimum": 0,
+                        "default": 0.0,
+                        "description": (
+                            "Per-client AXFR request token refill rate. "
+                            "Set to 0 to disable per-client rate limiting."
+                        ),
+                    },
+                )
+                axfr_props.setdefault(
+                    "rate_limit_burst",
+                    {
+                        "type": "number",
+                        "minimum": 1,
+                        "default": 2.0,
+                        "description": "Per-client AXFR request token bucket burst size.",
+                    },
+                )
+                axfr_props.setdefault(
+                    "max_transfer_rate_bytes_per_second",
+                    {
+                        "type": ["integer", "null"],
+                        "minimum": 1,
+                        "default": None,
+                        "description": (
+                            "Optional best-effort per-transfer throughput cap "
+                            "in bytes per second."
+                        ),
+                    },
+                )
+                axfr_props.setdefault(
+                    "message_max_bytes",
+                    {
+                        "type": "integer",
+                        "minimum": 512,
+                        "maximum": 65535,
+                        "default": 64000,
+                        "description": "Maximum packed DNS message size for AXFR chunks.",
+                    },
+                )
+                axfr_props.setdefault(
+                    "require_tsig",
+                    {
+                        "type": "boolean",
+                        "default": False,
+                        "description": (
+                            "Require inbound AXFR/IXFR requests to be TSIG-signed "
+                            "with one of server.axfr.tsig_keys."
+                        ),
+                    },
+                )
+                axfr_props.setdefault(
+                    "tsig_keys",
+                    {
+                        "type": "array",
+                        "description": "AXFR/IXFR TSIG keys (name/algorithm/secret).",
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "properties": {
+                                "name": {"type": "string"},
+                                "algorithm": {
+                                    "type": "string",
+                                    "default": "hmac-sha256",
+                                },
+                                "secret": {"type": "string"},
+                            },
+                            "required": ["name", "secret"],
+                        },
+                        "default": [],
+                    },
+                )
+    except Exception:  # pragma: no cover - defensive logging only
+        logger.exception("Failed to augment server.listen/server.limits schema")
+
+
+def _allow_comment_id_fields(schema: Dict[str, Any]) -> None:
+    """Brief: Allow optional comment/id keys on every object schema.
+
+    Inputs:
+      - schema: Mutable JSON Schema mapping (updated in place).
+
+    Outputs:
+      - None; schema is updated to allow `comment` and `id` keys on objects.
+
+    Notes:
+      - Applies a lightweight rule: any schema node that represents an object
+        (explicit type=object, or has properties/patternProperties) will gain
+        optional `comment` and `id` properties constrained to <= 254 chars.
+      - This keeps additionalProperties=False schemas strict while still
+        allowing comment/id everywhere.
+    """
+
+    comment_id_schema = {
+        "type": "string",
+        "maxLength": 254,
+        "description": "Optional human metadata string (max 254 characters).",
+    }
+
+    def _is_object_schema(node: Dict[str, Any]) -> bool:
+        if "properties" in node or "patternProperties" in node:
+            return True
+        t = node.get("type")
+        if isinstance(t, str) and t == "object":
+            return True
+        if isinstance(t, list) and "object" in t:
+            return True
+        return False
+
+    def _ensure_comment_id(node: Dict[str, Any]) -> None:
+        props = node.get("properties")
+        if not isinstance(props, dict):
+            props = {}
+            node["properties"] = props
+        props.setdefault("comment", dict(comment_id_schema))
+        props.setdefault("id", dict(comment_id_schema))
+
+    def _walk(node: Any) -> None:
+        if not isinstance(node, dict):
+            return
+
+        if _is_object_schema(node):
+            _ensure_comment_id(node)
+
+        for key in ("properties", "patternProperties", "$defs", "definitions"):
+            child = node.get(key)
+            if isinstance(child, dict):
+                for sub in child.values():
+                    _walk(sub)
+
+        items = node.get("items")
+        if isinstance(items, dict):
+            _walk(items)
+        elif isinstance(items, list):
+            for sub in items:
+                _walk(sub)
+
+        for key in ("oneOf", "anyOf", "allOf"):
+            child = node.get(key)
+            if isinstance(child, list):
+                for sub in child:
+                    _walk(sub)
+
+    _walk(schema)
+
+
 def _build_v2_root_schema(
     base: Dict[str, Any], plugins: Dict[str, Any]
 ) -> Dict[str, Any]:
@@ -491,11 +1070,356 @@ def _build_v2_root_schema(
         if isinstance(server_props, dict) and "listen" in server_props
         else base_props.get("listen", {"type": "object"})
     )
+
+    # Ensure the listener schemas are concrete enough for editor tooling even
+    # when the base schema is permissive.
+    if isinstance(listen_schema, dict):
+        listen_schema.setdefault("type", "object")
+        listen_schema["additionalProperties"] = False
+        listen_props = listen_schema.setdefault("properties", {})
+        if isinstance(listen_props, dict):
+            listen_props.setdefault(
+                "overload_response",
+                {
+                    "type": "string",
+                    "enum": ["servfail", "refused", "drop"],
+                    "default": "servfail",
+                    "description": (
+                        "Global overload response policy for listeners. "
+                        "When set, this value is used by listeners unless "
+                        "overridden by server.listen.<listener>.overload_response."
+                    ),
+                },
+            )
+            # Obsolete root-level defaults under server.listen are intentionally
+            # removed; listeners must now be configured under listen.dns and/or
+            # per-listener blocks (udp/tcp/dot/doh).
+            listen_props.pop("host", None)
+            listen_props.pop("port", None)
+
+            dns_child = listen_props.get("dns")
+            if not isinstance(dns_child, dict):
+                dns_child = {"type": "object", "additionalProperties": False}
+                listen_props["dns"] = dns_child
+            dns_child.setdefault("type", "object")
+            dns_child["additionalProperties"] = False
+            dns_props = dns_child.setdefault("properties", {})
+            if isinstance(dns_props, dict):
+                dns_props.setdefault(
+                    "host",
+                    {
+                        "type": "string",
+                        "description": "Default host for UDP/TCP listeners when per-listener host is not set.",
+                    },
+                )
+                dns_props.setdefault(
+                    "port",
+                    {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "Default port for UDP/TCP listeners when per-listener port is not set.",
+                    },
+                )
+
+            def _ensure_listener_child(key: str) -> Dict[str, Any]:
+                child = listen_props.get(key)
+                if not isinstance(child, dict):
+                    child = {"type": "object", "additionalProperties": True}
+                    listen_props[key] = child
+                child.setdefault("type", "object")
+                child.setdefault("additionalProperties", True)
+                cprops = child.setdefault("properties", {})
+                if not isinstance(cprops, dict):
+                    cprops = {}
+                    child["properties"] = cprops
+                return child
+
+            def _ensure_conn_limit_props(child: Dict[str, Any]) -> None:
+                cprops = child.get("properties")
+                if not isinstance(cprops, dict):
+                    return
+                cprops.setdefault(
+                    "overload_response",
+                    {
+                        "type": "string",
+                        "enum": ["servfail", "refused", "drop"],
+                        "description": (
+                            "Per-listener overload response policy for "
+                            "connection-limit rejections."
+                        ),
+                    },
+                )
+                cprops.setdefault(
+                    "max_connections",
+                    {
+                        "type": "integer",
+                        "minimum": 1,
+                        "default": 1024,
+                        "description": "Maximum concurrent connections accepted by this listener.",
+                    },
+                )
+                cprops.setdefault(
+                    "max_connections_per_ip",
+                    {
+                        "type": "integer",
+                        "minimum": 1,
+                        "default": 64,
+                        "description": "Maximum concurrent connections from a single client IP.",
+                    },
+                )
+                cprops.setdefault(
+                    "max_queries_per_connection",
+                    {
+                        "type": "integer",
+                        "minimum": 1,
+                        "default": 100,
+                        "description": "Maximum DNS queries processed per connection before closing it.",
+                    },
+                )
+                cprops.setdefault(
+                    "idle_timeout_seconds",
+                    {
+                        "type": "number",
+                        "minimum": 0,
+                        "default": 15.0,
+                        "description": "Idle timeout (seconds) before closing an inactive connection.",
+                    },
+                )
+
+            tcp_child = _ensure_listener_child("tcp")
+            dot_child = _ensure_listener_child("dot")
+            udp_child = _ensure_listener_child("udp")
+            _ensure_conn_limit_props(tcp_child)
+            _ensure_conn_limit_props(dot_child)
+
+            # UDP-specific hardening knobs.
+            udp_props = udp_child.get("properties")
+            if isinstance(udp_props, dict):
+                udp_props.setdefault(
+                    "use_asyncio",
+                    {
+                        "type": "boolean",
+                        "default": True,
+                        "description": "When true, prefer the asyncio UDP listener when available.",
+                    },
+                )
+                udp_props.setdefault(
+                    "allow_threaded_fallback",
+                    {
+                        "type": "boolean",
+                        "default": True,
+                        "description": (
+                            "When false, refuse to fall back to the threaded ThreadingUDPServer when "
+                            "asyncio UDP cannot start."
+                        ),
+                    },
+                )
+                udp_props.setdefault(
+                    "exit_on_asyncio_failure",
+                    {
+                        "type": "boolean",
+                        "default": False,
+                        "description": (
+                            "When true, exit non-zero if the asyncio UDP listener fails to start, instead "
+                            "of falling back to a threaded UDP server."
+                        ),
+                    },
+                )
+                udp_props.setdefault(
+                    "max_inflight",
+                    {
+                        "type": "integer",
+                        "minimum": 1,
+                        "default": 1024,
+                        "description": "Global cap on in-flight UDP queries for asyncio UDP listener.",
+                    },
+                )
+                udp_props.setdefault(
+                    "max_inflight_per_ip",
+                    {
+                        "type": "integer",
+                        "minimum": 1,
+                        "default": 64,
+                        "description": "Per-client-IP cap on in-flight UDP queries for asyncio UDP listener.",
+                    },
+                )
+                udp_props.setdefault(
+                    "max_inflight_by_cidr",
+                    {
+                        "type": "array",
+                        "description": (
+                            "Optional CIDR bucket limits for UDP in-flight queries. Each entry is {cidr, max_inflight}. "
+                            "When multiple buckets match a client IP, the most-specific (largest prefixlen) wins."
+                        ),
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "properties": {
+                                "cidr": {
+                                    "type": "string",
+                                    "description": "CIDR block (e.g. '10.0.0.0/8' or '2001:db8::/32').",
+                                },
+                                "max_inflight": {
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "description": "Maximum in-flight UDP queries for clients within this CIDR.",
+                                },
+                            },
+                            "required": ["cidr", "max_inflight"],
+                        },
+                    },
+                )
+                udp_props.setdefault(
+                    "max_query_bytes",
+                    {
+                        "type": "integer",
+                        "minimum": 12,
+                        "default": 4096,
+                        "description": (
+                            "Maximum UDP query payload bytes accepted by the UDP listener. "
+                            "Packets smaller than 12 bytes (DNS header) or larger than this limit are dropped silently."
+                        ),
+                    },
+                )
+                udp_props.setdefault(
+                    "max_response_bytes",
+                    {
+                        "type": ["integer", "null"],
+                        "minimum": 0,
+                        "default": None,
+                        "description": (
+                            "Optional explicit UDP response size ceiling. When null, defaults to server.dnssec.udp_payload_size. "
+                            "Effective ceiling per query is min(client advertised EDNS UDP size (or 512 without EDNS), server ceiling)."
+                        ),
+                    },
+                )
+                udp_props.setdefault(
+                    "overload_response",
+                    {
+                        "type": "string",
+                        "enum": ["servfail", "refused", "drop"],
+                        "description": (
+                            "Per-listener overload response policy for "
+                            "UDP in-flight limit shedding."
+                        ),
+                    },
+                )
+
+            doh_child = _ensure_listener_child("doh")
+            doh_props = doh_child.get("properties")
+            if isinstance(doh_props, dict):
+                doh_props.setdefault(
+                    "overload_response",
+                    {
+                        "type": "string",
+                        "enum": ["servfail", "refused", "drop"],
+                        "description": (
+                            "Per-listener overload response policy for "
+                            "DoH overload handling."
+                        ),
+                    },
+                )
+                doh_props.setdefault(
+                    "allow_threaded_fallback",
+                    {
+                        "type": "boolean",
+                        "default": True,
+                        "description": (
+                            "When false, refuse to start the threaded stdlib DoH fallback when "
+                            "FastAPI/uvicorn or asyncio is unavailable."
+                        ),
+                    },
+                )
     resolver_schema = (
         server_props.get("resolver")  # type: ignore[union-attr]
         if isinstance(server_props, dict) and "resolver" in server_props
         else base_props.get("resolver", {"type": "object"})
     )
+    axfr_schema = (
+        server_props.get("axfr")  # type: ignore[union-attr]
+        if isinstance(server_props, dict) and "axfr" in server_props
+        else {"type": "object", "additionalProperties": True}
+    )
+
+    # server.limits: hardening knobs.
+    limits_schema: Dict[str, Any] = {
+        "type": "object",
+        "additionalProperties": True,
+        "properties": {
+            "resolver_executor_workers": {
+                "type": ["integer", "null"],
+                "minimum": 1,
+                "default": None,
+                "description": (
+                    "Max workers for the shared resolver ThreadPoolExecutor used by asyncio listeners "
+                    "(TCP/DoT). Null uses a conservative default."
+                ),
+            },
+            "bg_executor_workers": {
+                "type": ["integer", "null"],
+                "minimum": 1,
+                "default": 4,
+                "description": (
+                    "Max workers for the shared background ThreadPoolExecutor used by "
+                    "best-effort tasks (cache refresh/NOTIFY). Null uses a default of 4."
+                ),
+            },
+            "bg_executor_max_pending": {
+                "type": ["integer", "null"],
+                "minimum": 1,
+                "default": None,
+                "description": (
+                    "Cap on accepted running+queued background tasks. Null derives "
+                    "capacity from bg_executor_workers * 32."
+                ),
+            },
+        },
+    }
+
+    # Ensure server.resolver exposes the runtime configuration surface. Some
+    # older base schemas model this as a generic object; augment it here so
+    # editor tooling can validate supported modes.
+    resolver_schema = {
+        "type": "object",
+        "additionalProperties": True,
+        "description": (
+            "Resolver configuration. mode selects how unanswered queries are "
+            "handled: forward (default), recursive (walk from root), or "
+            "master (authoritative-only; no forwarding). 'none' is an alias "
+            "for 'master'."
+        ),
+        "properties": {
+            "mode": {
+                "type": "string",
+                "enum": ["forward", "recursive", "master", "none"],
+                "default": "forward",
+                "description": "Resolver mode: forward | recursive | master (none).",
+            },
+            "timeout_ms": {
+                "type": "integer",
+                "minimum": 0,
+                "default": 2000,
+                "description": "Upstream/recursive timeout budget per query (milliseconds).",
+            },
+            "max_depth": {
+                "type": "integer",
+                "minimum": 1,
+                "default": 16,
+                "description": "Maximum delegation hops for recursive mode.",
+            },
+            "per_try_timeout_ms": {
+                "type": "integer",
+                "minimum": 0,
+                "default": 2000,
+                "description": "Per-authority timeout for recursive mode (milliseconds).",
+            },
+            "use_asyncio": {
+                "type": "boolean",
+                "default": True,
+                "description": "Enable asyncio-based listeners when available.",
+            },
+        },
+    }
     cache_schema = (
         server_props.get("cache")  # type: ignore[union-attr]
         if isinstance(server_props, dict) and "cache" in server_props
@@ -531,6 +1455,14 @@ def _build_v2_root_schema(
                 },
             ),
             "stderr": legacy_props.get("stderr", {"type": "boolean"}),
+            "color": {
+                "type": "boolean",
+                "default": True,
+                "description": (
+                    "Enable ANSI colorized stderr logging output for improved "
+                    "readability of levels and important tokens."
+                ),
+            },
             "syslog": legacy_props.get(
                 "syslog",
                 {"oneOf": [{"type": "boolean"}, {"type": "object"}]},
@@ -561,6 +1493,16 @@ def _build_v2_root_schema(
                 ),
                 "default": True,
             },
+            "max_logging_queue": {
+                "type": "integer",
+                "minimum": 0,
+                "description": (
+                    "Optional global default for backend async queue capacity. "
+                    "Applied to logging.backends entries that do not set "
+                    "config.max_logging_queue explicitly. Values <= 0 use an "
+                    "unbounded queue."
+                ),
+            },
             # Global toggle for keeping only the raw query_log in persistence
             # and avoiding mirroring aggregate counters into the backend.
             "query_log_only": {
@@ -571,6 +1513,174 @@ def _build_v2_root_schema(
                     "in-memory only."
                 ),
                 "default": False,
+            },
+            "query_log_retention": {
+                "type": "object",
+                "additionalProperties": False,
+                "description": (
+                    "Optional global retention policy for query-log backends. "
+                    "Per-backend config values override these defaults."
+                ),
+                "properties": {
+                    "max_records": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": (
+                            "Maximum number of query_log records to retain per "
+                            "supported backend."
+                        ),
+                    },
+                    "days": {
+                        "type": "number",
+                        "exclusiveMinimum": 0,
+                        "description": (
+                            "Maximum age in days for query_log records retained "
+                            "by supported backends."
+                        ),
+                    },
+                    "max_bytes": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": (
+                            "Maximum estimated query_log bytes retained per "
+                            "supported backend."
+                        ),
+                    },
+                    "prune_interval_seconds": {
+                        "type": "number",
+                        "exclusiveMinimum": 0,
+                        "description": (
+                            "Minimum seconds between retention prune passes."
+                        ),
+                    },
+                    "prune_every_n_inserts": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": (
+                            "Run retention prune after every N inserted "
+                            "query_log rows."
+                        ),
+                    },
+                },
+            },
+            "query_log_retention_max_records": {
+                "type": "integer",
+                "minimum": 1,
+                "description": (
+                    "Legacy alias for logging.query_log_retention.max_records."
+                ),
+            },
+            "query_log_retention_days": {
+                "type": "number",
+                "exclusiveMinimum": 0,
+                "description": "Legacy alias for logging.query_log_retention.days.",
+            },
+            "query_log_retention_max_bytes": {
+                "type": "integer",
+                "minimum": 1,
+                "description": (
+                    "Legacy alias for logging.query_log_retention.max_bytes."
+                ),
+            },
+            "query_log_retention_prune_interval_seconds": {
+                "type": "number",
+                "exclusiveMinimum": 0,
+                "description": (
+                    "Legacy alias for "
+                    "logging.query_log_retention.prune_interval_seconds."
+                ),
+            },
+            "query_log_retention_prune_every_n_inserts": {
+                "type": "integer",
+                "minimum": 1,
+                "description": (
+                    "Legacy alias for "
+                    "logging.query_log_retention.prune_every_n_inserts."
+                ),
+            },
+            "query_log_sampling": {
+                "type": "object",
+                "additionalProperties": False,
+                "description": (
+                    "Optional sampling policy applied before persistent "
+                    "query_log writes."
+                ),
+                "properties": {
+                    "enabled": {
+                        "type": "boolean",
+                        "description": (
+                            "When false, suppresses all persistent query_log "
+                            "writes from the stats collector."
+                        ),
+                        "default": True,
+                    },
+                    "sample_rate": {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 1,
+                        "description": (
+                            "Fraction of query_log rows to persist "
+                            "(0 disables writes, 1 logs all rows)."
+                        ),
+                        "default": 1,
+                    },
+                    "rate": {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 1,
+                        "description": ("Alias of sample_rate for compatibility."),
+                    },
+                },
+            },
+            "query_log_sample_rate": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1,
+                "description": (
+                    "Legacy alias for logging.query_log_sampling.sample_rate."
+                ),
+            },
+            "query_log_dedupe": {
+                "type": "object",
+                "additionalProperties": False,
+                "description": (
+                    "Optional dedupe policy applied before persistent query_log "
+                    "writes."
+                ),
+                "properties": {
+                    "window_seconds": {
+                        "type": "number",
+                        "minimum": 0,
+                        "description": (
+                            "Suppress repeated query_log rows with the same key "
+                            "inside this window. 0 disables dedupe."
+                        ),
+                        "default": 0,
+                    },
+                    "max_entries": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": (
+                            "Maximum in-memory dedupe keys retained by the "
+                            "stats collector."
+                        ),
+                        "default": 50000,
+                    },
+                },
+            },
+            "query_log_dedupe_window_seconds": {
+                "type": "number",
+                "minimum": 0,
+                "description": (
+                    "Legacy alias for logging.query_log_dedupe.window_seconds."
+                ),
+            },
+            "query_log_dedupe_max_entries": {
+                "type": "integer",
+                "minimum": 1,
+                "description": (
+                    "Legacy alias for logging.query_log_dedupe.max_entries."
+                ),
             },
             # Backends used for statistics and query logging; each entry maps to
             # a BaseStatsStore implementation (for example, sqlite, mysql,
@@ -659,17 +1769,52 @@ def _build_v2_root_schema(
                     "items": {"$ref": "#/$defs/upstream_host"},
                 },
             )
-            # axfr_notify_all: learn NOTIFY targets from AXFR/IXFR clients.
             zone_cfg_props.setdefault(
-                "axfr_notify_all",
+                "axfr_notify_allow_private_targets",
                 {
                     "type": "boolean",
                     "description": (
-                        "When true, any client that performs AXFR/IXFR from this "
-                        "server is remembered as a NOTIFY target for its zone "
-                        "using its source IP and TCP port 53."
+                        "When false (default), outbound NOTIFY targets that "
+                        "resolve to private/loopback/link-local/multicast/"
+                        "reserved addresses are blocked."
                     ),
                     "default": False,
+                },
+            )
+            zone_cfg_props.setdefault(
+                "axfr_notify_target_allowlist",
+                {
+                    "type": "array",
+                    "description": (
+                        "Optional outbound NOTIFY target allowlist. Entries "
+                        "may be hostnames, IP literals, or CIDR ranges. "
+                        "When set, targets must match."
+                    ),
+                    "items": {"type": "string"},
+                },
+            )
+            zone_cfg_props.setdefault(
+                "axfr_notify_min_interval_seconds",
+                {
+                    "type": "number",
+                    "minimum": 0,
+                    "description": (
+                        "Minimum elapsed seconds between consecutive NOTIFY "
+                        "sends to the same configured target."
+                    ),
+                    "default": 1.0,
+                },
+            )
+            zone_cfg_props.setdefault(
+                "axfr_notify_rate_limit_per_target_per_minute",
+                {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": (
+                        "Maximum NOTIFY messages sent to a single configured "
+                        "target in a rolling 60-second window."
+                    ),
+                    "default": 60,
                 },
             )
             # axfr_notify_scheduled: delay before sending follow-up NOTIFY.
@@ -697,6 +1842,27 @@ def _build_v2_root_schema(
     if isinstance(upstream_host_def, dict):
         host_props = upstream_host_def.setdefault("properties", {})
         if isinstance(host_props, dict):
+            host_props.setdefault(
+                "abort_on_fail",
+                {
+                    "type": "boolean",
+                    "description": (
+                        "When true (default behavior), startup fails if this "
+                        "upstream's TLS CA file validation fails. When false, "
+                        "validation failures are logged and startup continues."
+                    ),
+                },
+            )
+            host_props.setdefault(
+                "abort_on_failure",
+                {
+                    "type": "boolean",
+                    "description": (
+                        "Alias for abort_on_fail. When true, TLS CA validation "
+                        "errors for this upstream are fatal."
+                    ),
+                },
+            )
             notify_schema = {
                 "type": "object",
                 "additionalProperties": False,
@@ -751,6 +1917,32 @@ def _build_v2_root_schema(
             # Only inject notify when not already present so repeated schema
             # generation remains idempotent.
             host_props.setdefault("notify", notify_schema)
+
+    upstream_doh_def = defs.get("upstream_doh")
+    if isinstance(upstream_doh_def, dict):
+        doh_props = upstream_doh_def.setdefault("properties", {})
+        if isinstance(doh_props, dict):
+            doh_props.setdefault(
+                "abort_on_fail",
+                {
+                    "type": "boolean",
+                    "description": (
+                        "When true (default behavior), startup fails if this "
+                        "upstream's TLS CA file validation fails. When false, "
+                        "validation failures are logged and startup continues."
+                    ),
+                },
+            )
+            doh_props.setdefault(
+                "abort_on_failure",
+                {
+                    "type": "boolean",
+                    "description": (
+                        "Alias for abort_on_fail. When true, TLS CA validation "
+                        "errors for this upstream are fatal."
+                    ),
+                },
+            )
 
     # Decorated cache overrides are modelled via a dedicated definition so that
     # both tooling and runtime helpers share the same canonical module+name
@@ -812,7 +2004,7 @@ def _build_v2_root_schema(
             "type": "array",
             "description": (
                 "Optional list of overrides for decorated caches (functions "
-                "wrapped by registered_cached/registered_lru_cached). Each "
+                "wrapped by registered_cached/registered_lru_cache). Each "
                 "entry may target a specific module+name pair and override "
                 "backend-specific settings such as maxsize or TTL."
             ),
@@ -842,6 +2034,85 @@ def _build_v2_root_schema(
     upstream_host_ref = {"$ref": "#/$defs/upstream_host"}
     upstream_doh_ref = {"$ref": "#/$defs/upstream_doh"}
 
+    upstreams_backup_v2: Dict[str, Any] = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "endpoints": {
+                "type": "array",
+                "minItems": 1,
+                "items": {"oneOf": [upstream_host_ref, upstream_doh_ref]},
+            }
+        },
+        "required": ["endpoints"],
+    }
+
+    upstreams_health_v2: Dict[str, Any] = {
+        "type": "object",
+        "additionalProperties": False,
+        "description": "Upstream health tracking and failover probing knobs.",
+        "properties": {
+            "profile": {
+                "type": "string",
+                "description": (
+                    "Optional name of a built-in health profile loaded from "
+                    "upstreams_health_profiles.yaml. Explicit keys under upstreams.health "
+                    "override profile values."
+                ),
+            },
+            "max_serv_fail": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Mark an upstream unhealthy when its failure counter exceeds this threshold.",
+                "default": 3,
+            },
+            "unknown_after_seconds": {
+                "type": "number",
+                "minimum": 0,
+                "description": "If an upstream has not had a successful response in this many seconds, its status becomes 'unknown' (treated as eligible like healthy).",
+                "default": 300,
+            },
+            "probe_percent": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 100,
+                "description": "Percent of queries that should probe an unhealthy upstream first (before healthy/unknown upstreams).",
+                "default": 1.0,
+            },
+            "probe_min_percent": {
+                "type": "number",
+                "minimum": 0.5,
+                "maximum": 100,
+                "description": (
+                    "Lower bound for the dynamic probe percent. Must be > 0 so "
+                    "unhealthy upstreams are eventually retried."
+                ),
+                "default": 0.5,
+            },
+            "probe_max_percent": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 100,
+                "description": "Upper bound for the dynamic probe percent.",
+                "default": 50.0,
+            },
+            "probe_increase": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 100,
+                "description": "Amount to increase probe_percent after a successful unhealthy probe.",
+                "default": 1.0,
+            },
+            "probe_decrease": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 100,
+                "description": "Amount to decrease probe_percent after a failed unhealthy probe.",
+                "default": 1.0,
+            },
+        },
+    }
+
     upstreams_v2: Dict[str, Any] = {
         "type": "object",
         "additionalProperties": False,
@@ -865,12 +2136,21 @@ def _build_v2_root_schema(
                     "oneOf": [upstream_host_ref, upstream_doh_ref],
                 },
             },
+            "backup": {
+                "description": "Optional backup upstream endpoints used only when no eligible primary upstreams are available.",
+                "allOf": [upstreams_backup_v2],
+            },
+            "health": upstreams_health_v2,
         },
         "required": ["endpoints"],
     }
 
-    # Attach plugin config schemas under $defs.PluginConfigs.
-    defs["PluginConfigs"] = {
+    # Attach plugin config schemas under both modern and legacy keys.
+    #
+    # Some tooling still reads $defs.plugin_configs (lowercase) while newer
+    # code uses $defs.PluginConfigs (camel-case). Keep them in sync so that
+    # consumers on either key see the same, up-to-date plugin model schema.
+    plugin_configs_schema = {
         alias: {
             "module": meta["module"],
             "aliases": meta["aliases"],
@@ -878,6 +2158,8 @@ def _build_v2_root_schema(
         }
         for alias, meta in plugins.items()
     }
+    defs["PluginConfigs"] = plugin_configs_schema
+    defs["plugin_configs"] = plugin_configs_schema
 
     # Lightweight PluginInstance schema: keep it permissive for now but reflect
     # the v2 shape (id/type/enabled/logging/setup/hooks/config).
@@ -941,6 +2223,8 @@ def _build_v2_root_schema(
                     "dnssec": dnssec_schema,
                     "resolver": resolver_schema,
                     "cache": cache_schema,
+                    "limits": limits_schema,
+                    "axfr": axfr_schema,
                     # Preferred v2 placement for admin HTTP/web UI config.
                     "http": webserver_schema,
                     # Feature gate for Extended DNS Errors (RFC 8914). When true,
@@ -971,7 +2255,32 @@ def _build_v2_root_schema(
                 "items": {"$ref": "#/$defs/PluginInstance"},
             },
         },
-        "required": ["server", "upstreams"],
+        "required": ["server"],
+        # Conditionally require upstreams only when running in forward mode.
+        "allOf": [
+            {
+                "if": {
+                    "required": ["server"],
+                    "properties": {
+                        "server": {
+                            "required": ["resolver"],
+                            "properties": {
+                                "resolver": {
+                                    "required": ["mode"],
+                                    "properties": {
+                                        "mode": {
+                                            "enum": ["recursive", "master", "none"],
+                                        }
+                                    },
+                                }
+                            },
+                        }
+                    },
+                },
+                "then": {},
+                "else": {"required": ["upstreams"]},
+            }
+        ],
         "$defs": defs,
     }
 
@@ -999,12 +2308,18 @@ def build_document(base_schema_path: Optional[str] = None) -> Dict[str, Any]:
     # by foghorn.plugins.querylog.load_stats_store_backend().
     _augment_statistics_persistence_schema(base)
 
+    # Ensure schema includes hardening knobs for threaded fallbacks, connection
+    # limits, and the shared resolver executor sizing.
+    _augment_server_limits_and_listen_schema(base)
+
     # Heuristically fill in missing descriptions/default notes across the base
     # schema so that editor tooling always has something useful to display.
     _enrich_schema_descriptions(base)
 
     plugins = collect_plugin_schemas()
-
+    v2_root = _build_v2_root_schema(base, plugins)
+    _allow_comment_id_fields(v2_root)
+    return v2_root
     return _build_v2_root_schema(base, plugins)
 
 

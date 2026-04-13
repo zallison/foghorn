@@ -1,0 +1,30 @@
+# Example external TSIG key list for dns_update.zones[].tsig.key_sources
+#
+# This file can be referenced from:
+#   plugins[].config.dns_update.zones[].tsig.key_sources:
+#     - type: file
+#       path: ./example_configs/zone_update_tsig_keys.yaml
+
+- name: "external-dynamic-key-1"
+  algorithm: &algo "hmac-sha256"
+  secret: "ZXh0ZXJuYWwga2V5IDE="
+  allow_names:
+    - "host1.dyn.example.com"
+  allow_update_ips:
+    - "192.168.10.0/24"
+
+- name: "external-dynamic-key-2"
+  algorithm: *algo
+  secret: "ZQi1ZxZuYTwhv3V3IDI="
+  allow_names:
+    - "*.svc.example.com"
+  block_update_ips:
+    - "10.0.0.0/8"
+    - "172.16.0.0/12"
+    - "192.168.0.0/16"
+
+- name: "external-dynamic-key-3"
+  algorithm: *algo
+  secret: "ZQI1ZXZUYTWHV3V3IDI="
+  allow_names:
+    - "host.example.com"

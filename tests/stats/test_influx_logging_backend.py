@@ -186,6 +186,7 @@ def test_influx_logging_close_marks_unhealthy_and_closes_session(
     """
 
     import types as _types
+
     import foghorn.plugins.querylog.influxdb as influx_mod
 
     def _session_factory(**kwargs: Any) -> _FakeSession:  # type: ignore[no-untyped-def]
@@ -218,6 +219,7 @@ def test_insert_query_log_posts_line_protocol_and_parses_result_json(
     """
 
     import types as _types
+
     import foghorn.plugins.querylog.influxdb as influx_mod
 
     def _session_factory(**kwargs: Any) -> _FakeSession:  # type: ignore[no-untyped-def]
@@ -283,6 +285,7 @@ def test_insert_query_log_marks_unhealthy_on_http_error(monkeypatch: pytest.Monk
     """
 
     import types as _types
+
     import foghorn.plugins.querylog.influxdb as influx_mod
 
     class _ErrorSession(_FakeSession):
@@ -312,6 +315,9 @@ def test_insert_query_log_marks_unhealthy_on_http_error(monkeypatch: pytest.Monk
         first=None,
         result_json="{}",
     )
+    op_queue = getattr(backend, "_op_queue", None)
+    if op_queue is not None:
+        op_queue.join()
 
     # A second POST should have been attempted despite the HTTP 500 response.
     assert len(session.posts) == 2
@@ -330,6 +336,7 @@ def test_insert_query_log_returns_early_when_unhealthy(monkeypatch: pytest.Monke
     """
 
     import types as _types
+
     import foghorn.plugins.querylog.influxdb as influx_mod
 
     def _session_factory(**kwargs: Any) -> _FakeSession:  # type: ignore[no-untyped-def]
@@ -358,3 +365,124 @@ def test_insert_query_log_returns_early_when_unhealthy(monkeypatch: pytest.Monke
     )
 
     assert session.posts == initial_posts
+
+
+def test_batch_writes_flush_on_batch_size(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # type: ignore[no-untyped-def]
+    """Brief: Influx batching flushes once batch_max_size is reached.
+
+    Inputs:
+      - monkeypatch fixture.
+
+    Outputs:
+      - None; asserts one POST contains two newline-delimited points.
+    """
+
+    import types as _types
+
+    import foghorn.plugins.querylog.influxdb as influx_mod
+
+    def _session_factory(**kwargs: Any) -> _FakeSession:  # type: ignore[no-untyped-def]
+        return _FakeSession(**kwargs)
+
+    monkeypatch.setattr(
+        influx_mod, "requests", _types.SimpleNamespace(Session=_session_factory)
+    )
+
+    backend = InfluxLogging(
+        write_url="http://influx",
+        async_logging=False,
+        batch_writes=True,
+        batch_max_size=2,
+        batch_time_sec=9999.0,
+    )
+    session = backend._session  # type: ignore[attr-defined]
+    assert len(session.posts) == 1  # constructor marker
+
+    backend.insert_query_log(
+        ts=1.0,
+        client_ip="192.0.2.1",
+        name="one.example",
+        qtype="A",
+        upstream_id="up1",
+        rcode="NOERROR",
+        status="ok",
+        error=None,
+        first="1.2.3.4",
+        result_json="{}",
+    )
+    assert len(session.posts) == 1
+
+    backend.insert_query_log(
+        ts=2.0,
+        client_ip="192.0.2.2",
+        name="two.example",
+        qtype="AAAA",
+        upstream_id="up2",
+        rcode="NOERROR",
+        status="ok",
+        error=None,
+        first="2001:db8::1",
+        result_json="{}",
+    )
+    assert len(session.posts) == 2
+
+    payload = (
+        session.posts[1]["data"].decode("utf-8")
+        if isinstance(session.posts[1]["data"], bytes)
+        else session.posts[1]["data"]
+    )
+    assert payload.count("foghorn_query_log,") == 2
+    assert "\n" in payload
+
+
+def test_batch_writes_flush_on_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # type: ignore[no-untyped-def]
+    """Brief: Influx close() flushes pending batched query-log points.
+
+    Inputs:
+      - monkeypatch fixture.
+
+    Outputs:
+      - None; asserts close triggers one additional POST for buffered points.
+    """
+
+    import types as _types
+
+    import foghorn.plugins.querylog.influxdb as influx_mod
+
+    def _session_factory(**kwargs: Any) -> _FakeSession:  # type: ignore[no-untyped-def]
+        return _FakeSession(**kwargs)
+
+    monkeypatch.setattr(
+        influx_mod, "requests", _types.SimpleNamespace(Session=_session_factory)
+    )
+
+    backend = InfluxLogging(
+        write_url="http://influx",
+        async_logging=False,
+        batch_writes=True,
+        batch_max_size=100,
+        batch_time_sec=9999.0,
+    )
+    session = backend._session  # type: ignore[attr-defined]
+    assert len(session.posts) == 1
+
+    backend.insert_query_log(
+        ts=3.0,
+        client_ip="192.0.2.3",
+        name="close.example",
+        qtype="A",
+        upstream_id="up3",
+        rcode="NOERROR",
+        status="ok",
+        error=None,
+        first="1.2.3.4",
+        result_json="{}",
+    )
+    assert len(session.posts) == 1
+
+    backend.close()
+    assert len(session.posts) == 2

@@ -4,9 +4,10 @@ import logging
 from typing import Dict, List, Optional, Tuple
 
 from dnslib import RCODE, DNSRecord
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 
 from .base import BasePlugin, PluginContext, PluginDecision, plugin_aliases
+from foghorn.utils import dns_names
 
 logger = logging.getLogger(__name__)
 
@@ -42,8 +43,7 @@ class UpstreamRoute(BaseModel):
     suffix: Optional[str] = None
     upstreams: List[UpstreamRouteTarget] = Field(default_factory=list)
 
-    class Config:
-        extra = "allow"
+    model_config = ConfigDict(extra="allow")
 
 
 class UpstreamRouterConfig(BaseModel):
@@ -58,8 +58,7 @@ class UpstreamRouterConfig(BaseModel):
 
     routes: List[UpstreamRoute] = Field(default_factory=list)
 
-    class Config:
-        extra = "allow"
+    model_config = ConfigDict(extra="allow")
 
 
 @plugin_aliases("upstream_router", "router", "upstream")
@@ -124,7 +123,7 @@ class UpstreamRouter(BasePlugin):
         if not self.targets(ctx):
             return None
 
-        q = qname.rstrip(".").lower()
+        q = dns_names.normalize_name(qname)
         upstream_candidates = self._match_upstream_candidates(q)
         if upstream_candidates:
             # Set candidates on the context for the main server handler to use.
@@ -166,9 +165,9 @@ class UpstreamRouter(BasePlugin):
             domain = r.get("domain")
             suffix = r.get("suffix")
             if domain:
-                route["domain"] = str(domain).rstrip(".").lower()
+                route["domain"] = dns_names.normalize_name(domain)
             if suffix:
-                s = str(suffix).lower()
+                s = dns_names.normalize_name(suffix)
                 # Normalize suffix by removing a leading dot for simpler checks
                 if s.startswith("."):
                     s = s[1:]
@@ -211,102 +210,44 @@ class UpstreamRouter(BasePlugin):
     def _forward_with_failover(
         self, request_wire: bytes, targets: List[Dict[str, any]], timeout_ms: int
     ) -> Tuple[bool, bytes]:
-        """
-        Brief: Forward a DNS request to multiple upstreams with failover; synthesize SERVFAIL if all fail.
+        """Brief: Forward a DNS request to multiple upstreams using the hardened core helper.
 
         Inputs:
-        - request_wire (bytes): Original client DNS query wire (preserves transaction ID).
-        - targets (List[Dict[str, Any]]): List of upstream targets with host/port.
-        - timeout_ms (int): Per-attempt timeout in milliseconds.
+          - request_wire: Original client DNS query wire (preserves transaction ID).
+          - targets: List of upstream target mappings. These may include rich upstream
+            settings (transport/tls/method/headers) in addition to host/port.
+          - timeout_ms: Per-attempt timeout in milliseconds.
 
         Outputs:
-        - (bool, bytes): Tuple of (success flag, response wire). On failure, response is a SERVFAIL.
+          - (success, response_wire):
+              - success=True when an upstream response was obtained.
+              - success=False when all upstream attempts failed; response_wire is a
+                synthesized SERVFAIL.
 
-        Example:
-        >>> success, resp = self._forward_with_failover(req_wire, [{"host":"1.1.1.1","port":53},{"host":"8.8.8.8","port":53}], 2000)
-        >>> success
-        True
+        Notes:
+          - This method is retained for test coverage and internal use, but all
+            network I/O is delegated to foghorn.servers.server.send_query_with_failover
+            to ensure consistent hardening (TXID/question validation, truncation
+            handling, transport support).
         """
+
+        from foghorn.servers.server import send_query_with_failover
+
         req = DNSRecord.parse(request_wire)
         qname = str(req.q.qname)
         qtype = req.q.qtype
-        timeout_seconds = timeout_ms / 1000.0
-        total_upstreams = len(targets)
 
-        for i, upstream in enumerate(targets, 1):
-            host = upstream["host"]
-            port = upstream["port"]
-
-            logger.debug(
-                "Upstream attempt %d/%d to %s:%d for %s %s",
-                i,
-                total_upstreams,
-                host,
-                port,
-                qname,
-                qtype,
-            )
-
-            try:
-                reply_bytes = req.send(host, port, timeout=timeout_seconds)
-
-                # Parse response to check rcode
-                try:
-                    reply_record = DNSRecord.parse(reply_bytes)
-                    rcode = reply_record.header.rcode
-
-                    if rcode == RCODE.SERVFAIL:
-                        logger.debug(
-                            "Upstream %s:%d returned SERVFAIL for %s %s; failing over",
-                            host,
-                            port,
-                            qname,
-                            qtype,
-                        )
-                        continue
-                    else:
-                        # Any other response code (including NXDOMAIN) is valid - don't failover
-                        rcode_name = RCODE.get(rcode, f"RCODE({rcode})")
-                        logger.debug(
-                            "Upstream %s:%d returned %s for %s %s; accepting",
-                            host,
-                            port,
-                            rcode_name,
-                            qname,
-                            qtype,
-                        )
-                        return True, reply_bytes
-
-                except Exception as parse_e:
-                    # If we can't parse the response, treat it as valid anyway
-                    logger.debug(
-                        "Could not parse response from %s:%d, but accepting anyway: %s",
-                        host,
-                        port,
-                        str(parse_e),
-                    )
-                    return True, reply_bytes
-
-            except (
-                Exception
-            ) as e:  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-                logger.debug(
-                    "Upstream %s:%d error for %s %s: %s",
-                    host,
-                    port,
-                    qname,
-                    qtype,
-                    str(e),
-                )
-                continue
-
-        # All upstreams failed
-        logger.warning(
-            "All %d upstreams failed for %s %s; returning SERVFAIL",
-            total_upstreams,
+        reply, _used_upstream, _reason = send_query_with_failover(
+            req,
+            list(targets or []),
+            int(timeout_ms),
             qname,
             qtype,
+            max_concurrent=1,
         )
+        if reply is not None:
+            return True, reply
+
         servfail_reply = req.reply()
         servfail_reply.header.rcode = RCODE.SERVFAIL
         return False, servfail_reply.pack()

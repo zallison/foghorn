@@ -8,10 +8,10 @@ Outputs:
   - None
 """
 
+import importlib
 import os
 import signal
 import sys
-import importlib
 import types
 
 import pytest
@@ -108,6 +108,76 @@ def clear_dns_cache_between_tests():
     except Exception:  # pragma: no cover
         pass  # pragma: no cover
     yield
+
+
+@pytest.fixture(autouse=True)
+def clear_runtime_between_tests():
+    """Brief: Clear the in-process runtime snapshot between tests.
+
+    Inputs:
+      - None
+
+    Outputs:
+      - None.
+
+    Notes:
+      - Many resolver components consult foghorn.runtime_config.get_runtime_snapshot().
+        Clearing between tests avoids cross-test contamination.
+    """
+
+    try:
+        from foghorn.runtime_config import clear_runtime
+
+        clear_runtime()
+    except Exception:  # pragma: no cover
+        pass
+
+    yield
+
+    try:
+        from foghorn.runtime_config import clear_runtime
+
+        clear_runtime()
+    except Exception:  # pragma: no cover
+        pass
+
+
+_TEST_SNAPSHOT_GENERATION = 0
+
+
+@pytest.fixture
+def set_runtime_snapshot():
+    """Brief: Initialize the active RuntimeSnapshot for a test with overrides.
+
+    Inputs:
+      - **overrides: Fields to override on the default RuntimeSnapshot.
+
+    Outputs:
+      - callable: Function that applies overrides and returns the new snapshot.
+
+    Example:
+      >>> snap = set_runtime_snapshot(plugins=[MyPlugin()], upstream_addrs=[{'host': '1.1.1.1', 'port': 53}])
+    """
+
+    def _set(**overrides):
+        from dataclasses import replace
+
+        from foghorn.runtime_config import get_runtime_snapshot, initialize_runtime
+
+        base = get_runtime_snapshot()
+
+        # Ensure generation changes for each test snapshot. Some hot-path caches
+        # (e.g., plugin ordering) key off generation when using RuntimeSnapshot.
+        if "generation" not in overrides:
+            global _TEST_SNAPSHOT_GENERATION
+            _TEST_SNAPSHOT_GENERATION += 1
+            overrides["generation"] = int(_TEST_SNAPSHOT_GENERATION)
+
+        snap = replace(base, **overrides)
+        initialize_runtime(snapshot=snap, config_path="test.yaml")
+        return snap
+
+    return _set
 
 
 @pytest.fixture(autouse=True)

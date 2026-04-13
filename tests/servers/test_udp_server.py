@@ -13,10 +13,10 @@ import threading
 import time
 
 import pytest
-from dnslib import DNSRecord, QTYPE, RCODE, RR, TXT, EDNSOption
+from dnslib import QTYPE, RCODE, RR, TXT, DNSRecord, EDNSOption
 
-from foghorn.servers.udp_server import DNSUDPHandler, serve_udp
 from foghorn.plugins.resolve.base import PluginContext, PluginDecision
+from foghorn.servers.udp_server import DNSUDPHandler, serve_udp
 
 
 def _echo_resolver(q: bytes, client_ip: str) -> bytes:
@@ -597,7 +597,9 @@ def _extract_ede_from_wire(wire: bytes):
     return out
 
 
-def test_make_nxdomain_response_includes_ede_when_enabled(monkeypatch):
+def test_make_nxdomain_response_includes_ede_when_enabled(
+    monkeypatch, set_runtime_snapshot
+):
     """Brief: _make_nxdomain_response attaches a generic Blocked EDE for EDNS clients.
 
     Inputs:
@@ -609,8 +611,7 @@ def test_make_nxdomain_response_includes_ede_when_enabled(monkeypatch):
 
     from dnslib import EDNS0 as _EDNS0
 
-    # Ensure EDE is enabled on the handler class.
-    DNSUDPHandler.enable_ede = True
+    set_runtime_snapshot(enable_ede=True)
 
     handler = _make_handler()
     req = DNSRecord.question("ede-nxdomain.example")
@@ -627,7 +628,9 @@ def test_make_nxdomain_response_includes_ede_when_enabled(monkeypatch):
     assert "blocked" in text.lower()
 
 
-def test_make_servfail_response_includes_ede_when_enabled(monkeypatch):
+def test_make_servfail_response_includes_ede_when_enabled(
+    monkeypatch, set_runtime_snapshot
+):
     """Brief: _make_servfail_response attaches a generic Other EDE for EDNS clients.
 
     Inputs:
@@ -639,7 +642,7 @@ def test_make_servfail_response_includes_ede_when_enabled(monkeypatch):
 
     from dnslib import EDNS0 as _EDNS0
 
-    DNSUDPHandler.enable_ede = True
+    set_runtime_snapshot(enable_ede=True)
 
     handler = _make_handler()
     req = DNSRecord.question("ede-servfail.example")
@@ -656,7 +659,9 @@ def test_make_servfail_response_includes_ede_when_enabled(monkeypatch):
     assert "internal" in text.lower() or "error" in text.lower()
 
 
-def test_udp_handle_outer_exception_attaches_other_ede(monkeypatch):
+def test_udp_handle_outer_exception_attaches_other_ede(
+    monkeypatch, set_runtime_snapshot
+):
     """Brief: UDP handler outer exception path attaches a generic Other EDE.
 
     Inputs:
@@ -670,7 +675,7 @@ def test_udp_handle_outer_exception_attaches_other_ede(monkeypatch):
 
     import foghorn.servers.server as srv_mod
 
-    DNSUDPHandler.enable_ede = True
+    set_runtime_snapshot(enable_ede=True)
 
     # Force resolve_query_bytes to raise so DNSUDPHandler.handle() exercises its
     # outer exception path.
@@ -708,6 +713,75 @@ def test_udp_handle_outer_exception_attaches_other_ede(monkeypatch):
     code, text = edes[0]
     assert code == 0
     assert "internal" in text.lower() or "error" in text.lower()
+
+
+def test_enforce_udp_response_size_ceiling_non_edns_returns_tc_under_512() -> None:
+    """Brief: Helper truncates oversized non-EDNS UDP responses to <=512 with TC=1.
+
+    Inputs:
+      - Non-EDNS query.
+      - Oversized DNS response wire.
+
+    Outputs:
+      - None; asserts TC=1 and packed response length <= 512.
+    """
+
+    from foghorn.servers.udp_server import enforce_udp_response_size_ceiling
+
+    q = DNSRecord.question("big-tc-helper.example", "A")
+
+    rep = q.reply()
+    rep.add_answer(
+        RR(
+            "big-tc-helper.example",
+            QTYPE.TXT,
+            rdata=TXT(["x" * 255, "y" * 255, "z" * 100]),
+            ttl=60,
+        )
+    )
+    big_wire = rep.pack()
+    assert len(big_wire) > 512
+
+    out = enforce_udp_response_size_ceiling(q.pack(), big_wire)
+    assert len(out) <= 512
+    parsed = DNSRecord.parse(out)
+    assert parsed.header.tc == 1
+
+
+def test_enforce_udp_response_size_ceiling_edns_honors_server_override() -> None:
+    """Brief: Helper uses min(client EDNS size, server override) as ceiling.
+
+    Inputs:
+      - EDNS query advertising a large UDP size.
+      - Oversized response > server override.
+
+    Outputs:
+      - None; asserts TC=1 and output fits within server override.
+    """
+
+    from dnslib import EDNS0
+
+    from foghorn.servers.udp_server import enforce_udp_response_size_ceiling
+
+    q = DNSRecord.question("big-tc-edns.example", "A")
+    q.add_ar(EDNS0(udp_len=4096))
+
+    rep = q.reply()
+    rep.add_answer(
+        RR(
+            "big-tc-edns.example",
+            QTYPE.TXT,
+            rdata=TXT(["x" * 255, "y" * 255, "z" * 255, "w" * 255]),
+            ttl=60,
+        )
+    )
+    big_wire = rep.pack()
+    assert len(big_wire) > 800
+
+    out = enforce_udp_response_size_ceiling(q.pack(), big_wire, server_max_bytes=800)
+    assert len(out) <= 800
+    parsed = DNSRecord.parse(out)
+    assert parsed.header.tc == 1
 
 
 def test_handle_non_edns_large_response_sets_tc(monkeypatch):
@@ -768,3 +842,96 @@ def test_handle_non_edns_large_response_sets_tc(monkeypatch):
     sent_wire, addr = sock.sent[0]
     resp = DNSRecord.parse(sent_wire)
     assert resp.header.tc == 1
+
+
+def test_cleanup_upstream_health_removes_stale_healthy_entries(monkeypatch):
+    """Brief: _cleanup_upstream_health removes old healthy entries.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts that healthy entries older than max_age_hours are removed.
+    """
+    from foghorn.servers import udp_server as udp_mod
+
+    now = 1000000.0
+    monkeypatch.setattr(udp_mod.time, "time", lambda: now)
+
+    DNSUDPHandler.upstream_health.clear()
+
+    # Add an old healthy entry (down_until long past, fail_count=0)
+    up_old = {"host": "8.8.8.8", "port": 53}
+    up_id_old = DNSUDPHandler._upstream_id(up_old)
+    # down_until 25 hours ago (well past default 24h threshold)
+    DNSUDPHandler.upstream_health[up_id_old] = {
+        "fail_count": 0.0,
+        "down_until": now - (25 * 3600),
+    }
+
+    # Add a recent healthy entry (down_until recently, fail_count=0)
+    up_recent = {"host": "1.1.1.1", "port": 53}
+    up_id_recent = DNSUDPHandler._upstream_id(up_recent)
+    # down_until 1 hour ago (within 24h threshold)
+    DNSUDPHandler.upstream_health[up_id_recent] = {
+        "fail_count": 0.0,
+        "down_until": now - 3600,
+    }
+
+    # Add an unhealthy entry still in backoff window
+    up_down = {"host": "9.9.9.9", "port": 53}
+    up_id_down = DNSUDPHandler._upstream_id(up_down)
+    # down_until 1 hour in the future
+    DNSUDPHandler.upstream_health[up_id_down] = {
+        "fail_count": 2.0,
+        "down_until": now + 3600,
+    }
+
+    # Cleanup should remove old healthy but keep recent and unhealthy entries
+    DNSUDPHandler._cleanup_upstream_health(max_age_hours=24.0)
+
+    assert (
+        up_id_old not in DNSUDPHandler.upstream_health
+    ), "old healthy entry should be removed"
+    assert (
+        up_id_recent in DNSUDPHandler.upstream_health
+    ), "recent healthy entry should be kept"
+    assert (
+        up_id_down in DNSUDPHandler.upstream_health
+    ), "unhealthy entry in backoff should be kept"
+
+
+def test_cleanup_upstream_health_handles_corrupted_entries(monkeypatch):
+    """Brief: _cleanup_upstream_health safely skips malformed entries.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts that cleanup continues despite bad data.
+    """
+    from foghorn.servers import udp_server as udp_mod
+
+    now = 1000000.0
+    monkeypatch.setattr(udp_mod.time, "time", lambda: now)
+
+    DNSUDPHandler.upstream_health.clear()
+
+    # Add a valid entry
+    up_valid = {"host": "8.8.8.8", "port": 53}
+    up_id_valid = DNSUDPHandler._upstream_id(up_valid)
+    DNSUDPHandler.upstream_health[up_id_valid] = {
+        "fail_count": 0.0,
+        "down_until": now - 86400.0,  # 24 hours ago
+    }
+
+    # Add a corrupted entry (not a dict)
+    up_id_bad = "bad-key"
+    DNSUDPHandler.upstream_health[up_id_bad] = "not-a-dict"
+
+    # Cleanup should not raise and should produce a clean state
+    DNSUDPHandler._cleanup_upstream_health(max_age_hours=1.0)
+
+    # Invalid entry removed, old valid entry removed (older than 1 hour)
+    assert up_id_bad not in DNSUDPHandler.upstream_health
+    assert up_id_valid not in DNSUDPHandler.upstream_health

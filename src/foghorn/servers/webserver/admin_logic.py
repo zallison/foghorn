@@ -9,13 +9,18 @@ The functions here deliberately avoid importing FastAPI or http.server types.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import datetime
+from functools import cmp_to_key
 from typing import Any, Dict, Iterable, List, Optional
 
 from ...plugins.resolve.base import AdminPageSpec
+from ...security_limits import (
+    enforce_query_log_aggregate_bucket_limit,
+    enforce_query_log_aggregate_grouped_result_limit,
+)
 from ...stats import StatsCollector
-from ..udp_server import DNSUDPHandler
 from .config_helpers import _ts_to_utc_iso
 
 
@@ -53,6 +58,45 @@ def _get_store_from_collector(collector: StatsCollector | None) -> Any | None:
     return getattr(collector, "_store", None)
 
 
+def _derive_query_log_error_value(item: Dict[str, Any]) -> Any | None:
+    """Brief: Resolve query-log error text with nested and EDE fallbacks.
+
+    Inputs:
+      - item: Query-log row mapping from a stats backend.
+
+    Outputs:
+      - Existing item.error when present.
+      - Else result.error when present.
+      - Else synthesized EDE text using result.ede_code/result.ede_text.
+      - None when no error details are available.
+    """
+
+    top_level_error = item.get("error")
+    if top_level_error is not None:
+        return top_level_error
+
+    result = item.get("result")
+    if not isinstance(result, dict):
+        return None
+
+    nested_error = result.get("error")
+    if nested_error is not None:
+        return nested_error
+
+    ede_code_raw = result.get("ede_code")
+    ede_text_raw = result.get("ede_text")
+    ede_code = str(ede_code_raw).strip() if ede_code_raw is not None else ""
+    ede_text = str(ede_text_raw).strip() if ede_text_raw is not None else ""
+
+    if ede_code and ede_text:
+        return f"EDE {ede_code}: {ede_text}"
+    if ede_code:
+        return f"EDE {ede_code}"
+    if ede_text:
+        return ede_text
+    return None
+
+
 def build_query_log_payload(
     store: Any,
     *,
@@ -60,16 +104,21 @@ def build_query_log_payload(
     qtype: str | None,
     qname: str | None,
     rcode: str | None,
+    status: str | None,
+    source: str | None,
     start_ts: float | None,
     end_ts: float | None,
     page: int,
     page_size: int,
+    ede_code: str | None = None,
 ) -> Dict[str, Any]:
     """Brief: Build the query-log list payload from a store result.
 
     Inputs:
       - store: Stats store object that exposes select_query_log(**kwargs).
       - client_ip/qtype/qname/rcode: Optional filters.
+      - status/source: Optional filters for query status and result source.
+      - ede_code: Optional filter for result.ede_code in query-log rows.
       - start_ts/end_ts: Optional unix timestamps in seconds (UTC).
       - page: 1-indexed page number.
       - page_size: page size (already clamped).
@@ -77,6 +126,8 @@ def build_query_log_payload(
     Outputs:
       - Dict with keys: total, page, page_size, total_pages, items.
         Each dict item with a 'ts' key is copied and gets a 'timestamp' field.
+        The item error value follows precedence:
+        item.error -> result.error -> EDE details.
     """
 
     res = store.select_query_log(
@@ -84,6 +135,9 @@ def build_query_log_payload(
         qtype=qtype,
         qname=qname,
         rcode=rcode,
+        status=status,
+        source=source,
+        ede_code=ede_code,
         start_ts=start_ts,
         end_ts=end_ts,
         page=page,
@@ -95,6 +149,9 @@ def build_query_log_payload(
         if isinstance(item, dict) and "ts" in item:
             out = dict(item)
             out["timestamp"] = _ts_to_utc_iso(float(out.get("ts") or 0.0))
+            resolved_error = _derive_query_log_error_value(out)
+            if resolved_error is not None:
+                out["error"] = resolved_error
             items.append(out)
         else:
             items.append(item)
@@ -132,6 +189,15 @@ def build_query_log_aggregate_payload(
       - Dict with keys: start, end, interval_seconds, items.
         Each dict item may get bucket_start/bucket_end ISO fields when *_ts keys exist.
     """
+    group_by_text = str(group_by).strip() if group_by is not None else ""
+    try:
+        enforce_query_log_aggregate_bucket_limit(
+            start_dt.timestamp(),
+            end_dt.timestamp(),
+            interval_seconds,
+        )
+    except ValueError as exc:
+        raise AdminLogicHttpError(status_code=400, detail=str(exc)) from exc
 
     res = store.aggregate_query_log_counts(
         start_ts=start_dt.timestamp(),
@@ -144,8 +210,15 @@ def build_query_log_aggregate_payload(
         group_by=group_by,
     )
 
+    raw_items = res.get("items", []) or []
+    if group_by_text:
+        try:
+            enforce_query_log_aggregate_grouped_result_limit(len(raw_items))
+        except ValueError as exc:
+            raise AdminLogicHttpError(status_code=400, detail=str(exc)) from exc
+
     items: list[dict[str, Any]] = []
-    for item in res.get("items", []) or []:
+    for item in raw_items:
         if not isinstance(item, dict):
             continue
         out = dict(item)
@@ -165,100 +238,395 @@ def build_query_log_aggregate_payload(
     }
 
 
+def _resolve_path(obj: Any, path: str) -> Any:
+    """Brief: Resolve a dotted path into a nested mapping/object.
+
+    Inputs:
+      - obj: Source object (typically a dict).
+      - path: Dotted key path, e.g. "config.host".
+
+    Outputs:
+      - Resolved value or None.
+    """
+
+    if obj is None:
+        return None
+    if not path:
+        return obj
+
+    cur: Any = obj
+    for part in str(path).split("."):
+        if cur is None:
+            return None
+        if isinstance(cur, dict):
+            cur = cur.get(part)
+        else:
+            cur = getattr(cur, part, None)
+    return cur
+
+
+def build_table_page_payload(
+    rows: Iterable[dict[str, Any]] | None,
+    *,
+    page: int = 1,
+    page_size: int = 50,
+    sort_key: str | None = None,
+    sort_dir: str | None = None,
+    search: str | None = None,
+    hide_zero_calls: bool = False,  # noqa: ARG001
+    hide_zero_hits: bool = False,  # noqa: ARG001
+    show_down_services: bool = True,  # noqa: ARG001
+    hide_hash_like: bool = False,  # noqa: ARG001
+    default_sort_key: str | None = None,
+    default_sort_dir: str = "asc",
+) -> Dict[str, Any]:
+    """Brief: Server-side pagination/sorting/search for list-of-dict tables.
+
+    Inputs:
+      - rows: Iterable of dict rows.
+      - page: 1-indexed page.
+      - page_size: Page size.
+      - sort_key/sort_dir: Optional sort configuration.
+      - search: Optional substring filter applied across stringified row values.
+      - default_sort_key/default_sort_dir: Used when sort_key/dir are missing.
+      - hide_* / show_* flags: Reserved for future table-specific filters.
+
+    Outputs:
+      - Dict with keys: total, page, page_size, total_pages, sort_key, sort_dir,
+        search, items.
+    """
+
+    items: list[dict[str, Any]] = []
+    for row in rows or []:
+        if isinstance(row, dict):
+            items.append(row)
+
+    # Normalize paging.
+    try:
+        page_i = int(page)
+    except Exception:
+        page_i = 1
+    if page_i < 1:
+        page_i = 1
+
+    try:
+        page_size_i = int(page_size)
+    except Exception:
+        page_size_i = 50
+    if page_size_i < 1:
+        page_size_i = 1
+    if page_size_i > 500:
+        page_size_i = 500
+
+    # Search filtering.
+    q = (str(search).strip().lower() if search else "").strip()
+    if q:
+        filtered: list[dict[str, Any]] = []
+        for row in items:
+            try:
+                values = row.values()
+            except Exception:
+                values = []
+            matched = False
+            for v in values:
+                if v is None:
+                    continue
+                try:
+                    if q in str(v).lower():
+                        matched = True
+                        break
+                except Exception:
+                    continue
+            if matched:
+                filtered.append(row)
+        items = filtered
+
+    # Sorting.
+    key = (sort_key or default_sort_key or "").strip()
+    direction = (sort_dir or default_sort_dir or "asc").strip().lower()
+    if direction not in {"asc", "desc"}:
+        direction = "asc"
+
+    indexed: list[tuple[int, dict[str, Any]]] = list(enumerate(items))
+
+    def _norm(v: Any) -> tuple[int, Any]:
+        # 0: numeric/bool, 1: string/other, 2: None (always last)
+        if v is None:
+            return (2, 0)
+        if isinstance(v, bool):
+            return (0, int(v))
+        if isinstance(v, (int, float)):
+            return (0, float(v))
+        if isinstance(v, str):
+            try:
+                return (0, float(v))
+            except Exception:
+                return (1, v.lower())
+        return (1, str(v).lower())
+
+    def _cmp(a: tuple[int, dict[str, Any]], b: tuple[int, dict[str, Any]]) -> int:
+        ia, ra = a
+        ib, rb = b
+        if not key:
+            return -1 if ia < ib else (1 if ia > ib else 0)
+        va = _resolve_path(ra, key)
+        vb = _resolve_path(rb, key)
+        na = _norm(va)
+        nb = _norm(vb)
+        if na < nb:
+            res = -1
+        elif na > nb:
+            res = 1
+        else:
+            res = 0
+        if res == 0:
+            res = -1 if ia < ib else (1 if ia > ib else 0)
+        if direction == "desc":
+            res = -res
+        return res
+
+    indexed.sort(key=cmp_to_key(_cmp))
+    items = [row for _, row in indexed]
+
+    total = len(items)
+    total_pages = int(math.ceil(total / page_size_i)) if total else 0
+
+    start = (page_i - 1) * page_size_i
+    end = start + page_size_i
+    page_items = items[start:end] if start < total else []
+
+    return {
+        "total": total,
+        "page": page_i,
+        "page_size": page_size_i,
+        "total_pages": total_pages,
+        "sort_key": key,
+        "sort_dir": direction,
+        "search": str(search) if search is not None else "",
+        "items": page_items,
+    }
+
+
 def build_upstream_status_payload(
     config: Dict[str, Any] | None, *, now_ts: float | None = None
 ) -> Dict[str, Any]:
-    """Brief: Build upstream status payload using DNSUDPHandler state.
+    """Brief: Build upstream status payload using shared resolver health state.
 
     Inputs:
-      - config: Full configuration mapping, used to read config['upstreams'].
-      - now_ts: Optional unix timestamp (seconds) used for determining up/down.
+      - config: Full configuration mapping (currently unused; kept for API
+        compatibility).
+      - now_ts: Optional unix timestamp (seconds) used for determining health.
 
     Outputs:
       - Dict with keys: strategy, max_concurrent, items.
-        Items include configured upstreams plus health-only entries.
+
+    Notes:
+      - The shared resolver (foghorn.servers.server) owns upstream health state.
+      - Items include both primary and backup upstreams.
     """
-
-    cfg = config or {}
-    upstream_cfg = cfg.get("upstreams") or []
-    if not isinstance(upstream_cfg, list):
-        upstream_cfg = []
-
-    health = getattr(DNSUDPHandler, "upstream_health", {}) or {}
-    strategy = str(getattr(DNSUDPHandler, "upstream_strategy", "failover"))
-    try:
-        max_concurrent = int(getattr(DNSUDPHandler, "upstream_max_concurrent", 1) or 1)
-    except Exception:
-        max_concurrent = 1
-    if max_concurrent < 1:
-        max_concurrent = 1
 
     import time as _time
 
     now = float(now_ts) if now_ts is not None else _time.time()
-    items: list[Dict[str, Any]] = []
-    seen_ids: set[str] = set()
 
-    for up in upstream_cfg:
-        if not isinstance(up, dict):
-            continue
-        up_id = DNSUDPHandler._upstream_id(up)
-        if not up_id:
-            continue
-        seen_ids.add(up_id)
-        entry = health.get(up_id) or {}
+    def _safe_int(value: Any) -> int:
+        """Brief: Coerce a value to a non-negative integer count.
+
+        Inputs:
+          - value: Any numeric-ish object.
+
+        Outputs:
+          - int >= 0 suitable for counter fields.
+        """
+
         try:
-            fail_count = int(entry.get("fail_count", 0))
+            return max(0, int(float(value)))
         except Exception:
-            fail_count = 0
+            return 0
+
+    def _collect_run_upstream_counts(stats_collector: Any) -> Dict[str, Dict[str, int]]:
+        """Brief: Build per-upstream run counters from the live stats collector.
+
+        Inputs:
+          - stats_collector: Collector object expected to expose snapshot().
+
+        Outputs:
+          - Mapping keyed by upstream id with:
+              - run_query_count
+              - run_failed_count
+        """
+
+        counts: Dict[str, Dict[str, int]] = {}
+        if stats_collector is None:
+            return counts
+        snapshot_fn = getattr(stats_collector, "snapshot", None)
+        if not callable(snapshot_fn):
+            return counts
+
+        snap = None
         try:
-            down_until = float(entry.get("down_until", 0.0) or 0.0)
+            snap = snapshot_fn(reset=False)
+        except TypeError:
+            try:
+                snap = snapshot_fn()
+            except Exception:
+                snap = None
         except Exception:
-            down_until = 0.0
-        state = "down" if entry and down_until > now else "up"
+            snap = None
 
-        cfg_view: Dict[str, Any] = {}
-        for key in ("host", "port", "transport", "url"):
-            if key in up:
-                cfg_view[key] = up[key]
+        upstream_outcomes = getattr(snap, "upstreams", None)
+        if not isinstance(upstream_outcomes, dict):
+            return counts
 
-        items.append(
-            {
-                "id": up_id,
-                "config": cfg_view,
-                "state": state,
-                "fail_count": fail_count,
-                "down_until": down_until if down_until else None,
+        for upstream_id, outcomes in upstream_outcomes.items():
+            if not isinstance(outcomes, dict):
+                continue
+            total = 0
+            failed = 0
+            for outcome_key, raw_count in outcomes.items():
+                count = _safe_int(raw_count)
+                if count <= 0:
+                    continue
+                total += count
+                key = str(outcome_key or "").strip().lower()
+                if key not in {"success", "ok"}:
+                    failed += count
+            counts[str(upstream_id)] = {
+                "run_query_count": total,
+                "run_failed_count": failed,
             }
+        return counts
+
+    def _legacy_upstream_key(upstream: Any) -> str:
+        """Brief: Build the pre-id upstream key shape used by older stats snapshots.
+
+        Inputs:
+          - upstream: Upstream configuration mapping.
+
+        Outputs:
+          - str legacy key (url/endpoint, else host:port, else host), or empty.
+        """
+
+        if not isinstance(upstream, dict):
+            return ""
+        try:
+            url = upstream.get("url") or upstream.get("endpoint")
+        except Exception:
+            url = None
+        if url:
+            return str(url)
+        try:
+            host = upstream.get("host")
+        except Exception:
+            host = None
+        try:
+            port = upstream.get("port")
+        except Exception:
+            port = None
+        if host or port:
+            try:
+                return f"{host}:{int(port) if port is not None else 0}"
+            except Exception:
+                return str(host) if host is not None else ""
+        return ""
+
+    def _resolve_run_count(
+        run_counts_map: Dict[str, Dict[str, int]],
+        *,
+        upstream: Any,
+        record_id: Any,
+    ) -> Dict[str, int]:
+        """Brief: Resolve run counters for an upstream with legacy-key fallback.
+
+        Inputs:
+          - run_counts_map: Per-upstream counters from _collect_run_upstream_counts.
+          - upstream: Upstream configuration mapping used to derive legacy key.
+          - record_id: Current upstream id used in upstream_status payload.
+
+        Outputs:
+          - Dict with run_query_count/run_failed_count, or empty dict.
+        """
+
+        rec_key = str(record_id or "")
+        if rec_key:
+            direct = run_counts_map.get(rec_key)
+            if isinstance(direct, dict):
+                return direct
+        legacy_key = _legacy_upstream_key(upstream)
+        if legacy_key:
+            legacy = run_counts_map.get(legacy_key)
+            if isinstance(legacy, dict):
+                # Best-effort in-request migration so subsequent lookups in this
+                # payload build use the current id key.
+                if rec_key and rec_key != legacy_key:
+                    run_counts_map[rec_key] = legacy
+                return legacy
+        return {}
+
+    try:
+        from foghorn.runtime_config import get_runtime_snapshot
+
+        snap = get_runtime_snapshot()
+        primary = list(getattr(snap, "upstream_addrs", []) or [])
+        backup = list(getattr(snap, "upstream_backup_addrs", []) or [])
+        strategy = str(getattr(snap, "upstream_strategy", "failover") or "failover")
+        try:
+            max_concurrent = int(getattr(snap, "upstream_max_concurrent", 1) or 1)
+        except Exception:
+            max_concurrent = 1
+        if max_concurrent < 1:
+            max_concurrent = 1
+        from foghorn.runtime_config import (
+            UpstreamHealthConfig,
+            parse_upstream_health_config,
         )
 
-    for up_id, entry in (health or {}).items():
-        if up_id in seen_ids or not up_id:
-            continue
-        try:
-            fail_count = int(entry.get("fail_count", 0))
-        except Exception:
-            fail_count = 0
-        try:
-            down_until = float(entry.get("down_until", 0.0) or 0.0)
-        except Exception:
-            down_until = 0.0
-        state = "down" if down_until > now else "up"
-        items.append(
-            {
-                "id": up_id,
-                "config": {},
-                "state": state,
-                "fail_count": fail_count,
-                "down_until": down_until if down_until else None,
-            }
+        health_cfg = getattr(snap, "upstream_health", None)
+        if not isinstance(health_cfg, UpstreamHealthConfig):
+            health_cfg = parse_upstream_health_config({})
+
+        import foghorn.servers.server as server_mod
+
+        run_counts = _collect_run_upstream_counts(
+            getattr(snap, "stats_collector", None)
         )
 
-    return {
-        "strategy": strategy,
-        "max_concurrent": max_concurrent,
-        "items": items,
-    }
+        items: list[Dict[str, Any]] = []
+        for up in primary:
+            if not isinstance(up, dict):
+                continue
+            rec = server_mod._UPSTREAM_HEALTH.describe_upstream(
+                role="primary", upstream=up, now=now, cfg=health_cfg
+            )
+            if rec:
+                run_count = _resolve_run_count(
+                    run_counts, upstream=up, record_id=rec.get("id")
+                )
+                rec["run_query_count"] = _safe_int(run_count.get("run_query_count"))
+                rec["run_failed_count"] = _safe_int(run_count.get("run_failed_count"))
+                items.append(rec)
+        for up in backup:
+            if not isinstance(up, dict):
+                continue
+            rec = server_mod._UPSTREAM_HEALTH.describe_upstream(
+                role="backup", upstream=up, now=now, cfg=health_cfg
+            )
+            if rec:
+                run_count = _resolve_run_count(
+                    run_counts, upstream=up, record_id=rec.get("id")
+                )
+                rec["run_query_count"] = _safe_int(run_count.get("run_query_count"))
+                rec["run_failed_count"] = _safe_int(run_count.get("run_failed_count"))
+                items.append(rec)
+
+        return {
+            "strategy": strategy,
+            "max_concurrent": max_concurrent,
+            "items": items,
+        }
+    except Exception:
+        # Best-effort fallback when runtime snapshot is unavailable.
+        return {"strategy": "failover", "max_concurrent": 1, "items": []}
 
 
 def collect_admin_pages_for_response(plugins: Iterable[object]) -> list[dict[str, Any]]:
@@ -279,8 +647,10 @@ def collect_admin_pages_for_response(plugins: Iterable[object]) -> list[dict[str
     for plugin in plugins or []:
         try:
             plugin_name = getattr(plugin, "name", None)
-        except Exception:
-            plugin_name = None
+        except (
+            Exception
+        ):  # pragma: nocover - defensive against misbehaving plugin objects
+            plugin_name = None  # pragma: nocover - defensive default
         if not plugin_name:
             continue
 
@@ -290,8 +660,8 @@ def collect_admin_pages_for_response(plugins: Iterable[object]) -> list[dict[str
 
         try:
             specs = get_pages()
-        except Exception:
-            continue
+        except Exception:  # pragma: nocover - plugin code should not break admin UI
+            continue  # pragma: nocover - best-effort: ignore plugin failures
 
         for spec in specs or []:
             slug = None
@@ -318,8 +688,10 @@ def collect_admin_pages_for_response(plugins: Iterable[object]) -> list[dict[str
                     description = getattr(spec, "description", None)
                     layout = getattr(spec, "layout", "one_column")
                     kind = getattr(spec, "kind", None)
-            except Exception:
-                continue
+            except (
+                Exception
+            ):  # pragma: nocover - plugin page spec parsing is best-effort
+                continue  # pragma: nocover - ignore malformed plugin specs
 
             slug_str = str(slug or "").strip()
             title_str = str(title or "").strip()
@@ -369,8 +741,10 @@ def find_admin_page_detail(
             if getattr(plugin, "name", None) == plugin_name:
                 target = plugin
                 break
-        except Exception:
-            continue
+        except (
+            Exception
+        ):  # pragma: nocover - defensive against misbehaving plugin objects
+            continue  # pragma: nocover - ignore plugin failures
     if target is None:
         return None
 
@@ -380,8 +754,8 @@ def find_admin_page_detail(
 
     try:
         specs = get_pages()
-    except Exception:
-        return None
+    except Exception:  # pragma: nocover - plugin code should not break admin UI
+        return None  # pragma: nocover - best-effort: treat as missing
 
     for spec in specs or []:
         slug = None
@@ -416,8 +790,8 @@ def find_admin_page_detail(
                 kind = getattr(spec, "kind", None)
                 html_left = getattr(spec, "html_left", None)
                 html_right = getattr(spec, "html_right", None)
-        except Exception:
-            continue
+        except Exception:  # pragma: nocover - plugin page spec parsing is best-effort
+            continue  # pragma: nocover - ignore malformed plugin specs
 
         slug_str = str(slug or "").strip()
         if slug_str != str(page_slug or "").strip():
@@ -468,8 +842,10 @@ def collect_plugin_ui_descriptors(plugins: Iterable[object]) -> list[dict[str, A
             return None
         try:
             source_name = getattr(source, "name", "")
-        except Exception:
-            source_name = ""
+        except (
+            Exception
+        ):  # pragma: nocover - defensive against misbehaving plugin objects
+            source_name = ""  # pragma: nocover - defensive default
 
         name = str(desc.get("name") or source_name or "").strip()
         title_raw = desc.get("title")
@@ -481,8 +857,10 @@ def collect_plugin_ui_descriptors(plugins: Iterable[object]) -> list[dict[str, A
         order_val = desc.get("order")
         try:
             order = int(order_val) if order_val is not None else 100
-        except Exception:
-            order = 100
+        except (
+            Exception
+        ):  # pragma: nocover - defensive: plugins should provide int-ish order
+            order = 100  # pragma: nocover - defensive default
 
         item = dict(desc)
         item["name"] = name
@@ -495,14 +873,16 @@ def collect_plugin_ui_descriptors(plugins: Iterable[object]) -> list[dict[str, A
         get_desc = None
         try:
             get_desc = getattr(plugin, "get_admin_ui_descriptor", None)
-        except Exception:
-            get_desc = None
+        except (
+            Exception
+        ):  # pragma: nocover - defensive against misbehaving plugin objects
+            get_desc = None  # pragma: nocover - treat as missing
         if not callable(get_desc):
             continue
         try:
             desc = get_desc()
-        except Exception:
-            continue
+        except Exception:  # pragma: nocover - plugin code should not break admin UI
+            continue  # pragma: nocover - ignore plugin failures
         if isinstance(desc, dict):
             item = _normalise_descriptor(plugin, desc)
             if item is not None:
@@ -552,8 +932,10 @@ def find_plugin_instance_by_name(
         try:
             if getattr(p, "name", None) == plugin_name:
                 return p
-        except Exception:
-            continue
+        except (
+            Exception
+        ):  # pragma: nocover - defensive against misbehaving plugin objects
+            continue  # pragma: nocover - ignore plugin failures
     return None
 
 

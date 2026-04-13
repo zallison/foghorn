@@ -12,6 +12,8 @@ Key features:
 - Optional per-URL options (`hash_filenames`, `add_comment`).
 - Avoids unnecessary downloads via Last-Modified and minimum-age checks.
 - Optional periodic refresh via `interval_days` / `interval_seconds`.
+- Configurable `HEAD` check policy (`head_check`) and delayed startup refresh
+  when local files are still fresh.
 
 Typical use cases:
 
@@ -26,14 +28,14 @@ It does **not** directly answer DNS queries.
 ```yaml path=null start=null
 plugins:
   - id: adblock-downloader
-    type: file_downloader
-    hooks:
-      setup: { priority: 10 }
-    config:
-      download_path: ./config/var/lists
-      urls:
-        - https://v.firebog.net/hosts/AdguardDNS.txt
-        - https://v.firebog.net/hosts/Prigent-Ads.txt
+	type: file_downloader
+	hooks:
+	  setup: { priority: 10 }
+	config:
+	  download_path: ./config/var/lists
+	  urls:
+		- https://v.firebog.net/hosts/AdguardDNS.txt
+		- https://v.firebog.net/hosts/Prigent-Ads.txt
 ```
 
 ## Full configuration (all plugin + base options)
@@ -41,42 +43,44 @@ plugins:
 ```yaml path=null start=null
 plugins:
   - id: lists-downloader-full
-    type: file_downloader
-    hooks:
-      setup: { priority: 10 }
-    config:
-      # BasePlugin targeting + logging (mostly unused but supported)
-      targets: [ '0.0.0.0/0' ]
-      targets_listener: any
-      logging:
-        level: info
-        stderr: true
+	type: file_downloader
+	hooks:
+	  setup: { priority: 10 }
+	config:
+	  # BasePlugin targeting + logging (mostly unused but supported)
+	  targets:
+		ips: ['0.0.0.0/0' ]
+		listeners: any
+	  logging:
+		level: info
+		stderr: true
 
-      # Where to write list files
-      download_path: ./config/var/lists
+	  # Where to write list files
+	  download_path: ./config/var/lists
 
-      # Inline URLs; each entry can be a string or an object with options.
-      urls:
-        # Simple URL using global defaults
-        - https://v.firebog.net/hosts/AdguardDNS.txt
+	  # Inline URLs; each entry can be a string or an object with options.
+	  urls:
+		# Simple URL using global defaults
+		- https://v.firebog.net/hosts/AdguardDNS.txt
 
-        # URL with per-entry options
-        - url: https://example.com/custom-list.txt
-          hash_filenames: true         # override plugin-level hash_filenames
-          add_comment: true            # prepend a timestamp header
+		# URL with per-entry options
+		- url: https://example.com/custom-list.txt
+		  hash_filenames: true         # override plugin-level hash_filenames
+		  add_comment: true            # prepend a timestamp header
 
-      # Additional sources that contain one URL per line ("#" comments allowed)
-      url_files:
-        - ./config/url-sources/community.txt
-        - ./config/url-sources/partners.txt
+	  # Additional sources that contain one URL per line ("#" comments allowed)
+	  url_files:
+		- ./config/url-sources/community.txt
+		- ./config/url-sources/partners.txt
 
-      # Refresh interval. Prefer interval_days; interval_seconds is a legacy alias.
-      interval_days: 7                 # refresh at most once every ~7 days
-      # interval_seconds: 604800       # equivalent legacy form
+	  # Refresh interval. Prefer interval_days; interval_seconds is a legacy alias.
+	  interval_days: 7                 # refresh at most once every ~7 days
+	  # interval_seconds: 604800       # equivalent legacy form
 
-      # Plugin-level defaults for per-URL options
-      add_comment: false               # default: no header line
-      hash_filenames: true             # store as base-hash.ext instead of base.ext
+	  # Plugin-level defaults for per-URL options
+	  add_comment: false               # default: no header line
+	  hash_filenames: true             # store as base-hash.ext instead of base.ext
+	  head_check: stale             # always|half_age|stale|never
 ```
 
 ## Options
@@ -88,39 +92,46 @@ plugins:
   - Default: `"./config/var/lists"`.
 - `urls: list[str | object]`
   - List of source URLs. Each item may be:
-    - a simple string URL, or
-    - a mapping with keys:
-      - `url: str` (required)
-      - `hash_filenames: bool | null` – per-URL override; when `null`, falls
-        back to the plugin-level `hash_filenames`.
-      - `add_comment: bool | null` – per-URL override; when `true`, prepend a
-        timestamped header line, otherwise no header.
+	- a simple string URL, or
+	- a mapping with keys:
+	  - `url: str` (required)
+	  - `hash_filenames: bool | null` – per-URL override; when `null`, falls
+		back to the plugin-level `hash_filenames`.
+	  - `add_comment: bool | null` – per-URL override; when `true`, prepend a
+		timestamped header line, otherwise no header.
 - `url_files: list[str]`
   - Paths to text files containing one URL per line. Empty lines and lines
-    starting with `#` are ignored.
+	starting with `#` are ignored.
 - `interval_days: float | null`
   - Preferred way to configure the minimum interval between refreshes. Converted
-    internally to seconds. `null` disables interval-based scheduling.
-- `interval_seconds: int | null`
-  - Legacy seconds-based equivalent; still supported but `interval_days` is
-    recommended.
+	internally to seconds. `null` disables interval-based scheduling.
 - `add_comment: bool | null`
   - Plugin-level default used when a URL entry does not specify its own
-    `add_comment` flag. Only when the effective value is `true` does the plugin
-    write the `# YYYY-MM-DD HH:MM - url` header line.
+	`add_comment` flag. Only when the effective value is `true` does the plugin
+	write the `# YYYY-MM-DD HH:MM - url` header line.
 - `hash_filenames: bool`
   - Plugin-level default controlling filename layout:
-    - `false` (default): derive filenames directly from the URL path/netloc
-      (`AdguardDNS.txt`, `list1.txt`, `example.com`, ...).
-    - `true`: include a short SHA-1 hash suffix: `<base>-<hash12><ext>`.
+	- `false` (default): derive filenames directly from the URL path/netloc
+	  (`AdguardDNS.txt`, `list1.txt`, `example.com`, ...).
+	- `true`: include a short SHA-1 hash suffix: `<base>-<hash12><ext>`.
+- `head_check: str`
+  - When to issue upstream `HEAD` requests:
+	- `always`: always `HEAD` when files are not considered fresh.
+	- `half_age`: start `HEAD` checks when files are older than half
+	  the refresh interval (or half a day when no interval is configured).
+	- `stale` (default): only `HEAD` once files are at or beyond the refresh interval.
+	- `never`: skip `HEAD` entirely; only refresh on expiry.
 
 ### Behaviour
 
 - If the local file does not exist, the URL is always downloaded.
-- If `interval_days` / `interval_seconds` is configured, very new files are
-  treated as fresh and reused without a network call.
+- If `interval_days`is configured, very new files are treated as fresh and
+  reused without a network call.
 - Otherwise, the plugin uses HTTP `HEAD` and `Last-Modified` (when available)
   to decide whether a remote copy is newer than the local one.
+- On startup, when all local files are still within their fresh window, the
+  plugin defers the first refresh check to post-setup background execution. The
+  deferred refresh currently runs immediately (no fixed 10-second delay).
 - Each downloaded file is validated as a "domain-per-line" list; obviously
   malformed content causes setup to fail.
 

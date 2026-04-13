@@ -91,7 +91,7 @@ def test_get_web_cfg_and_redact_keys_defensive_paths() -> None:
 
     assert web_mod._get_web_cfg(None) == {}
     keys = web_mod._get_redact_keys({"webserver": {"redact_keys": "token"}})
-    assert keys == ["token"]
+    assert set(keys) == {"token", "password", "secret"}
 
 
 def test_trim_top_fields_limit_default_and_scalar_dict_values() -> None:
@@ -255,8 +255,8 @@ def test_redact_yaml_preserving_layout_redacts_nested_block_keys() -> None:
     )
 
     out = web_mod._redact_yaml_text_preserving_layout(raw_yaml, ["auth"])
-    assert "token: ***" in out
-    assert "password: ***" in out
+    assert "token: '***'" in out
+    assert "password: '***'" in out
     assert "secret-token" not in out
     assert "secret-password" not in out
     assert "note: keep" in out
@@ -317,17 +317,18 @@ def test_query_log_endpoints_disabled_when_no_store() -> None:
     assert resp1.status_code == 200
     assert resp1.json()["status"] == "disabled"
 
-    resp2 = client.get(
-        "/api/v1/query_log/aggregate",
-        params={
-            "interval": 15,
-            "interval_units": "minutes",
-            "start": "2025-12-10 01:00:00",
-            "end": "2025-12-10 02:00:00",
-        },
-    )
-    assert resp2.status_code == 200
-    assert resp2.json()["status"] == "disabled"
+    for path in ["/api/v1/query_log/aggregate", "/query_log/aggregate"]:
+        resp2 = client.get(
+            path,
+            params={
+                "interval": 15,
+                "interval_units": "minutes",
+                "start": "2025-12-10 01:00:00",
+                "end": "2025-12-10 02:00:00",
+            },
+        )
+        assert resp2.status_code == 200
+        assert resp2.json()["status"] == "disabled"
 
 
 def test_upstream_status_more_defensive_branches(

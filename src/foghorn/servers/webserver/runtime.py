@@ -10,175 +10,22 @@ preserving the public/semi-public API via re-exports from ``core``.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import threading
-from typing import Any, Dict, Optional, Tuple, List
+from typing import Any, Dict, List, Optional, Tuple
 
-from cachetools import TTLCache
-
+# Re-export shared types from the FastAPI-free servers.runtime_state module so
+# minimal/headless builds can import foghorn.main without pulling in the web UI.
+from foghorn.servers.runtime_state import (
+    RingBuffer,  # kept for backwards compatibility; some callers import it from webserver
+)
+from foghorn.servers.runtime_state import (  # noqa: F401
+    RuntimeState,
+    _ListenerRuntime,
+    _thread_is_alive,
+)
 from foghorn.stats import StatsCollector
-from foghorn.utils.register_caches import registered_cached
 
 from .config_helpers import _get_web_cfg
-
-
-@dataclass
-class _ListenerRuntime:
-    """Track the runtime state of a single listener for readiness checks.
-
-    Inputs (fields):
-      - name: Logical listener name (e.g. "udp", "tcp", "dot", "doh", "webserver").
-      - enabled: Whether this listener is expected to be running.
-      - thread: Optional thread-like object that may implement ``is_alive()`` or
-        ``is_running()``.
-      - error: Optional string describing a startup/runtime error.
-
-    Outputs:
-      - ``_ListenerRuntime`` instance used inside :class:`RuntimeState`.
-    """
-
-    name: str
-    enabled: bool
-    thread: Any | None = None
-    error: str | None = None
-
-
-class RuntimeState:
-    """Shared, thread-safe runtime state used by /ready endpoints.
-
-    Inputs (constructor):
-      - startup_complete: Optional bool indicating whether main startup has
-        completed.
-
-    Outputs:
-      - :class:`RuntimeState` instance whose :meth:`snapshot` method returns a
-        JSON-safe mapping describing listener readiness.
-
-    Example::
-
-      state = RuntimeState()
-      state.set_listener("udp", enabled=True, thread=None)
-      state.mark_startup_complete()
-    """
-
-    def __init__(self, startup_complete: bool = False) -> None:
-        self._lock = threading.Lock()
-        self._startup_complete = bool(startup_complete)
-        self._listeners: Dict[str, _ListenerRuntime] = {}
-
-    def mark_startup_complete(self) -> None:
-        """Mark the process as having completed startup.
-
-        Inputs: none
-        Outputs: none
-        """
-
-        with self._lock:
-            self._startup_complete = True
-
-    def set_listener(self, name: str, *, enabled: bool, thread: Any | None) -> None:
-        """Register or update a listener entry.
-
-        Inputs:
-          - name: Listener name string.
-          - enabled: Whether the listener is expected to be running.
-          - thread: Optional thread/handle object.
-
-        Outputs:
-          - None.
-        """
-
-        if not name:
-            return
-        with self._lock:
-            current = self._listeners.get(name)
-            error = current.error if current is not None else None
-            self._listeners[name] = _ListenerRuntime(
-                name=str(name),
-                enabled=bool(enabled),
-                thread=thread,
-                error=error,
-            )
-
-    def set_listener_error(self, name: str, exc: Exception | str) -> None:
-        """Attach an error message to a listener entry.
-
-        Inputs:
-          - name: Listener name string.
-          - exc: Exception instance or error string.
-
-        Outputs:
-          - None.
-        """
-
-        if not name:
-            return
-        msg = str(exc)
-        with self._lock:
-            current = self._listeners.get(name)
-            enabled = current.enabled if current is not None else True
-            thread = current.thread if current is not None else None
-            self._listeners[name] = _ListenerRuntime(
-                name=str(name),
-                enabled=bool(enabled),
-                thread=thread,
-                error=msg,
-            )
-
-    @registered_cached(cache=TTLCache(maxsize=1, ttl=10))
-    def snapshot(self) -> Dict[str, Any]:
-        """Return a JSON-safe snapshot of current runtime state.
-
-        Inputs: none
-
-        Outputs:
-          - dict with keys:
-              * startup_complete: bool
-              * listeners: mapping of listener name -> {enabled, running, error}
-        """
-
-        with self._lock:
-            listeners = {
-                name: {
-                    "enabled": entry.enabled,
-                    "running": _thread_is_alive(entry.thread),
-                    "error": entry.error,
-                }
-                for name, entry in self._listeners.items()
-            }
-            return {
-                "startup_complete": bool(self._startup_complete),
-                "listeners": listeners,
-            }
-
-
-def _thread_is_alive(obj: Any | None) -> bool:
-    """Best-effort check whether a thread/handle is alive.
-
-    Inputs:
-      - obj: Thread-like object (may implement ``is_alive()`` or
-        ``is_running()``) or None.
-
-    Outputs:
-      - bool: True when ``obj`` appears to be running; False otherwise.
-    """
-
-    if obj is None:
-        return False
-    try:
-        fn = getattr(obj, "is_alive", None)
-        if callable(fn):
-            return bool(fn())
-    except Exception:
-        return False
-    # Some handles expose is_running instead of is_alive.
-    try:
-        fn = getattr(obj, "is_running", None)
-        if callable(fn):
-            return bool(fn())
-    except Exception:
-        return False
-    return False
 
 
 def _expected_listeners_from_config(config: Dict[str, Any] | None) -> Dict[str, bool]:
@@ -193,31 +40,61 @@ def _expected_listeners_from_config(config: Dict[str, Any] | None) -> Dict[str, 
     Notes:
       - Mirrors the defaults in ``foghorn.main``: UDP defaults to enabled, others
         default to disabled.
+      - Preferred v2 location is ``config['server']['listen']`` with legacy
+        fallback to root-level ``listen``.
     """
 
     cfg = config if isinstance(config, dict) else {}
-    listen = cfg.get("listen") or {}
+
+    server_cfg = cfg.get("server") or {}
+    listen: Any
+    if isinstance(server_cfg, dict) and isinstance(server_cfg.get("listen"), dict):
+        listen = server_cfg.get("listen") or {}
+    else:
+        # Legacy fallback: root-level listen (used in older tests/configs).
+        listen = cfg.get("listen") or {}
     if not isinstance(listen, dict):
         listen = {}
 
-    def _enabled(subkey: str, default: bool) -> bool:
-        sub = listen.get(subkey)
-        if not isinstance(sub, dict):
-            return bool(default)
-        return bool(sub.get("enabled", default))
+    dns_cfg = listen.get("dns")
+    if not isinstance(dns_cfg, dict):
+        dns_cfg = {}
+
+    def _enabled_section(section_name: str, *, default_enabled: bool) -> bool:
+        section = listen.get(section_name)
+        if isinstance(section, dict):
+            return bool(section.get("enabled", default_enabled))
+        return bool(default_enabled)
+
+    # Match foghorn.main defaults, including dns.{udp,tcp} legacy booleans.
+    udp_section = listen.get("udp")
+    if isinstance(udp_section, dict):
+        udp_default_enabled = bool(udp_section.get("enabled", True))
+    else:
+        udp_default_enabled = bool(dns_cfg.get("udp")) if "udp" in dns_cfg else True
+
+    tcp_section = listen.get("tcp")
+    if isinstance(tcp_section, dict):
+        tcp_default_enabled = bool(tcp_section.get("enabled", True))
+    else:
+        tcp_default_enabled = bool(dns_cfg.get("tcp")) if "tcp" in dns_cfg else False
+
+    dot_section = listen.get("dot")
+    dot_default_enabled = True if isinstance(dot_section, dict) else False
+
+    doh_section = listen.get("doh")
+    doh_default_enabled = True if isinstance(doh_section, dict) else False
 
     web_cfg = _get_web_cfg(cfg)
-    # If a webserver block exists, treat it as enabled by default unless
-    # explicitly disabled with enabled: false.
     has_web_cfg = bool(web_cfg)
     raw_web_enabled = web_cfg.get("enabled") if isinstance(web_cfg, dict) else None
     web_enabled = bool(raw_web_enabled) if raw_web_enabled is not None else has_web_cfg
 
     return {
-        "udp": _enabled("udp", True),
-        "tcp": _enabled("tcp", False),
-        "dot": _enabled("dot", False),
-        "doh": _enabled("doh", False),
+        "udp": _enabled_section("udp", default_enabled=udp_default_enabled),
+        "tcp": _enabled_section("tcp", default_enabled=tcp_default_enabled),
+        "dot": _enabled_section("dot", default_enabled=dot_default_enabled),
+        "doh": _enabled_section("doh", default_enabled=doh_default_enabled),
         "webserver": web_enabled,
     }
 
@@ -265,18 +142,29 @@ def evaluate_readiness(
         not_ready.append("startup not complete")
 
     # Upstream configuration: required in forwarder mode.
+    server_cfg = cfg.get("server") or {}
+    if not isinstance(server_cfg, dict):
+        server_cfg = {}
+
     fog_cfg = cfg.get("foghorn") or {}
     resolver_cfg = (
-        (fog_cfg.get("resolver") if isinstance(fog_cfg, dict) else None)
+        (server_cfg.get("resolver") if isinstance(server_cfg, dict) else None)
+        or (fog_cfg.get("resolver") if isinstance(fog_cfg, dict) else None)
         or cfg.get("resolver")
         or {}
     )
     if not isinstance(resolver_cfg, dict):
         resolver_cfg = {}
     mode = str(resolver_cfg.get("mode", "forward")).lower()
+    if mode == "none":
+        mode = "master"
 
     if mode == "forward":
-        upstreams = cfg.get("upstreams") or []
+        upstream_block = cfg.get("upstreams")
+        if isinstance(upstream_block, dict) and "endpoints" in upstream_block:
+            upstreams = upstream_block.get("endpoints")
+        else:
+            upstreams = upstream_block or []
         if not isinstance(upstreams, list) or not any(
             isinstance(u, dict) for u in upstreams
         ):
@@ -296,7 +184,12 @@ def evaluate_readiness(
             not_ready.append(f"{name} listener not running")
 
     # Store availability (only when persistence is configured).
-    stats_cfg = cfg.get("statistics") or {}
+    # Prefer v2 root 'stats' but keep legacy 'statistics' support.
+    stats_cfg = (
+        cfg.get("stats")
+        if isinstance(cfg.get("stats"), dict)
+        else (cfg.get("statistics") or {})
+    )
     if not isinstance(stats_cfg, dict):
         stats_cfg = {}
     persistence_cfg = stats_cfg.get("persistence") or {}

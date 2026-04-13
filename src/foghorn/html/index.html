@@ -5,6 +5,21 @@
 	<meta charset="utf-8" />
 	<title>Foghorn</title>
 	<link rel="stylesheet" href="/styles.css" />
+	<style>
+		:root:not([data-theme='light']) .fh-btn,
+		:root:not([data-theme='light']) .fh-theme-btn,
+		:root:not([data-theme='light']) .fh-toggle-btn {
+			outline: 1px solid var(--accent);
+			outline-offset: 0;
+		}
+		.fh-txt-kv-value {
+			color: #6495ed;
+			font-weight: 600;
+		}
+		:root[data-theme='light'] .fh-txt-kv-value {
+			color: #4169e1;
+		}
+	</style>
 	<!-- Ajv JSON Schema validator for client-side config checks -->
 	<script src="https://cdn.jsdelivr.net/npm/ajv@8.12.0/dist/ajv7.min.js"></script>
 	<!-- js-yaml for parsing YAML config in the browser -->
@@ -52,12 +67,35 @@
 			aria-selected="true">
 			Stats
 		</button>
+		<button id="btn-tab-query-log" class="fh-theme-btn" type="button" role="tab" aria-selected="false">
+			Query Log
+		</button>
 		<button id="btn-tab-edit" class="fh-theme-btn" type="button" role="tab" aria-selected="false">
-			JSON & Config
+			Config
 		</button>
 		<span id="plugin-tabs-root"></span>
+		<div class="fh-refresh-control">
+			<label class="fh-refresh-label" for="refresh-interval-select">Refresh</label>
+			<select id="refresh-interval-select" class="fh-refresh-select" aria-label="Auto refresh interval">
+				<option value="0">off</option>
+				<option value="5">5s</option>
+				<option value="15" selected>15s</option>
+				<option value="60">1m</option>
+				<option value="300">5m</option>
+			</select>
+		</div>
 	</div>
 	<main class="fh-main" id="page2">
+		<section class="fh-pane fh-pane-full" id="stats-details-pane" hidden>
+			<div class="fh-pane-header">
+				<h2 class="fh-pane-title" id="stats-details-title">Details</h2>
+				<div class="fh-config-actions">
+					<button id="btn-stats-details-back" class="fh-btn fh-btn-secondary" type="button">Back</button>
+				</div>
+			</div>
+			<p class="fh-pane-help" id="stats-details-help"></p>
+			<div id="stats-details-root" class="fh-stats-groups"></div>
+		</section>
 		<section class="fh-pane fh-pane-left">
 			<div class="fh-pane-header">
 				<h2 class="fh-pane-title">Statistics</h2>
@@ -80,21 +118,29 @@
 
 		<section class="fh-pane fh-pane-left">
 			<div class="fh-pane-header">
-				<h2 class="fh-pane-title">Raw JSON Stats</h2>
-				<p class="fh-pane-help"></p>
+				<h2 class="fh-pane-title">Config Diagram</h2>
+				<p class="fh-pane-help" id="config-diagram-status">Loading diagram...</p>
 			</div>
-			<div id="stats-groups" class="fh-stats-groups">
-				<!-- Filled by JavaScript -->
-			</div>
-			<div class="fh-stats-group">
-				<h3 class="fh-stats-group-title">Raw stats JSON</h3>
-				<pre id="stats-raw" class="fh-pre fh-pre-compact">Loading statistics...</pre>
+			<div class="fh-diagram-container">
+					<img id="config-diagram-img" class="fh-diagram-img" alt="Config diagram" />
+					<div id="config-diagram-fallback" class="fh-diagram-fallback" hidden>
+						PNG diagram unavailable. Showing GraphViz dot output.
+						<br />
+						To render a PNG locally:
+						<pre class="fh-pre fh-pre-compact">dot -Tpng diagram.dot -o diagram.png</pre>
+						<pre id="config-diagram-dot" class="fh-pre fh-pre-compact"></pre>
+						<div class="fh-config-actions" style="margin-top: 10px; gap: 10px; flex-wrap: wrap;">
+							<input id="config-diagram-upload" type="file" accept="image/png" />
+							<button id="btn-config-diagram-upload" class="fh-btn fh-btn-secondary" type="button">Upload PNG (max 1MB)</button>
+						</div>
+						<p class="fh-pane-help" id="config-diagram-upload-status"></p>
+					</div>
 			</div>
 		</section>
 
 		<section class="fh-pane fh-pane-right">
 			<div class="fh-pane-header">
-				<h2 class="fh-pane-title">Configuration</h2>
+				<h2 class="fh-pane-title">Config</h2>
 				<div class="fh-config-actions" id="config-actions-view">
 					<button id="btn-edit" class="fh-btn" type="button">Edit Config</button>
 				</div>
@@ -104,9 +150,9 @@
 				</div>
 			</div>
 			<div class="fh-warning" id="config-warning">
-				<strong>Warning:</strong> Saving will overwrite <code>config.yaml</code>, then after a brief
-				delay send SIGHUP to the main process. Changes take effect after the server restarts;
-				SIGUSR1/SIGUSR2 only notify plugins and may reset statistics when configured.
+				<strong>Warning:</strong> Saving will overwrite <code>config.yaml</code> on disk. After saving,
+				you can choose to apply changes via a zero-downtime <em>reload</em> or a full <em>restart</em>
+				(depending on what changed).
 			</div>
 
 			<div id="config-messages" class="fh-messages" aria-live="polite"></div>
@@ -120,11 +166,100 @@
 			</div>
 		</section>
 	</main>
+	<main class="fh-main" id="page-query-log" style="display: none;">
+		<section class="fh-pane fh-pane-full">
+			<div class="fh-pane-header">
+				<h2 class="fh-pane-title">Query Log</h2>
+				<p class="fh-pane-help">Filters and records from <code>/api/v1/query_log</code>.</p>
+			</div>
+			<div class="fh-query-log-controls">
+				<div class="fh-query-log-row">
+					<label class="fh-query-log-field">
+						<span>qname</span>
+						<input id="query-log-filter-qname" class="fh-query-log-input" type="text" />
+					</label>
+					<label class="fh-query-log-field">
+						<span>qtype</span>
+						<input id="query-log-filter-qtype" class="fh-query-log-input" type="text" />
+					</label>
+					<label class="fh-query-log-field">
+						<span>rcode</span>
+						<input id="query-log-filter-rcode" class="fh-query-log-input" type="text" />
+					</label>
+					<label class="fh-query-log-field">
+						<span>client_ip</span>
+						<input id="query-log-filter-client-ip" class="fh-query-log-input" type="text" />
+					</label>
+				</div>
+				<div class="fh-query-log-row">
+					<label class="fh-query-log-field">
+						<span>status</span>
+						<input id="query-log-filter-status" class="fh-query-log-input" type="text" />
+					</label>
+					<label class="fh-query-log-field">
+						<span>source</span>
+						<input id="query-log-filter-source" class="fh-query-log-input" type="text" />
+					</label>
+					<label class="fh-query-log-field">
+						<span>ede_code</span>
+						<input id="query-log-filter-ede-code" class="fh-query-log-input" type="text" />
+					</label>
+					<label class="fh-query-log-field">
+						<span>start (UTC)</span>
+						<input id="query-log-filter-start" class="fh-query-log-input" type="datetime-local" />
+					</label>
+					<label class="fh-query-log-field">
+						<span>end (UTC)</span>
+						<input id="query-log-filter-end" class="fh-query-log-input" type="datetime-local" />
+					</label>
+				</div>
+				<div class="fh-query-log-actions">
+					<button id="btn-query-log-apply" class="fh-btn fh-btn-primary" type="button">Apply filters</button>
+					<button id="btn-query-log-clear" class="fh-btn fh-btn-secondary" type="button">Clear filters</button>
+				</div>
+			</div>
+			<div id="query-log-filter-chips" class="fh-query-log-chips"></div>
+			<p id="query-log-summary" class="fh-pane-help"></p>
+			<div id="query-log-error" class="fh-messages"></div>
+			<div class="fh-query-log-table-wrap">
+				<table class="fh-table" id="query-log-table">
+					<thead>
+						<tr>
+							<th>Timestamp</th>
+							<th>QName</th>
+							<th>QType</th>
+							<th>Client IP</th>
+							<th>RCode</th>
+							<th>Status</th>
+							<th>Source</th>
+							<th>First Record</th>
+							<th>Error</th>
+						</tr>
+					</thead>
+					<tbody id="query-log-table-body"></tbody>
+				</table>
+			</div>
+			<div class="fh-query-log-pager">
+				<label class="fh-query-log-field fh-query-log-page-size">
+					<span>Page size</span>
+					<select id="query-log-page-size" class="fh-query-log-input">
+						<option value="25">25</option>
+						<option value="50" selected>50</option>
+						<option value="100">100</option>
+						<option value="250">250</option>
+					</select>
+				</label>
+				<button id="btn-query-log-prev" class="fh-btn fh-btn-secondary" type="button">Previous</button>
+				<span id="query-log-page-info" class="fh-pane-help"></span>
+				<button id="btn-query-log-next" class="fh-btn fh-btn-secondary" type="button">Next</button>
+			</div>
+		</section>
+	</main>
 
 	<footer class="fh-footer">
-		Foghorn&copy; 2025-2026 Zack Allison. GitHub:
+		GitHub:
 		<a href="https://github.com/zallison/foghorn">https://github.com/zallison/foghorn</a>
-		&mdash; <b>Open Source Software: MIT Licence</b>
+		&mdash; <b>Open Source Software</b>
 	</footer>
 
 	<script>
@@ -133,15 +268,27 @@
 
 			var root = document.documentElement;
 			var logoEl = document.getElementById('fh-logo');
-			var statsRawEl = document.getElementById('stats-raw');
 			var statsGroupsEl = document.getElementById('stats-groups');
 			var statsGroupsRightEl = document.getElementById('stats-groups-right');
+			var statsDetailsPane = document.getElementById('stats-details-pane');
+			var statsDetailsTitleEl = document.getElementById('stats-details-title');
+			var statsDetailsHelpEl = document.getElementById('stats-details-help');
+			var statsDetailsRootEl = document.getElementById('stats-details-root');
+			var btnStatsDetailsBack = document.getElementById('btn-stats-details-back');
+			var statsPaneLeftEl = null;
+			var statsPaneRightEl = null;
 			var configOutputEl = document.getElementById('config-output');
+			var configDiagramImgEl = document.getElementById('config-diagram-img');
+			var configDiagramStatusEl = document.getElementById('config-diagram-status');
+			var configDiagramFallbackEl = document.getElementById('config-diagram-fallback');
+			var configDiagramDotEl = document.getElementById('config-diagram-dot');
+			var configDiagramUploadEl = document.getElementById('config-diagram-upload');
+			var btnConfigDiagramUploadEl = document.getElementById('btn-config-diagram-upload');
+			var configDiagramUploadStatusEl = document.getElementById('config-diagram-upload-status');
 			var configEditorEl = document.getElementById('config-editor');
 			var configViewContainer = document.getElementById('config-view-container');
 			var configEditContainer = document.getElementById('config-edit-container');
 			var msgEl = document.getElementById('config-messages');
-			var dockerShowHashEl = null;
 			if (msgEl) {
 				msgEl.style.display = 'none';
 			}
@@ -150,7 +297,6 @@
 				warningEl.style.display = 'none';
 			}
 
-			var btnDisk = document.getElementById('btn-config-disk');
 			var btnEdit = document.getElementById('btn-edit');
 			var btnCancel = document.getElementById('btn-cancel');
 			var btnSave = document.getElementById('btn-save');
@@ -160,12 +306,75 @@
 			var btnThemeLight = document.getElementById('btn-theme-light');
 			var page1 = document.getElementById('page1');
 			var page2 = document.getElementById('page2');
+			var pageQueryLog = document.getElementById('page-query-log');
 			var btnTabStats = document.getElementById('btn-tab-stats');
+			var btnTabQueryLog = document.getElementById('btn-tab-query-log');
 			var btnTabEdit = document.getElementById('btn-tab-edit');
+			var refreshIntervalSelectEl = document.getElementById('refresh-interval-select');
 			var pluginTabsRoot = document.getElementById('plugin-tabs-root');
 			var pluginUiPages = {};
 			var pluginRefreshTimers = {};
+			var tableSortStateStore = {};
 			var activePluginName = null;
+			var activeTab = 'stats';
+			var autoRefreshTimer = null;
+			var DEFAULT_REFRESH_SECONDS = '15';
+			var REFRESH_INTERVAL_STORAGE_KEY = 'foghorn-refresh-interval-seconds';
+			var queryLogFilters = {
+				qname: '',
+				qtype: '',
+				rcode: '',
+				client_ip: '',
+				status: '',
+				source: '',
+				ede_code: '',
+				start: '',
+				end: '',
+			};
+			var queryLogPage = 1;
+			var queryLogPageSize = 50;
+			var queryLogSummaryEl = document.getElementById('query-log-summary');
+			var queryLogErrorEl = document.getElementById('query-log-error');
+			var queryLogChipsEl = document.getElementById('query-log-filter-chips');
+			var queryLogTableBodyEl = document.getElementById('query-log-table-body');
+			var queryLogPageInfoEl = document.getElementById('query-log-page-info');
+			var queryLogFilterQnameEl = document.getElementById('query-log-filter-qname');
+			var queryLogFilterQtypeEl = document.getElementById('query-log-filter-qtype');
+			var queryLogFilterRcodeEl = document.getElementById('query-log-filter-rcode');
+			var queryLogFilterClientIpEl = document.getElementById('query-log-filter-client-ip');
+			var queryLogFilterStatusEl = document.getElementById('query-log-filter-status');
+			var queryLogFilterSourceEl = document.getElementById('query-log-filter-source');
+			var queryLogFilterEdeCodeEl = document.getElementById('query-log-filter-ede-code');
+			var queryLogFilterStartEl = document.getElementById('query-log-filter-start');
+			var queryLogFilterEndEl = document.getElementById('query-log-filter-end');
+			var btnQueryLogApply = document.getElementById('btn-query-log-apply');
+			var btnQueryLogClear = document.getElementById('btn-query-log-clear');
+			var btnQueryLogPrev = document.getElementById('btn-query-log-prev');
+			var btnQueryLogNext = document.getElementById('btn-query-log-next');
+			var queryLogPageSizeEl = document.getElementById('query-log-page-size');
+			var UI_QUERY_TAB_PARAM = 'tab';
+			var QUERY_LOG_FILTER_KEYS = [
+				'qname',
+				'qtype',
+				'rcode',
+				'client_ip',
+				'status',
+				'source',
+				'ede_code',
+				'start',
+				'end',
+			];
+			var QUERY_LOG_FILTER_META = {
+				qname: { label: 'qname' },
+				qtype: { label: 'qtype' },
+				rcode: { label: 'rcode' },
+				client_ip: { label: 'client_ip' },
+				status: { label: 'status' },
+				source: { label: 'source' },
+				ede_code: { label: 'ede_code' },
+				start: { label: 'start' },
+				end: { label: 'end' },
+			};
 
 			var currentSource = 'disk'; // 'disk' only
 			var lastDiskConfigObj = null;
@@ -206,39 +415,54 @@
 				ede_15: 'Extended DNS Error code 15 (Blocked); query was blocked by policy.',
 				ede_23: 'Extended DNS Error code 23 (Network Error); all configured upstreams failed.',
 			};
-			var lastDiskConfigObj = null;
-			var lastDiskRawYaml = null;
-			var isEditing = false;
-
-			// Client-side JSON Schema validation (Ajv from CDN). We prefer window.ajv7.Ajv
-			// when available, falling back to window.Ajv when present. When Ajv is
-			// missing, validation becomes a no-op and server-side validation still
-			// enforces correctness on save/startup.
-			var AjvCtor = (window.ajv7 && window.ajv7.Ajv) || window.Ajv || null;
-			var configSchemaValidator = null;
-
-			var STATS_TOOLTIPS = {
-				total_queries: 'Total DNS queries handled since the collector started or was last reset.',
-				cache_hits: 'Queries answered directly from the cache.',
-				cache_misses: 'Queries that required contacting upstream servers.',
-				cache_null: 'Responses generated directly by plugins before cache or upstream lookup.',
-				cache_deny_pre: 'Pre-plugin deny decisions that bypassed cache (e.g., filtering plugins).',
-				cache_override_pre: 'Pre-plugin overrides that bypassed cache (e.g., synthetic responses from plugins).',
-				min_ms: 'Fastest observed query latency in milliseconds.',
-				max_ms: 'Slowest observed query latency in milliseconds.',
-				avg_ms: 'Average (mean) query latency in milliseconds.',
-				p50_ms: 'Median (50th percentile) query latency in milliseconds.',
-				p90_ms: '90th percentile query latency in milliseconds.',
-				p99_ms: '99th percentile query latency in milliseconds.',
-				load_1m: 'System load average over the last 1 minute.',
-				load_5m: 'System load average over the last 5 minutes.',
-				load_15m: 'System load average over the last 15 minutes.',
-				dnssec_secure: 'Responses that validated successfully against DNSSEC trust anchors (secure).',
-				dnssec_zone_secure: 'Responses treated as DNSSEC-secure based on extended upstream signals (for example, AD bit).',
-				dnssec_unsigned: 'Responses from zones that are not signed with DNSSEC (unsigned but not an error).',
-				dnssec_bogus: 'Responses that failed DNSSEC validation (bogus).',
-				dnssec_indeterminate: 'Responses where DNSSEC status could not be determined (indeterminate).',
+			var EDE_CODE_LABELS = {
+				'0': 'Other',
+				'1': 'Unsupported DNSKEY Algorithm',
+				'2': 'Unsupported DS Digest Type',
+				'3': 'Stale Answer',
+				'4': 'Forged Answer',
+				'5': 'DNSSEC Indeterminate',
+				'6': 'DNSSEC Bogus',
+				'7': 'Signature Expired',
+				'8': 'Signature Not Yet Valid',
+				'9': 'DNSKEY Missing',
+				'10': 'RRSIGs Missing',
+				'11': 'No Zone Key Bit Set',
+				'12': 'NSEC Missing',
+				'13': 'Cached Error',
+				'14': 'Not Ready',
+				'15': 'Blocked',
+				'16': 'Censored',
+				'17': 'Filtered',
+				'18': 'Prohibited',
+				'19': 'Stale NXDOMAIN Answer',
+				'20': 'Not Authoritative',
+				'21': 'Not Supported',
+				'22': 'No Reachable Authority',
+				'23': 'Network Error',
+				'24': 'Invalid Data',
 			};
+
+			function formatStatsKeyForDisplay(rawKey) {
+				var key = String(rawKey || '');
+				if (key.indexOf('ede_') !== 0) {
+					return key;
+				}
+				var code = key.slice(4);
+				if (!Object.prototype.hasOwnProperty.call(EDE_CODE_LABELS, code)) {
+					return key;
+				}
+				return EDE_CODE_LABELS[code] + ' (' + key + ')';
+			}
+
+			function getEdeCodeFromStatsKey(rawKey) {
+				var key = String(rawKey || '');
+				var match = key.match(/^ede_(\d+)$/);
+				if (!match || !match[1]) {
+					return null;
+				}
+				return String(match[1]);
+			}
 
 			function setMessage(text, level) {
 				if (!msgEl) {
@@ -258,6 +482,50 @@
 				} else {
 					msgEl.classList.add('fh-messages-info');
 				}
+			}
+			function normalizeRefreshIntervalSeconds(value) {
+				var raw = String(value || '').trim();
+				if (
+					raw === '0' ||
+					raw === '5' ||
+					raw === '15' ||
+					raw === '60' ||
+					raw === '300'
+				) {
+					return raw;
+				}
+				return DEFAULT_REFRESH_SECONDS;
+			}
+			function stopAutoRefreshTimer() {
+				if (!autoRefreshTimer) {
+					return;
+				}
+				clearInterval(autoRefreshTimer);
+				autoRefreshTimer = null;
+			}
+			function restartAutoRefreshTimer() {
+				stopAutoRefreshTimer();
+				var seconds = Number(
+					normalizeRefreshIntervalSeconds(
+						refreshIntervalSelectEl ? refreshIntervalSelectEl.value : DEFAULT_REFRESH_SECONDS
+					)
+				);
+				if (!isFinite(seconds) || seconds <= 0) {
+					return;
+				}
+				autoRefreshTimer = setInterval(refreshActiveTabData, seconds * 1000);
+			}
+			function applyRefreshIntervalSetting(value) {
+				var normalized = normalizeRefreshIntervalSeconds(value);
+				if (refreshIntervalSelectEl) {
+					refreshIntervalSelectEl.value = normalized;
+				}
+				try {
+					if (window.localStorage) {
+						localStorage.setItem(REFRESH_INTERVAL_STORAGE_KEY, normalized);
+					}
+				} catch (e) {}
+				restartAutoRefreshTimer();
 			}
 
 			function pretty(obj) {
@@ -395,6 +663,231 @@
 				return y + '-' + m + '-' + d + ' ' + hh + ':' + mm + ':' + ss;
 			}
 
+			function parseQueryLogTimestamp(value) {
+				if (value == null || value === '') {
+					return null;
+				}
+				if (typeof value === 'number') {
+					return new Date(value > 1e11 ? value : value * 1000);
+				}
+				var text = String(value).trim();
+				var n = Number(text);
+				if (text && isFinite(n)) {
+					return new Date(n > 1e11 ? n : n * 1000);
+				}
+				return new Date(text);
+			}
+
+			function formatQueryLogTimestamp(value) {
+				if (value == null || value === '') {
+					return { text: '', title: '' };
+				}
+				var date = parseQueryLogTimestamp(value);
+				if (!date || isNaN(date.getTime())) {
+					return { text: String(value), title: '' };
+				}
+				var rounded = new Date(Math.round(date.getTime() / 1000) * 1000);
+				var iso = rounded.toISOString().replace('.000Z', 'Z');
+				var datePart = iso.slice(0, 10);
+				var timePart = iso.slice(11, 19);
+				return { text: timePart, title: datePart + ' UTC' };
+			}
+
+			function normalizeQueryLogToken(value) {
+				if (value == null) {
+					return '';
+				}
+				return String(value).trim().toUpperCase();
+			}
+
+			function classifyQueryLogQtype(value) {
+				var token = normalizeQueryLogToken(value);
+				if (!token) {
+					return '';
+				}
+				if (token === 'ANY' || token === 'AXFR' || token === 'IXFR' || token === '*') {
+					return 'anomaly';
+				}
+				var commonQtypes = {
+					A: true,
+					AAAA: true,
+					CNAME: true,
+					MX: true,
+					TXT: false,
+					NS: false,
+					SOA: false,
+					PTR: true,
+					SRV: true,
+					CAA: false,
+					NAPTR: false,
+					HTTPS: true,
+					SVCB: false,
+					DS: false,
+					DNSKEY: false,
+					RRSIG: false,
+					NSEC: false,
+					NSEC3: false,
+					TLSA: false,
+					SSHFP: false,
+					SPF: false,
+					URI: false,
+				};
+				if (commonQtypes[token]) {
+					return 'good';
+				}
+				if (/^\d+$/.test(token)) {
+					return 'warn';
+				}
+				return 'anomaly';
+			}
+
+            function normalizeQueryLogSourceDisplay(sourceValue, resultObj, upstreamIdValue) {
+				var sourceText = sourceValue != null ? String(sourceValue) : '';
+				if (sourceText !== 'pre_plugin_override') {
+					return sourceText;
+				}
+				var pluginName = '';
+				if (resultObj && typeof resultObj === 'object') {
+					pluginName =
+						resultObj.plugin_label ||
+						resultObj.plugin ||
+						resultObj.source_plugin ||
+						'';
+				}
+				pluginName = pluginName != null ? String(pluginName).trim() : '';
+				if (pluginName) {
+					return pluginName;
+				}
+				return sourceText;
+			}
+
+            function normalizeQueryLogSourceDisplayWithUpstream(sourceValue, resultObj, upstreamIdValue) {
+    var sourceText = sourceValue != null ? String(sourceValue) : '';
+    if (sourceText === 'upstream') {
+        var upstreamBits = [];
+        var resultUpstream = '';
+        var resultUpstreamUrl = '';
+        if (resultObj && typeof resultObj === 'object') {
+            if (resultObj.upstream != null) {
+                resultUpstream = String(resultObj.upstream).trim();
+            } else if (resultObj.upstream_id != null) {
+                resultUpstream = String(resultObj.upstream_id).trim();
+            }
+            if (resultObj.upstream_url != null) {
+                resultUpstreamUrl = String(resultObj.upstream_url).trim();
+            }
+        }
+        var topLevelUpstream = upstreamIdValue != null ? String(upstreamIdValue).trim() : '';
+        if (resultUpstream) {
+            upstreamBits.push(resultUpstream);
+        } else if (topLevelUpstream) {
+            upstreamBits.push(topLevelUpstream);
+        }
+        if (resultUpstreamUrl && upstreamBits.indexOf(resultUpstreamUrl) === -1) {
+            upstreamBits.push(resultUpstreamUrl);
+        }
+        if (upstreamBits.length) {
+            return sourceText + ' (' + upstreamBits.join(' | ') + ')';
+        }
+        return sourceText;
+    }
+    return normalizeQueryLogSourceDisplay(sourceValue, resultObj, upstreamIdValue);
+}
+
+            function isOverridePreDeniedWithIp(statusToken, firstValue) {
+				if (statusToken !== 'OVERRIDE_PRE') {
+					return false;
+				}
+				var firstText = firstValue != null ? String(firstValue).trim().toLowerCase() : '';
+				return firstText === '0.0.0.0' || firstText === '::1';
+			}
+
+			function truncateQueryLogValue(value, maxLength) {
+				var text = value != null ? String(value) : '';
+				if (!text) {
+					return { text: '', full: '' };
+				}
+				var limit = parseInt(maxLength, 10);
+				if (!isFinite(limit) || limit < 2 || text.length <= limit) {
+					return { text: text, full: text };
+				}
+				return {
+					text: text.slice(0, limit - 1) + '…',
+					full: text,
+				};
+			}
+
+			function classifyQueryLogRcode(value) {
+				var token = normalizeQueryLogToken(value);
+				if (!token) {
+					return '';
+				}
+				if (token === 'NOERROR' || token === '0') {
+					return 'good';
+				}
+				if (token === 'NXDOMAIN' || token === '3') {
+					return 'warn';
+				}
+				if (
+					token === 'SERVFAIL' ||
+					token === 'REFUSED' ||
+					token === 'FORMERR' ||
+					token === 'NOTIMP' ||
+					token === 'YXDOMAIN' ||
+					token === 'YXRRSET' ||
+					token === 'NXRRSET' ||
+					token === 'NOTAUTH' ||
+					token === 'NOTZONE' ||
+					token === 'BADVERS' ||
+					token === 'BADCOOKIE' ||
+					token === '1' ||
+					token === '2' ||
+					token === '4' ||
+					token === '5' ||
+					token.indexOf('BAD') === 0
+				) {
+					return 'error';
+				}
+				if (/^\d+$/.test(token)) {
+					return 'anomaly';
+				}
+				return 'anomaly';
+			}
+
+			function classifyQueryLogStatus(value) {
+				var token = normalizeQueryLogToken(value);
+				if (!token) {
+					return '';
+				}
+				if (token === 'CACHE_HIT') {
+					return 'info';
+				}
+				if (token === 'OK' || token === 'SUCCESS') {
+					return 'good';
+				}
+				if (
+					token === 'CACHE_MISS' ||
+					token === 'DENY_PRE' ||
+					token === 'OVERRIDE_PRE' ||
+					token === 'LOCAL_BLOCKED' ||
+					token.indexOf('CACHE_') === 0
+				) {
+					return 'warn';
+				}
+				if (
+					token === 'ERROR' ||
+					token.indexOf('FAIL') !== -1 ||
+					token.indexOf('TIMEOUT') !== -1 ||
+					token.indexOf('NO_UPSTREAM') !== -1 ||
+					token.indexOf('EXCEPTION') !== -1 ||
+					token.indexOf('DROP') !== -1
+				) {
+					return 'error';
+				}
+				return 'anomaly';
+			}
+
+
 			function formatDurationSeconds(value) {
 				if (value == null) {
 					return null;
@@ -420,6 +913,822 @@
 				return hms;
 			}
 
+			function normalizeQueryLogFilterValue(value) {
+				if (value == null) {
+					return '';
+				}
+				return String(value).trim();
+			}
+
+			function clearQueryLogFilterState() {
+				QUERY_LOG_FILTER_KEYS.forEach(function (key) {
+					queryLogFilters[key] = '';
+				});
+			}
+
+			function isIpv4Address(value) {
+				var text = normalizeQueryLogFilterValue(value);
+				if (!text) {
+					return false;
+				}
+				var parts = text.split('.');
+				if (parts.length !== 4) {
+					return false;
+				}
+				for (var i = 0; i < parts.length; i++) {
+					var part = parts[i];
+					if (!/^\d+$/.test(part)) {
+						return false;
+					}
+					var n = Number(part);
+					if (!isFinite(n) || n < 0 || n > 255) {
+						return false;
+					}
+				}
+				return true;
+			}
+
+			function isProbablyIpv6Address(value) {
+				var text = normalizeQueryLogFilterValue(value);
+				if (!text) {
+					return false;
+				}
+				if (text.charAt(0) === '[' && text.charAt(text.length - 1) === ']') {
+					text = text.slice(1, -1);
+				}
+				var zoneIdx = text.indexOf('%');
+				if (zoneIdx !== -1) {
+					text = text.slice(0, zoneIdx);
+				}
+				if (!text || text.indexOf(':') === -1) {
+					return false;
+				}
+				if (/[^0-9a-f:.]/i.test(text)) {
+					return false;
+				}
+				if (text.indexOf(':::') !== -1) {
+					return false;
+				}
+				var doubleColonCount = text.split('::').length - 1;
+				if (doubleColonCount > 1) {
+					return false;
+				}
+				var groups = text.split(':');
+				if (groups.length > 8 && doubleColonCount === 0) {
+					return false;
+				}
+				if (groups.length > 9) {
+					return false;
+				}
+				var hasPayload = false;
+				for (var i = 0; i < groups.length; i++) {
+					var g = groups[i];
+					if (!g) {
+						continue;
+					}
+					hasPayload = true;
+					if (g.indexOf('.') !== -1) {
+						if (!isIpv4Address(g)) {
+							return false;
+						}
+						continue;
+					}
+					if (!/^[0-9a-f]{1,4}$/i.test(g)) {
+						return false;
+					}
+				}
+				return hasPayload;
+			}
+
+			function isIpAddress(value) {
+				return isIpv4Address(value) || isProbablyIpv6Address(value);
+			}
+
+			function shouldEnableQueryLogFilterControl(value, mode) {
+				var normalized = normalizeQueryLogFilterValue(value);
+				if (!normalized) {
+					return false;
+				}
+				var m = mode ? String(mode) : 'any';
+				if (m === 'ip_no_cidr') {
+					if (normalized.indexOf('/') !== -1) {
+						return false;
+					}
+					return isIpAddress(normalized);
+				}
+				return true;
+			}
+
+			function applyQueryLogFilterAction(filterKey, filterValue, mode) {
+				var key = filterKey != null ? String(filterKey) : '';
+				var value = normalizeQueryLogFilterValue(filterValue);
+				if (!key || QUERY_LOG_FILTER_KEYS.indexOf(key) === -1 || !value) {
+					return;
+				}
+				if (mode !== 'add') {
+					clearQueryLogFilterState();
+				}
+				queryLogFilters[key] = value;
+				queryLogPage = 1;
+				syncQueryLogInputsFromState();
+				applyTab('query-log');
+			}
+
+			function buildQueryLogFilterControl(displayText, filterKey, filterValue, options) {
+				var text = displayText != null ? String(displayText) : '';
+				var value = normalizeQueryLogFilterValue(filterValue);
+				var key = filterKey != null ? String(filterKey) : '';
+				options = options && typeof options === 'object' ? options : {};
+				var allowAdd = Boolean(options.allowAdd);
+				if (!text || !value || !key) {
+					return null;
+				}
+				var wrap = document.createElement('span');
+				wrap.className = 'fh-query-log-filter-control';
+
+				var textBtn = document.createElement('button');
+textBtn.type = 'button';
+				textBtn.className = 'fh-query-log-filter-main';
+				textBtn.textContent = text;
+				textBtn.title = 'Replace filters with ' + key + '=' + value;
+				textBtn.addEventListener('click', function (ev) {
+					ev.preventDefault();
+					ev.stopPropagation();
+					applyQueryLogFilterAction(key, value, 'replace');
+				});
+				wrap.appendChild(textBtn);
+
+				if (allowAdd) {
+					var addBtn = document.createElement('button');
+					addBtn.type = 'button';
+					addBtn.className = 'fh-query-log-filter-add';
+					addBtn.textContent = '+';
+					addBtn.title = 'Add ' + key + '=' + value + ' to current filters';
+					addBtn.setAttribute('aria-label', addBtn.title);
+					addBtn.addEventListener('click', function (ev) {
+						ev.preventDefault();
+						ev.stopPropagation();
+						applyQueryLogFilterAction(key, value, 'add');
+					});
+					wrap.appendChild(addBtn);
+				}
+
+				return wrap;
+			}
+
+			function appendQueryLogCell(
+				row,
+				value,
+				className,
+				severity,
+				titleText,
+				filterSpec
+			) {
+				var td = document.createElement('td');
+				var text = value != null ? String(value) : '';
+				var filterKey = '';
+				var filterValue = '';
+				var filterMode = 'any';
+				if (filterSpec && typeof filterSpec === 'object') {
+					filterKey = filterSpec.key != null ? String(filterSpec.key) : '';
+					filterValue = filterSpec.value != null ? String(filterSpec.value) : text;
+					filterMode = filterSpec.mode != null ? String(filterSpec.mode) : 'any';
+				}
+				if (
+					filterKey &&
+					shouldEnableQueryLogFilterControl(filterValue, filterMode)
+				) {
+					var control = buildQueryLogFilterControl(
+						text,
+						filterKey,
+						filterValue,
+						{ allowAdd: true }
+					);
+					if (control) {
+						td.appendChild(control);
+					} else {
+						td.textContent = text;
+					}
+				} else {
+					td.textContent = text;
+				}
+				if (Array.isArray(className)) {
+					className.forEach(function (name) {
+						if (name) {
+							td.classList.add(name);
+						}
+					});
+				} else if (className) {
+					td.classList.add(className);
+				}
+				if (severity) {
+					td.classList.add('fh-query-log-severity');
+					td.classList.add('fh-query-log-severity-' + severity);
+				}
+				if (titleText) {
+					td.title = String(titleText);
+				}
+				row.appendChild(td);
+			}
+
+			function parsePositiveInt(value, fallback) {
+				var n = parseInt(value, 10);
+				if (!isFinite(n) || n <= 0) {
+					return fallback;
+				}
+				return n;
+			}
+
+			function queryLogFilterInputMap() {
+				return {
+					qname: queryLogFilterQnameEl,
+					qtype: queryLogFilterQtypeEl,
+					rcode: queryLogFilterRcodeEl,
+					client_ip: queryLogFilterClientIpEl,
+					status: queryLogFilterStatusEl,
+					source: queryLogFilterSourceEl,
+					ede_code: queryLogFilterEdeCodeEl,
+					start: queryLogFilterStartEl,
+					end: queryLogFilterEndEl,
+				};
+			}
+
+			function syncQueryLogInputsFromState() {
+				var inputMap = queryLogFilterInputMap();
+				QUERY_LOG_FILTER_KEYS.forEach(function (key) {
+					var el = inputMap[key];
+					if (!el) {
+						return;
+					}
+					var value = queryLogFilters[key];
+					el.value = value != null ? String(value) : '';
+				});
+				if (queryLogPageSizeEl) {
+					queryLogPageSizeEl.value = String(queryLogPageSize);
+				}
+			}
+
+			function syncQueryLogStateFromInputs() {
+				var inputMap = queryLogFilterInputMap();
+				QUERY_LOG_FILTER_KEYS.forEach(function (key) {
+					var el = inputMap[key];
+					var value = el && typeof el.value === 'string' ? el.value : '';
+					queryLogFilters[key] = normalizeQueryLogFilterValue(value);
+				});
+				if (queryLogPageSizeEl) {
+					queryLogPageSize = parsePositiveInt(
+						queryLogPageSizeEl.value,
+						queryLogPageSize
+					);
+				}
+			}
+
+			function setQueryLogError(text) {
+				if (!queryLogErrorEl) {
+					return;
+				}
+				queryLogErrorEl.textContent = text || '';
+				queryLogErrorEl.className = 'fh-messages';
+				if (!text) {
+					return;
+				}
+				queryLogErrorEl.classList.add('fh-messages-error');
+			}
+
+			function readUiStateFromUrl() {
+				var params = null;
+				try {
+					params = new URLSearchParams(window.location.search || '');
+				} catch (e) {
+					params = null;
+				}
+				if (!params) {
+					return null;
+				}
+				return params;
+			}
+
+			function applyQueryLogStateFromUrl(params) {
+				if (!params) {
+					return;
+				}
+				QUERY_LOG_FILTER_KEYS.forEach(function (key) {
+					var paramKey = 'ql_' + key;
+					var value = params.get(paramKey);
+					if (value == null) {
+						return;
+					}
+					queryLogFilters[key] = normalizeQueryLogFilterValue(value);
+				});
+				var page = params.get('ql_page');
+				var pageSize = params.get('ql_page_size');
+				if (page != null) {
+					queryLogPage = parsePositiveInt(page, 1);
+				}
+				if (pageSize != null) {
+					queryLogPageSize = parsePositiveInt(pageSize, queryLogPageSize);
+				}
+			}
+
+			function writeUiStateToUrl(activeTab) {
+				var params = readUiStateFromUrl();
+				if (!params) {
+					return;
+				}
+				if (activeTab) {
+					params.set(UI_QUERY_TAB_PARAM, activeTab);
+				} else {
+					params.delete(UI_QUERY_TAB_PARAM);
+				}
+				if (activeTab === 'query-log') {
+					QUERY_LOG_FILTER_KEYS.forEach(function (key) {
+						var paramKey = 'ql_' + key;
+						var value = normalizeQueryLogFilterValue(queryLogFilters[key]);
+						if (value) {
+							params.set(paramKey, value);
+						} else {
+							params.delete(paramKey);
+						}
+					});
+					params.set('ql_page', String(queryLogPage));
+					params.set('ql_page_size', String(queryLogPageSize));
+				} else {
+					QUERY_LOG_FILTER_KEYS.forEach(function (key) {
+						params.delete('ql_' + key);
+					});
+					params.delete('ql_page');
+					params.delete('ql_page_size');
+				}
+				var nextQuery = params.toString();
+				var nextUrl = window.location.pathname + (nextQuery ? '?' + nextQuery : '');
+				if (window.location.hash) {
+					nextUrl += window.location.hash;
+				}
+				try {
+					window.history.replaceState(null, '', nextUrl);
+				} catch (e) {}
+			}
+
+			function renderQueryLogFilterChips() {
+				if (!queryLogChipsEl) {
+					return;
+				}
+				queryLogChipsEl.textContent = '';
+				QUERY_LOG_FILTER_KEYS.forEach(function (key) {
+					var value = normalizeQueryLogFilterValue(queryLogFilters[key]);
+					if (!value) {
+						return;
+					}
+					var chip = document.createElement('span');
+					chip.className = 'fh-query-log-chip';
+					var meta = QUERY_LOG_FILTER_META[key] || { label: key };
+					var valueText = value;
+					if ((key === 'start' || key === 'end') && value) {
+						valueText = formatTimestamp(value) || value;
+					}
+					chip.appendChild(
+						document.createTextNode(String(meta.label || key) + ': ' + valueText)
+					);
+					var removeBtn = document.createElement('button');
+					removeBtn.type = 'button';
+					removeBtn.title = 'Remove ' + String(meta.label || key) + ' filter';
+					removeBtn.textContent = '×';
+					removeBtn.addEventListener('click', function () {
+						queryLogFilters[key] = '';
+						queryLogPage = 1;
+						syncQueryLogInputsFromState();
+						loadQueryLog();
+					});
+					chip.appendChild(removeBtn);
+					queryLogChipsEl.appendChild(chip);
+				});
+			}
+
+			function renderQueryLogRows(items) {
+				if (!queryLogTableBodyEl) {
+					return;
+				}
+				queryLogTableBodyEl.textContent = '';
+				items = Array.isArray(items) ? items : [];
+				if (!items.length) {
+					var emptyTr = document.createElement('tr');
+					var emptyTd = document.createElement('td');
+					emptyTd.colSpan = 9;
+					emptyTd.className = 'fh-pane-help';
+					emptyTd.textContent = 'No query-log rows matched the current filters.';
+					emptyTr.appendChild(emptyTd);
+					queryLogTableBodyEl.appendChild(emptyTr);
+					return;
+				}
+				items.forEach(function (item) {
+					if (!item || typeof item !== 'object') {
+						return;
+					}
+					var row = document.createElement('tr');
+					var result = item.result && typeof item.result === 'object' ? item.result : {};
+					var sourceRaw = result.source != null ? String(result.source) : '';
+					var timestampRaw =
+						item.timestamp != null && item.timestamp !== '' ? item.timestamp : item.ts;
+					var timestampMeta = formatQueryLogTimestamp(timestampRaw);
+					var qnameValue = item.qname != null ? String(item.qname) : '';
+					var qtypeValue = item.qtype != null ? String(item.qtype) : '';
+					var clientIpValue = item.client_ip != null ? String(item.client_ip) : '';
+					var rcodeValue = item.rcode != null ? String(item.rcode) : '';
+					var statusValue = item.status != null ? String(item.status) : '';
+					var upstreamValue = item.upstream_id != null ? String(item.upstream_id) : '';
+					var firstRawValue = item.first != null ? String(item.first) : '';
+					var errorValue =
+						item.error != null
+							? String(item.error)
+							: (result.error != null ? String(result.error) : '');
+					var statusSeverity = classifyQueryLogStatus(statusValue);
+					var statusToken = normalizeQueryLogToken(statusValue);
+					var useStatusSeverityForQnameAndQtype =
+						statusToken &&
+						statusToken !== 'OK' &&
+						statusToken !== 'CACHE_HIT'
+							? true
+							: false;
+					var overrideDeniedWithIp = isOverridePreDeniedWithIp(statusToken, firstRawValue);
+					var firstDisplayValue = overrideDeniedWithIp
+						? 'Denied-with-IP'
+						: firstRawValue;
+					var firstTrimmed = truncateQueryLogValue(firstDisplayValue, 30);
+					var firstTitleValue = firstRawValue || firstTrimmed.full;
+					var overrideAllowedHighlight =
+						statusToken === 'OVERRIDE_PRE' &&
+						!overrideDeniedWithIp &&
+						Boolean(firstRawValue);
+					var overrideHighlightClass = overrideAllowedHighlight
+						? 'fh-query-log-override-allowed'
+						: '';
+					var qnameSeverity = useStatusSeverityForQnameAndQtype ? statusSeverity : '';
+					var sourceSeverity = qnameSeverity;
+					var firstSeverity = qnameSeverity;
+					var qtypeSeverity = useStatusSeverityForQnameAndQtype
+						? statusSeverity
+						: classifyQueryLogQtype(qtypeValue);
+					var sourceTooltipParts = [];
+                    var sourceDisplay = normalizeQueryLogSourceDisplayWithUpstream(sourceRaw, result, upstreamValue);
+					if (sourceDisplay) {
+						sourceTooltipParts.push('source: ' + sourceDisplay);
+					}
+					if (sourceRaw && sourceRaw !== sourceDisplay) {
+						sourceTooltipParts.push('raw_source: ' + sourceRaw);
+					}
+					if (upstreamValue) {
+						sourceTooltipParts.push('upstream: ' + upstreamValue);
+					}
+					var sourceTooltip = sourceTooltipParts.join('\n');
+
+					appendQueryLogCell(
+						row,
+						timestampMeta.text,
+						'fh-query-log-timestamp',
+						'',
+						timestampMeta.title
+					);
+					appendQueryLogCell(
+						row,
+						qnameValue,
+						overrideHighlightClass ? [overrideHighlightClass] : '',
+						qnameSeverity,
+						'',
+						{ key: 'qname', value: qnameValue }
+					);
+					appendQueryLogCell(
+						row,
+						qtypeValue,
+						overrideHighlightClass
+							? ['fh-query-log-qtype', overrideHighlightClass]
+							: 'fh-query-log-qtype',
+						qtypeSeverity,
+						'',
+						{ key: 'qtype', value: qtypeValue }
+					);
+					appendQueryLogCell(row, clientIpValue, '', '', '', {
+						key: 'client_ip',
+						value: clientIpValue,
+					});
+					appendQueryLogCell(
+						row,
+						rcodeValue,
+						'fh-query-log-rcode',
+						classifyQueryLogRcode(rcodeValue),
+						'',
+						{ key: 'rcode', value: rcodeValue }
+					);
+					appendQueryLogCell(
+						row,
+						statusValue,
+						overrideHighlightClass
+							? ['fh-query-log-status', overrideHighlightClass]
+							: 'fh-query-log-status',
+						statusSeverity,
+						'',
+						{ key: 'status', value: statusValue }
+					);
+					appendQueryLogCell(
+						row,
+						sourceDisplay,
+						overrideHighlightClass
+							? ['fh-query-log-source', overrideHighlightClass]
+							: 'fh-query-log-source',
+						sourceSeverity,
+						sourceTooltip,
+						{ key: 'source', value: sourceRaw || sourceDisplay }
+					);
+					appendQueryLogCell(
+						row,
+						firstTrimmed.text,
+						overrideHighlightClass ? [overrideHighlightClass] : '',
+						firstSeverity,
+						firstTitleValue
+					);
+					appendQueryLogCell(row, errorValue, '', '', '');
+					queryLogTableBodyEl.appendChild(row);
+				});
+			}
+
+			function updateQueryLogPager(payload) {
+				var page = parsePositiveInt(payload && payload.page, queryLogPage);
+				var pageSize = parsePositiveInt(payload && payload.page_size, queryLogPageSize);
+				var total = payload && payload.total != null ? Number(payload.total) : 0;
+				var totalPages =
+					payload && payload.total_pages != null
+						? Number(payload.total_pages)
+						: (pageSize > 0 ? Math.ceil(total / pageSize) : 0);
+				queryLogPage = page;
+				queryLogPageSize = pageSize;
+				if (queryLogPageSizeEl) {
+					queryLogPageSizeEl.value = String(queryLogPageSize);
+				}
+				if (btnQueryLogPrev) {
+					btnQueryLogPrev.disabled = page <= 1;
+				}
+				if (btnQueryLogNext) {
+					btnQueryLogNext.disabled = totalPages > 0 ? page >= totalPages : true;
+				}
+				if (queryLogPageInfoEl) {
+					queryLogPageInfoEl.textContent =
+						'Page ' +
+						page +
+						(totalPages > 0 ? ' / ' + totalPages : '') +
+						' (' +
+						formatNumber(total) +
+						' rows)';
+				}
+				if (queryLogSummaryEl) {
+					queryLogSummaryEl.textContent =
+						'Showing query-log rows from /api/v1/query_log with server-side paging.';
+				}
+			}
+
+			function buildQueryLogApiUrl() {
+				var query = {
+					page: queryLogPage,
+					page_size: queryLogPageSize,
+				};
+				QUERY_LOG_FILTER_KEYS.forEach(function (key) {
+					var value = normalizeQueryLogFilterValue(queryLogFilters[key]);
+					if (!value) {
+						return;
+					}
+					query[key] = value;
+				});
+				return '/api/v1/query_log' + _buildQuery(query);
+			}
+
+			function loadQueryLog() {
+				if (!pageQueryLog) {
+					return;
+				}
+				renderQueryLogFilterChips();
+				setQueryLogError('');
+				if (queryLogSummaryEl) {
+					queryLogSummaryEl.textContent = 'Loading query-log rows...';
+				}
+				var url = buildQueryLogApiUrl();
+				return fetchJson(url)
+					.then(function (payload) {
+						if (payload && payload.status === 'disabled') {
+							renderQueryLogRows([]);
+							if (queryLogSummaryEl) {
+								queryLogSummaryEl.textContent =
+									'Query logging is disabled for this server instance.';
+							}
+							if (queryLogPageInfoEl) {
+								queryLogPageInfoEl.textContent = '';
+							}
+							if (btnQueryLogPrev) {
+								btnQueryLogPrev.disabled = true;
+							}
+							if (btnQueryLogNext) {
+								btnQueryLogNext.disabled = true;
+							}
+							writeUiStateToUrl('query-log');
+							return;
+						}
+						renderQueryLogRows(payload && payload.items ? payload.items : []);
+						updateQueryLogPager(payload || {});
+						writeUiStateToUrl('query-log');
+					})
+					.catch(function (err) {
+						renderQueryLogRows([]);
+						setQueryLogError(
+							'Failed to load query-log rows: ' +
+								(err && err.message ? err.message : String(err))
+						);
+						if (queryLogSummaryEl) {
+							queryLogSummaryEl.textContent = '';
+						}
+						if (queryLogPageInfoEl) {
+							queryLogPageInfoEl.textContent = '';
+						}
+					});
+			}
+
+			function applyQueryLogFilters() {
+				syncQueryLogStateFromInputs();
+				queryLogPage = 1;
+				loadQueryLog();
+			}
+
+			function clearQueryLogFilters() {
+				QUERY_LOG_FILTER_KEYS.forEach(function (key) {
+					queryLogFilters[key] = '';
+				});
+				queryLogPage = 1;
+				syncQueryLogInputsFromState();
+				loadQueryLog();
+			}
+
+			function openQueryLogWithFilters(filters) {
+				filters = filters && typeof filters === 'object' ? filters : {};
+				QUERY_LOG_FILTER_KEYS.forEach(function (key) {
+					if (!Object.prototype.hasOwnProperty.call(filters, key)) {
+						return;
+					}
+					queryLogFilters[key] = normalizeQueryLogFilterValue(filters[key]);
+				});
+				queryLogPage = 1;
+				if (Object.prototype.hasOwnProperty.call(filters, 'page_size')) {
+					queryLogPageSize = parsePositiveInt(filters.page_size, queryLogPageSize);
+				}
+				syncQueryLogInputsFromState();
+				applyTab('query-log');
+			}
+
+			function getTopListDrilldownFilters(title, key) {
+				if (!title || key == null) {
+					return null;
+				}
+				var titleText = String(title);
+				if (titleText === 'Top Sub Domains') {
+					titleText = 'Top Subdomains';
+				}
+				var value = normalizeQueryLogFilterValue(key);
+				if (!value) {
+					return null;
+				}
+				if (titleText === 'Top Client') {
+					return { client_ip: value };
+				}
+				if (
+					titleText === 'Top Cache Hit Domains' ||
+					titleText === 'Top Cache Hit Subdomains'
+				) {
+					return { qname: value, status: 'cache_hit', source: 'cache' };
+				}
+				if (
+					titleText === 'Top Cache Miss Domains' ||
+					titleText === 'Top Cache Miss Subdomains'
+				) {
+					return { qname: value, source: 'upstream' };
+				}
+				if (titleText === 'Top Domains' || titleText === 'Top Subdomains') {
+					return { qname: value };
+				}
+				if (
+					titleText.indexOf('Top ') === 0 &&
+					titleText.lastIndexOf(' Requests') ===
+						titleText.length - ' Requests'.length
+				) {
+					return {
+						qname: value,
+						qtype: titleText.slice(
+							'Top '.length,
+							titleText.length - ' Requests'.length
+						),
+					};
+				}
+				if (
+					titleText.indexOf('Top ') === 0 &&
+					titleText.lastIndexOf(' Domains') ===
+						titleText.length - ' Domains'.length &&
+					titleText.indexOf('Top Cache ') !== 0
+				) {
+					return {
+						qname: value,
+						rcode: titleText.slice(
+							'Top '.length,
+							titleText.length - ' Domains'.length
+						),
+					};
+				}
+				if (
+					titleText.indexOf('Top ') === 0 &&
+					titleText.lastIndexOf(' Subdomains') ===
+						titleText.length - ' Subdomains'.length &&
+					titleText.indexOf('Top Cache ') !== 0
+				) {
+					return {
+						qname: value,
+						rcode: titleText.slice(
+							'Top '.length,
+							titleText.length - ' Subdomains'.length
+						),
+					};
+				}
+				return { qname: value };
+			}
+
+			function _ensureStatsPaneRefs() {
+				if (!page2) {
+					return;
+				}
+				if (!statsPaneLeftEl) {
+					statsPaneLeftEl = page2.querySelector('.fh-pane-left');
+				}
+				if (!statsPaneRightEl) {
+					statsPaneRightEl = page2.querySelector('.fh-pane-right');
+				}
+			}
+
+			function hideStatsDetails() {
+				_ensureStatsPaneRefs();
+				if (statsDetailsPane) {
+					statsDetailsPane.hidden = true;
+				}
+				if (statsDetailsRootEl) {
+					statsDetailsRootEl.textContent = '';
+				}
+				if (statsPaneLeftEl) {
+					statsPaneLeftEl.hidden = false;
+				}
+				if (statsPaneRightEl) {
+					statsPaneRightEl.hidden = false;
+				}
+			}
+
+			function showStatsDetails(details) {
+				if (!details || !details.table_id) {
+					return;
+				}
+				_ensureStatsPaneRefs();
+				if (statsPaneLeftEl) {
+					statsPaneLeftEl.hidden = true;
+				}
+				if (statsPaneRightEl) {
+					statsPaneRightEl.hidden = true;
+				}
+				if (statsDetailsPane) {
+					statsDetailsPane.hidden = false;
+				}
+
+				var title = details.title || 'Details';
+				if (statsDetailsTitleEl) {
+					statsDetailsTitleEl.textContent = title;
+				}
+				if (statsDetailsHelpEl) {
+					statsDetailsHelpEl.textContent = details.help || '';
+				}
+				if (!statsDetailsRootEl) {
+					return;
+				}
+
+				var desc = { endpoints: { snapshot: '/api/v1/stats' } };
+				var section = {
+					id: details.table_id,
+					title: title,
+					columns: [
+						{ key: 'name', label: 'Name' },
+						{ key: 'count', label: 'Count', align: 'right', nowrap: true },
+					],
+				};
+				var extra = null;
+				if (details.group_key != null && details.group_key !== '') {
+					extra = { group_key: details.group_key };
+				}
+				renderTableSectionPaged(statsDetailsRootEl, section, desc, null, extra);
+			}
+
+			if (btnStatsDetailsBack) {
+				btnStatsDetailsBack.addEventListener('click', function () {
+					hideStatsDetails();
+				});
+			}
+
 			function clearStatsGroups() {
 				while (statsGroupsEl.firstChild) {
 					statsGroupsEl.removeChild(statsGroupsEl.firstChild);
@@ -429,6 +1738,19 @@
 						statsGroupsRightEl.removeChild(statsGroupsRightEl.firstChild);
 					}
 				}
+			}
+			function replaceContainerChildren(target, source) {
+				if (!target || !source) {
+					return;
+				}
+				if (typeof target.replaceChildren === 'function') {
+					target.replaceChildren(source);
+					return;
+				}
+				while (target.firstChild) {
+					target.removeChild(target.firstChild);
+				}
+				target.appendChild(source);
 			}
 
 			function appendDictGroup(title, mapping) {
@@ -479,7 +1801,7 @@
 					// to alphabetical ordering for any remaining keys.
 					if (title === 'Meta') {
 						// Meta ordering: host (combined row) is injected above via
-						// mapping.hostname/version/ip. Within the Meta group we want
+						// mapping.hostname/version. Within the Meta group we want
 						// ip, created_at, uptime, domains, clients, with any other
 						// keys alphabetically in the middle.
 						var headOrder = ['ip', 'created_at'];
@@ -489,7 +1811,7 @@
 							var bHead = headOrder.indexOf(b.key);
 							var aTail = tailOrder.indexOf(a.key);
 							var bTail = tailOrder.indexOf(b.key);
-							// Head keys (hostname, version, ip) always first in fixed order.
+							// Head keys (ip, created_at) always first in fixed order.
 							if (aHead !== -1 || bHead !== -1) {
 								if (aHead === -1) return 1;
 								if (bHead === -1) return -1;
@@ -548,9 +1870,30 @@
 						return;
 					}
 					var dt = document.createElement('dt');
-					dt.textContent = key;
+					dt.textContent = formatStatsKeyForDisplay(key);
 					if (Object.prototype.hasOwnProperty.call(STATS_TOOLTIPS, key)) {
 						dt.title = STATS_TOOLTIPS[key];
+					}
+					if (title === 'Query types') {
+						(function (qtypeValue) {
+							dt.classList.add('fh-stats-group-title-link');
+							dt.title = (dt.title ? dt.title + ' ' : '') + 'Open related query-log rows.';
+							dt.addEventListener('click', function () {
+								openQueryLogWithFilters({ qtype: qtypeValue });
+							});
+						})(String(key));
+					}
+					if (title === 'Extended DNS Errors (EDE)') {
+						(function (edeCodeValue) {
+							if (!edeCodeValue) {
+								return;
+							}
+							dt.classList.add('fh-stats-group-title-link');
+							dt.title = (dt.title ? dt.title + ' ' : '') + 'Open related query-log rows.';
+							dt.addEventListener('click', function () {
+								openQueryLogWithFilters({ ede_code: edeCodeValue });
+							});
+						})(getEdeCodeFromStatsKey(key));
 					}
 					var dd = document.createElement('dd');
 					dd.textContent = formatNumber(entry.value);
@@ -564,6 +1907,68 @@
 				statsGroupsEl.appendChild(group);
 			}
 
+			function getStatsDetailsForTopListTitle(title) {
+				if (!title) {
+					return null;
+				}
+				title = String(title);
+				if (title === 'Top Sub Domains') {
+					title = 'Top Subdomains';
+				}
+				var info = { title: title, table_id: null, group_key: null, help: '' };
+
+				// Fixed-name tables (direct stats snapshot fields).
+				var fixed = {
+					'Top Client': 'top_clients',
+					'Top Domains': 'top_domains',
+					'Top Subdomains': 'top_subdomains',
+					'Top Cache Hit Domains': 'cache_hit_domains',
+					'Top Cache Miss Domains': 'cache_miss_domains',
+					'Top Cache Hit Subdomains': 'cache_hit_subdomains',
+					'Top Cache Miss Subdomains': 'cache_miss_subdomains',
+				};
+				if (Object.prototype.hasOwnProperty.call(fixed, title)) {
+					info.table_id = fixed[title];
+					info.help = 'From /api/v1/stats/table/' + encodeURIComponent(String(info.table_id)) + '.';
+					return info;
+				}
+
+				// Per-qtype lists: "Top A Requests" => qtype_qnames?group_key=A
+				if (title.indexOf('Top ') === 0 && title.lastIndexOf(' Requests') === title.length - ' Requests'.length) {
+					var qt = title.slice('Top '.length, title.length - ' Requests'.length);
+					if (qt) {
+						info.table_id = 'qtype_qnames';
+						info.group_key = qt;
+						info.help = 'Query type ' + qt + ' from /api/v1/stats/table/qtype_qnames.';
+						return info;
+					}
+				}
+
+				// Per-rcode domain lists: "Top NXDOMAIN Domains" => rcode_domains?group_key=NXDOMAIN
+				if (title.indexOf('Top ') === 0 && title.lastIndexOf(' Domains') === title.length - ' Domains'.length) {
+					var rc = title.slice('Top '.length, title.length - ' Domains'.length);
+					if (rc && rc.indexOf('Cache ') !== 0) {
+						info.table_id = 'rcode_domains';
+						info.group_key = rc;
+						info.help = 'Response code ' + rc + ' from /api/v1/stats/table/rcode_domains.';
+						return info;
+					}
+				}
+
+				// Per-rcode subdomain lists: "Top NXDOMAIN Subdomains" => rcode_subdomains?group_key=NXDOMAIN
+				if (title.indexOf('Top ') === 0 && title.lastIndexOf(' Subdomains') === title.length - ' Subdomains'.length) {
+					var rc2 = title.slice('Top '.length, title.length - ' Subdomains'.length);
+					if (rc2 && rc2.indexOf('Cache ') !== 0) {
+						info.table_id = 'rcode_subdomains';
+						info.group_key = rc2;
+						info.help = 'Response code ' + rc2 + ' from /api/v1/stats/table/rcode_subdomains.';
+						return info;
+					}
+				}
+
+				return null;
+			}
+
 			function appendTopListGroup(title, entries, container) {
 				if (!entries || !Array.isArray(entries) || !entries.length) {
 					return;
@@ -575,13 +1980,24 @@
 				var heading = document.createElement('h3');
 				heading.className = 'fh-stats-group-title';
 				heading.textContent = title;
+				var details = getStatsDetailsForTopListTitle(title);
+				if (details && details.table_id) {
+					heading.classList.add('fh-stats-group-title-link');
+					heading.addEventListener('click', function () {
+						showStatsDetails(details);
+					});
+				}
 				// Provide a helpful tooltip for any "*Subdomain*" style list so it
 				// is clear that the entries are full subdomain qnames.
 				if (
 					typeof title === 'string' &&
-					(title.indexOf('Subdomain') !== -1 || title.indexOf('Sub Domains') !== -1)
+					title.indexOf('Subdomain') !== -1
 				) {
 					heading.title = 'Entries are subdomain names (full qnames, for example "www.example.com").';
+				}
+				if (details && details.table_id) {
+					var extra = details.group_key ? ' group_key=' + String(details.group_key) : '';
+					heading.title = (heading.title ? heading.title + ' ' : '') + 'Click for details (' + details.table_id + extra + ').';
 				}
 				group.appendChild(heading);
 
@@ -594,9 +2010,19 @@
 					}
 					var key = pair[0];
 					var count = pair[1];
+					var drilldownFilters = getTopListDrilldownFilters(title, key);
 
 					var dt = document.createElement('dt');
-					dt.textContent = key;
+					if (drilldownFilters) {
+						dt.classList.add('fh-stats-group-title-link');
+						dt.title = 'Open related query-log rows';
+						dt.textContent = String(key);
+						dt.addEventListener('click', function () {
+							openQueryLogWithFilters(drilldownFilters);
+						});
+					} else {
+						dt.textContent = key;
+					}
 
 					var dd = document.createElement('dd');
 					dd.textContent = formatNumber(count);
@@ -608,8 +2034,133 @@
 				group.appendChild(dl);
 				target.appendChild(group);
 			}
+			function sortEntriesByNumericThenKey(entries) {
+				entries = Array.isArray(entries) ? entries : [];
+				entries.sort(function (a, b) {
+					if (b.numeric === a.numeric) {
+						if (a.key < b.key) return -1;
+						if (a.key > b.key) return 1;
+						return 0;
+					}
+					return b.numeric - a.numeric;
+				});
+				return entries;
+			}
 
-			function appendUpstreamsGroup(upstreams, upstreamRcodes) {
+			function buildCountEntries(countMap, options) {
+				options = options || {};
+				countMap = countMap && typeof countMap === 'object' ? countMap : {};
+				var exclude = options.excludeKeys || [];
+				var entries = Object.keys(countMap)
+					.filter(function (key) {
+						return exclude.indexOf(key) === -1;
+					})
+					.map(function (key) {
+						var num = Number(countMap[key]);
+						if (!isFinite(num)) {
+							num = 0;
+						}
+						return { key: key, value: countMap[key], numeric: num };
+					});
+				return sortEntriesByNumericThenKey(entries);
+			}
+
+			function sortUpstreamRowsByTotalThenId(rows) {
+				rows = Array.isArray(rows) ? rows : [];
+				rows.sort(function (a, b) {
+					if (b.total === a.total) {
+						if (a.id < b.id) return -1;
+						if (a.id > b.id) return 1;
+						return 0;
+					}
+					return b.total - a.total;
+				});
+				return rows;
+			}
+
+			function appendGroupedUpstreamRows(tbody, rows, labelFormatter) {
+				rows = Array.isArray(rows) ? rows : [];
+				rows.forEach(function (rowData) {
+					var mainRow = document.createElement('tr');
+					var mainUpstreamCell = document.createElement('td');
+					mainUpstreamCell.textContent = rowData.label || rowData.id;
+					var mainBlankCell = document.createElement('td');
+					mainBlankCell.textContent = '';
+					var mainTotalParts = getNumberParts(rowData.total);
+					var mainTotalIntCell = document.createElement('td');
+					mainTotalIntCell.className = 'fh-num-int';
+					mainTotalIntCell.textContent = mainTotalParts.intPart;
+					var mainTotalDecCell = document.createElement('td');
+					mainTotalDecCell.className = 'fh-num-dec';
+					mainTotalDecCell.textContent = mainTotalParts.decPart;
+					mainRow.appendChild(mainUpstreamCell);
+					mainRow.appendChild(mainBlankCell);
+					mainRow.appendChild(mainTotalIntCell);
+					mainRow.appendChild(mainTotalDecCell);
+					tbody.appendChild(mainRow);
+
+					(rowData.detailEntries || []).forEach(function (entry) {
+						var row = document.createElement('tr');
+						var blankCell = document.createElement('td');
+						blankCell.textContent = '';
+						var labelCell = document.createElement('td');
+						labelCell.textContent = labelFormatter
+							? labelFormatter(entry.key)
+							: entry.key;
+						var parts = getNumberParts(entry.value);
+						var countIntCell = document.createElement('td');
+						countIntCell.className = 'fh-num-int';
+						countIntCell.textContent = parts.intPart;
+						var countDecCell = document.createElement('td');
+						countDecCell.className = 'fh-num-dec';
+						countDecCell.textContent = parts.decPart;
+						row.appendChild(blankCell);
+						row.appendChild(labelCell);
+						row.appendChild(countIntCell);
+						row.appendChild(countDecCell);
+						tbody.appendChild(row);
+					});
+				});
+			}
+			function buildUpstreamDisplayLabel(id, endpoint) {
+				var idText = id != null ? String(id).trim() : '';
+				var endpointText = endpoint != null ? String(endpoint).trim() : '';
+				if (idText && endpointText && idText !== endpointText) {
+					return idText + ' (' + endpointText + ')';
+				}
+				return idText || endpointText;
+			}
+
+			function buildUpstreamLabelMapFromStatus(status) {
+				var map = {};
+				if (!status || typeof status !== 'object') {
+					return map;
+				}
+				var items = Array.isArray(status.items) ? status.items : [];
+				items.forEach(function (item) {
+					if (!item || typeof item !== 'object') {
+						return;
+					}
+					var id = item.id != null ? String(item.id).trim() : '';
+					var url = item.url != null ? String(item.url).trim() : '';
+					var host = item.host != null ? String(item.host).trim() : '';
+					var port = item.port != null ? String(item.port).trim() : '';
+					var endpoint = url || (host && port ? host + ':' + port : host);
+					var label = buildUpstreamDisplayLabel(id, endpoint);
+					if (!label) {
+						return;
+					}
+					if (id) {
+						map[id] = label;
+					}
+					if (endpoint) {
+						map[endpoint] = label;
+					}
+				});
+				return map;
+			}
+
+			function appendUpstreamsGroup(upstreams, upstreamRcodes, upstreamStatus) {
 				if (!upstreams || typeof upstreams !== 'object') {
 					return;
 				}
@@ -630,10 +2181,9 @@
 				var table = document.createElement('table');
 				table.className = 'fh-table fh-table-upstreams';
 				var tbody = document.createElement('tbody');
-
-				// Build sortable rows with pre-computed totals.
 				var upstreamRows = [];
 				upstreamRcodes = upstreamRcodes || {};
+				var upstreamLabelMap = buildUpstreamLabelMapFromStatus(upstreamStatus);
 
 				upstreamIds.forEach(function (upstreamId) {
 					var outcomes = upstreams[upstreamId];
@@ -648,6 +2198,7 @@
 					var rcodeKeys = Object.keys(rcMap).sort();
 
 					var total = 0;
+					var detailEntries = [];
 					if (rcodeKeys.length) {
 						rcodeKeys.forEach(function (key) {
 							var val = Number(rcMap[key]);
@@ -656,8 +2207,13 @@
 							}
 							total += val;
 						});
+						if (rcodeKeys.length > 1) {
+							detailEntries = buildCountEntries(rcMap, {
+								excludeKeys: ['NOERROR'],
+							});
+						}
 					} else {
-						var outcomeKeys = Object.keys(outcomes).sort();
+						var outcomeKeys = Object.keys(outcomes);
 						if (!outcomeKeys.length) {
 							return;
 						}
@@ -668,148 +2224,27 @@
 							}
 							total += val;
 						});
+						var onlySuccess =
+							outcomeKeys.length === 1 && outcomeKeys[0] === 'success';
+						if (!onlySuccess) {
+							detailEntries = buildCountEntries(outcomes);
+						}
 					}
 
 					upstreamRows.push({
 						id: upstreamId,
-						outcomes: outcomes,
-						rcodes: rcMap,
-						rcodeKeys: rcodeKeys,
+						label: upstreamLabelMap[upstreamId] || upstreamId,
 						total: total,
+						detailEntries: detailEntries,
 					});
 				});
-
-				// Sort by total count (descending), then by upstream id (ascending).
-				upstreamRows.sort(function (a, b) {
-					if (b.total === a.total) {
-						if (a.id < b.id) return -1;
-						if (a.id > b.id) return 1;
-						return 0;
+				appendGroupedUpstreamRows(
+					tbody,
+					sortUpstreamRowsByTotalThenId(upstreamRows),
+					function (key) {
+						return String(key).toLowerCase();
 					}
-					return b.total - a.total;
-				});
-
-				upstreamRows.forEach(function (rowData) {
-					var upstreamId = rowData.id;
-					var total = rowData.total;
-					var rcodes = rowData.rcodes || {};
-					var rcodeKeys = rowData.rcodeKeys || [];
-
-					// Main row: "upstream", "", "total"
-					var mainRow = document.createElement('tr');
-					var mainUpstreamCell = document.createElement('td');
-					mainUpstreamCell.textContent = upstreamId;
-					var mainBlankCell = document.createElement('td');
-					mainBlankCell.textContent = '';
-					var mainTotalParts = getNumberParts(total);
-					var mainTotalIntCell = document.createElement('td');
-					mainTotalIntCell.className = 'fh-num-int';
-					mainTotalIntCell.textContent = mainTotalParts.intPart;
-					var mainTotalDecCell = document.createElement('td');
-					mainTotalDecCell.className = 'fh-num-dec';
-					mainTotalDecCell.textContent = mainTotalParts.decPart;
-					mainRow.appendChild(mainUpstreamCell);
-					mainRow.appendChild(mainBlankCell);
-					mainRow.appendChild(mainTotalIntCell);
-					mainRow.appendChild(mainTotalDecCell);
-					tbody.appendChild(mainRow);
-
-					// Detail rows: "", rcode or outcome, count. Prefer rcodes
-					// when available, fall back to outcomes otherwise.
-					if (rcodeKeys.length > 1) {
-						// Sort rcodes (excluding NOERROR) by count descending, then name.
-						var rcodeEntries = rcodeKeys
-							.filter(function (key) {
-								return key !== 'NOERROR';
-							})
-							.map(function (key) {
-								var num = Number(rcodes[key]);
-								if (!isFinite(num)) {
-									num = 0;
-								}
-								return { key: key, value: rcodes[key], numeric: num };
-							});
-
-						rcodeEntries.sort(function (a, b) {
-							if (b.numeric === a.numeric) {
-								if (a.key < b.key) return -1;
-								if (a.key > b.key) return 1;
-								return 0;
-							}
-							return b.numeric - a.numeric;
-						});
-
-						rcodeEntries.forEach(function (entry) {
-							var key = entry.key;
-							var val = entry.value;
-							var row = document.createElement('tr');
-
-							var blankCell = document.createElement('td');
-							blankCell.textContent = '';
-							var labelCell = document.createElement('td');
-							labelCell.textContent = key.toLowerCase();
-							var parts = getNumberParts(val);
-							var countIntCell = document.createElement('td');
-							countIntCell.className = 'fh-num-int';
-							countIntCell.textContent = parts.intPart;
-							var countDecCell = document.createElement('td');
-							countDecCell.className = 'fh-num-dec';
-							countDecCell.textContent = parts.decPart;
-							row.appendChild(blankCell);
-							row.appendChild(labelCell);
-							row.appendChild(countIntCell);
-							row.appendChild(countDecCell);
-							tbody.appendChild(row);
-						});
-					} else if (!rcodeKeys.length) {
-						var outcomes = rowData.outcomes || {};
-						var outcomeKeys = Object.keys(outcomes);
-						var onlySuccess =
-							outcomeKeys.length === 1 && outcomeKeys[0] === 'success';
-						if (!onlySuccess) {
-							var outcomeEntries = outcomeKeys.map(function (key) {
-								var num = Number(outcomes[key]);
-								if (!isFinite(num)) {
-									num = 0;
-								}
-								return { key: key, value: outcomes[key], numeric: num };
-							});
-
-							outcomeEntries.sort(function (a, b) {
-								if (b.numeric === a.numeric) {
-									if (a.key < b.key) return -1;
-									if (a.key > b.key) return 1;
-									return 0;
-								}
-								return b.numeric - a.numeric;
-							});
-
-							outcomeEntries.forEach(function (entry) {
-								var key = entry.key;
-								var val = entry.value;
-								var row = document.createElement('tr');
-
-								var blankCell = document.createElement('td');
-								blankCell.textContent = '';
-								var outcomeCell = document.createElement('td');
-								outcomeCell.textContent = key;
-								var parts = getNumberParts(val);
-								var countIntCell = document.createElement('td');
-								countIntCell.className = 'fh-num-int';
-								countIntCell.textContent = parts.intPart;
-								var countDecCell = document.createElement('td');
-								countDecCell.className = 'fh-num-dec';
-								countDecCell.textContent = parts.decPart;
-
-								row.appendChild(blankCell);
-								row.appendChild(outcomeCell);
-								row.appendChild(countIntCell);
-								row.appendChild(countDecCell);
-								tbody.appendChild(row);
-							});
-						}
-					}
-				});
+				);
 
 				table.appendChild(tbody);
 				group.appendChild(table);
@@ -858,9 +2293,8 @@
 					});
 					upstreamRows.push({
 						id: upstreamId,
-						qtypes: qmap,
-						qtypeKeys: qtypes,
 						total: total,
+						detailEntries: buildCountEntries(qmap),
 					});
 				});
 
@@ -868,80 +2302,7 @@
 					return;
 				}
 
-				upstreamRows.sort(function (a, b) {
-					if (b.total === a.total) {
-						if (a.id < b.id) return -1;
-						if (a.id > b.id) return 1;
-						return 0;
-					}
-					return b.total - a.total;
-				});
-
-				upstreamRows.forEach(function (rowData) {
-					var upstreamId = rowData.id;
-					var total = rowData.total;
-					var qtypes = rowData.qtypes || {};
-					var qtypeKeys = rowData.qtypeKeys || [];
-
-					var mainRow = document.createElement('tr');
-					var mainUpstreamCell = document.createElement('td');
-					mainUpstreamCell.textContent = upstreamId;
-					var mainBlankCell = document.createElement('td');
-					mainBlankCell.textContent = '';
-					var mainTotalParts = getNumberParts(total);
-					var mainTotalIntCell = document.createElement('td');
-					mainTotalIntCell.className = 'fh-num-int';
-					mainTotalIntCell.textContent = mainTotalParts.intPart;
-					var mainTotalDecCell = document.createElement('td');
-					mainTotalDecCell.className = 'fh-num-dec';
-					mainTotalDecCell.textContent = mainTotalParts.decPart;
-					mainRow.appendChild(mainUpstreamCell);
-					mainRow.appendChild(mainBlankCell);
-					mainRow.appendChild(mainTotalIntCell);
-					mainRow.appendChild(mainTotalDecCell);
-					tbody.appendChild(mainRow);
-
-					var qtypeEntries = qtypeKeys.map(function (qt) {
-						var num = Number(qtypes[qt]);
-						if (!isFinite(num)) {
-							num = 0;
-						}
-						return { key: qt, value: qtypes[qt], numeric: num };
-					});
-
-					qtypeEntries.sort(function (a, b) {
-						if (b.numeric === a.numeric) {
-							if (a.key < b.key) return -1;
-							if (a.key > b.key) return 1;
-							return 0;
-						}
-						return b.numeric - a.numeric;
-					});
-
-					qtypeEntries.forEach(function (entry) {
-						var qt = entry.key;
-						var val = entry.value;
-						var row = document.createElement('tr');
-
-						var blankCell = document.createElement('td');
-						blankCell.textContent = '';
-						var labelCell = document.createElement('td');
-						labelCell.textContent = qt;
-						var parts = getNumberParts(val);
-						var countIntCell = document.createElement('td');
-						countIntCell.className = 'fh-num-int';
-						countIntCell.textContent = parts.intPart;
-						var countDecCell = document.createElement('td');
-						countDecCell.className = 'fh-num-dec';
-						countDecCell.textContent = parts.decPart;
-
-						row.appendChild(blankCell);
-						row.appendChild(labelCell);
-						row.appendChild(countIntCell);
-						row.appendChild(countDecCell);
-						tbody.appendChild(row);
-					});
-				});
+				appendGroupedUpstreamRows(tbody, sortUpstreamRowsByTotalThenId(upstreamRows));
 
 				table.appendChild(tbody);
 				group.appendChild(table);
@@ -1127,7 +2488,17 @@
 				table.className = 'fh-table fh-table-upstreams';
 				var thead = document.createElement('thead');
 				var headRow = document.createElement('tr');
-				['Upstream', 'State', 'Failures', 'Backoff (s)'].forEach(function (label) {
+				[
+					'Upstream',
+					'Role',
+					'State',
+					'Failures',
+					'Run queries',
+					'Run failed',
+					'Last error',
+					'Last error at',
+					'Backoff',
+				].forEach(function (label) {
 					var th = document.createElement('th');
 					th.textContent = label;
 					th.style.textAlign = 'left';
@@ -1141,30 +2512,93 @@
 					if (!item || typeof item !== 'object') {
 						return;
 					}
-					var id = item.id || '';
-					var state = item.state || 'up';
+					var id = item.id != null ? String(item.id) : '';
+					var role = item.role != null ? String(item.role) : '';
+					var state = item.state != null ? String(item.state) : 'up';
 					var failCount = item.fail_count != null ? item.fail_count : 0;
-					var backoffText = '';
+					var host = item.host != null ? String(item.host) : '';
+					var port = item.port != null ? String(item.port) : '';
+					var transport = item.transport != null ? String(item.transport) : '';
+					var runQueries = item.run_query_count;
+					if (runQueries == null) {
+						runQueries = item.query_count;
+					}
+					if (runQueries == null) {
+						runQueries = item.total_queries;
+					}
+					var runFailed = item.run_failed_count;
+					if (runFailed == null) {
+						runFailed = item.failed_query_count;
+					}
+					if (runFailed == null) {
+						runFailed = item.failed_count;
+					}
+					var lastError = item.last_error != null ? String(item.last_error) : '';
+					var lastErrorTsRaw = item.last_error_ts;
+					if (lastErrorTsRaw == null) {
+						lastErrorTsRaw = item.last_failure_ts;
+					}
+					var lastErrorTs = lastErrorTsRaw != null ? (formatTimestamp(lastErrorTsRaw) || String(lastErrorTsRaw)) : '';
+					var backoffText = 'none';
 					if (item.down_until) {
 						var nowMs = Date.now();
 						var untilMs = Number(item.down_until) * 1000;
 						var remainingMs = untilMs - nowMs;
 						if (remainingMs > 0) {
-							backoffText = (remainingMs / 1000).toFixed(1);
+							backoffText = (remainingMs / 1000).toFixed(1) + 's';
 						}
 					}
+					var hoverDetails = [];
+					if (host) {
+						hoverDetails.push('host=' + host);
+					}
+					if (port) {
+						hoverDetails.push('port=' + port);
+					}
+					if (transport) {
+						hoverDetails.push('transport=' + transport);
+					}
+					if (item.config && typeof item.config === 'object') {
+						try {
+							hoverDetails.push('config=' + JSON.stringify(item.config));
+						} catch (e) {}
+					}
 					var tr = document.createElement('tr');
+					if (hoverDetails.length) {
+						tr.title = hoverDetails.join('\n');
+					}
 					var tdId = document.createElement('td');
-					tdId.textContent = id;
+					var displayId = id || (host && port ? host + ':' + port : host || '');
+					tdId.textContent = displayId;
+					if (!id && displayId) {
+						tdId.title = 'Constructed from host/port because no upstream id was available.';
+					}
+					var tdRole = document.createElement('td');
+					tdRole.textContent = role;
 					var tdState = document.createElement('td');
 					tdState.textContent = state;
 					var tdFail = document.createElement('td');
-					tdFail.textContent = String(failCount);
+					tdFail.textContent = formatNumber(failCount);
+					var tdRunQueries = document.createElement('td');
+					tdRunQueries.textContent =
+						runQueries == null ? '' : formatNumber(runQueries);
+					var tdRunFailed = document.createElement('td');
+					tdRunFailed.textContent =
+						runFailed == null ? '' : formatNumber(runFailed);
+					var tdLastError = document.createElement('td');
+					tdLastError.textContent = lastError;
+					var tdLastErrorTs = document.createElement('td');
+					tdLastErrorTs.textContent = lastErrorTs;
 					var tdBackoff = document.createElement('td');
 					tdBackoff.textContent = backoffText;
 					tr.appendChild(tdId);
+					tr.appendChild(tdRole);
 					tr.appendChild(tdState);
 					tr.appendChild(tdFail);
+					tr.appendChild(tdRunQueries);
+					tr.appendChild(tdRunFailed);
+					tr.appendChild(tdLastError);
+					tr.appendChild(tdLastErrorTs);
 					tr.appendChild(tdBackoff);
 					tbody.appendChild(tr);
 				});
@@ -1196,29 +2630,34 @@
 				}
 			}
 
-			function renderStats(data) {
-				clearStatsGroups();
+			function renderStats(data, upstreamStatus) {
+				var liveLeft = statsGroupsEl;
+				var liveRight = statsGroupsRightEl;
+				var nextLeft = document.createDocumentFragment();
+				var nextRight = liveRight ? document.createDocumentFragment() : nextLeft;
+				statsGroupsEl = nextLeft;
+				statsGroupsRightEl = nextRight;
+				try {
+					clearStatsGroups();
 
-				if (!data || typeof data !== 'object') {
-					statsRawEl.textContent = 'No statistics payload returned from /stats';
-					return;
-				}
+					if (!data || typeof data !== 'object') {
+						return;
+					}
 
-				if (data.status === 'disabled') {
-					var disabledGroup = document.createElement('section');
-					disabledGroup.className = 'fh-stats-group';
-					var heading = document.createElement('h3');
-					heading.className = 'fh-stats-group-title';
-					heading.textContent = 'Status';
-					disabledGroup.appendChild(heading);
-					var p = document.createElement('p');
-					p.className = 'fh-pane-help';
-					p.textContent = 'Statistics are disabled for this server instance.';
-					disabledGroup.appendChild(p);
-					statsGroupsEl.appendChild(disabledGroup);
-					statsRawEl.textContent = pretty(data);
-					return;
-				}
+					if (data.status === 'disabled') {
+						var disabledGroup = document.createElement('section');
+						disabledGroup.className = 'fh-stats-group';
+						var heading = document.createElement('h3');
+						heading.className = 'fh-stats-group-title';
+						heading.textContent = 'Status';
+						disabledGroup.appendChild(heading);
+						var p = document.createElement('p');
+						p.className = 'fh-pane-help';
+						p.textContent = 'Statistics are disabled for this server instance.';
+						disabledGroup.appendChild(p);
+						statsGroupsEl.appendChild(disabledGroup);
+						return;
+					}
 
 				// Prefer a created_at field from meta when present, falling back to
 				// a top-level created_at. Always format as "YYYY-MM-DD HH:MM:SS".
@@ -1279,6 +2718,7 @@
 				// peel off DNSSEC- and EDE-specific counters into their own mappings so
 				// they can be displayed in dedicated sections.
 				var totalsForDisplay = {};
+				var loggingQueueForDisplay = {};
 				var dnssecTotalsFromTotals = {};
 				var edeTotalsFromTotals = {};
 				if (data.totals && typeof data.totals === 'object') {
@@ -1298,6 +2738,15 @@
 							edeTotalsFromTotals[key] = data.totals[key];
 							return;
 						}
+						if (
+							key === 'logging_queue_drops' ||
+							key === 'logging_queue_pct' ||
+							key === 'logging_queue_size' ||
+							key === 'logging_queue_capacity'
+						) {
+							loggingQueueForDisplay[key] = data.totals[key];
+							return;
+						}
 						totalsForDisplay[key] = data.totals[key];
 					});
 				}
@@ -1305,6 +2754,9 @@
 				// Surface unique client/domain counts only via Meta; Totals intentionally
 				// omits clients/domains so they are not duplicated.
 				appendDictGroup('Totals', totalsForDisplay);
+				if (Object.keys(loggingQueueForDisplay).length) {
+					appendDictGroup('Logging queue', loggingQueueForDisplay);
+				}
 
 				// Prefer a dedicated dnssec object from the API when present; fall
 				// back to DNSSEC counters discovered under totals.
@@ -1330,7 +2782,12 @@
 					appendDictGroup('Extended DNS Errors (EDE)', edeMapping);
 				}
 
-				appendUpstreamsGroup(data.upstreams || {}, data.upstream_rcodes || {});
+				appendUpstreamsGroup(
+					data.upstreams || {},
+					data.upstream_rcodes || {},
+					upstreamStatus || null
+				);
+				appendUpstreamStatusGroup(upstreamStatus || null);
 				appendDictGroup('Query types', data.qtypes || {});
 				appendDictGroup('Response codes', data.rcodes || {});
 				appendDictGroup('Recent latency', data.latency_recent || {});
@@ -1338,7 +2795,7 @@
 
 				appendTopListGroup('Top Client', data.top_clients || []);
 				appendTopListGroup('Top Domains', data.top_domains || [], statsGroupsRightEl || statsGroupsEl);
-				appendTopListGroup('Top Sub Domains', data.top_subdomains || [], statsGroupsRightEl || statsGroupsEl);
+				appendTopListGroup('Top Subdomains', data.top_subdomains || [], statsGroupsRightEl || statsGroupsEl);
 				// Cache hit/miss lists live in the right-hand pane when available.
 				appendTopListGroup('Top Cache Hit Domains', data.cache_hit_domains || [], statsGroupsRightEl || statsGroupsEl);
 				appendTopListGroup('Top Cache Miss Domains', data.cache_miss_domains || [], statsGroupsRightEl || statsGroupsEl);
@@ -1353,27 +2810,257 @@
 				appendRcodeTopSubdomains(data.rcode_subdomains || {});
 
 
-				if (data.system) {
-					appendSystemGroup(data.system);
+					if (data.system) {
+						appendSystemGroup(data.system);
+					}
+				} finally {
+					statsGroupsEl = liveLeft;
+					statsGroupsRightEl = liveRight;
+					replaceContainerChildren(liveLeft, nextLeft);
+					if (liveRight && nextRight && nextRight !== nextLeft) {
+						replaceContainerChildren(liveRight, nextRight);
+					}
 				}
 
-				statsRawEl.textContent = pretty(data);
 			}
 
 			function loadStats() {
 				fetchJson('/api/v1/stats')
 					.then(function (data) {
-						renderStats(data);
 						return fetchJson('/api/v1/upstream_status')
 							.then(function (ustatus) {
-								appendUpstreamStatusGroup(ustatus);
+								renderStats(data, ustatus);
 							})
 							.catch(function () {
-								// Upstream status is optional; ignore errors here.
+								// Upstream status is optional; still render core stats.
+								renderStats(data, null);
 							});
 					})
+					.catch(function () {});
+			}
+			function refreshActiveTabData() {
+				if (activeTab === 'stats') {
+					loadStats();
+					return;
+				}
+				if (activeTab === 'query-log') {
+					loadQueryLog();
+					return;
+				}
+				if (activeTab === 'edit') {
+					if (!isEditing) {
+						refreshDiskConfigView();
+					}
+					if (page1 && page1.style && page1.style.display !== 'none') {
+						loadConfigDiagram();
+					}
+					return;
+				}
+				if (activeTab && activeTab.indexOf('plugin:') === 0) {
+					var pluginName = activeTab.slice('plugin:'.length);
+					var info = pluginUiPages && pluginUiPages[pluginName];
+					if (!info || !info.page || !info.desc) {
+						return;
+					}
+					// Avoid duplicate polling when a plugin-specific timer exists.
+					if (pluginRefreshTimers && pluginRefreshTimers[pluginName]) {
+						return;
+					}
+					loadSnapshotPageV1(info.page, info.desc);
+				}
+			}
+
+			function loadConfigDiagram() {
+				if (!configDiagramImgEl) {
+					return;
+				}
+				if (configDiagramStatusEl) {
+					configDiagramStatusEl.textContent = 'Loading diagram...';
+				}
+				if (configDiagramFallbackEl) {
+					configDiagramFallbackEl.hidden = true;
+				}
+				if (configDiagramUploadStatusEl) {
+					configDiagramUploadStatusEl.textContent = '';
+				}
+
+				configDiagramImgEl.onload = function () {
+					if (configDiagramStatusEl) {
+						configDiagramStatusEl.textContent = '';
+					}
+					// Diagram present: use the standard two-pane layout.
+					if (page1 && page1.classList) {
+						page1.classList.remove('fh-main-config-single');
+					}
+					configDiagramImgEl.style.display = 'block';
+					if (configDiagramFallbackEl) {
+						configDiagramFallbackEl.hidden = true;
+					}
+					if (configDiagramDotEl) {
+						configDiagramDotEl.textContent = '';
+					}
+
+					// Best-effort: fetch only headers from /diagram.dot so we can surface
+					// staleness warnings even when the PNG loads successfully.
+					fetch('/api/v1/config/diagram.dot?meta=1&ts=' + Date.now(), { cache: 'no-store' })
+						.then(function (resp) {
+							var warn = resp.headers.get('x-foghorn-warning');
+							if (warn && configDiagramStatusEl) {
+								configDiagramStatusEl.textContent = warn;
+							}
+						})
+						.catch(function () {
+							// Ignore warning fetch failures.
+						});
+				};
+				configDiagramImgEl.onerror = function () {
+					if (configDiagramStatusEl) {
+						configDiagramStatusEl.textContent = 'PNG unavailable; showing GraphViz dot source.';
+					}
+					// Diagram missing (usually dot is not available on the server): keep the
+					// standard two-pane layout and show the dot output in the diagram
+					// area instead of collapsing to a single column.
+					configDiagramImgEl.style.display = 'none';
+					if (configDiagramFallbackEl) {
+						configDiagramFallbackEl.hidden = false;
+					}
+					if (configDiagramDotEl) {
+						configDiagramDotEl.textContent = 'Loading dot source...';
+						fetch('/api/v1/config/diagram.dot?ts=' + Date.now(), { cache: 'no-store' })
+							.then(function (resp) {
+								var warn = resp.headers.get('x-foghorn-warning');
+								if (warn && configDiagramStatusEl) {
+									configDiagramStatusEl.textContent = warn;
+								}
+								if (!resp.ok) {
+									throw new Error('HTTP ' + resp.status);
+								}
+								return resp.text();
+							})
+							.then(function (text) {
+								configDiagramDotEl.textContent = text || '';
+							})
+							.catch(function (err) {
+								configDiagramDotEl.textContent = 'Failed to load dot source: ' + (err && err.message ? err.message : String(err));
+							});
+					}
+				};
+
+				var ts = Date.now();
+
+				function isDarkThemeSelected() {
+					try {
+						var t = root && root.getAttribute ? root.getAttribute('data-theme') : null;
+						if (t === 'light') {
+							return false;
+						}
+						if (t === 'dark') {
+							return true;
+						}
+					} catch (e) {}
+					// Fallback to OS preference when the UI theme is not set.
+					try {
+						return !!(window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
+					} catch (e2) {
+						return false;
+					}
+				}
+
+				var primaryPng = isDarkThemeSelected() ? '/api/v1/config/diagram-dark.png' : '/api/v1/config/diagram.png';
+				var fallbackPng = '/api/v1/config/diagram.png';
+
+				function probeAndLoad(pngUrl, maybeFallbackUrl) {
+					fetch(pngUrl + '?meta=1&ts=' + ts, { cache: 'no-store' })
+						.then(function (resp) {
+							if (!resp.ok) {
+								throw new Error('HTTP ' + resp.status);
+							}
+							var warn = resp.headers.get('x-foghorn-warning');
+							if (warn && configDiagramStatusEl) {
+								configDiagramStatusEl.textContent = warn;
+							}
+							var exists = resp.headers.get('x-foghorn-exists');
+							if (exists === '0') {
+								if (maybeFallbackUrl) {
+									return probeAndLoad(maybeFallbackUrl, null);
+								}
+								if (typeof configDiagramImgEl.onerror === 'function') {
+									configDiagramImgEl.onerror();
+								}
+								return;
+							}
+							configDiagramImgEl.src = pngUrl + '?ts=' + ts;
+						})
+						.catch(function () {
+							// Older servers may not support the meta probe; fall back to
+							// the img load/onerror path.
+							configDiagramImgEl.src = pngUrl + '?ts=' + ts;
+						});
+				}
+
+				probeAndLoad(primaryPng, primaryPng !== fallbackPng ? fallbackPng : null);
+			}
+
+			function setDiagramUploadStatus(text) {
+				if (!configDiagramUploadStatusEl) {
+					return;
+				}
+				configDiagramUploadStatusEl.textContent = text || '';
+			}
+
+			function uploadConfigDiagramPng() {
+				setDiagramUploadStatus('');
+				if (!configDiagramUploadEl || !configDiagramUploadEl.files || !configDiagramUploadEl.files.length) {
+					setDiagramUploadStatus('Select a PNG file to upload.');
+					return;
+				}
+				if (configDiagramUploadEl.files.length > 1) {
+					setDiagramUploadStatus('Please choose a single PNG file.');
+					return;
+				}
+				var file = configDiagramUploadEl.files[0];
+				if (!file) {
+					setDiagramUploadStatus('Select a PNG file to upload.');
+					return;
+				}
+				var name = (file.name || '').toLowerCase();
+				if (name && name.lastIndexOf('.png') !== name.length - 4) {
+					setDiagramUploadStatus('File must have a .png extension.');
+					return;
+				}
+				if (file.size > 1000000) {
+					setDiagramUploadStatus('File too large (max 1MB).');
+					return;
+				}
+				if (file.type && file.type !== 'image/png') {
+					setDiagramUploadStatus('File must be an image/png.');
+					return;
+				}
+
+				setDiagramUploadStatus('Uploading...');
+				var form = new FormData();
+				form.append('file', file, file.name || 'diagram.png');
+				fetch('/api/v1/config/diagram.png', {
+					method: 'POST',
+					body: form,
+				})
+					.then(function (resp) {
+						if (!resp.ok) {
+							return resp.text().then(function (text) {
+								throw new Error('HTTP ' + resp.status + ': ' + text);
+							});
+						}
+						return resp.json().catch(function () { return {}; });
+					})
+					.then(function (data) {
+						setDiagramUploadStatus('Uploaded diagram.png. Reloading...');
+						try {
+							configDiagramUploadEl.value = '';
+						} catch (e) {}
+						loadConfigDiagram();
+					})
 					.catch(function (err) {
-						statsRawEl.textContent = 'Failed to load statistics: ' + err.message;
+						setDiagramUploadStatus('Upload failed: ' + (err && err.message ? err.message : String(err)));
 					});
 			}
 
@@ -1412,6 +3099,353 @@
 					.replace(/'/g, '&#39;');
 			}
 
+			function parseNumericSortValue(value) {
+				if (value == null) {
+					return null;
+				}
+				var text = String(value).trim();
+				if (!text) {
+					return null;
+				}
+				var compact = text.replace(/,/g, '');
+				if (!/^[-+]?\d+(?:\.\d+)?$/.test(compact)) {
+					return null;
+				}
+				var n = Number(compact);
+				return isFinite(n) ? n : null;
+			}
+
+			function toComparableSortValue(raw) {
+				if (raw == null) {
+					return { rank: 2, value: '' };
+				}
+				if (typeof raw === 'number') {
+					if (!isFinite(raw)) {
+						return { rank: 2, value: '' };
+					}
+					return { rank: 0, value: raw };
+				}
+				if (typeof raw === 'boolean') {
+					return { rank: 0, value: raw ? 1 : 0 };
+				}
+				if (Array.isArray(raw)) {
+					raw = raw.join(' ');
+				}
+				var text = String(raw).trim();
+				if (!text) {
+					return { rank: 2, value: '' };
+				}
+				var numeric = parseNumericSortValue(text);
+				if (numeric != null) {
+					return { rank: 0, value: numeric };
+				}
+				var maybeTimestamp = Date.parse(text);
+				if (
+					!isNaN(maybeTimestamp) &&
+					text.length >= 10 &&
+					text.charAt(4) === '-' &&
+					text.charAt(7) === '-'
+				) {
+					return { rank: 0, value: maybeTimestamp };
+				}
+				return { rank: 1, value: text.toLowerCase(), raw: text };
+			}
+
+			function compareComparableSortValues(left, right) {
+				if (left.rank !== right.rank) {
+					return left.rank - right.rank;
+				}
+				if (left.rank === 0) {
+					if (left.value < right.value) {
+						return -1;
+					}
+					if (left.value > right.value) {
+						return 1;
+					}
+					return 0;
+				}
+				if (left.rank === 1) {
+					return String(left.value).localeCompare(String(right.value), undefined, {
+						numeric: true,
+						sensitivity: 'base',
+					});
+				}
+				return 0;
+			}
+
+			function sortRowsByColumn(rows, column, direction) {
+				rows = Array.isArray(rows) ? rows.slice() : [];
+				if (!column || !column.key) {
+					return rows;
+				}
+				var sortPath = column.sort_key ? String(column.sort_key) : String(column.key);
+				var dir = direction === 'desc' ? -1 : 1;
+				var decorated = rows.map(function (row, index) {
+					var raw = resolvePath(row, sortPath);
+					return {
+						row: row,
+						index: index,
+						comparable: toComparableSortValue(raw),
+					};
+				});
+				decorated.sort(function (a, b) {
+					var cmp = compareComparableSortValues(a.comparable, b.comparable);
+					if (cmp === 0) {
+						return a.index - b.index;
+					}
+					return cmp * dir;
+				});
+				return decorated.map(function (item) {
+					return item.row;
+				});
+			}
+
+			function getTableColumnByKey(columns, key) {
+				for (var i = 0; i < columns.length; i++) {
+					var col = columns[i];
+					if (col && col.key && String(col.key) === key) {
+						return col;
+					}
+				}
+				return null;
+			}
+
+			function getDefaultSortDirection(rows, column) {
+				if (!column || !column.key) {
+					return 'asc';
+				}
+				var explicitDirection = column.default_sort_dir
+					? String(column.default_sort_dir).toLowerCase()
+					: '';
+				if (explicitDirection === 'asc' || explicitDirection === 'desc') {
+					return explicitDirection;
+				}
+				var sortPath = column.sort_key ? String(column.sort_key) : String(column.key);
+				rows = Array.isArray(rows) ? rows : [];
+				for (var i = 0; i < rows.length; i++) {
+					var raw = resolvePath(rows[i], sortPath);
+					var comparable = toComparableSortValue(raw);
+					if (comparable.rank === 0) {
+						return 'desc';
+					}
+					if (comparable.rank === 1) {
+						return 'asc';
+					}
+				}
+				if (column.align === 'right') {
+					return 'desc';
+				}
+				return 'asc';
+			}
+			function _serializeSortStateExtraQuery(extraQuery) {
+				if (!extraQuery || typeof extraQuery !== 'object') {
+					return '';
+				}
+				var keys = Object.keys(extraQuery).sort();
+				if (!keys.length) {
+					return '';
+				}
+				return keys
+					.map(function (k) {
+						return String(k) + '=' + String(extraQuery[k]);
+					})
+					.join('&');
+			}
+			function getTableSortStateKey(kind, section, pluginName, extraQuery) {
+				var sectionId = section && section.id ? String(section.id) : '';
+				var title = section && section.title ? String(section.title) : '';
+				var plugin = pluginName ? String(pluginName) : '';
+				var extra = _serializeSortStateExtraQuery(extraQuery);
+				return [String(kind || ''), plugin, sectionId, title, extra].join('|');
+			}
+			function readTableSortState(sortStateKey, columns) {
+				if (!sortStateKey || !tableSortStateStore) {
+					return null;
+				}
+				var state = tableSortStateStore[sortStateKey];
+				if (!state || typeof state !== 'object') {
+					return null;
+				}
+				var key = state.key ? String(state.key) : '';
+				var dir = state.dir === 'desc' ? 'desc' : 'asc';
+				if (!key) {
+					return { key: '', dir: dir };
+				}
+				if (!getTableColumnByKey(Array.isArray(columns) ? columns : [], key)) {
+					return null;
+				}
+				return { key: key, dir: dir };
+			}
+			function writeTableSortState(sortStateKey, sortState) {
+				if (!sortStateKey || !tableSortStateStore || !sortState || typeof sortState !== 'object') {
+					return;
+				}
+				tableSortStateStore[sortStateKey] = {
+					key: sortState.key ? String(sortState.key) : '',
+					dir: sortState.dir === 'desc' ? 'desc' : 'asc',
+				};
+			}
+
+			function renderSortableHeader(columns, sortState, onSort) {
+				var thead = document.createElement('thead');
+				var hrow = document.createElement('tr');
+				columns.forEach(function (col) {
+					var th = document.createElement('th');
+					var key = col && col.key ? String(col.key) : '';
+					var label = col && col.label ? col.label : key;
+					var suffix = '';
+					if (key && sortState && sortState.key === key) {
+						suffix = sortState.dir === 'desc' ? ' ▼' : ' ▲';
+					}
+					th.textContent = label + suffix;
+					if (String(label).indexOf('\n') !== -1) {
+						th.style.whiteSpace = 'pre-line';
+					}
+					if (col && col.align === 'right') {
+						th.style.textAlign = 'right';
+					}
+					if (key && typeof onSort === 'function') {
+						th.style.cursor = 'pointer';
+						th.addEventListener('click', function () {
+							onSort(key);
+						});
+					}
+					hrow.appendChild(th);
+				});
+				thead.appendChild(hrow);
+				return thead;
+			}
+
+			function formatTableCellValue(raw, key, rowData, col) {
+				var text = '';
+				var title = '';
+				if (key === 'last_seen') {
+					var iso = rowData && rowData._lastSeenRaw != null ? String(rowData._lastSeenRaw) : (raw != null ? String(raw) : '');
+					var fmt = formatTimestamp(iso || raw);
+					text = fmt != null ? String(fmt) : '';
+					title = iso || '';
+					return { text: text, title: title };
+				}
+				if (raw == null) {
+					return { text: '', title: '' };
+				}
+				if (Array.isArray(raw) && col && col.join) {
+					return { text: raw.join(String(col.join)), title: '' };
+				}
+				if (typeof raw === 'boolean') {
+					return { text: raw ? 'yes' : '', title: '' };
+				}
+				if (typeof raw === 'number') {
+					return { text: formatNumber(raw), title: '' };
+				}
+				return { text: String(raw), title: '' };
+			}
+
+			function formatTableCellSearchText(raw, key, rowData) {
+				if (key === 'last_seen') {
+					var iso = rowData && rowData._lastSeenRaw != null ? String(rowData._lastSeenRaw) : (raw != null ? String(raw) : '');
+					var fmt = formatTimestamp(iso || raw);
+					return fmt != null ? String(fmt) : '';
+				}
+				if (raw == null) {
+					return '';
+				}
+				if (typeof raw === 'boolean') {
+					return raw ? 'yes' : '';
+				}
+				if (typeof raw === 'number') {
+					return formatNumber(raw);
+				}
+				if (Array.isArray(raw)) {
+					return raw.join(', ');
+				}
+				return String(raw);
+			}
+
+			function renderTableBodyRows(columns, items, options) {
+				options = options || {};
+				items = Array.isArray(items) ? items : [];
+				var tbody = document.createElement('tbody');
+				items.forEach(function (rowData) {
+					if (!rowData || typeof rowData !== 'object') {
+						return;
+					}
+					var tr = document.createElement('tr');
+					if (options.setMetricsAttrs) {
+						if (typeof rowData.calls_total === 'number') {
+							tr.setAttribute('data-calls-total', String(rowData.calls_total));
+						}
+						if (typeof rowData.cache_hits === 'number') {
+							tr.setAttribute('data-cache-hits', String(rowData.cache_hits));
+						}
+						if (typeof rowData.status === 'string') {
+							tr.setAttribute('data-status', String(rowData.status).toLowerCase());
+						}
+					}
+					columns.forEach(function (col) {
+						var key = col && col.key ? col.key : '';
+						var raw = key ? resolvePath(rowData, key) : null;
+						var td = document.createElement('td');
+						if (col && col.align === 'right') {
+							td.style.textAlign = 'right';
+						}
+						if (col && col.nowrap) {
+							td.style.whiteSpace = 'nowrap';
+						}
+						if (options.sectionStyle === 'docker_group_by_txt' && col && col.key === 'name') {
+							td.classList.add('fh-cell-multiline');
+						}
+						var formatted = formatTableCellValue(raw, key, rowData, col);
+						if (col && col.html) {
+							td.innerHTML = formatted.text;
+						} else {
+							td.textContent = formatted.text;
+						}
+						if (formatted.title) {
+							td.title = formatted.title;
+						}
+						if (col && col.key === 'txt' && rowData && rowData._txtTooltip) {
+							td.title = String(rowData._txtTooltip);
+						}
+						var filterKey = col && col.query_log_filter_key
+							? String(col.query_log_filter_key)
+							: '';
+						var filterMode = col && col.query_log_filter_mode
+							? String(col.query_log_filter_mode)
+							: 'any';
+						if (
+							filterKey &&
+							shouldEnableQueryLogFilterControl(raw, filterMode) &&
+							!col.html
+						) {
+							td.textContent = '';
+							var control = buildQueryLogFilterControl(
+								formatted.text,
+								filterKey,
+								raw
+							);
+							if (control) {
+								td.appendChild(control);
+							} else {
+								td.textContent = formatted.text;
+							}
+						}
+						tr.appendChild(td);
+					});
+					tbody.appendChild(tr);
+				});
+				if (!items.length && options.emptyText) {
+					var trEmpty = document.createElement('tr');
+					var tdEmpty = document.createElement('td');
+					tdEmpty.colSpan = columns.length;
+					tdEmpty.className = 'fh-pane-help';
+					tdEmpty.textContent = String(options.emptyText);
+					trEmpty.appendChild(tdEmpty);
+					tbody.appendChild(trEmpty);
+				}
+				return tbody;
+			}
+
 			function renderKvSection(root, valueMap, section) {
 				if (!root) {
 					return;
@@ -1420,6 +3454,9 @@
 				var title = section && section.title ? section.title : 'Stats';
 				var group = document.createElement('section');
 				group.className = 'fh-stats-group';
+				if (section && section.className) {
+					group.classList.add(String(section.className));
+				}
 				var heading = document.createElement('h3');
 				heading.className = 'fh-stats-group-title';
 				heading.textContent = title;
@@ -1562,8 +3599,7 @@
 				}
 				// Optional domain suffix (e.g. "docker.zaa") provided by the backend
 				// via data.summary.suffix and plumbed into section._domainSuffix so
-				// that we can hide it from display names while still showing it in
-				// the Summary table.
+				// we can render bare names as FQDNs for consistency.
 				var domainSuffix = '';
 				if (section && section._domainSuffix) {
 					var raw = String(section._domainSuffix).toLowerCase().trim();
@@ -1581,178 +3617,84 @@
 						}
 					}
 				}
-				function stripSuffix(name) {
-					if (!domainSuffix) {
-						return name;
-					}
+				function withDefaultDomain(name) {
 					var text = String(name || '').trim();
 					if (!text) {
 						return text;
 					}
-					var lower = text.toLowerCase();
-					var suf = '.' + domainSuffix;
-					if (lower.endsWith(suf)) {
-						return text.slice(0, text.length - suf.length) || text;
+					if (text.charAt(0) === '/') {
+						text = text.substring(1);
 					}
+					if (!text) {
+						return text;
+					}
+					if (!domainSuffix) {
+						return text;
+					}
+					// Keep already-qualified names unchanged.
+					if (text.indexOf('.') !== -1) {
+						return text;
+					}
+					// Keep hash-like labels unchanged.
+					if (isHashLikeLabel(text)) {
+						return text;
+					}
+					text = text + '.' + domainSuffix;
 					return text;
 				}
-				// First, group rows by identical TXT payload so that aliases for the
-				// same TXT summary are collapsed. Later we will further aggregate by
-				// short (non-hash) names so that only one visual row appears per
-				// logical name.
-				var groups = Object.create(null);
-				rows.forEach(function (row) {
-					if (!row || typeof row !== 'object') {
-						return;
+				function renderDockerTxtLine(text) {
+					var line = String(text || '');
+					if (!line) {
+						return '';
 					}
-					var txt = row.txt;
-					var key;
-					if (Array.isArray(txt)) {
-						try {
-							key = JSON.stringify(txt);
-						} catch (e) {
-							key = String(txt);
-						}
-					} else {
-						key = String(txt);
-					}
-					if (!groups[key]) {
-						groups[key] = { rows: [], txt: Array.isArray(txt) ? txt.slice() : (txt != null ? [String(txt)] : []) };
-					}
-					groups[key].rows.push(row);
-				});
-				// Build a per-TXT group descriptor with display name, aliases, tooltip,
-				// and a containers count (parsed from the header line). These group
-				// objects will then be aggregated by short name so that only one
-				// visual row appears per short name.
-				var groupObjects = [];
-				Object.keys(groups).forEach(function (gkey) {
-					var group = groups[gkey];
-					var txtLines = group.txt;
-					if (!txtLines.length) {
-						// No TXT/Info; just collapse to first row.
-						groupObjects.push({
-							base: group.rows[0],
-							primaryName: group.rows[0] && group.rows[0].name ? String(group.rows[0].name) : '',
-							aliases: [],
-							fullIds: [],
-							cleanedLines: [],
-							containersCount: 0,
-						});
-						return;
-					}
-					// Tooltip starts as the full TXT payload joined with newlines; we
-					// will append any full container IDs so they are still visible even
-					// when not rendered in the alias list.
-					var primaryName = '';
-					var aliasSet = Object.create(null);
-					var fullIdAliases = [];
-					var containersCount = 0;
-					// Parse containers= header when present so that when an alias points
-					// to multiple servers, we can treat the TXT with the highest
-					// container count as the "main".
-					for (var hi = 0; hi < txtLines.length; hi++) {
-						var headerLine = String(txtLines[hi] || '');
-						if (headerLine.indexOf('containers=') === 0) {
-							var numStr = headerLine.substring('containers='.length).trim();
-							var numVal = parseInt(numStr, 10);
-							if (!isNaN(numVal) && numVal > 0) {
-								containersCount = numVal;
-							}
-							break;
-						}
-					}
-					function isFullId(name) {
-						var token = String(name).split('.', 1)[0].toLowerCase().trim();
-						if (token.length !== 64) {
-							return false;
-						}
-						for (var i = 0; i < token.length; i++) {
-							var ch = token.charAt(i);
-							if ('0123456789abcdef'.indexOf(ch) === -1) {
-								return false;
-							}
-						}
-						return true;
-					}
-					// Helper to record alias names (deduplicated). Full 64-char IDs are
-					// not added to aliasSet; instead they are only exposed via tooltip.
-					function addAlias(name) {
-						if (!name) {
-							return;
-						}
-						var k = String(name).trim();
-						// Normalise docker-style names like "/calibre-web" by
-						// removing a single leading slash so that UI display names
-						// match the TXT/Info summaries and DNS labels.
-						if (k.charAt(0) === '/') {
-							k = k.substring(1);
-						}
-						if (!k) {
-							return;
-						}
-						if (isFullId(k)) {
-							if (fullIdAliases.indexOf(k) === -1) {
-								fullIdAliases.push(k);
-							}
-							return;
-						}
-						aliasSet[k] = true;
-					}
-					// Parse name=/aliases= from the first non-header line.
-					for (var i = 0; i < txtLines.length; i++) {
-						var line = String(txtLines[i]);
-						if (!line || line.indexOf('=') === -1) {
+					var parts = line.split(/\s+/);
+					var htmlParts = [];
+					for (var i = 0; i < parts.length; i++) {
+						var part = parts[i];
+						if (!part) {
 							continue;
 						}
-						if (line.indexOf('containers=') === 0 || line.indexOf('hosts=') === 0) {
+						var eq = part.indexOf('=');
+						if (eq <= 0) {
+							htmlParts.push(escapeHtml(part));
 							continue;
 						}
-						var parts = line.split(/\s+/);
-						for (var j = 0; j < parts.length; j++) {
-							var part = parts[j];
-							if (part.indexOf('name=') === 0 && !primaryName) {
-								primaryName = part.substring('name='.length);
-								// Normalise docker-style names like "/foghorn" to
-								// "foghorn" so the primary display name never begins
-								// with a leading slash even when provided via
-								// txt_fields.
-								if (primaryName.charAt(0) === '/') {
-									primaryName = primaryName.substring(1);
-								}
-							} else if (part.indexOf('aliases=') === 0) {
-								var rawAliases = part.substring('aliases='.length).split(',');
-								rawAliases.forEach(function (a) {
-									addAlias(a);
-								});
-							}
-						}
-						if (primaryName) {
-							break;
-						}
+						var key = part.slice(0, eq);
+						var value = part.slice(eq + 1);
+						htmlParts.push(
+							escapeHtml(key) +
+							'=' +
+							'<span class="fh-txt-kv-value">' +
+							escapeHtml(value) +
+							'</span>'
+						);
 					}
-					// Also treat the per-row display names as aliases.
-					group.rows.forEach(function (row) {
-						if (row && row.name) {
-							addAlias(row.name);
-						}
-					});
-					if (!primaryName && group.rows[0] && group.rows[0].name) {
-						primaryName = String(group.rows[0].name);
-						if (primaryName.charAt(0) === '/') {
-							primaryName = primaryName.substring(1);
-						}
+					return htmlParts.join(' ');
+				}
+				function splitCoreAndSuffix(fullName) {
+					var text = String(fullName || '').trim();
+					if (!text) {
+						return { core: '', suffix: '' };
 					}
-					// Clean TXT text for display: strip name=/aliases= tokens but keep others.
-					var cleanedLines = [];
+					var dotIdx = text.indexOf('.');
+					if (dotIdx === -1) {
+						return { core: text, suffix: '' };
+					}
+					return {
+						core: text.substring(0, dotIdx),
+						suffix: text.substring(dotIdx),
+					};
+				}
+				function cleanedTxtLines(rawTxt) {
+					var txtLines = Array.isArray(rawTxt) ? rawTxt : (rawTxt != null ? [String(rawTxt)] : []);
+					var out = [];
 					txtLines.forEach(function (line) {
 						var text = String(line || '');
 						if (!text) {
 							return;
 						}
 						if (text.indexOf('containers=') === 0 || text.indexOf('hosts=') === 0) {
-							// Keep header line as-is.
-							cleanedLines.push(text);
+							out.push(text);
 							return;
 						}
 						var parts = text.split(/\s+/);
@@ -1764,166 +3706,110 @@
 							}
 							kept.push(part);
 						}
-						cleanedLines.push(kept.join(' '));
+						out.push(kept.join(' '));
 					});
-					groupObjects.push({
-						base: group.rows[0],
-						primaryName: primaryName,
-						aliases: Object.keys(aliasSet),
-						fullIds: fullIdAliases.slice(),
-						cleanedLines: cleanedLines,
-						containersCount: containersCount,
-						allTxtLines: txtLines.slice(),
-					});
-				});
-				// Next, aggregate by short (non-hash) name. When an alias maps to
-				// multiple TXT groups, choose the group with the largest containers
-				// count as the "main". Hash-like labels (short/long hex) are never
-				// chosen as the primary when a non-hash alternative exists.
-				var bestByShortName = Object.create(null);
-				groupObjects.forEach(function (g) {
-					// Candidate keys: primaryName plus all aliases.
-					var candidates = [];
-					if (g.primaryName) {
-						candidates.push(g.primaryName);
-					}
-					g.aliases.forEach(function (a) {
-						if (candidates.indexOf(a) === -1) {
-							candidates.push(a);
-						}
-					});
-					candidates.forEach(function (rawName) {
-						if (!rawName) {
-							return;
-						}
-						// Normalise away a single leading slash from docker-style
-						// names before computing shortName keys.
-						if (rawName.charAt(0) === '/') {
-							rawName = rawName.substring(1);
-						}
-						// Prefer non-hash labels; hash-like labels become aliases.
-						if (isHashLikeLabel(rawName)) {
-							return;
-						}
-						var shortName = stripSuffix(rawName);
-						if (!shortName) {
-							return;
-						}
-						var existing = bestByShortName[shortName];
-						if (!existing || (g.containersCount || 0) > (existing.containersCount || 0)) {
-							bestByShortName[shortName] = g;
-						}
-					});
-				});
-				// Any groups that are only referenced by hash-like names (no
-				// non-hash alias) should still be visible; treat their primary name
-				// (possibly hash-like) as the key.
-				groupObjects.forEach(function (g) {
-					if (!g.primaryName) {
-						return;
-					}
-					var shortName = stripSuffix(g.primaryName);
-					if (!shortName) {
-						return;
-					}
-					if (!bestByShortName[shortName]) {
-						bestByShortName[shortName] = g;
-					}
-				});
-				// Finally, materialize rows: one visual row per short name, with the
-				// chosen main group providing TXT/Info and aliases.
-				var result = [];
-				Object.keys(bestByShortName).forEach(function (shortName) {
-					var g = bestByShortName[shortName];
-					// Build HTML for the Name column: main short name, then aliases
-					// (including hash-like) indented 2em.
-					var nameHtml = '';
-					nameHtml += '<div>' + escapeHtml(stripSuffix(shortName)) + '</div>';
-					// Merge aliases from *all* TXT groups that share this short
-					// name so that per-container short hashes (sha1[:12]) for every
-					// backend appear as aliases, not just those from the chosen main
-					// group.
-					var aliasSet = Object.create(null);
-					groupObjects.forEach(function (g2) {
-						// Determine whether this group contributes to this shortName.
-						var candidates2 = [];
-						if (g2.primaryName) {
-							candidates2.push(g2.primaryName);
-						}
-						g2.aliases.forEach(function (a) {
-							if (candidates2.indexOf(a) === -1) {
-								candidates2.push(a);
-							}
-						});
-						var contributes = false;
-						candidates2.forEach(function (rawName2) {
-							if (!rawName2) {
-								return;
-							}
-							var sn2 = stripSuffix(rawName2);
-							if (sn2 && sn2 === shortName) {
-								contributes = true;
-							}
-						});
-						if (!contributes) {
-							return;
-						}
-						// Collect this group's aliases (including hash-like ones) as
-						// display aliases for the shortName.
-						g2.aliases.forEach(function (a) {
-							if (!a) {
-								return;
-							}
-							var disp = stripSuffix(a);
-							if (!disp || disp === shortName) {
-								return;
-							}
-							aliasSet[disp] = true;
-						});
-					});
-					Object.keys(aliasSet).forEach(function (alias) {
-						nameHtml += '<div style="margin-left:2em">' + escapeHtml(alias) + '</div>';
-					});
-					// Render cleaned TXT lines with indentation, as before.
-					var cleanedLines = g.cleanedLines || [];
-					var txtHtml = escapeHtml((cleanedLines[0] || ''));
-					for (var ci = 1; ci < cleanedLines.length; ci++) {
-						var seg = cleanedLines[ci];
-						if (!seg) {
-							continue;
-						}
-						txtHtml += '<br>&nbsp;&nbsp;&nbsp;&nbsp;' + escapeHtml(seg);
-					}
-					// Add a small spacer at the bottom of each row so Docker entries
-					// do not visually run together in the admin table.
-					nameHtml += '<div style="margin-top:0.35em"></div>';
-					txtHtml += '<br>&nbsp;';
-					var base = Object.assign({}, g.base);
-					base.name = nameHtml;
-					base.txt = txtHtml;
-					// Tooltip: original TXT plus any full 64-char IDs.
-					var tooltipParts = (g.allTxtLines || []).slice();
-					(g.fullIds || []).forEach(function (fid) {
-						tooltipParts.push('full_id=' + String(fid));
-					});
-					base._txtTooltip = tooltipParts.join('\n');
-					result.push(base);
-				});
-				// Mark the Name column as HTML-capable so nameHtml is not escaped.
-				if (section && Array.isArray(section.columns)) {
-					section.columns = section.columns.map(function (col) {
-						if (col && col.key === 'name') {
-							var copy = Object.assign({}, col);
-							copy.html = true;
-							return copy;
-						}
-						return col;
-					});
+					return out;
 				}
+				var groupedByCore = Object.create(null);
+				rows.forEach(function (row) {
+					if (!row || typeof row !== 'object') {
+						return;
+					}
+					var fullName = withDefaultDomain(row.name || '');
+					if (!fullName) {
+						return;
+					}
+					var parsed = splitCoreAndSuffix(fullName);
+					if (!parsed.core) {
+						return;
+					}
+					var txtSig = '';
+					try {
+						txtSig = JSON.stringify(row.txt || []);
+					} catch (e) {
+						txtSig = String(row.txt || '');
+					}
+					var uniqueKey = fullName + '|' + txtSig;
+					if (!groupedByCore[parsed.core]) {
+						groupedByCore[parsed.core] = { seen: Object.create(null), items: [] };
+					}
+					if (groupedByCore[parsed.core].seen[uniqueKey]) {
+						return;
+					}
+					groupedByCore[parsed.core].seen[uniqueKey] = true;
+					groupedByCore[parsed.core].items.push({
+						fullName: fullName,
+						suffix: parsed.suffix,
+						row: row,
+					});
+				});
+				var result = [];
+				Object.keys(groupedByCore).sort().forEach(function (core) {
+					var group = groupedByCore[core];
+					var items = Array.isArray(group.items) ? group.items.slice() : [];
+					items.sort(function (a, b) {
+						var as = String(a.suffix || '');
+						var bs = String(b.suffix || '');
+						if (as < bs) return -1;
+						if (as > bs) return 1;
+						return String(a.fullName || '').localeCompare(String(b.fullName || ''));
+					});
+					items.forEach(function (entry, idx) {
+						var base = Object.assign({}, entry.row);
+						var suffixLabel = entry.suffix || '';
+						base.name = core;
+						base.domain = suffixLabel ? suffixLabel.replace(/^\./, '') : '';
+						var lines = cleanedTxtLines(base.txt);
+						var txtHtml = '';
+						for (var ci = 0; ci < lines.length; ci++) {
+							var seg = lines[ci];
+							if (!seg) {
+								continue;
+							}
+							if (txtHtml) {
+								txtHtml += '<br>';
+							}
+							txtHtml += renderDockerTxtLine(seg);
+						}
+						txtHtml += '<br>&nbsp;';
+						base.txt = txtHtml;
+						base._txtTooltip = Array.isArray(entry.row.txt) ? entry.row.txt.join('\n') : String(entry.row.txt || '');
+						result.push(base);
+					});
+				});
 				return result;
+			}
+			function normalizeDockerColumns(columns) {
+				columns = Array.isArray(columns) ? columns.slice() : [];
+				var hasDomain = false;
+				for (var i = 0; i < columns.length; i++) {
+					if (columns[i] && String(columns[i].key || '') === 'domain') {
+						hasDomain = true;
+						break;
+					}
+				}
+				if (hasDomain) {
+					return columns;
+				}
+				var out = [];
+				var inserted = false;
+				for (var j = 0; j < columns.length; j++) {
+					var col = columns[j];
+					out.push(col);
+					if (!inserted && col && String(col.key || '') === 'name') {
+						out.push({ key: 'domain', label: 'Domain' });
+						inserted = true;
+					}
+				}
+				if (!inserted) {
+					out.unshift({ key: 'domain', label: 'Domain' });
+				}
+				return out;
 			}
 
 			function renderTableSection(root, rows, section) {
+				// Legacy client-side renderer (kept for backwards compatibility and
+				// for any future non-paginated uses).
 				if (!root) {
 					return;
 				}
@@ -1951,70 +3837,75 @@
 					});
 				}
 				var columns = Array.isArray(section && section.columns) ? section.columns : [];
+				if (section && section.style === 'docker_group_by_txt') {
+					columns = normalizeDockerColumns(columns);
+				}
 				var title = section && section.title ? section.title : 'Items';
 				if (!columns.length) {
 					return;
 				}
 				var group = document.createElement('section');
 				group.className = 'fh-stats-group';
+				if (section && section.className) {
+					group.classList.add(String(section.className));
+				}
 				var heading = document.createElement('h3');
 				heading.className = 'fh-stats-group-title';
 				heading.textContent = title;
 				group.appendChild(heading);
 
-					// Optional filters (e.g. hide_zero_calls/hide_zero_hits for decorated
-					// caches or show_down_services for mDNS). Multiple filters for a
-					// section share a single controls container.
-					var filterIds = Array.isArray(section && section.filters)
-						? section.filters.map(function (f) { return f && f.id; })
-						: [];
-					var controlsDiv = null;
-					function ensureControlsDiv() {
-						if (!controlsDiv) {
-							controlsDiv = document.createElement('div');
-							controlsDiv.className = 'fh-pane-controls';
-							group.appendChild(controlsDiv);
-						}
-						return controlsDiv;
+				// Optional filters (legacy client-side)
+				var filterIds = Array.isArray(section && section.filters)
+					? section.filters.map(function (f) { return f && f.id; })
+					: [];
+				var controlsDiv = null;
+				function ensureControlsDiv() {
+					if (!controlsDiv) {
+						controlsDiv = document.createElement('div');
+						controlsDiv.className = 'fh-pane-controls';
+						group.appendChild(controlsDiv);
 					}
-					if (filterIds.indexOf('hide_zero_calls') !== -1) {
-						var controlsZeroCalls = ensureControlsDiv();
-						var labelZeroCalls = document.createElement('label');
-						labelZeroCalls.style.fontSize = '0.9em';
-						var cbZeroCalls = document.createElement('input');
-						cbZeroCalls.type = 'checkbox';
-						cbZeroCalls.checked = true;
-						cbZeroCalls.setAttribute('data-filter-id', 'hide_zero_calls');
-						labelZeroCalls.appendChild(cbZeroCalls);
-						labelZeroCalls.appendChild(document.createTextNode(' Hide zero-call caches'));
-						controlsZeroCalls.appendChild(labelZeroCalls);
-					}
-					if (filterIds.indexOf('hide_zero_hits') !== -1) {
-						var controlsZeroHits = ensureControlsDiv();
-						var labelZeroHits = document.createElement('label');
-						labelZeroHits.style.fontSize = '0.9em';
-						labelZeroHits.style.marginLeft = '1.5em';
-						var cbZeroHits = document.createElement('input');
-						cbZeroHits.type = 'checkbox';
-						cbZeroHits.checked = true;
-						cbZeroHits.setAttribute('data-filter-id', 'hide_zero_hits');
-						labelZeroHits.appendChild(cbZeroHits);
-						labelZeroHits.appendChild(document.createTextNode(' Hide zero-hit caches'));
-						controlsZeroHits.appendChild(labelZeroHits);
-					}
-					if (filterIds.indexOf('show_down_services') !== -1) {
-						var controlsStatus = ensureControlsDiv();
-						var labelStatus = document.createElement('label');
-						labelStatus.style.fontSize = '0.9em';
-						labelStatus.style.marginLeft = '1.5em';
-						var cbStatus = document.createElement('input');
-						cbStatus.type = 'checkbox';
-						cbStatus.checked = false; // default: show only up services
-						cbStatus.setAttribute('data-filter-id', 'show_down_services');
-						labelStatus.appendChild(cbStatus);
-						labelStatus.appendChild(document.createTextNode(' Show down services'));
-						controlsStatus.appendChild(labelStatus);
-					}
+					return controlsDiv;
+				}
+				if (filterIds.indexOf('hide_zero_calls') !== -1) {
+					var controlsZeroCalls = ensureControlsDiv();
+					var labelZeroCalls = document.createElement('label');
+					labelZeroCalls.style.fontSize = '0.9em';
+					var cbZeroCalls = document.createElement('input');
+					cbZeroCalls.type = 'checkbox';
+					cbZeroCalls.checked = true;
+					cbZeroCalls.setAttribute('data-filter-id', 'hide_zero_calls');
+					labelZeroCalls.appendChild(cbZeroCalls);
+					labelZeroCalls.appendChild(document.createTextNode(' Hide zero-call caches'));
+					controlsZeroCalls.appendChild(labelZeroCalls);
+				}
+				if (filterIds.indexOf('hide_zero_hits') !== -1) {
+					var controlsZeroHits = ensureControlsDiv();
+					var labelZeroHits = document.createElement('label');
+					labelZeroHits.style.fontSize = '0.9em';
+					labelZeroHits.style.marginLeft = '1.5em';
+					var cbZeroHits = document.createElement('input');
+					cbZeroHits.type = 'checkbox';
+					cbZeroHits.checked = true;
+					cbZeroHits.setAttribute('data-filter-id', 'hide_zero_hits');
+					labelZeroHits.appendChild(cbZeroHits);
+					labelZeroHits.appendChild(document.createTextNode(' Hide zero-hit caches'));
+					controlsZeroHits.appendChild(labelZeroHits);
+				}
+				if (filterIds.indexOf('show_down_services') !== -1) {
+					var controlsStatus = ensureControlsDiv();
+					var labelStatus = document.createElement('label');
+					labelStatus.style.fontSize = '0.9em';
+					labelStatus.style.marginLeft = '1.5em';
+					var cbStatus = document.createElement('input');
+					cbStatus.type = 'checkbox';
+					cbStatus.checked = false; // default: show only up services
+					cbStatus.setAttribute('data-filter-id', 'show_down_services');
+					labelStatus.appendChild(cbStatus);
+					labelStatus.appendChild(document.createTextNode(' Show down services'));
+					controlsStatus.appendChild(labelStatus);
+				}
+
 				if (!rows.length) {
 					var p = document.createElement('p');
 					p.className = 'fh-pane-help';
@@ -2025,150 +3916,533 @@
 				}
 				var table = document.createElement('table');
 				table.className = 'fh-table fh-table-upstreams';
-				// Attach a data attribute so filter handlers can locate this table.
 				table.setAttribute('data-section-id', section && section.id ? String(section.id) : '');
-				var thead = document.createElement('thead');
-				var hrow = document.createElement('tr');
-				columns.forEach(function (col) {
-					var th = document.createElement('th');
-					th.textContent = col.label || String(col.key || '');
-					// Optional alignment hint for numeric-heavy columns such as TTL
-					// and Max size in cache tables.
-						if (col.align === 'right') {
-							th.style.textAlign = 'right';
-						}
-					hrow.appendChild(th);
-				});
-				thead.appendChild(hrow);
-				table.appendChild(thead);
-				var tbody = document.createElement('tbody');
-				rows.forEach(function (rowData) {
-					if (!rowData || typeof rowData !== 'object') {
-						return;
+				var sortStateKey = getTableSortStateKey('local', section, null, null);
+				var storedSortState = readTableSortState(sortStateKey, columns);
+				var sortState = storedSortState || { key: '', dir: 'asc' };
+
+				function renderTable() {
+					var displayRows = rows.slice();
+					if (sortState.key) {
+						var activeCol = getTableColumnByKey(columns, sortState.key);
+						displayRows = sortRowsByColumn(displayRows, activeCol, sortState.dir);
 					}
-					var tr = document.createElement('tr');
-					// Tag each row with calls_total when available so filters can
-					// hide zero-call entries for decorated caches.
-					if (rowData && typeof rowData.calls_total === 'number') {
-						tr.setAttribute('data-calls-total', String(rowData.calls_total));
-					}
-					// Tag each row with cache_hits when available so filters can
-					// hide zero-hit entries for decorated caches.
-					if (rowData && typeof rowData.cache_hits === 'number') {
-						tr.setAttribute('data-cache-hits', String(rowData.cache_hits));
-					}
-					// Tag each row with status when present so mDNS-style tables can
-					// hide/show down services via a checkbox filter.
-					if (rowData && typeof rowData.status === 'string') {
-						tr.setAttribute('data-status', String(rowData.status).toLowerCase());
-					}
-					columns.forEach(function (col) {
-						var key = col.key;
-						var joiner = col.join || null;
-						var raw = key ? resolvePath(rowData, key) : null;
-						var td = document.createElement('td');
-					if (col.align === 'right') {
-						td.style.textAlign = 'right';
-					}
-					if (col.nowrap) {
-						td.style.whiteSpace = 'nowrap';
-					}
-					var text = '';
-					// Special-case: last_seen should be rendered in the user's timezone
-					// as "YYYY-MM-DD HH:MM:SS" and expose the full ISO timestamp via
-					// a tooltip on hover.
-					if (key === 'last_seen') {
-						var iso = rowData && rowData._lastSeenRaw != null ? String(rowData._lastSeenRaw) : (raw != null ? String(raw) : '');
-						var fmt = formatTimestamp(iso || raw);
-						text = fmt != null ? String(fmt) : '';
-						if (iso) {
-							td.title = iso;
-						}
-					} else if (raw == null) {
-						text = '';
-					} else if (Array.isArray(raw) && joiner) {
-						text = raw.join(String(joiner));
-					} else if (typeof raw === 'boolean') {
-						text = raw ? 'yes' : '';
-					} else if (typeof raw === 'number') {
-						text = formatNumber(raw);
-					} else {
-						text = String(raw);
-					}
-						if (col.html) {
-							td.innerHTML = text;
-						} else {
-							td.textContent = text;
-						}
-					// For Docker TXT/Info cells, expose the full raw TXT payload as a tooltip.
-					if (col.key === 'txt' && rowData && rowData._txtTooltip) {
-						td.title = String(rowData._txtTooltip);
-					}
-						tr.appendChild(td);
-					});
-					tbody.appendChild(tr);
-				});
-				table.appendChild(tbody);
+					table.textContent = '';
+					table.appendChild(
+						renderSortableHeader(columns, sortState, function (key) {
+							if (sortState.key === key) {
+								sortState.dir = sortState.dir === 'asc' ? 'desc' : 'asc';
+							} else {
+								sortState.key = key;
+								sortState.dir = getDefaultSortDirection(
+									rows,
+									getTableColumnByKey(columns, key)
+								);
+							}
+							writeTableSortState(sortStateKey, sortState);
+							renderTable();
+						})
+					);
+					table.appendChild(
+						renderTableBodyRows(columns, displayRows, {
+							sectionStyle: section && section.style,
+							setMetricsAttrs: true,
+						})
+					);
+				}
+
+				renderTable();
 				group.appendChild(table);
-
-					// Wire up hide_zero_calls, hide_zero_hits and show_down_services
-					// filters, when present.
-					if (controlsDiv) {
-						var cbHideCalls = controlsDiv.querySelector('input[data-filter-id="hide_zero_calls"]');
-						var cbHideHits = controlsDiv.querySelector('input[data-filter-id="hide_zero_hits"]');
-						var cbShowDown = controlsDiv.querySelector('input[data-filter-id="show_down_services"]');
-						if (cbHideCalls || cbHideHits || cbShowDown) {
-							var applyFilters = function () {
-								var hideZeroCalls = cbHideCalls ? cbHideCalls.checked : false;
-								var hideZeroHits = cbHideHits ? cbHideHits.checked : false;
-								var showDown = cbShowDown ? cbShowDown.checked : false;
-								var rowsEls = tbody.querySelectorAll('tr');
-								rowsEls.forEach(function (trEl) {
-									var display = '';
-									// Zero-call cache rows (decorated caches view).
-									if (cbHideCalls) {
-										var callsAttr = trEl.getAttribute('data-calls-total');
-										var calls = callsAttr ? parseInt(callsAttr, 10) : NaN;
-										if (hideZeroCalls && callsAttr !== null && !isNaN(calls) && calls === 0) {
-											display = 'none';
-										}
-									}
-									// Zero-hit cache rows (decorated caches view).
-									if (cbHideHits) {
-										var hitsAttr = trEl.getAttribute('data-cache-hits');
-										var hits = hitsAttr ? parseInt(hitsAttr, 10) : NaN;
-										if (hideZeroHits && hitsAttr !== null && !isNaN(hits) && hits === 0) {
-											display = 'none';
-										}
-									}
-									// mDNS services: show only status=up by default unless
-									// the user explicitly enables down services.
-									if (cbShowDown) {
-										var statusAttr = (trEl.getAttribute('data-status') || '').toLowerCase();
-										if (!showDown && statusAttr === 'down') {
-											display = 'none';
-										}
-									}
-									trEl.style.display = display;
-								});
-							};
-							if (cbHideCalls) {
-								cbHideCalls.addEventListener('change', applyFilters);
-							}
-							if (cbHideHits) {
-								cbHideHits.addEventListener('change', applyFilters);
-							}
-							if (cbShowDown) {
-								cbShowDown.addEventListener('change', applyFilters);
-							}
-							// Apply initial state so filters take effect immediately.
-							applyFilters();
-						}
-					}
-
 				root.appendChild(group);
 			}
 
+			function renderTableSectionSearchable(root, rows, section) {
+				// Client-side searchable renderer for static row arrays.
+				if (!root) {
+					return;
+				}
+				root.textContent = '';
+				rows = Array.isArray(rows) ? rows : [];
+				var columns = Array.isArray(section && section.columns) ? section.columns : [];
+				var title = section && section.title ? section.title : 'Items';
+				if (!columns.length) {
+					return;
+				}
+
+				var group = document.createElement('section');
+				group.className = 'fh-stats-group';
+				if (section && section.className) {
+					group.classList.add(String(section.className));
+				}
+				var heading = document.createElement('h3');
+				heading.className = 'fh-stats-group-title';
+				heading.textContent = title;
+				group.appendChild(heading);
+
+				var controlsDiv = document.createElement('div');
+				controlsDiv.className = 'fh-table-controls';
+				group.appendChild(controlsDiv);
+
+				var searchWrap = document.createElement('div');
+				searchWrap.className = 'fh-table-controls-row';
+				var searchInput = document.createElement('input');
+				searchInput.type = 'search';
+				searchInput.className = 'fh-table-search';
+				searchInput.placeholder = 'Search...';
+				searchWrap.appendChild(searchInput);
+				controlsDiv.appendChild(searchWrap);
+
+				var table = document.createElement('table');
+				table.className = 'fh-table fh-table-upstreams';
+				group.appendChild(table);
+				var sortStateKey = getTableSortStateKey('searchable', section, null, null);
+				var storedSortState = readTableSortState(sortStateKey, columns);
+				var sortState = storedSortState || {
+					key: '',
+					dir: 'asc',
+				};
+
+				function matchesSearch(rowData, queryLower) {
+					if (!queryLower) {
+						return true;
+					}
+					for (var i = 0; i < columns.length; i++) {
+						var col = columns[i];
+						if (!col || !col.key) {
+							continue;
+						}
+						var raw = resolvePath(rowData, col.key);
+						var text = formatTableCellSearchText(raw, col.key, rowData).toLowerCase();
+						if (text.indexOf(queryLower) !== -1) {
+							return true;
+						}
+					}
+					return false;
+				}
+
+				function renderBody(items) {
+					var tbody = renderTableBodyRows(columns, items, {
+						emptyText: 'No matching rows.',
+					});
+					table.textContent = '';
+					table.appendChild(
+						renderSortableHeader(columns, sortState, function (key) {
+							if (sortState.key === key) {
+								sortState.dir = sortState.dir === 'asc' ? 'desc' : 'asc';
+							} else {
+								sortState.key = key;
+								sortState.dir = getDefaultSortDirection(
+									rows,
+									getTableColumnByKey(columns, key)
+								);
+							}
+							writeTableSortState(sortStateKey, sortState);
+							applySearch();
+						})
+					);
+					table.appendChild(tbody);
+				}
+
+				function applySearch() {
+					var queryLower = String(searchInput.value || '').trim().toLowerCase();
+					var filtered = rows.filter(function (rowData) {
+						return matchesSearch(rowData, queryLower);
+					});
+					if (sortState.key) {
+						var activeCol = getTableColumnByKey(columns, sortState.key);
+						filtered = sortRowsByColumn(filtered, activeCol, sortState.dir);
+					}
+					renderBody(filtered);
+				}
+
+				var searchTimer = null;
+				searchInput.addEventListener('input', function () {
+					if (searchTimer) {
+						clearTimeout(searchTimer);
+					}
+					searchTimer = setTimeout(applySearch, 200);
+				});
+
+				root.appendChild(group);
+				applySearch();
+			}
+
+			function _getTableSectionUrl(desc, pluginName, sectionId) {
+				var endpoint = desc && desc.endpoints && desc.endpoints.snapshot ? String(desc.endpoints.snapshot) : '';
+				var sid = encodeURIComponent(String(sectionId || ''));
+				if (!sid) {
+					return '';
+				}
+				if (endpoint.indexOf('/api/v1/cache') === 0) {
+					return '/api/v1/cache/table/' + sid;
+				}
+				if (endpoint.indexOf('/api/v1/stats') === 0) {
+					return '/api/v1/stats/table/' + sid;
+				}
+				if (!pluginName) {
+					return '';
+				}
+				return '/api/v1/plugins/' + encodeURIComponent(String(pluginName)) + '/table/' + sid;
+			}
+
+			function _buildQuery(params) {
+				var parts = [];
+				Object.keys(params || {}).forEach(function (k) {
+					var v = params[k];
+					if (v === undefined || v === null || v === '') {
+						return;
+					}
+					parts.push(encodeURIComponent(k) + '=' + encodeURIComponent(String(v)));
+				});
+				return parts.length ? '?' + parts.join('&') : '';
+			}
+
+			function renderTableSectionPaged(root, section, desc, pluginName, extraQuery) {
+				if (!root) {
+					return;
+				}
+				root.textContent = '';
+				if (!section || typeof section !== 'object') {
+					return;
+				}
+				var sectionId = section.id || '';
+				var tableUrl = _getTableSectionUrl(desc, pluginName, sectionId);
+				var columns = Array.isArray(section.columns) ? section.columns : [];
+				if (section && section.style === 'docker_group_by_txt') {
+					columns = normalizeDockerColumns(columns);
+				}
+				var title = section.title ? section.title : 'Items';
+				if (!columns.length || !tableUrl) {
+					return;
+				}
+
+				var state = {
+					page: 1,
+					pageSize: 50,
+					sortKey: '',
+					// Keep empty until we have a sort key so we do not override
+					// server-side defaults (for stats tables this is count/desc).
+					sortDir: '',
+					search: '',
+					lastItems: [],
+					filters: {
+						hide_zero_calls: true,
+						hide_zero_hits: true,
+						show_down_services: false,
+						hide_hash_like: true,
+					},
+				};
+				var sortStateKey = getTableSortStateKey('paged', section, pluginName, extraQuery);
+				var storedSortState = readTableSortState(sortStateKey, columns);
+				if (storedSortState && storedSortState.key) {
+					state.sortKey = storedSortState.key;
+					state.sortDir = storedSortState.dir === 'desc' ? 'desc' : 'asc';
+				}
+				var requestToken = 0;
+
+				var group = document.createElement('section');
+				group.className = 'fh-stats-group';
+				if (section && section.className) {
+					group.classList.add(String(section.className));
+				}
+				var heading = document.createElement('h3');
+				heading.className = 'fh-stats-group-title';
+				heading.textContent = title;
+				group.appendChild(heading);
+
+				var controlsDiv = document.createElement('div');
+				controlsDiv.className = 'fh-table-controls';
+				group.appendChild(controlsDiv);
+
+				var searchWrap = document.createElement('div');
+				searchWrap.className = 'fh-table-controls-row';
+				var searchInput = document.createElement('input');
+				searchInput.type = 'search';
+				searchInput.className = 'fh-table-search';
+				searchInput.placeholder = 'Search...';
+				searchWrap.appendChild(searchInput);
+				controlsDiv.appendChild(searchWrap);
+
+				// Optional per-section filters.
+				var filterIds = Array.isArray(section.filters) ? section.filters.map(function (f) { return f && f.id; }) : [];
+				var enabledFilters = Object.create(null);
+				filterIds.forEach(function (fid) {
+					if (fid) {
+						enabledFilters[String(fid)] = true;
+					}
+				});
+				if (filterIds.length) {
+					var filterRow = document.createElement('div');
+					filterRow.className = 'fh-table-controls-row';
+					section.filters.forEach(function (f) {
+						if (!f || !f.id) {
+							return;
+						}
+						var fid = String(f.id);
+						if (!Object.prototype.hasOwnProperty.call(state.filters, fid)) {
+							// Unknown filter id; skip.
+							return;
+						}
+						var label = document.createElement('label');
+						label.className = 'fh-table-filter';
+						var cb = document.createElement('input');
+						cb.type = 'checkbox';
+						cb.checked = !!state.filters[fid];
+						cb.setAttribute('data-filter-id', fid);
+						label.appendChild(cb);
+						label.appendChild(document.createTextNode(' ' + String(f.label || fid)));
+						cb.addEventListener('change', function () {
+							state.filters[fid] = cb.checked;
+							state.page = 1;
+							loadPage();
+						});
+						filterRow.appendChild(label);
+					});
+					controlsDiv.appendChild(filterRow);
+				}
+
+				var pagerRow = document.createElement('div');
+				pagerRow.className = 'fh-table-controls-row fh-table-pager';
+				var btnPrev = document.createElement('button');
+				btnPrev.type = 'button';
+				btnPrev.className = 'fh-btn fh-btn-secondary fh-table-page-btn';
+				btnPrev.textContent = 'Prev';
+				var btnNext = document.createElement('button');
+				btnNext.type = 'button';
+				btnNext.className = 'fh-btn fh-btn-secondary fh-table-page-btn';
+				btnNext.textContent = 'Next';
+				var pageInfo = document.createElement('span');
+				pageInfo.className = 'fh-table-page-info';
+				pageInfo.textContent = '';
+				var sizeSelect = document.createElement('select');
+				sizeSelect.className = 'fh-table-page-size';
+				[25, 50, 100, 200].forEach(function (n) {
+					var opt = document.createElement('option');
+					opt.value = String(n);
+					opt.textContent = String(n) + ' / page';
+					if (n === state.pageSize) {
+						opt.selected = true;
+					}
+					sizeSelect.appendChild(opt);
+				});
+				sizeSelect.addEventListener('change', function () {
+					var n = parseInt(sizeSelect.value, 10);
+					if (!isNaN(n) && n > 0) {
+						state.pageSize = n;
+						state.page = 1;
+						loadPage();
+					}
+				});
+
+				btnPrev.addEventListener('click', function () {
+					if (state.page > 1) {
+						state.page -= 1;
+						loadPage();
+					}
+				});
+				btnNext.addEventListener('click', function () {
+					state.page += 1;
+					loadPage();
+				});
+
+				pagerRow.appendChild(btnPrev);
+				pagerRow.appendChild(btnNext);
+				pagerRow.appendChild(pageInfo);
+				pagerRow.appendChild(sizeSelect);
+				controlsDiv.appendChild(pagerRow);
+
+				var table = document.createElement('table');
+				table.className = 'fh-table fh-table-upstreams';
+				group.appendChild(table);
+
+				function renderHeader() {
+					var thead = document.createElement('thead');
+					var hrow = document.createElement('tr');
+					columns.forEach(function (col) {
+						var th = document.createElement('th');
+						var label = col.label || String(col.key || '');
+						var key = String(col.key || '');
+						var suffix = '';
+						if (key && state.sortKey && key === state.sortKey) {
+							suffix = state.sortDir === 'desc' ? ' ▼' : ' ▲';
+						}
+						th.textContent = label + suffix;
+						if (String(label).indexOf('\n') !== -1) {
+							th.style.whiteSpace = 'pre-line';
+						}
+						th.style.cursor = key ? 'pointer' : '';
+						if (col.align === 'right') {
+							th.style.textAlign = 'right';
+						}
+						th.addEventListener('click', function () {
+							if (!key) {
+								return;
+							}
+							if (state.sortKey === key) {
+								state.sortDir = state.sortDir === 'asc' ? 'desc' : 'asc';
+							} else {
+								state.sortKey = key;
+								state.sortDir = getDefaultSortDirection(
+									state.lastItems,
+									getTableColumnByKey(columns, key)
+								);
+							}
+							writeTableSortState(sortStateKey, {
+								key: state.sortKey,
+								dir: state.sortDir,
+							});
+							state.page = 1;
+							loadPage();
+						});
+						hrow.appendChild(th);
+					});
+					thead.appendChild(hrow);
+					return thead;
+				}
+
+				function renderBody(items) {
+					var tbody = document.createElement('tbody');
+					items = Array.isArray(items) ? items : [];
+					if (section && section.style === 'docker_group_by_txt') {
+						// Best-effort: keep the grouping UI, but only within the current page.
+						items = buildDockerGroupsByTxt(items, section);
+					}
+					items.forEach(function (rowData) {
+						if (!rowData || typeof rowData !== 'object') {
+							return;
+						}
+						var tr = document.createElement('tr');
+						columns.forEach(function (col) {
+							var key = col.key;
+							var joiner = col.join || null;
+							var raw = key ? resolvePath(rowData, key) : null;
+							var td = document.createElement('td');
+							if (col.align === 'right') {
+								td.style.textAlign = 'right';
+							}
+							if (col.nowrap) {
+								td.style.whiteSpace = 'nowrap';
+							}
+							if (section && section.style === 'docker_group_by_txt' && col && col.key === 'name') {
+								td.classList.add('fh-cell-multiline');
+							}
+							var text = '';
+							if (key === 'last_seen') {
+								var iso = rowData && rowData._lastSeenRaw != null ? String(rowData._lastSeenRaw) : (raw != null ? String(raw) : '');
+								var fmt = formatTimestamp(iso || raw);
+								text = fmt != null ? String(fmt) : '';
+								if (iso) {
+									td.title = iso;
+								}
+							} else if (raw == null) {
+								text = '';
+							} else if (Array.isArray(raw) && joiner) {
+								text = raw.join(String(joiner));
+							} else if (typeof raw === 'boolean') {
+								text = raw ? 'yes' : '';
+							} else if (typeof raw === 'number') {
+								text = formatNumber(raw);
+							} else {
+								text = String(raw);
+							}
+							if (col.html) {
+								td.innerHTML = text;
+							} else {
+								td.textContent = text;
+							}
+							if (col.key === 'txt' && rowData && rowData._txtTooltip) {
+								td.title = String(rowData._txtTooltip);
+							}
+							tr.appendChild(td);
+						});
+						tbody.appendChild(tr);
+					});
+					return tbody;
+				}
+
+				function updatePager(meta) {
+					var total = meta && meta.total != null ? meta.total : 0;
+					var page = meta && meta.page != null ? meta.page : state.page;
+					var totalPages = meta && meta.total_pages != null ? meta.total_pages : 0;
+					pageInfo.textContent = ' Page ' + page + (totalPages ? ' / ' + totalPages : '') + ' (' + total + ' rows)';
+					btnPrev.disabled = page <= 1;
+					btnNext.disabled = totalPages ? page >= totalPages : (total === 0);
+				}
+
+				var searchTimer = null;
+				searchInput.addEventListener('input', function () {
+					if (searchTimer) {
+						clearTimeout(searchTimer);
+					}
+					searchTimer = setTimeout(function () {
+						state.search = String(searchInput.value || '').trim();
+						state.page = 1;
+						loadPage();
+					}, 200);
+				});
+
+				function loadPage() {
+					requestToken += 1;
+					var token = requestToken;
+					var query = {
+						page: state.page,
+						page_size: state.pageSize,
+						sort_key: state.sortKey,
+						sort_dir: state.sortDir,
+						search: state.search,
+					};
+					if (extraQuery && typeof extraQuery === 'object') {
+						Object.keys(extraQuery).forEach(function (k) {
+							query[k] = extraQuery[k];
+						});
+					}
+					Object.keys(state.filters || {}).forEach(function (k) {
+						if (!enabledFilters || !enabledFilters[k]) {
+							return;
+						}
+						query[k] = state.filters[k] ? 1 : 0;
+					});
+					var url = tableUrl + _buildQuery(query);
+					pageInfo.textContent = ' Loading...';
+					return fetchJson(url)
+						.then(function (payload) {
+							if (token !== requestToken) {
+								return;
+							}
+							// Update state from server (defaults may have been applied).
+							state.page = payload && payload.page ? payload.page : state.page;
+							state.pageSize = payload && payload.page_size ? payload.page_size : state.pageSize;
+							state.sortKey = payload && payload.sort_key ? payload.sort_key : state.sortKey;
+							state.sortDir = payload && payload.sort_dir ? payload.sort_dir : state.sortDir;
+							state.lastItems = payload && Array.isArray(payload.items) ? payload.items : [];
+							if (state.sortKey) {
+								writeTableSortState(sortStateKey, {
+									key: state.sortKey,
+									dir: state.sortDir,
+								});
+							}
+
+							table.textContent = '';
+							table.appendChild(renderHeader());
+							table.appendChild(renderBody(state.lastItems));
+							updatePager(payload);
+						})
+						.catch(function (err) {
+							if (token !== requestToken) {
+								return;
+							}
+							table.textContent = '';
+							var pre = document.createElement('pre');
+							pre.className = 'fh-pre fh-pre-compact';
+							pre.textContent = 'Failed to load table: ' + err.message;
+							group.appendChild(pre);
+							pageInfo.textContent = ' Error';
+						});
+				}
+
+				root.appendChild(group);
+				loadPage();
+			}
 			function initSnapshotPageV1(pageEl, desc) {
 				if (!pageEl) {
 					return;
@@ -2216,6 +4490,350 @@
 					clearPluginRefreshTimer(name);
 				});
 			}
+			function isRateLimitSnapshotDescriptor(desc) {
+				var endpoint = desc && desc.endpoints && desc.endpoints.snapshot
+					? String(desc.endpoints.snapshot)
+					: '';
+				if (!endpoint) {
+					return false;
+				}
+				return endpoint.indexOf('/rate_limit') !== -1;
+			}
+			function formatRateLimitRps(value) {
+				var n = Number(value);
+				if (!isFinite(n) || n < 0.01) {
+					return '-';
+				}
+				return n.toFixed(1);
+			}
+
+			function buildRateLimitProfileRows(payload) {
+				var rows = [];
+				var databases = payload && Array.isArray(payload.databases) ? payload.databases : [];
+				function firstFiniteNumber(values) {
+					if (!Array.isArray(values)) {
+						return NaN;
+					}
+					for (var i = 0; i < values.length; i += 1) {
+						var n = Number(values[i]);
+						if (isFinite(n)) {
+							return n;
+						}
+					}
+					return NaN;
+				}
+
+				databases.forEach(function (db) {
+					if (!db || typeof db !== 'object') {
+						return;
+					}
+					var dbPath = db.db_path != null ? String(db.db_path) : '';
+					var dbLookback = Number(db.lookback_seconds);
+					var lookbackValue = isFinite(dbLookback) && dbLookback > 0 ? dbLookback : '';
+					var profiles = Array.isArray(db.profiles) ? db.profiles : [];
+					profiles.forEach(function (item) {
+						if (!item || typeof item !== 'object') {
+							return;
+						}
+						var rpsLimit = firstFiniteNumber([
+							item.rps_limit,
+							item.current_limit_rps,
+							item.current_limit,
+						]);
+						var avgOverall = firstFiniteNumber([
+							item.avg_rps_overall,
+							item.avg_rps_total,
+							item.avg_rps,
+						]);
+						var maxOverall = firstFiniteNumber([
+							item.max_rps_overall,
+							item.max_rps_total,
+							item.max_rps,
+						]);
+						var avgInterval = firstFiniteNumber([
+							item.avg_rps_interval,
+							item.window_avg_rps,
+						]);
+						var maxInterval = firstFiniteNumber([
+							item.max_rps_interval,
+							item.window_max_rps,
+						]);
+						var currentRps = firstFiniteNumber([
+							item.current_rps,
+						]);
+						var burstThresholdRps = firstFiniteNumber([
+							item.burst_threshold_rps,
+						]);
+						var enforcementActive = item.enforcement_active === true;
+						var avgRps1m = firstFiniteNumber([item.avg_rps_1m]);
+						var avgRps5m = firstFiniteNumber([item.avg_rps_5m]);
+						var avgRps10m = firstFiniteNumber([item.avg_rps_10m]);
+						var samples = Number(item.samples);
+						var lastRaw = item.last_update;
+						var lastUpdateTs = null;
+						if (lastRaw != null) {
+							var parsedLastUpdateTs = Number(lastRaw);
+							if (isFinite(parsedLastUpdateTs)) {
+								lastUpdateTs = parsedLastUpdateTs;
+							}
+						}
+						var lastText = '';
+						if (lastRaw != null) {
+							lastText = formatTimestamp(lastRaw) || String(lastRaw);
+						}
+						var rpsLimitText = '';
+						var rpsLimitRaw = 0;
+						if (isFinite(rpsLimit)) {
+							rpsLimitText = formatRateLimitRps(rpsLimit);
+							rpsLimitRaw = rpsLimit;
+						} else {
+							rpsLimitText = '-';
+						}
+						rows.push({
+							key: item.key != null ? String(item.key) : '',
+							rps_limit: rpsLimitText,
+							rps_limit_raw: rpsLimitRaw,
+							avg_rps_overall: formatRateLimitRps(avgOverall),
+							avg_rps_overall_raw: isFinite(avgOverall) ? avgOverall : 0,
+							max_rps_overall: formatRateLimitRps(maxOverall),
+							max_rps_overall_raw: isFinite(maxOverall) ? maxOverall : 0,
+							avg_rps_interval: formatRateLimitRps(avgInterval),
+							avg_rps_interval_raw: isFinite(avgInterval) ? avgInterval : 0,
+							max_rps_interval: formatRateLimitRps(maxInterval),
+							max_rps_interval_raw: isFinite(maxInterval) ? maxInterval : 0,
+							current_rps: formatRateLimitRps(currentRps),
+							current_rps_raw: isFinite(currentRps) ? currentRps : 0,
+							burst_threshold_rps: formatRateLimitRps(burstThresholdRps),
+							burst_threshold_rps_raw: isFinite(burstThresholdRps) ? burstThresholdRps : 0,
+							enforcement_active: enforcementActive ? 'yes' : '',
+							enforcement_active_raw: enforcementActive ? 1 : 0,
+							avg_rps_1m: formatRateLimitRps(avgRps1m),
+							avg_rps_1m_raw: isFinite(avgRps1m) ? avgRps1m : 0,
+							avg_rps_5m: formatRateLimitRps(avgRps5m),
+							avg_rps_5m_raw: isFinite(avgRps5m) ? avgRps5m : 0,
+							avg_rps_10m: formatRateLimitRps(avgRps10m),
+							avg_rps_10m_raw: isFinite(avgRps10m) ? avgRps10m : 0,
+							lookback_seconds: lookbackValue,
+							lookback_seconds_raw: isFinite(dbLookback) ? dbLookback : 0,
+							samples: isFinite(samples) ? samples : 0,
+							last_update: lastText,
+							last_update_ts: lastUpdateTs,
+						});
+					});
+				});
+
+				rows.sort(function (a, b) {
+					if (b.avg_rps_overall_raw === a.avg_rps_overall_raw) {
+						if (a.key < b.key) return -1;
+						if (a.key > b.key) return 1;
+						return 0;
+					}
+					return b.avg_rps_overall_raw - a.avg_rps_overall_raw;
+				});
+
+				return rows;
+			}
+
+			function renderRateLimitPluginSections(body, desc, pluginName, snapshotData) {
+				if (!body) {
+					return;
+				}
+				var snapshot = snapshotData && typeof snapshotData === 'object' ? snapshotData : {};
+				var settingsObj = snapshot && typeof snapshot.settings === 'object'
+					? snapshot.settings
+					: {};
+
+				var layout = desc && desc.layout ? desc.layout : {};
+				var sections = Array.isArray(layout.sections) ? layout.sections : [];
+				var configSection = null;
+				sections.forEach(function (section) {
+					if (!section || typeof section !== 'object') {
+						return;
+					}
+					if (section.type === 'table' && String(section.id || '') === 'config') {
+						configSection = Object.assign({}, section);
+					}
+				});
+				if (!configSection) {
+					configSection = {
+						id: 'config',
+						title: 'Configuration variables',
+						type: 'table',
+						columns: [
+							{ key: 'key', label: 'Key' },
+							{ key: 'value', label: 'Value' },
+						],
+					};
+				}
+				if (!configSection.title) {
+					configSection.title = 'Configuration variables';
+				}
+				configSection.className = 'fh-rate-limit-config';
+				var runtimeRoot = document.createElement('div');
+				body.appendChild(runtimeRoot);
+				renderKvSection(runtimeRoot, {
+					current_rps: formatRateLimitRps(settingsObj.current_rps),
+				rps_1m: formatRateLimitRps(settingsObj.rps_1m),
+				rps_5m: formatRateLimitRps(settingsObj.rps_5m),
+				rps_10m: formatRateLimitRps(settingsObj.rps_10m),
+				}, {
+					id: 'summary',
+					title: 'Runtime',
+					className: 'fh-rate-limit-runtime',
+					align: 'right',
+					rows: [
+						{ key: 'current_rps', label: 'Current RPS' },
+					{ key: 'rps_1m', label: 'Global RPS (1m)' },
+					{ key: 'rps_5m', label: 'Global RPS (5m)' },
+					{ key: 'rps_10m', label: 'Global RPS (10m)' },
+					],
+				});
+
+				var profilesRoot = document.createElement('div');
+				body.appendChild(profilesRoot);
+				var profilesSection = {
+					id: 'profiles',
+					title: 'Profiles',
+					className: 'fh-rate-limit-profiles',
+					columns: [
+						{
+							key: 'key',
+							label: 'Key',
+							query_log_filter_key: 'client_ip',
+							query_log_filter_mode: 'ip_no_cidr',
+						},
+						{
+							key: 'rps_limit',
+							sort_key: 'rps_limit_raw',
+							label: 'RPS Limit',
+							align: 'right',
+							default_sort_dir: 'desc',
+							nowrap: true,
+						},
+						{
+							key: 'current_rps',
+							sort_key: 'current_rps_raw',
+							label: 'Current RPS',
+							align: 'right',
+							default_sort_dir: 'desc',
+							nowrap: true,
+						},
+						{
+							key: 'avg_rps_1m',
+							sort_key: 'avg_rps_1m_raw',
+							label: '1m Avg',
+							align: 'right',
+							default_sort_dir: 'desc',
+							nowrap: true,
+						},
+						{
+							key: 'avg_rps_5m',
+							sort_key: 'avg_rps_5m_raw',
+							label: '5m Avg',
+							align: 'right',
+							default_sort_dir: 'desc',
+							nowrap: true,
+						},
+						{
+							key: 'avg_rps_10m',
+							sort_key: 'avg_rps_10m_raw',
+							label: '10m Avg',
+							align: 'right',
+							default_sort_dir: 'desc',
+							nowrap: true,
+						},
+						{
+							key: 'avg_rps_overall',
+							sort_key: 'avg_rps_overall_raw',
+							label: 'Avg RPS\n(overall)',
+							align: 'right',
+							default_sort_dir: 'desc',
+							nowrap: true,
+						},
+						{
+							key: 'max_rps_overall',
+							sort_key: 'max_rps_overall_raw',
+							label: 'Max RPS\n(overall)',
+							align: 'right',
+							default_sort_dir: 'desc',
+							nowrap: true,
+						},
+						{
+							key: 'avg_rps_interval',
+							sort_key: 'avg_rps_interval_raw',
+							label: 'Avg RPS\n(interval)',
+							align: 'right',
+							default_sort_dir: 'desc',
+							nowrap: true,
+						},
+						{
+							key: 'max_rps_interval',
+							sort_key: 'max_rps_interval_raw',
+							label: 'Max RPS\n(interval)',
+							align: 'right',
+							default_sort_dir: 'desc',
+							nowrap: true,
+						},
+						{
+							key: 'samples',
+							label: 'Samples',
+							align: 'right',
+							default_sort_dir: 'desc',
+							nowrap: true,
+						},
+						{ key: 'last_update', sort_key: 'last_update_ts', label: 'Last update', nowrap: true },
+					],
+				};
+				function renderRateLimitProfiles(payload) {
+					var rows = buildRateLimitProfileRows(payload);
+					renderTableSectionSearchable(profilesRoot, rows, profilesSection);
+				}
+				var snapshotProfiles = Array.isArray(snapshot.profiles) ? snapshot.profiles : [];
+				if (snapshotProfiles.length > 0) {
+					var snapshotDbPath = settingsObj && settingsObj.db_path != null
+						? String(settingsObj.db_path)
+						: '';
+					var snapshotWindow = Number(settingsObj && settingsObj.stats_window_seconds);
+					var snapshotInterval = Number(settingsObj && settingsObj.stats_log_interval_seconds);
+					var snapshotLookback = isFinite(snapshotWindow) && snapshotWindow > 0
+						? snapshotWindow
+						: (isFinite(snapshotInterval) && snapshotInterval > 0 ? snapshotInterval : 0);
+					renderRateLimitProfiles({
+						databases: [{
+							db_path: snapshotDbPath,
+							lookback_seconds: snapshotLookback,
+							profiles: snapshotProfiles,
+						}],
+					});
+				} else {
+					fetchJson('/api/v1/ratelimit')
+						.then(function (payload) {
+							renderRateLimitProfiles(payload);
+						})
+						.catch(function (err) {
+							profilesRoot.textContent = '';
+							var group = document.createElement('section');
+							group.className = 'fh-stats-group fh-rate-limit-profiles';
+							var heading = document.createElement('h3');
+							heading.className = 'fh-stats-group-title';
+							heading.textContent = 'Profiles';
+							var pre = document.createElement('pre');
+							pre.className = 'fh-pre fh-pre-compact';
+							pre.textContent = 'Failed to load profiles: ' + err.message;
+							group.appendChild(heading);
+							group.appendChild(pre);
+							profilesRoot.appendChild(group);
+						});
+				}
+
+				var configRoot = document.createElement('div');
+				body.appendChild(configRoot);
+				var configRows = resolvePath(snapshot, configSection.path || 'config_items');
+				if (!Array.isArray(configRows)) {
+					configRows = [];
+				}
+				renderTableSection(configRoot, configRows, configSection);
+			}
 
 			function loadSnapshotPageV1(pageEl, desc) {
 				if (!pageEl) {
@@ -2226,13 +4844,26 @@
 				if (!endpoint || !body) {
 					return;
 				}
-				body.textContent = '';
-				fetchJson(endpoint)
+				// Request table-free snapshots (when supported) so large tables are
+				// fetched via dedicated paginated endpoints.
+				var snapshotUrl = endpoint;
+				if (snapshotUrl.indexOf('?') === -1) {
+					snapshotUrl += '?exclude_tables=1';
+				} else {
+					snapshotUrl += '&exclude_tables=1';
+				}
+				fetchJson(snapshotUrl)
 					.then(function (payload) {
+						var nextBody = document.createElement('div');
+						nextBody.className = body.className;
+						nextBody.setAttribute('data-role', 'plugin-snapshot-body');
 						var data = payload && payload.data ? payload.data : {};
 						var layout = desc && desc.layout ? desc.layout : {};
 						var sections = Array.isArray(layout.sections) ? layout.sections : [];
 						var pluginName = desc && desc.name ? String(desc.name) : null;
+						if (isRateLimitSnapshotDescriptor(desc)) {
+							renderRateLimitPluginSections(nextBody, desc, pluginName, data);
+						} else {
 						if (!sections.length) {
 							// Fallback: pretty-print the raw payload.
 							var group = document.createElement('section');
@@ -2241,15 +4872,14 @@
 							pre.className = 'fh-pre';
 							pre.textContent = pretty(data);
 							group.appendChild(pre);
-							body.appendChild(group);
-							return;
-						}
-						sections.forEach(function (section) {
+							nextBody.appendChild(group);
+						} else {
+							sections.forEach(function (section) {
 							// Plumb plugin-level metadata (like domain suffix) into the
 							// section descriptor so renderers can use it without needing
 							// to know about the full payload shape.
-							if (section && layout && layout.summary && layout.summary.suffix && !section._domainSuffix) {
-								section._domainSuffix = layout.summary.suffix;
+							if (section && data && data.summary && data.summary.suffix && !section._domainSuffix) {
+								section._domainSuffix = data.summary.suffix;
 							}
 							if (!section || typeof section !== 'object') {
 								return;
@@ -2257,18 +4887,53 @@
 							var type = section.type || 'kv';
 							var path = section.path || '';
 							var sectionRoot = document.createElement('div');
-							body.appendChild(sectionRoot);
+							nextBody.appendChild(sectionRoot);
 							var value = path ? resolvePath(data, path) : data;
 							if (type === 'table') {
-								renderTableSection(sectionRoot, value, section);
-						} else {
-							// Default to key/value rendering using section.rows
-							// against the resolved value mapping.
-							if (value && typeof value === 'object') {
-								renderKvSection(sectionRoot, value, section);
+								renderTableSectionPaged(sectionRoot, section, desc, pluginName);
+							} else {
+								// Default to key/value rendering using section.rows
+								// against the resolved value mapping.
+								if (value && typeof value === 'object') {
+									renderKvSection(sectionRoot, value, section);
+								}
 							}
+							});
 						}
-						});
+					}
+						if (body.parentNode) {
+							var scrollX = window.pageXOffset != null ? window.pageXOffset : window.scrollX;
+							var scrollY = window.pageYOffset != null ? window.pageYOffset : window.scrollY;
+							var previousMinHeight = body.style.minHeight || '';
+							var previousBodyHeight = body.offsetHeight;
+							if (previousBodyHeight > 0) {
+								body.style.minHeight = String(previousBodyHeight) + 'px';
+							}
+							if (typeof body.replaceChildren === 'function') {
+								body.replaceChildren.apply(body, Array.prototype.slice.call(nextBody.childNodes));
+							} else {
+								while (body.firstChild) {
+									body.removeChild(body.firstChild);
+								}
+								while (nextBody.firstChild) {
+									body.appendChild(nextBody.firstChild);
+								}
+							}
+							if (typeof window.scrollTo === 'function') {
+								var restoreScroll = function () {
+									window.scrollTo(scrollX, scrollY);
+								};
+								if (typeof window.requestAnimationFrame === 'function') {
+									window.requestAnimationFrame(restoreScroll);
+								} else {
+									restoreScroll();
+								}
+								window.setTimeout(restoreScroll, 250);
+							}
+							window.setTimeout(function () {
+								body.style.minHeight = previousMinHeight;
+							}, 900);
+						}
 
 						// After a successful render, configure optional auto-refresh
 						// when the plugin (or descriptor) advertises a refresh interval.
@@ -2410,7 +5075,7 @@
 					return;
 				}
 
-				if (!window.confirm('Are you sure you want to overwrite config.yaml and request a restart via SIGHUP?')) {
+				if (!window.confirm('Are you sure you want to overwrite config.yaml on disk?')) {
 					return;
 				}
 
@@ -2430,10 +5095,89 @@
 						});
 					})
 					.then(function (data) {
-						setMessage('Configuration saved; restart requested via SIGHUP. Path: ' + (data.path || ''), 'success');
+						var analysis = (data && data.analysis) || {};
+						var msg = 'Configuration saved. Path: ' + (data.path || '') + '.';
+						if (analysis && analysis.restart_required) {
+							msg += ' Restart is required to apply some changes.';
+						} else if (analysis && analysis.reload_required) {
+							msg += ' A zero-downtime reload is recommended to apply changes.';
+						} else if (analysis && analysis.changed === false) {
+							msg += ' No changes detected.';
+						}
+						setMessage(msg, 'success');
 						exitEditMode(true);
 						loadDiskConfig();
 						loadStats();
+
+						function doPost(url, payload) {
+							return fetch(url, {
+								method: 'POST',
+								headers: { 'Content-Type': 'application/json' },
+								body: payload ? JSON.stringify(payload) : JSON.stringify({}),
+							}).then(function (resp) {
+								return resp.text().then(function (text) {
+									var obj = {};
+									try {
+										obj = text ? JSON.parse(text) : {};
+									} catch (e) {
+										obj = { raw: text };
+									}
+									if (!resp.ok) {
+										var detail = (obj && (obj.detail || obj.message)) || text || ('HTTP ' + resp.status);
+										throw new Error(detail);
+									}
+									return obj;
+								});
+							});
+						}
+
+						// Prompt to continue based on analysis.
+						if (analysis && analysis.restart_required) {
+							var choice = window.prompt(
+								'Restart is required to apply some changes. Choose an action:\n' +
+								'1) Restart now\n' +
+								'2) Reload reloadable settings now (zero downtime; restart later)\n' +
+								'3) Do nothing',
+								'1'
+							);
+							if (choice === null) {
+								return;
+							}
+							choice = String(choice || '').trim();
+
+							if (choice === '2') {
+								setMessage('Reloading reloadable settings...', 'info');
+								doPost('/api/v1/reload_reloadable', {})
+									.then(function () {
+										setMessage('Reloaded reloadable settings. Restart is still required for some changes.', 'success');
+										loadStats();
+									})
+									.catch(function (err) {
+										setMessage('Reload-reloadable failed: ' + err.message, 'error');
+									});
+							} else if (choice === '1') {
+								setMessage('Restarting...', 'info');
+								doPost('/api/v1/restart', { delay_seconds: 1.0 })
+									.then(function () {
+										setMessage('Restart scheduled via SIGHUP.', 'success');
+									})
+									.catch(function (err) {
+										setMessage('Failed to schedule restart: ' + err.message, 'error');
+									});
+							}
+						} else if (analysis && analysis.reload_required) {
+							if (window.confirm('Apply a zero-downtime reload now?')) {
+								setMessage('Reloading...', 'info');
+								doPost('/api/v1/reload', {})
+									.then(function () {
+										setMessage('Reload completed.', 'success');
+										loadStats();
+									})
+									.catch(function (err) {
+										setMessage('Reload failed: ' + err.message, 'error');
+									});
+							}
+						}
 					})
 					.catch(function (err) {
 						setMessage('Failed to save configuration: ' + err.message, 'error');
@@ -2467,6 +5211,13 @@
 					btnThemeDark.classList.remove('fh-theme-btn-active');
 					btnThemeDark.setAttribute('aria-checked', 'false');
 				}
+
+				// Reload diagram so it matches the selected UI theme.
+				try {
+					if (page1 && page1.style && page1.style.display !== 'none') {
+						loadConfigDiagram();
+					}
+				} catch (e) {}
 			}
 
 
@@ -2552,6 +5303,7 @@
 			}
 
 			function applyTab(tab) {
+				activeTab = tab || 'stats';
 				// Persist the last-selected tab in localStorage so reloads return to
 				// the same view when possible.
 				try {
@@ -2560,6 +5312,10 @@
 					}
 				} catch (e) {}
 				var isStats = tab === 'stats';
+				if (!isStats) {
+					hideStatsDetails();
+				}
+				var isQueryLog = tab === 'query-log';
 				var isEdit = tab === 'edit';
 				var pluginName = null;
 				if (tab && tab.indexOf('plugin:') === 0) {
@@ -2577,9 +5333,18 @@
 				if (page1) {
 					// When Stats is selected, page1 shows Advanced/Config; hide when Stats or a plugin tab is selected.
 					page1.style.display = isEdit ? '' : 'none';
+					if (isEdit) {
+						if (!isEditing) {
+							refreshDiskConfigView();
+						}
+						loadConfigDiagram();
+					}
 				}
 				if (page2) {
 					page2.style.display = isStats ? '' : 'none';
+				}
+				if (pageQueryLog) {
+					pageQueryLog.style.display = isQueryLog ? '' : 'none';
 				}
 				if (pluginUiPages && typeof pluginUiPages === 'object') {
 					Object.keys(pluginUiPages).forEach(function (name) {
@@ -2612,6 +5377,15 @@
 						btnTabStats.setAttribute('aria-selected', 'false');
 					}
 				}
+				if (btnTabQueryLog) {
+					if (isQueryLog) {
+						btnTabQueryLog.classList.add('fh-theme-btn-active');
+						btnTabQueryLog.setAttribute('aria-selected', 'true');
+					} else {
+						btnTabQueryLog.classList.remove('fh-theme-btn-active');
+						btnTabQueryLog.setAttribute('aria-selected', 'false');
+					}
+				}
 				if (btnTabEdit) {
 					if (isEdit) {
 						btnTabEdit.classList.add('fh-theme-btn-active');
@@ -2620,6 +5394,11 @@
 						btnTabEdit.classList.remove('fh-theme-btn-active');
 						btnTabEdit.setAttribute('aria-selected', 'false');
 					}
+				}
+				writeUiStateToUrl(tab || '');
+				if (isQueryLog) {
+					syncQueryLogInputsFromState();
+					loadQueryLog();
 				}
 			}
 
@@ -2641,6 +5420,13 @@
 				saveConfig();
 			});
 
+			// Upload config diagram PNG (only shown when dot fallback is visible)
+			if (btnConfigDiagramUploadEl) {
+				btnConfigDiagramUploadEl.addEventListener('click', function () {
+					uploadConfigDiagramPng();
+				});
+			}
+
 			// Theme control
 			btnThemeDark.addEventListener('click', function () {
 				applyTheme('dark');
@@ -2655,28 +5441,113 @@
 					applyTab('stats');
 				});
 			}
+			if (btnTabQueryLog) {
+				btnTabQueryLog.addEventListener('click', function () {
+					applyTab('query-log');
+				});
+			}
 			if (btnTabEdit) {
 				btnTabEdit.addEventListener('click', function () {
 					applyTab('edit');
 				});
 			}
+			if (refreshIntervalSelectEl) {
+				refreshIntervalSelectEl.addEventListener('change', function () {
+					applyRefreshIntervalSetting(refreshIntervalSelectEl.value);
+				});
+			}
+			if (btnQueryLogApply) {
+				btnQueryLogApply.addEventListener('click', function () {
+					applyQueryLogFilters();
+				});
+			}
+			if (btnQueryLogClear) {
+				btnQueryLogClear.addEventListener('click', function () {
+					clearQueryLogFilters();
+				});
+			}
+			if (btnQueryLogPrev) {
+				btnQueryLogPrev.addEventListener('click', function () {
+					if (queryLogPage > 1) {
+						queryLogPage -= 1;
+						loadQueryLog();
+					}
+				});
+			}
+			if (btnQueryLogNext) {
+				btnQueryLogNext.addEventListener('click', function () {
+					queryLogPage += 1;
+					loadQueryLog();
+				});
+			}
+			if (queryLogPageSizeEl) {
+				queryLogPageSizeEl.addEventListener('change', function () {
+					queryLogPageSize = parsePositiveInt(
+						queryLogPageSizeEl.value,
+						queryLogPageSize
+					);
+					queryLogPage = 1;
+					loadQueryLog();
+				});
+			}
+			QUERY_LOG_FILTER_KEYS.forEach(function (key) {
+				var inputMap = queryLogFilterInputMap();
+				var el = inputMap[key];
+				if (!el) {
+					return;
+				}
+				el.addEventListener('keydown', function (ev) {
+					if (ev && ev.key === 'Enter') {
+						ev.preventDefault();
+						applyQueryLogFilters();
+					}
+				});
+			});
 
 			// Initial load
 			var initialTheme = root.getAttribute('data-theme') || 'dark';
 			applyTheme(initialTheme);
+			var urlState = readUiStateFromUrl();
+			applyQueryLogStateFromUrl(urlState);
+			syncQueryLogInputsFromState();
 			var initialTab = 'stats';
+			var urlTab = '';
+			if (urlState) {
+				urlTab = normalizeQueryLogFilterValue(urlState.get(UI_QUERY_TAB_PARAM));
+			}
+			if (
+				urlTab === 'stats' ||
+				urlTab === 'edit' ||
+				urlTab === 'query-log' ||
+				(urlTab && urlTab.indexOf('plugin:') === 0)
+			) {
+				initialTab = urlTab;
+			}
 			try {
-				if (window.localStorage) {
+				if (window.localStorage && !urlTab) {
 					var storedTab = localStorage.getItem('foghorn-last-tab');
-					if (storedTab === 'stats' || storedTab === 'edit' || (storedTab && storedTab.indexOf('plugin:') === 0)) {
+					if (
+						storedTab === 'stats' ||
+						storedTab === 'edit' ||
+						storedTab === 'query-log' ||
+						(storedTab && storedTab.indexOf('plugin:') === 0)
+					) {
 						initialTab = storedTab;
 					}
+				}
+			} catch (e) {}
+			var initialRefreshSeconds = DEFAULT_REFRESH_SECONDS;
+			try {
+				if (window.localStorage) {
+					initialRefreshSeconds = normalizeRefreshIntervalSeconds(
+						localStorage.getItem(REFRESH_INTERVAL_STORAGE_KEY)
+					);
 				}
 			} catch (e) {}
 			applyTab(initialTab);
 			loadStats();
 			initPluginTabs();
-			setInterval(loadStats, 15000);
+			applyRefreshIntervalSetting(initialRefreshSeconds);
 			refreshDiskConfigView();
 			})();
 		</script>

@@ -12,14 +12,15 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, List
-import json
 
 import pytest
 
 from foghorn.config import config_schema as config_schema_mod
 
 
-def test_normalize_cache_config_treats_null_module_as_none_alias_and_strips_null_config() -> None:
+def test_normalize_cache_config_treats_null_module_as_none_alias_and_strips_null_config() -> (
+    None
+):
     """Brief: _normalize_cache_config_for_validation handles null module/config.
 
     Inputs:
@@ -75,19 +76,26 @@ def test_normalize_variables_rejects_non_mapping_legacy_variables() -> None:
         config_schema_mod._normalize_variables_for_validation(cfg)
 
 
-def test_normalize_variables_enforces_uppercase_and_pattern() -> None:
-    """Brief: _normalize_variables_for_validation enforces ALL_UPPERCASE keys.
+def test_normalize_variables_accepts_case_flexible_keys_and_enforces_pattern() -> None:
+    """Brief: _normalize_variables_for_validation accepts mixed case, rejects bad names.
 
     Inputs:
       - None.
 
     Outputs:
-      - None; asserts lowercase variable keys are rejected.
+      - None; asserts mixed/lower keys are expanded and invalid names are rejected.
     """
 
-    cfg: Dict[str, Any] = {"vars": {"lower": 1}}
+    cfg_ok: Dict[str, Any] = {
+        "vars": {"lower": 1, "MiXeD_2": "ok"},
+        "text": "prefix ${lower} ${MiXeD_2}",
+    }
+    config_schema_mod._normalize_variables_for_validation(cfg_ok)
+    assert cfg_ok["text"] == "prefix 1 ok"
+
+    cfg_bad: Dict[str, Any] = {"vars": {"bad-name": 1}}
     with pytest.raises(ValueError):
-        config_schema_mod._normalize_variables_for_validation(cfg)
+        config_schema_mod._normalize_variables_for_validation(cfg_bad)
 
 
 def test_normalize_variables_detects_cycles() -> None:
@@ -152,7 +160,61 @@ def test_normalize_variables_embeds_non_scalar_as_json_in_string() -> None:
     config_schema_mod._normalize_variables_for_validation(cfg)
 
     text = cfg["text"]
-    assert "\"a\": 1" in text
+    assert '"a": 1' in text
+
+
+def test_normalize_variables_expands_inside_templates_and_strips_templates() -> None:
+    """Brief: variables expand inside templates and templates are stripped.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts:
+        - ${VARS} are expanded inside the templates subtree.
+        - templates is removed from the config mapping after expansion.
+        - anchored/aliased structures that are referenced elsewhere still work
+          after templates is stripped.
+    """
+
+    # Simulate a YAML anchor/alias by reusing the same Python object in two
+    # places. (PyYAML aliases also preserve object identity for sequences/maps.)
+    shared_cfg: Dict[str, Any] = {
+        "db_path": "${DATABASES}/greylist.db",
+        "ttl": "$TTL",
+    }
+    templates: Dict[str, Any] = {
+        "paths": {
+            "db_dir": "${DATABASES}",
+        },
+        "shared": shared_cfg,
+    }
+
+    cfg: Dict[str, Any] = {
+        "vars": {
+            "DATABASES": "/var/lib/foghorn",
+            "TTL": 300,
+        },
+        "templates": templates,
+        "plugins": [
+            {
+                "module": "dummy",
+                "config": shared_cfg,
+            }
+        ],
+    }
+
+    config_schema_mod._normalize_variables_for_validation(cfg)
+
+    # templates must always be stripped.
+    assert "templates" not in cfg
+
+    plugin_cfg = cfg["plugins"][0]["config"]
+
+    # Expansion occurred for plugin config values (including values that were
+    # originally shared with templates via YAML aliases).
+    assert plugin_cfg["db_path"] == "/var/lib/foghorn/greylist.db"
+    assert plugin_cfg["ttl"] == 300
 
 
 def test_normalize_dnssec_config_lowercases_validation_fields() -> None:
@@ -176,14 +238,14 @@ def test_normalize_dnssec_config_lowercases_validation_fields() -> None:
     assert cfg["foghorn"]["dnssec"]["validation"] == "local"
 
 
-def test_normalize_plugin_entries_strips_disabled_and_applies_priority_and_comment() -> None:
+def test_normalize_plugin_entries_strips_disabled_only() -> None:
     """Brief: _normalize_plugin_entries_for_validation normalizes plugin meta fields.
 
     Inputs:
       - None.
 
     Outputs:
-      - None; asserts disabled entries are removed and priority/comment handled.
+      - None; asserts disabled entries are removed and comment is stripped.
     """
 
     cfg: Dict[str, Any] = {
@@ -200,14 +262,18 @@ def test_normalize_plugin_entries_strips_disabled_and_applies_priority_and_comme
 
     plugins = cfg["plugins"]
     assert len(plugins) == 3
-    assert "a" not in {getattr(p, "get", lambda *_: None)("module") for p in plugins if isinstance(p, dict)}
-    # Entry "c" should have its priority expanded and comment stripped.
+    assert "a" not in {
+        getattr(p, "get", lambda *_: None)("module")
+        for p in plugins
+        if isinstance(p, dict)
+    }
+    # Entry "c" keeps explicit priority untouched; only comment is stripped.
     entry_c = next(p for p in plugins if isinstance(p, dict) and p.get("module") == "c")
-    assert "priority" not in entry_c
-    assert "comment" not in entry_c
-    assert entry_c["pre_priority"] == 5
-    assert entry_c["post_priority"] == 5
-    assert entry_c["setup_priority"] == 5
+    assert entry_c["priority"] == 5
+    assert "comment" in entry_c
+    assert "pre_priority" not in entry_c
+    assert "post_priority" not in entry_c
+    assert "setup_priority" not in entry_c
 
 
 def test_normalize_plugin_entries_rejects_capitalized_comment_keys() -> None:
@@ -227,6 +293,57 @@ def test_normalize_plugin_entries_rejects_capitalized_comment_keys() -> None:
     cfg_config: Dict[str, Any] = {"plugins": [{"config": {"Comment": "bad"}}]}
     with pytest.raises(ValueError):
         config_schema_mod._normalize_plugin_entries_for_validation(cfg_config)
+
+
+def test_normalize_plugin_entries_rejects_unsupported_hooks_keys() -> None:
+    """Brief: _normalize_plugin_entries_for_validation rejects unknown hooks keys.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts ValueError for unsupported plugins[].hooks keys.
+    """
+
+    cfg: Dict[str, Any] = {
+        "plugins": [
+            {
+                "type": "filter",
+                "hooks": {"pre-resolve": 25},
+            }
+        ]
+    }
+
+    with pytest.raises(
+        ValueError, match=r"plugins\[0\]\.hooks contains unsupported key"
+    ):
+        config_schema_mod._normalize_plugin_entries_for_validation(cfg)
+
+
+def test_normalize_plugin_entries_rejects_unsupported_nested_hook_keys() -> None:
+    """Brief: _normalize_plugin_entries_for_validation rejects unknown nested hook keys.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts ValueError for unsupported hooks.pre_resolve.* keys.
+    """
+
+    cfg: Dict[str, Any] = {
+        "plugins": [
+            {
+                "type": "filter",
+                "hooks": {"pre_resolve": {"prio": 25}},
+            }
+        ]
+    }
+
+    with pytest.raises(
+        ValueError,
+        match=r"plugins\[0\]\.hooks\.pre_resolve contains unsupported key",
+    ):
+        config_schema_mod._normalize_plugin_entries_for_validation(cfg)
 
 
 def test_get_default_schema_path_uses_assets_in_source_tree() -> None:
@@ -282,7 +399,9 @@ def test_format_errors_includes_paths_and_schema_paths() -> None:
     """
 
     errors: List[Any] = [
-        SimpleNamespace(path=["foo"], schema_path=["properties", "foo"], message="is bad"),
+        SimpleNamespace(
+            path=["foo"], schema_path=["properties", "foo"], message="is bad"
+        ),
         SimpleNamespace(path=[], schema_path=["root"], message="root error"),
     ]
 
@@ -327,30 +446,38 @@ def test_validate_config_rejects_invalid_unknown_keys_policy() -> None:
         config_schema_mod.validate_config({}, unknown_keys="bogus")
 
 
-def test_validate_config_skips_when_schema_file_missing(tmp_path: Path) -> None:
-    """Brief: validate_config returns without error when schema file is missing.
+def test_validate_config_raises_when_schema_file_missing(tmp_path: Path) -> None:
+    """Brief: validate_config raises when schema file is missing.
 
     Inputs:
       - tmp_path: pytest temporary path fixture.
 
     Outputs:
-      - None; asserts no exception when schema_path does not exist.
+      - None; asserts ValueError is raised when schema_path does not exist.
+
+    Notes:
+      - Foghorn treats missing schema as a deployment error unless
+        skip_schema_validation is explicitly set.
     """
 
     missing = tmp_path / "does-not-exist.json"
     cfg: Dict[str, Any] = {"listen": {"host": "127.0.0.1", "port": 5353}}
-    config_schema_mod.validate_config(cfg, schema_path=missing)
+
+    with pytest.raises(ValueError, match=r"Configuration schema file .* not found"):
+        config_schema_mod.validate_config(cfg, schema_path=missing)
 
 
-def test_validate_config_skips_when_schema_load_fails(tmp_path: Path, monkeypatch) -> None:
-    """Brief: validate_config logs and returns when _load_schema raises.
+def test_validate_config_raises_when_schema_load_fails(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Brief: validate_config raises when _load_schema fails.
 
     Inputs:
       - tmp_path: pytest temporary path fixture.
       - monkeypatch: pytest monkeypatch fixture.
 
     Outputs:
-      - None; asserts no exception when _load_schema raises OSError/SchemaError.
+      - None; asserts ValueError is raised when _load_schema raises.
     """
 
     path = tmp_path / "schema.json"
@@ -362,18 +489,23 @@ def test_validate_config_skips_when_schema_load_fails(tmp_path: Path, monkeypatc
     monkeypatch.setattr(config_schema_mod, "_load_schema", _boom)
 
     cfg: Dict[str, Any] = {"listen": {"host": "127.0.0.1", "port": 5353}}
-    config_schema_mod.validate_config(cfg, schema_path=path)
+    with pytest.raises(
+        ValueError, match=r"Failed to load or parse configuration schema"
+    ):
+        config_schema_mod.validate_config(cfg, schema_path=path)
 
 
-def test_validate_config_skips_when_jsonschema_not_installed(tmp_path: Path, monkeypatch) -> None:
-    """Brief: validate_config returns when Draft202012Validator is None.
+def test_validate_config_raises_when_jsonschema_not_installed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Brief: validate_config raises when Draft202012Validator is None.
 
     Inputs:
       - tmp_path: pytest temporary path fixture.
       - monkeypatch: pytest monkeypatch fixture.
 
     Outputs:
-      - None; asserts no exception and no validation when Draft202012Validator is None.
+      - None; asserts ValueError is raised when jsonschema is unavailable.
     """
 
     path = tmp_path / "schema.json"
@@ -382,10 +514,13 @@ def test_validate_config_skips_when_jsonschema_not_installed(tmp_path: Path, mon
     monkeypatch.setattr(config_schema_mod, "Draft202012Validator", None)
 
     cfg: Dict[str, Any] = {"listen": {"host": "127.0.0.1", "port": 5353}}
-    config_schema_mod.validate_config(cfg, schema_path=path)
+    with pytest.raises(ValueError, match=r"jsonschema is not installed"):
+        config_schema_mod.validate_config(cfg, schema_path=path)
 
 
-def test_validate_config_handles_non_extra_and_extra_errors(monkeypatch, tmp_path: Path) -> None:
+def test_validate_config_handles_non_extra_and_extra_errors(
+    monkeypatch, tmp_path: Path
+) -> None:
     """Brief: validate_config treats non-extra errors as fatal regardless of unknown_keys.
 
     Inputs:
@@ -428,7 +563,9 @@ def test_validate_config_handles_non_extra_and_extra_errors(monkeypatch, tmp_pat
     assert "foo" in msg and "bar" in msg
 
 
-def test_validate_config_extra_property_policy_variants(monkeypatch, tmp_path: Path) -> None:
+def test_validate_config_extra_property_policy_variants(
+    monkeypatch, tmp_path: Path
+) -> None:
     """Brief: validate_config honors ignore/warn/error for extra-property errors.
 
     Inputs:

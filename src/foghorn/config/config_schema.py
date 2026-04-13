@@ -24,6 +24,104 @@ except (
     SchemaError = Exception  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
+_PLUGIN_HOOK_ALLOWED_KEYS = {
+    "priority",
+    "pre_resolve",
+    "post_resolve",
+    "setup",
+    "comment",
+    "id",
+}
+_PLUGIN_HOOK_NODE_ALLOWED_KEYS = {"priority", "comment", "id"}
+
+
+def _validate_plugin_hooks_for_validation(
+    hooks_obj: Any,
+    *,
+    entry_path: str,
+) -> None:
+    """Brief: Enforce strict key validation for plugins[].hooks objects.
+
+    Inputs:
+      - hooks_obj: Value of a plugin entry's hooks field.
+      - entry_path: Human-readable config path prefix (for example, "plugins[0]").
+
+    Outputs:
+      - None.
+
+    Raises:
+      - ValueError: When hooks contains unsupported keys at the top level or
+        under hooks.pre_resolve/hooks.post_resolve/hooks.setup mapping forms.
+    """
+
+    if hooks_obj is None:
+        return
+    if not isinstance(hooks_obj, dict):
+        raise ValueError(f"{entry_path}.hooks must be a mapping when present")
+
+    unknown_top_level = sorted(
+        str(k) for k in hooks_obj.keys() if str(k) not in _PLUGIN_HOOK_ALLOWED_KEYS
+    )
+    if unknown_top_level:
+        allowed = ", ".join(sorted(_PLUGIN_HOOK_ALLOWED_KEYS))
+        found = ", ".join(repr(k) for k in unknown_top_level)
+        raise ValueError(
+            f"{entry_path}.hooks contains unsupported key(s): {found}. "
+            + f"Supported keys: {allowed}"
+        )
+
+    for hook_name in ("pre_resolve", "post_resolve", "setup"):
+        hook_value = hooks_obj.get(hook_name)
+        if not isinstance(hook_value, dict):
+            continue
+        unknown_nested = sorted(
+            str(k)
+            for k in hook_value.keys()
+            if str(k) not in _PLUGIN_HOOK_NODE_ALLOWED_KEYS
+        )
+        if unknown_nested:
+            allowed_nested = ", ".join(sorted(_PLUGIN_HOOK_NODE_ALLOWED_KEYS))
+            found_nested = ", ".join(repr(k) for k in unknown_nested)
+            raise ValueError(
+                f"{entry_path}.hooks.{hook_name} contains unsupported key(s): "
+                + f"{found_nested}. Supported keys: {allowed_nested}"
+            )
+
+
+def _reject_obsolete_server_listen_keys(cfg: Dict[str, Any]) -> None:
+    """Brief: Reject obsolete server.listen and listen.dns legacy keys.
+
+    Inputs:
+      - cfg: Parsed YAML configuration mapping.
+
+    Outputs:
+      - None.
+
+    Raises:
+      - ValueError: When deprecated server.listen.host/port or
+        server.listen.dns.udp/tcp keys are present.
+    """
+
+    server_cfg = cfg.get("server")
+    if not isinstance(server_cfg, dict):
+        return
+
+    listen_cfg = server_cfg.get("listen")
+    if not isinstance(listen_cfg, dict):
+        return
+
+    obsolete_keys = [k for k in ("host", "port") if k in listen_cfg]
+    dns_cfg = listen_cfg.get("dns")
+    if isinstance(dns_cfg, dict):
+        obsolete_keys.extend(f"dns.{k}" for k in ("udp", "tcp") if k in dns_cfg)
+    if not obsolete_keys:
+        return
+
+    joined = ", ".join(f"server.listen.{k}" for k in obsolete_keys)
+    raise ValueError(
+        f"Invalid configuration: {joined} is obsolete and no longer supported. "
+        "Use server.listen.dns.host/port and per-listener server.listen.{udp,tcp,dot,doh}.enabled/host/port."
+    )
 
 
 def _normalize_cache_config_for_validation(cfg: Dict[str, Any]) -> None:
@@ -74,10 +172,14 @@ def _normalize_cache_config_for_validation(cfg: Dict[str, Any]) -> None:
         cache_cfg.pop("config", None)
 
 
-_VAR_PATTERN = re.compile(r"\$\{([A-Z_][A-Z0-9_]*)\}")
+_VAR_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
 
-def _normalize_variables_for_validation(cfg: Dict[str, Any]) -> None:
+def _normalize_variables_for_validation(
+    cfg: Dict[str, Any],
+    *,
+    whole_node_injection_allowlist: set[str] | None = None,
+) -> None:
     """Brief: Expand top-level `vars` into the config and remove the group.
 
     Inputs:
@@ -87,12 +189,16 @@ def _normalize_variables_for_validation(cfg: Dict[str, Any]) -> None:
       - None.
 
     Behavior:
-      - Reads cfg['variables'] (a mapping of key -> YAML value).
+      - Reads cfg['variables'] / cfg['vars'] (a mapping of key -> YAML value).
       - Replaces `${KEY}` occurrences inside strings.
       - If a string value is exactly `$KEY` or `${KEY}`, the value is replaced
-        with the variable's underlying YAML value (list/dict/int/etc.).
+        with the variable's underlying YAML value (list/dict/int/etc.), but only
+        when KEY is allowlisted as config-authored (not environment-sourced).
       - The `variables` group itself is removed after expansion so JSON Schema
         validation does not reject it.
+      - The top-level `templates` key is stripped after expansion as a YAML
+        authoring convenience (anchors/aliases) and is not part of the runtime
+        schema.
 
     Notes:
       - Variable substitution is applied across the entire config (excluding the
@@ -115,43 +221,46 @@ def _normalize_variables_for_validation(cfg: Dict[str, Any]) -> None:
     if not isinstance(variables, dict):
         raise ValueError("config.vars must be a mapping when present")
 
-    # Enforce uppercase variable keys to make substitutions visually distinct
-    # and avoid accidentally treating normal config fields as variables.
+    # Enforce identifier-style variable keys to avoid accidentally treating
+    # normal config fields or punctuation-heavy values as variables.
     for k in variables.keys():
         if not isinstance(k, str):
             raise ValueError("config.vars keys must be strings")
-        if k != k.upper():
-            raise ValueError(f"config.vars key {k!r} must be ALL_UPPERCASE")
-        if not re.fullmatch(r"[A-Z_][A-Z0-9_]*", k):
-            raise ValueError(f"config.vars key {k!r} must match [A-Z_][A-Z0-9_]*")
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", k):
+            raise ValueError(f"config.vars key {k!r} must match [A-Za-z_][A-Za-z0-9_]*")
+
+    if whole_node_injection_allowlist is None:
+        whole_node_injection_allowlist = set(variables.keys())
 
     resolved: Dict[str, Any] = {}
 
-    def _resolve_var(key: str, stack: set[str]) -> Any:
+    def _resolve_var(key: str, stack: dict[str, None]) -> Any:
         if key in resolved:
             return resolved[key]
         if key in stack:
-            cycle = " -> ".join(list(stack) + [key])
+            cycle = " -> ".join(list(stack.keys()) + [key])
             raise ValueError(f"config.variables contains a cycle: {cycle}")
         if key not in variables:
             raise KeyError(key)
 
-        stack.add(key)
+        stack[key] = None
         resolved_value = _expand_obj(variables[key], stack)
-        stack.remove(key)
+        del stack[key]
 
         resolved[key] = resolved_value
         return resolved_value
 
-    def _expand_string(text: str, stack: set[str]) -> Any:
+    def _expand_string(text: str, stack: dict[str, None]) -> Any:
         # Whole-node injection: "$KEY" or "${KEY}" becomes the variable value.
+        # Security: whole-node injection is restricted to variables authored in
+        # the config file itself (not environment-sourced variables).
         if text.startswith("${") and text.endswith("}") and len(text) > 3:
             candidate = text[2:-1]
-            if candidate in variables:
+            if candidate in variables and candidate in whole_node_injection_allowlist:
                 return copy.deepcopy(_resolve_var(candidate, stack))
         if text.startswith("$") and len(text) > 1:
             candidate2 = text[1:]
-            if candidate2 in variables:
+            if candidate2 in variables and candidate2 in whole_node_injection_allowlist:
                 return copy.deepcopy(_resolve_var(candidate2, stack))
 
         # In-string substitution: replace `${KEY}` occurrences.
@@ -168,8 +277,15 @@ def _normalize_variables_for_validation(cfg: Dict[str, Any]) -> None:
                 return "null"
             if isinstance(v, (int, float, str)):
                 return str(v)
-            # Non-scalar values should be injected as whole nodes; fall back to
-            # JSON text when embedded in a string.
+
+            # Non-scalar values should be injected as whole nodes; when embedded
+            # inside strings, emit a warning and fall back to JSON text.
+            logger.warning(
+                "config vars: non-scalar %s referenced inside a string; embedding JSON text. "
+                "Consider using whole-node injection ($%s) instead.",
+                k,
+                k,
+            )
             try:
                 return json.dumps(v)
             except Exception:
@@ -180,15 +296,15 @@ def _normalize_variables_for_validation(cfg: Dict[str, Any]) -> None:
     def _injection_var_name(text: str) -> str | None:
         if text.startswith("${") and text.endswith("}") and len(text) > 3:
             candidate = text[2:-1]
-            if candidate in variables:
+            if candidate in variables and candidate in whole_node_injection_allowlist:
                 return candidate
         if text.startswith("$") and len(text) > 1:
             candidate2 = text[1:]
-            if candidate2 in variables:
+            if candidate2 in variables and candidate2 in whole_node_injection_allowlist:
                 return candidate2
         return None
 
-    def _expand_obj(obj: Any, stack: set[str]) -> Any:
+    def _expand_obj(obj: Any, stack: dict[str, None]) -> Any:
         if isinstance(obj, str):
             return _expand_string(obj, stack)
         if isinstance(obj, list):
@@ -214,18 +330,24 @@ def _normalize_variables_for_validation(cfg: Dict[str, Any]) -> None:
 
     # Resolve all variables first (so missing references are caught early).
     for k in list(variables.keys()):
-        _resolve_var(str(k), set())
+        _resolve_var(str(k), {})
 
     # Expand the rest of the config. Do not expand inside the vars mapping.
     for top_key in list(cfg.keys()):
         if top_key == "vars":
             continue
-        cfg[top_key] = _expand_obj(cfg[top_key], set())
+        cfg[top_key] = _expand_obj(cfg[top_key], {})
 
     # Remove variable groups after expansion so JSON Schema validation accepts
     # configs that used either 'vars' (new) or 'variables' (legacy/public).
     cfg.pop("vars", None)
     cfg.pop("variables", None)
+
+    # templates is a YAML authoring convenience (anchors/aliases) and is not part
+    # of the runtime config schema. Strip it after expansion so that:
+    #  - ${VARS} are expanded inside templates
+    #  - JSON Schema validation does not warn/fail on the extra property
+    cfg.pop("templates", None)
 
 
 def _normalize_dnssec_config_for_validation(cfg: Dict[str, Any]) -> None:
@@ -275,21 +397,13 @@ def _normalize_plugin_entries_for_validation(cfg: Dict[str, Any]) -> None:
       - None.
 
     Behavior:
-      - Supports plugin entry meta keys that are not part of the JSON Schema by
-        translating or stripping them.
+      - Strips plugin entry meta fields not present in schema.
       - Removes disabled plugin entries (enabled: false) so they are not loaded.
 
     Supported meta fields:
-      - priority: Shorthand that sets pre_priority/post_priority/setup_priority.
       - enabled: When false (either at entry level or in entry.config), the
         plugin entry is removed.
-      - comment: Optional human-only string; removed.
-
-    Notes:
-      - Explicit pre_priority/post_priority/setup_priority values win over the
-        shorthand when both are provided.
-      - JSON Schema disallows unknown keys on plugin entries
-        (additionalProperties: false).
+      - comment: Optional human-only string; preserved.
     """
 
     plugins = cfg.get("plugins")
@@ -297,7 +411,7 @@ def _normalize_plugin_entries_for_validation(cfg: Dict[str, Any]) -> None:
         return
 
     normalized: list[Any] = []
-    for entry in plugins:
+    for idx, entry in enumerate(plugins):
         if not isinstance(entry, dict):
             normalized.append(entry)
             continue
@@ -318,6 +432,9 @@ def _normalize_plugin_entries_for_validation(cfg: Dict[str, Any]) -> None:
 
         if isinstance(config_obj, dict) and "enabled" in config_obj:
             enabled_obj = config_obj.get("enabled")
+            # Strip enabled from nested config so it is never passed through to
+            # plugin constructors.
+            config_obj.pop("enabled", None)
 
         enabled = True
         if enabled_obj is not None:
@@ -326,19 +443,69 @@ def _normalize_plugin_entries_for_validation(cfg: Dict[str, Any]) -> None:
         if not enabled:
             continue
 
+        _validate_plugin_hooks_for_validation(
+            entry.get("hooks"),
+            entry_path=f"plugins[{idx}]",
+        )
+
         # Strip non-schema fields.
         entry.pop("enabled", None)
-        entry.pop("comment", None)
-
-        if "priority" in entry:
-            prio = entry.pop("priority")
-            entry.setdefault("pre_priority", prio)
-            entry.setdefault("post_priority", prio)
-            entry.setdefault("setup_priority", prio)
 
         normalized.append(entry)
 
     cfg["plugins"] = normalized
+
+
+def _validate_comment_id_fields(cfg: Dict[str, Any]) -> None:
+    """Brief: Enforce that comment/id keys are short strings on all mappings.
+
+    Inputs:
+      - cfg: Parsed configuration mapping (mutated by earlier normalization).
+
+    Outputs:
+      - None. Raises ValueError when invalid comment/id fields are found.
+
+    Notes:
+      - This check runs even when JSON Schema validation is unavailable so
+        comment/id constraints remain consistent across environments.
+      - Only keys named exactly "comment" or "id" are validated. They are
+        optional; when present, they must be strings up to 254 characters.
+    """
+
+    max_len = 254
+
+    def _format_path(path: list[str]) -> str:
+        if not path:
+            return "<root>"
+        return ".".join(path)
+
+    def _validate_value(key: str, value: Any, *, path: list[str]) -> None:
+        if not isinstance(value, str):
+            raise ValueError(
+                f"{_format_path(path)}.{key} must be a string (max {max_len} chars)"
+            )
+        if len(value) > max_len:
+            raise ValueError(f"{_format_path(path)}.{key} exceeds {max_len} characters")
+
+    def _walk(obj: Any, path: list[str]) -> None:
+        if isinstance(obj, dict):
+            if "comment" in obj:
+                _validate_value("comment", obj.get("comment"), path=path)
+            if "id" in obj:
+                _validate_value("id", obj.get("id"), path=path)
+            for key, value in obj.items():
+                path.append(str(key))
+                _walk(value, path)
+                path.pop()
+            return
+        if isinstance(obj, list):
+            for idx, value in enumerate(obj):
+                path.append(f"[{idx}]")
+                _walk(value, path)
+                path.pop()
+            return
+
+    _walk(cfg, [])
 
 
 def get_default_schema_path() -> Path:
@@ -353,9 +520,15 @@ def get_default_schema_path() -> Path:
 
     here = Path(__file__).resolve()
 
-    # 1) Look for assets/config-schema.json in ancestors (source checkout).
-    for ancestor in here.parents:
+    # 1) Look for assets/config-schema.json in a small number of ancestors
+    # (source checkout). Keep this bounded to avoid surprising matches like
+    # /assets/config-schema.json.
+    max_ancestor_depth = 5
+    for depth, ancestor in enumerate(here.parents):
+        if depth >= max_ancestor_depth:
+            break
         candidate = ancestor / "assets" / "config-schema.json"
+        logger.debug("Checking schema path candidate: %s", candidate)
         if candidate.is_file():
             return candidate
 
@@ -440,8 +613,9 @@ def validate_config(
     cfg: Dict[str, Any],
     *,
     schema_path: Optional[Path] = None,
-    config_path: Optional[str] = "./config/config.yaml",
-    unknown_keys: str = "warn",
+    config_path: Optional[str] = None,
+    unknown_keys: str = "error",
+    skip_schema_validation: bool = False,
 ) -> None:
     """Brief: Validate a parsed YAML configuration mapping against JSON Schema.
 
@@ -454,11 +628,15 @@ def validate_config(
       - unknown_keys: Policy for keys not described by the JSON Schema at any
         depth. Supported values:
 
+      - skip_schema_validation: When true, skip JSON Schema validation entirely.
+        This is unsafe; use only for debugging or in environments where the
+        schema cannot be shipped.
+
         - "ignore": ignore extra-property validation errors entirely.
-        - "warn": (default) log a warning listing the offending paths but do
-          not treat them as fatal.
-        - "error": treat extra-property errors as fatal, alongside all other
-          validation errors.
+        - "warn": log a warning listing the offending paths but do not treat
+          them as fatal.
+        - "error": (default) treat extra-property errors as fatal, alongside
+          all other validation errors.
 
     Outputs:
       - None on success.
@@ -483,39 +661,69 @@ def validate_config(
             f"unknown_keys policy must be 'ignore', 'warn', or 'error', got {unknown_keys!r}"
         )
 
+    # Extract internal metadata (injected by config_parser) before schema checks.
+    allowlist_obj = cfg.pop("__schema_validation_config_var_keys", None)
+    config_var_keys: set[str] = set()
+    if isinstance(allowlist_obj, list):
+        config_var_keys = {str(x) for x in allowlist_obj if isinstance(x, str) and x}
+
+    if skip_schema_validation:
+        logger.warning(
+            "Skipping JSON Schema validation because skip_schema_validation/--skip-schema-validation is set"
+        )
+        # Still run normalizations that keep runtime behavior consistent.
+        _reject_obsolete_server_listen_keys(cfg)
+        _normalize_variables_for_validation(
+            cfg,
+            whole_node_injection_allowlist=config_var_keys,
+        )
+        _normalize_cache_config_for_validation(cfg)
+        _normalize_dnssec_config_for_validation(cfg)
+        _normalize_plugin_entries_for_validation(cfg)
+        _validate_comment_id_fields(cfg)
+        return None
+
     # Normalize config regardless of whether JSON Schema validation is
     # available. This keeps runtime behavior consistent even when assets are
     # missing or jsonschema is not installed.
-    _normalize_variables_for_validation(cfg)
+    _reject_obsolete_server_listen_keys(cfg)
+    _normalize_variables_for_validation(
+        cfg,
+        whole_node_injection_allowlist=config_var_keys,
+    )
     _normalize_cache_config_for_validation(cfg)
     _normalize_dnssec_config_for_validation(cfg)
     _normalize_plugin_entries_for_validation(cfg)
+    _validate_comment_id_fields(cfg)
 
-    # If the base schema file cannot be found, log a warning and skip
-    # validation rather than aborting startup. This keeps behaviour resilient
-    # in environments where assets are missing or relocated while still
-    # surfacing the problem clearly in logs.
+    # If the base schema file cannot be found, treat it as a deployment error
+    # and refuse to start (unless skip_schema_validation is explicitly set).
     if not effective_schema_path.is_file():
-        logger.warning(
-            "Configuration schema file %s not found; skipping JSON Schema validation",
+        logger.error(
+            "Configuration schema file %s not found; refusing to start without schema validation",
             effective_schema_path,
         )
-        return None
+        raise ValueError(f"Configuration schema file {effective_schema_path} not found")
 
     try:
         schema = _load_schema(effective_schema_path)
     except (OSError, json.JSONDecodeError, SchemaError) as exc:
-        logger.warning(
-            "Failed to load or parse configuration schema at %s: %s; "
-            "skipping JSON Schema validation",
+        logger.error(
+            "Failed to load or parse configuration schema at %s: %s; refusing to start without schema validation",
             effective_schema_path,
             exc,
         )
-        return None
+        raise ValueError(
+            f"Failed to load or parse configuration schema at {effective_schema_path}: {exc}"
+        ) from exc
 
     if Draft202012Validator is None:
-        logger.warning("jsonschema is not installed; skipping JSON Schema validation")
-        return None
+        logger.error(
+            "jsonschema is not installed; refusing to start without schema validation"
+        )
+        raise ValueError(
+            "jsonschema is not installed; cannot validate configuration schema"
+        )
 
     validator = Draft202012Validator(schema)
     all_errors = sorted(validator.iter_errors(cfg), key=lambda e: list(e.path))
@@ -546,6 +754,3 @@ def validate_config(
 
     # unknown_keys == "error": treat these as fatal.
     raise ValueError(message)
-
-    # No validation errors; configuration is considered valid.
-    return None

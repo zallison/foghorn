@@ -12,11 +12,11 @@ import ipaddress
 from contextlib import closing
 
 import pytest
-from dnslib import AAAA, QTYPE, RR, TXT, A, DNSRecord, RCODE
+from dnslib import AAAA, QTYPE, RCODE, RR, TXT, A, DNSRecord
 
 from foghorn.plugins.cache.in_memory_ttl import InMemoryTTLCache
 from foghorn.plugins.resolve.base import PluginContext, PluginDecision
-from foghorn.plugins.resolve.filter import FilterConfig, Filter
+from foghorn.plugins.resolve.filter import Filter, FilterConfig
 
 
 def _mk_query(name="example.com", qtype="A"):
@@ -47,25 +47,25 @@ def _mk_response_with_ips(name, records):
 
 def test_pre_resolve_block_exact_and_cache(tmp_path):
     """
-    Brief: Exact blocked domain denies and subsequent cached lookup denies fast.
+    Brief: Blocked domain denies and subsequent cached lookup denies fast.
 
     Inputs:
-      - blocked_domains: ['blocked.com']
+      - blocked_domains: ['Blocked.COM.']
 
     Outputs:
-      - None: Asserts deny and cached deny
+      - None: Asserts deny and cached deny across mixed-case and trailing-dot variants.
     """
     db = tmp_path / "bl.db"
-    p = Filter(db_path=str(db), blocked_domains=["blocked.com"], default="allow")
+    p = Filter(db_path=str(db), blocked_domains=["Blocked.COM."], default="allow")
     p.setup()
     ctx = PluginContext(client_ip="1.2.3.4")
 
     with closing(p.conn):
         # First call denies and populates cache
-        dec1 = p.pre_resolve("blocked.com", QTYPE.A, b"", ctx)
+        dec1 = p.pre_resolve("Blocked.Com.", QTYPE.A, b"", ctx)
         assert isinstance(dec1, PluginDecision) and dec1.action == "deny"
 
-        # Second call hits cache
+        # Second call hits cache (normalized key)
         dec2 = p.pre_resolve("blocked.com", QTYPE.A, b"", ctx)
         assert isinstance(dec2, PluginDecision) and dec2.action == "deny"
 
@@ -134,6 +134,32 @@ def test_pre_resolve_deny_response_ip_override(tmp_path):
         assert reply.header.rcode == RCODE.NOERROR
         assert reply.rr
         assert str(reply.rr[0].rdata) == "192.0.2.55"
+
+
+def test_pre_resolve_deny_response_drop(tmp_path):
+    """Brief: deny_response='drop' returns PluginDecision(action='drop').
+
+    Inputs:
+      - blocked_domains: ['blocked.com']
+      - deny_response: 'drop'
+
+    Outputs:
+      - None: Asserts drop decision.
+    """
+    db = tmp_path / "bl_drop.db"
+    p = Filter(
+        db_path=str(db),
+        blocked_domains=["blocked.com"],
+        default="allow",
+        deny_response="drop",
+    )
+    p.setup()
+    ctx = PluginContext(client_ip="1.2.3.4")
+
+    with closing(p.conn):
+        dec = p.pre_resolve("blocked.com", QTYPE.A, b"", ctx)
+        assert isinstance(dec, PluginDecision)
+        assert dec.action == "drop"
 
 
 def test_pre_resolve_qtype_allowlist_denies_unlisted_qtypes(tmp_path):
@@ -380,13 +406,13 @@ def test_post_resolve_replace_version_mismatch_and_invalid_runtime(tmp_path):
 
 def test_post_resolve_non_a_aaaa_and_parse_error(tmp_path):
     """
-    Brief: Non-A/AAAA qtype raises TypeError; parse error returns default action.
+    Brief: Non-A/AAAA qtype returns None; parse error returns deterministic deny.
 
     Inputs:
-      - qtype: MX for TypeError; bad wire to force parse error
+      - qtype: MX for None; bad wire to force parse error
 
     Outputs:
-      - None: Asserts TypeError and default decision
+      - None: Asserts None and deterministic deny decision.
     """
     db = tmp_path / "bl.db"
     p = Filter(db_path=str(db), blocked_ips=["1.2.3.4"], default="allow")
@@ -399,9 +425,9 @@ def test_post_resolve_non_a_aaaa_and_parse_error(tmp_path):
         res = plugin.post_resolve("ex.com", QTYPE.MX, b"", ctx)
         assert res is None
 
-        # Parse error returns default action
+        # Parse error returns deterministic deny action
         dec = plugin.post_resolve("ex.com", QTYPE.A, b"not-dns", ctx)
-        assert dec.action == "allow"
+        assert dec.action == "deny"
 
 
 def test_add_to_cache_and_get_ip_action(tmp_path):
@@ -431,6 +457,7 @@ def test_add_to_cache_and_get_ip_action(tmp_path):
         plugin.blocked_networks[ipaddress.ip_network("10.0.0.0/8")] = {
             "action": "remove"
         }
+        plugin._rebuild_blocked_network_index()
         assert (
             plugin._get_ip_action(ipaddress.ip_address("1.2.3.4"))["action"] == "deny"
         )
@@ -818,6 +845,55 @@ def test_multiple_filter_instances_use_isolated_dbs_by_default(tmp_path):
     assert p2.pre_resolve("p1-block.com", QTYPE.A, b"", ctx).action == "skip"
 
 
+def test_multiple_filter_instances_do_not_leak_pre_resolve_cache_decisions(tmp_path):
+    """Brief: Shared cache backend does not leak allow decisions across Filter instances.
+
+    Inputs:
+      - Shared in-memory cache passed to both filter instances.
+      - PTR query from the targeted Plex client IP.
+
+    Outputs:
+      - None: Asserts plex_ptr denies regardless of whether malware_and_ads runs first.
+    """
+    shared_cache = InMemoryTTLCache()
+
+    malware_and_ads = Filter(
+        name="malware_and_ads",
+        db_path=str(tmp_path / "malware_and_ads.db"),
+        default="allow",
+        cache=shared_cache,
+    )
+    malware_and_ads.setup()
+
+    plex_ptr = Filter(
+        name="plex_ptr",
+        db_path=str(tmp_path / "plex_ptr.db"),
+        default="deny",
+        cache=shared_cache,
+        targets={"ips": ["192.168.88.135"], "qtypes": ["PTR"]},
+    )
+    plex_ptr.setup()
+
+    ctx = PluginContext(client_ip="192.168.88.135")
+    ptr_name = "135.88.168.192.in-addr.arpa"
+
+    with closing(malware_and_ads.conn), closing(plex_ptr.conn):
+        # Baseline: plex_ptr first should deny.
+        baseline_decision = plex_ptr.pre_resolve(ptr_name, QTYPE.PTR, b"", ctx)
+        assert isinstance(baseline_decision, PluginDecision)
+        assert baseline_decision.action == "deny"
+
+        # Regression case: malware_and_ads runs first and allows the query.
+        allow_decision = malware_and_ads.pre_resolve(ptr_name, QTYPE.PTR, b"", ctx)
+        assert isinstance(allow_decision, PluginDecision)
+        assert allow_decision.action == "skip"
+
+        # plex_ptr must still deny after the earlier allow from malware_and_ads.
+        post_allow_decision = plex_ptr.pre_resolve(ptr_name, QTYPE.PTR, b"", ctx)
+        assert isinstance(post_allow_decision, PluginDecision)
+        assert post_allow_decision.action == "deny"
+
+
 def test_get_config_model_returns_filter_config():
     """Brief: get_config_model returns the FilterConfig model class.
 
@@ -944,13 +1020,14 @@ def test_pre_resolve_ip_mode_for_aaaa_and_other_qtypes(tmp_path):
       - tmp_path fixture.
 
     Outputs:
-      - None: Asserts AAAA and non-A/AAAA paths build override responses.
+      - None: Asserts AAAA override and fallback deny mode for non-A/AAAA qtypes.
     """
     db = tmp_path / "bl_ipmode.db"
     p = Filter(
         db_path=str(db),
         blocked_domains=["blocked.com"],
         default="allow",
+        ttl=123,
         deny_response="ip",
         deny_response_ip4="192.0.2.55",
         deny_response_ip6="2001:db8::55",
@@ -966,14 +1043,72 @@ def test_pre_resolve_ip_mode_for_aaaa_and_other_qtypes(tmp_path):
         assert isinstance(dec6, PluginDecision)
         assert dec6.action == "override"
         rep6 = DNSRecord.parse(dec6.response)
-        assert any(rr.rtype == QTYPE.AAAA for rr in rep6.rr)
-        assert any(
-            str(rr.rdata) == "2001:db8::55" for rr in rep6.rr if rr.rtype == QTYPE.AAAA
-        )
+        aaaa_rrs = [rr for rr in rep6.rr if rr.rtype == QTYPE.AAAA]
+        assert aaaa_rrs
+        assert aaaa_rrs[0].ttl == 123
+        assert str(aaaa_rrs[0].rdata) == "2001:db8::55"
 
         dec_txt = p.pre_resolve("blocked.com", QTYPE.TXT, wiretxt, ctx)
         assert isinstance(dec_txt, PluginDecision)
-        assert dec_txt.action == "override"
+        assert dec_txt.action == "deny"
+
+
+def test_pre_resolve_rejects_unsafe_regex_patterns(tmp_path):
+    """Brief: Unsafe blocked_patterns are rejected during setup.
+
+    Inputs:
+      - blocked_patterns containing catastrophic-style regex.
+    Outputs:
+      - None: Asserts unsafe pattern is skipped while safe pattern still applies.
+    """
+    db = tmp_path / "bl_unsafe_regex.db"
+    p = Filter(
+        db_path=str(db),
+        default="allow",
+        blocked_patterns=["(a+)+$", "^safe\\."],
+    )
+    p.setup()
+    ctx = PluginContext(client_ip="1.2.3.4")
+
+    with closing(p.conn):
+        assert p.pre_resolve("safe.example", QTYPE.A, b"", ctx).action == "deny"
+        assert p.pre_resolve("aaaa.example", QTYPE.A, b"", ctx).action == "skip"
+
+
+def test_is_allowed_uses_single_query_and_respects_suffix_priority(
+    tmp_path, monkeypatch
+):
+    """Brief: is_allowed uses one DB query while preserving most-specific suffix semantics.
+
+    Inputs:
+      - allow for example.com; deny for sub.example.com.
+    Outputs:
+      - None: Asserts one SQL round-trip and most-specific match behavior.
+    """
+    db = tmp_path / "bl_is_allowed.db"
+    p = Filter(db_path=str(db), default="deny")
+    p.setup()
+
+    with closing(p.conn):
+        p._db_insert_domain("example.com", "config", "allow")
+        p._db_insert_domain("sub.example.com", "config", "deny")
+        p.conn.commit()
+
+        execute_calls = {"count": 0}
+        original_conn = p.conn
+
+        class _ConnWrapper:
+            def __init__(self, inner):
+                self._inner = inner
+
+            def execute(self, *args, **kwargs):
+                execute_calls["count"] += 1
+                return self._inner.execute(*args, **kwargs)
+
+        monkeypatch.setattr(p, "conn", _ConnWrapper(original_conn))
+
+        assert p.is_allowed("sub.example.com") is False
+        assert execute_calls["count"] == 1
 
 
 def test_build_deny_decision_pre_unknown_mode_defaults_to_deny(tmp_path):
@@ -1039,6 +1174,32 @@ def test_post_resolve_deny_response_refused_and_noerror_empty(tmp_path):
         rep2 = DNSRecord.parse(dec2.response)
         assert rep2.header.rcode == RCODE.NOERROR
         assert not rep2.rr
+
+
+def test_post_resolve_deny_response_drop(tmp_path):
+    """Brief: deny_response='drop' returns PluginDecision(action='drop') post-resolve.
+
+    Inputs:
+      - blocked_ips: [{'ip': '1.2.3.4', 'action': 'deny'}]
+      - deny_response: 'drop'
+
+    Outputs:
+      - None: Asserts drop decision.
+    """
+    db = tmp_path / "bl_post_drop.db"
+    p = Filter(
+        db_path=str(db),
+        blocked_ips=[{"ip": "1.2.3.4", "action": "deny"}],
+        deny_response="drop",
+    )
+    p.setup()
+    ctx = PluginContext(client_ip="1.2.3.4")
+    resp = _mk_response_with_ips("ex.com", [("A", "1.2.3.4", 60)])
+
+    with closing(p.conn):
+        dec = p.post_resolve("ex.com", QTYPE.A, resp, ctx)
+        assert isinstance(dec, PluginDecision)
+        assert dec.action == "drop"
 
 
 def test_build_deny_decision_post_unknown_mode_defaults_to_deny(tmp_path):

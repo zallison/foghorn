@@ -11,7 +11,6 @@ Outputs:
 from dnslib import QTYPE, RCODE, DNSRecord
 
 import foghorn.servers.server as srv
-from foghorn.servers.server import DNSUDPHandler
 
 
 def _mk_axfr_query(name: str) -> DNSRecord:
@@ -27,28 +26,36 @@ def _mk_axfr_query(name: str) -> DNSRecord:
     return DNSRecord.question(qname, qtype="AXFR")
 
 
-def test_iter_axfr_messages_non_authoritative_refused() -> None:
+def test_iter_axfr_messages_non_authoritative_refused(set_runtime_snapshot) -> None:
     """Brief: iter_axfr_messages returns REFUSED when no plugin is authoritative.
 
     Inputs:
       - None.
 
     Outputs:
-      - Asserts that a single REFUSED response is returned when no plugin
-        advertises iter_zone_rrs_for_transfer for the requested zone.
+      - Asserts that an iterable yielding a single REFUSED response is returned
+        when no plugin advertises iter_zone_rrs_for_transfer for the requested
+        zone.
     """
-    DNSUDPHandler.plugins = []
+    set_runtime_snapshot(
+        plugins=[],
+        axfr_enabled=True,
+        axfr_allow_clients=["127.0.0.0/8"],
+    )
 
     q = _mk_axfr_query("example.com")
-    messages = srv.iter_axfr_messages(q)
-    assert isinstance(messages, list)
-    assert len(messages) == 1
+    messages = iter(srv.iter_axfr_messages(q, client_ip="127.0.0.1"))
+    first_wire = next(messages, None)
+    assert first_wire is not None
+    assert next(messages, None) is None
 
-    resp = DNSRecord.parse(messages[0])
+    resp = DNSRecord.parse(first_wire)
     assert resp.header.rcode == RCODE.REFUSED
 
 
-def test_iter_axfr_messages_with_zone_plugin_exports_zone(tmp_path) -> None:
+def test_iter_axfr_messages_with_zone_plugin_exports_zone(
+    tmp_path, set_runtime_snapshot
+) -> None:
     """Brief: iter_axfr_messages streams an AXFR from a ZoneRecords-backed zone.
 
     Inputs:
@@ -82,11 +89,14 @@ def test_iter_axfr_messages_with_zone_plugin_exports_zone(tmp_path) -> None:
     plugin = ZoneRecords(file_paths=[str(zone_file)])
     plugin.setup()
 
-    # Wire the plugin into DNSUDPHandler so iter_axfr_messages can discover it.
-    DNSUDPHandler.plugins = [plugin]
+    set_runtime_snapshot(
+        plugins=[plugin],
+        axfr_enabled=True,
+        axfr_allow_clients=["127.0.0.0/8"],
+    )
 
     q = _mk_axfr_query("example.com")
-    messages = srv.iter_axfr_messages(q)
+    messages = srv.iter_axfr_messages(q, client_ip="127.0.0.1")
     assert messages, "Expected at least one AXFR response message"
 
     # Collect all RRs from the streamed messages.
@@ -110,7 +120,7 @@ def test_iter_axfr_messages_with_zone_plugin_exports_zone(tmp_path) -> None:
     assert "www.example.com" in owners
 
 
-def test_iter_axfr_messages_includes_dnssec_rrs(tmp_path) -> None:
+def test_iter_axfr_messages_includes_dnssec_rrs(tmp_path, set_runtime_snapshot) -> None:
     """Brief: AXFR responses include DNSKEY and RRSIG RRsets when present.
 
     Inputs:
@@ -151,10 +161,15 @@ def test_iter_axfr_messages_includes_dnssec_rrs(tmp_path) -> None:
 
     plugin = ZoneRecords(file_paths=[str(zone_file)])
     plugin.setup()
-    DNSUDPHandler.plugins = [plugin]
+
+    set_runtime_snapshot(
+        plugins=[plugin],
+        axfr_enabled=True,
+        axfr_allow_clients=["127.0.0.0/8"],
+    )
 
     q = _mk_axfr_query("example.com")
-    messages = srv.iter_axfr_messages(q)
+    messages = srv.iter_axfr_messages(q, client_ip="127.0.0.1")
     all_rrs = []
     for wire in messages:
         rec = DNSRecord.parse(wire)

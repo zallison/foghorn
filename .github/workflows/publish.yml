@@ -1,26 +1,47 @@
-name: Publish Package
+name: Publish
 on:
-  pull_request:
-    tags: [ 'v*' ]  # Trigger on version tags
+  push:
+    tags: [ 'v*' ]
+    branches: [ 'main' ]
+  workflow_dispatch: {}
 
 jobs:
   pytest:
-    uses: ./.github/workflows/run-pytest.yml  # Call test workflow
+    runs-on: ubuntu-latest
+    strategy:
+      matrix: # One last paranoia check
+        python-version: ['3.11', '3.12', '3.13', '3.14']
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install system dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y libmariadb3 libmariadb-dev
+      - name: Install project
+        run: |
+          python -m pip install --upgrade pip
+          make env-dev
+      - name: Run tests
+        run: ./venv/bin/pytest -v
 
-  publish:
+  publish-testpypi:
     needs: pytest
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
-      - name: Build & Publish to PyPI
+          python-version: '3.12'
+      - name: Build & Publish to TestPyPI
         run: |
-          pip install build
+          python -m pip install --upgrade pip
+          pip install build twine
           python -m build
-          pip install twine
           twine upload --repository testpypi dist/*
         env:
           TWINE_USERNAME: __token__

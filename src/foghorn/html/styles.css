@@ -168,6 +168,28 @@ a:visited {
     border-color: var(--accent);
 }
 
+.fh-refresh-control {
+    margin-left: auto;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0 0 0.4rem 0.6rem;
+}
+
+.fh-refresh-label {
+    font-size: 0.8rem;
+    color: var(--fg-muted);
+}
+
+.fh-refresh-select {
+    border-radius: 0.375rem;
+    border: 1px solid var(--accent-soft);
+    background: var(--bg-card-inner);
+    color: var(--fg-text);
+    padding: 0.2rem 0.45rem;
+    font-size: 0.8rem;
+}
+
 /* Main layout: two side-by-side boxes for statistics and config */
 
 .fh-main {
@@ -186,6 +208,21 @@ a:visited {
 .fh-pane-docker {
     flex: 0 0 100%;
     width: 100%;
+}
+
+/* Config page: keep two-pane layout even when the config diagram is unavailable */
+.fh-main-config-single {
+    flex-direction: row;
+}
+
+.fh-main-config-single .fh-pane {
+    flex: 1 1 0;
+    width: auto;
+}
+
+.fh-diagram-fallback .fh-pre {
+    margin-top: 0.75rem;
+    white-space: pre;
 }
 
 .fh-docker-controls {
@@ -211,6 +248,11 @@ a:visited {
     border-radius: 0.5rem;
     padding: 0 1.25rem 1rem 1.25rem;
     box-shadow: 0 4px 12px rgba(15, 23, 42, 0.6);
+}
+
+.fh-pane-full {
+    flex: 0 0 100%;
+    width: 100%;
 }
 
 .fh-pane-title {
@@ -253,6 +295,19 @@ a:visited {
     font-size: 1rem;
 }
 
+.fh-stats-group-title-link,
+.fh-stats-group-title-link:link,
+.fh-stats-group-title-link:visited {
+    cursor: pointer;
+    text-decoration: none !important;
+}
+
+.fh-stats-group-title-link:hover,
+
+.fh-stats-group-title-link:focus-visible {
+    text-decoration: underline !important;
+}
+
 .fh-kv-list {
     display: grid;
     grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr);
@@ -271,6 +326,21 @@ a:visited {
     text-align: right;
 }
 
+/* Multiline table cells (used by DockerHosts name column) */
+.fh-cell-multiline {
+    white-space: pre-line;
+    vertical-align: top;
+}
+.fh-rate-limit-config .fh-table td:nth-child(2),
+.fh-rate-limit-profiles .fh-table td:nth-child(2) {
+    word-break: break-word;
+}
+
+.fh-rate-limit-profiles {
+    max-height: 26rem;
+    overflow: auto;
+}
+
 table {
     border-collapse: collapse;
 }
@@ -285,6 +355,322 @@ table {
 .fh-table td {
     padding: 0.15rem 0.25rem;
     text-align: left;
+}
+
+/* Server-side paginated table controls */
+
+.fh-table-controls {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+    margin: 0.25rem 0 0.6rem 0;
+}
+
+.fh-table-controls-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+.fh-table-search {
+    flex: 1 1 16rem;
+    max-width: 30rem;
+    padding: 0.25rem 0.5rem;
+    border-radius: 0.375rem;
+    border: 1px solid var(--accent-soft);
+    background: transparent;
+    color: var(--fg-text);
+    font-size: 0.85rem;
+}
+
+:root[data-theme='light'] .fh-table-search {
+    background: #e5e7eb;
+    color: #111827;
+    border-color: #9ca3af;
+}
+
+/* Dark theme: increase contrast for search/pagination controls (borders were
+   previously indistinguishable from the panel background). */
+:root:not([data-theme='light']) .fh-table-search,
+:root:not([data-theme='light']) .fh-table-page-size,
+:root:not([data-theme='light']) .fh-table-page-btn {
+    border-color: rgba(229, 231, 235, 0.35);
+}
+
+:root:not([data-theme='light']) .fh-table-search,
+:root:not([data-theme='light']) .fh-table-page-size,
+:root:not([data-theme='light']) .fh-query-log-input,
+:root:not([data-theme='light']) .fh-textarea {
+    background: #000;
+    color: #e5e7eb;
+}
+
+:root:not([data-theme='light']) .fh-table-pager {
+    border: 1px solid rgba(229, 231, 235, 0.25);
+    border-radius: 0.5rem;
+    padding: 0.35rem;
+}
+
+.fh-table-filter {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-size: 0.8rem;
+    color: var(--fg-muted);
+}
+
+.fh-table-filter input[type='checkbox'] {
+    accent-color: var(--accent);
+}
+
+.fh-table-pager {
+    align-items: center;
+}
+
+.fh-table-page-info {
+    font-size: 0.8rem;
+    color: var(--fg-muted);
+}
+
+.fh-table-page-size {
+    padding: 0.25rem 0.5rem;
+    border-radius: 0.375rem;
+    border: 1px solid var(--accent-soft);
+    background: transparent;
+    color: var(--fg-text);
+    font-size: 0.8rem;
+}
+
+:root[data-theme='light'] .fh-table-page-size {
+    background: #e5e7eb;
+    color: #111827;
+    border-color: #9ca3af;
+}
+
+:root:not([data-theme='light']) .fh-table-page-size {
+    background: var(--bg-card-inner);
+    color: #e5e7eb;
+}
+
+:root:not([data-theme='light']) .fh-table-page-size option {
+    background: #000;
+    color: #e5e7eb;
+}
+:root:not([data-theme='light']) #page-query-log .fh-pane {
+    background: var(--bg-card-inner);
+}
+.fh-query-log-controls {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    margin: 0.5rem 0 0.75rem 0;
+}
+
+.fh-query-log-row {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+    gap: 0.5rem 0.75rem;
+}
+
+.fh-query-log-field {
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+    font-size: 0.78rem;
+    color: var(--fg-muted);
+}
+
+.fh-query-log-input {
+    padding: 0.25rem 0.45rem;
+    border-radius: 0.375rem;
+    border: 1px solid var(--accent-soft);
+    background: transparent;
+    color: var(--fg-text);
+    font-size: 0.82rem;
+}
+
+:root[data-theme='light'] .fh-query-log-input {
+    background: #e5e7eb;
+    color: #111827;
+    border-color: #9ca3af;
+}
+
+.fh-query-log-actions {
+    display: inline-flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+}
+
+.fh-query-log-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem;
+    margin-bottom: 0.5rem;
+}
+
+.fh-query-log-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    border-radius: 999px;
+    border: 1px solid var(--accent-soft);
+    background: var(--bg-card-inner);
+    padding: 0.15rem 0.55rem;
+    font-size: 0.75rem;
+    color: var(--fg-muted);
+}
+
+.fh-query-log-chip button {
+    border: none;
+    background: transparent;
+    color: var(--accent);
+    cursor: pointer;
+    padding: 0;
+    font-size: 0.75rem;
+}
+
+.fh-query-log-table-wrap {
+    overflow-x: auto;
+}
+
+.fh-query-log-pager {
+    margin-top: 0.65rem;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.6rem;
+}
+
+.fh-query-log-page-size {
+    min-width: 120px;
+}
+
+.fh-query-log-entry-link {
+    cursor: pointer;
+    color: var(--accent);
+    text-decoration: none;
+}
+
+.fh-query-log-entry-link:hover {
+    text-decoration: underline;
+    opacity: 0.9;
+}
+
+.fh-query-log-entry-link:focus-visible {
+    text-decoration: underline;
+}
+
+.fh-query-log-filter-main:focus-visible {
+    text-decoration: underline;
+    text-underline-offset: 2px;
+}
+
+.fh-query-log-filter-control {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.2rem;
+    max-width: 100%;
+}
+
+.fh-query-log-filter-main {
+    border: none;
+    background: transparent;
+    padding: 0;
+    margin: 0;
+    color: inherit;
+    font: inherit;
+    text-decoration: none;
+    text-underline-offset: 2px;
+    cursor: pointer;
+}
+
+.fh-query-log-filter-main:hover {
+    text-decoration: underline;
+    text-underline-offset: 2px;
+    opacity: 0.9;
+}
+
+.fh-query-log-filter-add {
+    border: none;
+    background: transparent;
+    padding: 0 0.1rem;
+    margin: 0;
+    color: var(--accent);
+    font: inherit;
+    font-size: 0.75rem;
+    line-height: 1;
+    cursor: pointer;
+    opacity: 0;
+    pointer-events: none;
+    transform: translateX(-2px);
+    transition: opacity 120ms ease, transform 120ms ease;
+}
+
+td:hover .fh-query-log-filter-add,
+.fh-query-log-filter-control:focus-within .fh-query-log-filter-add {
+    opacity: 1;
+    pointer-events: auto;
+    transform: translateX(0);
+}
+.fh-query-log-timestamp {
+    white-space: nowrap;
+    line-height: 1.2;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
+    font-variant-numeric: tabular-nums;
+}
+
+.fh-query-log-source {
+    cursor: help;
+}
+
+.fh-query-log-severity {
+    font-weight: 600;
+}
+
+.fh-query-log-severity-good {
+    color: var(--fg-muted);
+    font-weight: 500;
+}
+
+.fh-query-log-severity-warn {
+    color: #f59e0b;
+}
+.fh-query-log-severity-info {
+    color: #6495ed;
+}
+
+.fh-query-log-severity-error {
+    color: #f87171;
+}
+
+.fh-query-log-severity-anomaly {
+    color: #fb923c;
+}
+.fh-query-log-override-allowed {
+    color: #86efac;
+}
+
+:root[data-theme='light'] .fh-query-log-severity-good {
+    color: #4b5563;
+}
+
+:root[data-theme='light'] .fh-query-log-severity-warn {
+    color: #92400e;
+}
+:root[data-theme='light'] .fh-query-log-severity-info {
+    color: #4169e1;
+}
+
+:root[data-theme='light'] .fh-query-log-severity-error {
+    color: #b91c1c;
+}
+
+:root[data-theme='light'] .fh-query-log-severity-anomaly {
+    color: #9a3412;
+}
+:root[data-theme='light'] .fh-query-log-override-allowed {
+    color: #15803d;
 }
 
 /* Upstreams tables: match System section fonts and split integer/decimal columns */
@@ -316,6 +702,27 @@ table {
     height: 100%;
     background: var(--accent);
     transform-origin: left center;
+}
+
+/* Config diagram */
+
+.fh-diagram-container {
+    background: var(--bg-card-inner);
+    border-radius: 0.375rem;
+    padding: 0.75rem 0.9rem;
+    overflow: auto;
+}
+
+.fh-diagram-img {
+    width: 100%;
+    height: auto;
+    display: block;
+}
+
+.fh-diagram-fallback {
+    margin-top: 0.5rem;
+    font-size: 0.85rem;
+    color: var(--fg-muted);
 }
 
 /* Config view/edit */
@@ -399,6 +806,11 @@ table {
 
 .fh-messages-success {
     color: #bbf7d0;
+}
+
+:root[data-theme='light'] .fh-messages-success {
+    /* Darken success text for readability on the light theme background. */
+    color: #166534;
 }
 
 .fh-messages-info {

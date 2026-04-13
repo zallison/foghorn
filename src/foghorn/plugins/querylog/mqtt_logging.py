@@ -89,6 +89,8 @@ class MqttLogging(BaseStatsStore):
         connect_kwargs: Optional mapping of additional keyword arguments passed
             through to the MQTT client's connect() method (for example,
             ssl options or socket options).
+        async_logging: When True (default), enqueue query-log publishes on the
+            BaseStatsStore worker queue. Set to False to publish inline.
 
     Outputs:
         Initialized MqttLogging instance connected to the broker and
@@ -107,7 +109,10 @@ class MqttLogging(BaseStatsStore):
         qos: int = 1,
         retain: bool = False,
         connect_kwargs: Optional[Dict[str, Any]] = None,
-        async_logging: bool = False,
+        async_logging: bool = True,
+        max_logging_queue: int = 16384,
+        retention_max_records: Optional[int] = None,
+        retention_days: Optional[float] = None,
         **_: Any,
     ) -> None:
         mqtt = _import_mqtt_driver()
@@ -119,10 +124,22 @@ class MqttLogging(BaseStatsStore):
         self._qos = int(qos)
         self._retain = bool(retain)
 
-        # Logging behaviour: allow callers to opt into async queuing via
-        # ``async_logging``; MQTT logging defaults to synchronous behaviour so
-        # tests and callers see publishes immediately.
+        # Logging behaviour: default to async for remote broker logging to keep
+        # resolver hot-path latency decoupled from broker/network slowness.
+        # Callers can still force synchronous publishes by setting
+        # ``async_logging`` to False explicitly.
         self._async_logging = bool(async_logging)
+        # BaseStatsStore worker queue capacity
+        try:
+            self._max_logging_queue = int(max_logging_queue)
+        except Exception:
+            self._max_logging_queue = 16384
+        if retention_max_records is not None or retention_days is not None:
+            logger.debug(
+                "MqttLogging does not support retention pruning; ignoring retention_max_records=%r retention_days=%r",
+                retention_max_records,
+                retention_days,
+            )
 
         self._client = mqtt.Client(client_id=client_id or "foghorn_mqtt_logger")
         if username is not None:
@@ -232,7 +249,7 @@ class MqttLogging(BaseStatsStore):
             enqueues the operation on the BaseStatsStore worker queue.
         """
 
-        if getattr(self, "_async_logging", False):
+        if getattr(self, "_async_logging", True):
             super().insert_query_log(
                 ts,
                 client_ip,

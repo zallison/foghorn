@@ -1,7 +1,7 @@
 # Example: tuning decorated helper caches via server.cache.func_caches
 #
 # This example shows how to override maxsize and TTL for specific decorated
-# caches (functions wrapped by registered_cached / registered_lru_cached /
+# caches (functions wrapped by registered_cached / registered_lru_cache /
 # registered_foghorn_ttl / registered_sqlite_ttl).
 #
 # NOTE:
@@ -21,6 +21,11 @@
 #   - reset_on_ttl_change controls whether the underlying TTLCache is cleared
 #     once when the TTL value actually changes; it is only effective for the
 #     "ttlcache" backend.
+
+logging:
+  python:
+    level: info
+    stderr: true
 
 server:
   listen:
@@ -78,7 +83,3 @@ upstreams:
   max_concurrent: 1
 
 plugins: []
-
-logging:
-  level: info
-  stderr: true
