@@ -293,6 +293,7 @@ main() {
 	info "Merge PR: https://github.com/zallison/foghorn/pulls/"
 	info "Make GitHub release: https://github.com/zallison/foghorn/releases/new"
 
+	read -p "Press enter to continue: "
 	if [[ ${PUBLISH_PYPI} -eq 1 ]]; then
 		publish_pypi
 	fi
