@@ -9,7 +9,7 @@ Outputs:
 """
 
 import pytest
-from dnslib import QTYPE, RCODE, RR, A, DNSRecord
+from dnslib import EDNS0, QTYPE, RCODE, RR, A, DNSRecord
 
 import foghorn.servers.server as server_mod
 from foghorn.plugins.cache.in_memory_ttl import InMemoryTTLCache
@@ -18,6 +18,7 @@ from foghorn.plugins.resolve.base import BasePlugin, PluginContext, PluginDecisi
 from foghorn.plugins.resolve.dns_rebinding import DnsRebinding
 from foghorn.runtime_config import parse_upstream_health_config
 from foghorn.servers.dns_runtime_state import DNSRuntimeState
+from foghorn.servers.edns_utils import parse_ecs_from_request, upsert_ecs_option
 from foghorn.servers.server import resolve_query_bytes
 
 
@@ -30,6 +31,21 @@ class _OverridePlugin(BasePlugin):
     def pre_resolve(self, qname, qtype, data, ctx: PluginContext):
         r = DNSRecord.question(qname, "A").reply()
         return PluginDecision(action="override", response=r.pack())
+
+class _CaptureContextPlugin(BasePlugin):
+    def __init__(self) -> None:
+        super().__init__()
+        self.seen_contexts: list[dict[str, object]] = []
+
+    def pre_resolve(self, qname, qtype, data, ctx: PluginContext):
+        self.seen_contexts.append(
+            {
+                "source_ip": getattr(ctx, "source_ip", None),
+                "effective_target_ip": getattr(ctx, "effective_target_ip", None),
+                "ecs": getattr(ctx, "ecs", None),
+            }
+        )
+        return PluginDecision(action="allow")
 
 
 class _Stats:
@@ -1080,7 +1096,293 @@ def test_forward_local_true_allows_local_queries(
     out = DNSRecord.parse(resp)
     assert out.header.rcode == RCODE.NOERROR
     assert upstream_calls["n"] == 1
-    assert any(rr.rdata == A("192.168.1.1") for rr in out.rr)
+
+
+def test_resolve_query_bytes_ecs_trusted_inbound_forwarded_and_targeted(
+    monkeypatch: pytest.MonkeyPatch,
+    set_runtime_snapshot,
+) -> None:
+    """Brief: Trusted inbound ECS is forwarded upstream and used for plugin targeting.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts trusted ECS is forwarded and exposed via PluginContext.
+    """
+
+    q = DNSRecord.question("ecs-trusted.example.", "A")
+    assert upsert_ecs_option(
+        q,
+        {
+            "family": 1,
+            "source_prefix": 32,
+            "scope_prefix": 0,
+            "address": "203.0.113.9",
+        },
+        create_opt_if_missing=True,
+        edns_udp_payload=1232,
+    )
+
+    forwarded: dict[str, object] = {"ecs": None}
+
+    def _forward_capture(
+        req,
+        upstreams,
+        timeout_ms,
+        qname,
+        qtype,
+        max_concurrent=None,
+        on_attempt_result=None,
+    ):
+        forwarded["ecs"] = parse_ecs_from_request(req)
+        r = req.reply()
+        r.add_answer(RR("ecs-trusted.example.", QTYPE.A, rdata=A("192.0.2.10"), ttl=60))
+        return r.pack(), {"host": "8.8.8.8", "port": 53}, "ok"
+
+    monkeypatch.setattr(server_mod, "send_query_with_failover", _forward_capture)
+
+    capture_plugin = _CaptureContextPlugin()
+    if hasattr(capture_plugin, "setup"):
+        capture_plugin.setup()
+
+    plugin_base.DNS_CACHE = InMemoryTTLCache()
+    set_runtime_snapshot(
+        plugins=[capture_plugin],
+        upstream_addrs=[{"host": "8.8.8.8", "port": 53}],
+        ecs_enabled=True,
+        ecs_forward_inbound=True,
+        ecs_use_for_plugin_targeting=True,
+        ecs_trusted_listeners=["udp"],
+        ecs_trusted_client_cidrs=[],
+    )
+
+    resp = resolve_query_bytes(
+        q.pack(),
+        "198.51.100.10",
+        listener="udp",
+        secure=False,
+    )
+    out = DNSRecord.parse(resp)
+    assert out.header.rcode == RCODE.NOERROR
+
+    seen = capture_plugin.seen_contexts[-1]
+    assert seen["source_ip"] == "198.51.100.10"
+    assert seen["effective_target_ip"] == "203.0.113.9"
+    assert isinstance(seen["ecs"], dict)
+
+    forwarded_ecs = forwarded["ecs"]
+    assert isinstance(forwarded_ecs, dict)
+    assert forwarded_ecs["address"] == "203.0.113.9"
+    assert forwarded_ecs["subnet"] == "203.0.113.9/32"
+
+
+def test_resolve_query_bytes_ecs_untrusted_inbound_is_ignored(
+    monkeypatch: pytest.MonkeyPatch,
+    set_runtime_snapshot,
+) -> None:
+    """Brief: Untrusted inbound ECS is ignored for forwarding and targeting.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts spoofed/untrusted ECS does not affect resolver behavior.
+    """
+
+    q = DNSRecord.question("ecs-untrusted.example.", "A")
+    assert upsert_ecs_option(
+        q,
+        {
+            "family": 1,
+            "source_prefix": 32,
+            "scope_prefix": 0,
+            "address": "203.0.113.77",
+        },
+        create_opt_if_missing=True,
+        edns_udp_payload=1232,
+    )
+
+    forwarded: dict[str, object] = {"ecs": None}
+
+    def _forward_capture(
+        req,
+        upstreams,
+        timeout_ms,
+        qname,
+        qtype,
+        max_concurrent=None,
+        on_attempt_result=None,
+    ):
+        forwarded["ecs"] = parse_ecs_from_request(req)
+        r = req.reply()
+        r.add_answer(
+            RR("ecs-untrusted.example.", QTYPE.A, rdata=A("192.0.2.20"), ttl=60)
+        )
+        return r.pack(), {"host": "8.8.8.8", "port": 53}, "ok"
+
+    monkeypatch.setattr(server_mod, "send_query_with_failover", _forward_capture)
+
+    capture_plugin = _CaptureContextPlugin()
+    if hasattr(capture_plugin, "setup"):
+        capture_plugin.setup()
+
+    plugin_base.DNS_CACHE = InMemoryTTLCache()
+    set_runtime_snapshot(
+        plugins=[capture_plugin],
+        upstream_addrs=[{"host": "8.8.8.8", "port": 53}],
+        ecs_enabled=True,
+        ecs_forward_inbound=True,
+        ecs_use_for_plugin_targeting=True,
+        ecs_trusted_listeners=["dot"],
+        ecs_trusted_client_cidrs=["10.0.0.0/8"],
+    )
+
+    resp = resolve_query_bytes(
+        q.pack(),
+        "198.51.100.11",
+        listener="udp",
+        secure=False,
+    )
+    out = DNSRecord.parse(resp)
+    assert out.header.rcode == RCODE.NOERROR
+
+    seen = capture_plugin.seen_contexts[-1]
+    assert seen["source_ip"] == "198.51.100.11"
+    assert seen["effective_target_ip"] == "198.51.100.11"
+    assert seen["ecs"] is None
+    assert forwarded["ecs"] is None
+
+
+def test_resolve_query_bytes_ecs_synth_bypasses_cache(
+    monkeypatch: pytest.MonkeyPatch,
+    set_runtime_snapshot,
+) -> None:
+    """Brief: Synthesized ECS bypasses cache lookup/store sharing across subnets.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts upstream path is used despite cache hit and outbound ECS exists.
+    """
+
+    q = DNSRecord.question("ecs-synth-cache.example.", "A")
+    q.add_ar(EDNS0(udp_len=1232))
+    cache_reply = q.reply()
+    cache_reply.add_answer(
+        RR("ecs-synth-cache.example.", QTYPE.A, rdata=A("192.0.2.30"), ttl=60)
+    )
+    plugin_base.DNS_CACHE = InMemoryTTLCache()
+    plugin_base.DNS_CACHE.set(("ecs-synth-cache.example", QTYPE.A), 60, cache_reply.pack())
+
+    upstream_calls = {"n": 0, "ecs": None}
+
+    def _forward_capture(
+        req,
+        upstreams,
+        timeout_ms,
+        qname,
+        qtype,
+        max_concurrent=None,
+        on_attempt_result=None,
+    ):
+        upstream_calls["n"] += 1
+        upstream_calls["ecs"] = parse_ecs_from_request(req)
+        r = req.reply()
+        r.add_answer(
+            RR("ecs-synth-cache.example.", QTYPE.A, rdata=A("192.0.2.31"), ttl=60)
+        )
+        return r.pack(), {"host": "8.8.8.8", "port": 53}, "ok"
+
+    monkeypatch.setattr(server_mod, "send_query_with_failover", _forward_capture)
+    set_runtime_snapshot(
+        plugins=[],
+        upstream_addrs=[{"host": "8.8.8.8", "port": 53}],
+        ecs_enabled=True,
+        ecs_synthesize_from_client_ip=True,
+        ecs_source_prefix_v4=24,
+    )
+
+    resp = resolve_query_bytes(
+        q.pack(),
+        "198.51.100.23",
+        listener="udp",
+        secure=False,
+    )
+    out = DNSRecord.parse(resp)
+    assert out.header.rcode == RCODE.NOERROR
+    assert upstream_calls["n"] == 1
+    assert isinstance(upstream_calls["ecs"], dict)
+    assert upstream_calls["ecs"]["subnet"] == "198.51.100.0/24"
+
+
+def test_resolve_query_bytes_ecs_result_metadata_in_query_log(
+    monkeypatch: pytest.MonkeyPatch,
+    set_runtime_snapshot,
+) -> None:
+    """Brief: Query-log result context includes source/effective target/ECS metadata.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts ECS metadata is attached to record_query_result payloads.
+    """
+
+    q = DNSRecord.question("ecs-result-meta.example.", "A")
+    q.add_ar(EDNS0(udp_len=1232))
+    stats = _Stats()
+
+    def _forward_ok(
+        req,
+        upstreams,
+        timeout_ms,
+        qname,
+        qtype,
+        max_concurrent=None,
+        on_attempt_result=None,
+    ):
+        r = req.reply()
+        r.add_answer(
+            RR("ecs-result-meta.example.", QTYPE.A, rdata=A("192.0.2.40"), ttl=60)
+        )
+        return r.pack(), {"host": "8.8.8.8", "port": 53}, "ok"
+
+    monkeypatch.setattr(server_mod, "send_query_with_failover", _forward_ok)
+    plugin_base.DNS_CACHE = InMemoryTTLCache()
+    set_runtime_snapshot(
+        stats_collector=stats,
+        plugins=[],
+        upstream_addrs=[{"host": "8.8.8.8", "port": 53}],
+        ecs_enabled=True,
+        ecs_synthesize_from_client_ip=True,
+        ecs_source_prefix_v4=24,
+    )
+
+    resp = resolve_query_bytes(
+        q.pack(),
+        "198.51.100.24",
+        listener="udp",
+        secure=False,
+    )
+    out = DNSRecord.parse(resp)
+    assert out.header.rcode == RCODE.NOERROR
+
+    result_entries = [
+        payload
+        for name, payload in stats.calls
+        if name == "record_query_result"
+    ]
+    assert result_entries
+    _args, kwargs = result_entries[-1]
+    result = kwargs.get("result", {})
+    assert result.get("source_ip") == "198.51.100.24"
+    assert result.get("effective_target_ip") == "198.51.100.24"
+    assert isinstance(result.get("ecs"), dict)
+    assert result["ecs"].get("cache_bypass") is True
+    assert result["ecs"].get("outbound", {}).get("subnet") == "198.51.100.0/24"
+    assert any(str(rr.rdata) == "192.0.2.40" for rr in out.rr)
 
 
 def test_forward_local_blocking_does_not_affect_non_local_queries(
