@@ -385,8 +385,18 @@ options edns0 trust-ad
 
 Without `trust-ad`, glibc clears the AD flag before handing answers to applications, so tools like OpenSSH will ignore SSHFP records even when Foghorn has validated them.
 
-- `server.enable_ede`
-  - Optional toggle for RFC 8914 Extended DNS Errors; when true and the client advertises EDNS(0), Foghorn can attach EDE options to certain policy or upstream-failure responses and surface per-code stats in the admin UI.
+- `server.features`
+  - Canonical feature flag map for resolver behavior.
+  - Includes:
+    - `enable_ede`: RFC 8914 Extended DNS Errors (attach EDE options on selected synthetic responses when EDNS is present).
+    - `forward_local`: allow forwarding `.local` and RFC1918 PTR lookups.
+    - `ecs.enabled`: enable EDNS Client Subnet handling.
+    - `ecs.forward_inbound`: forward inbound ECS only when it is trusted.
+    - `ecs.synthesize_from_client_ip`: synthesize outbound ECS from transport source IP in forward mode.
+    - `ecs.trusted_listeners` / `ecs.trusted_client_cidrs`: trust gates for inbound ECS.
+    - `ecs.use_for_plugin_targeting`: allow trusted inbound ECS to influence plugin targeting IP selection.
+  - When ECS influences upstream selection/targeting, cache reads/writes are bypassed to avoid cross-subnet contamination.
+  - Legacy `server.enable_ede` and `server.forward_local` keys are still accepted as compatibility aliases.
 - `server.resolver`
   - Timeouts, recursion depth, and resolver mode:
 	- `forward` (default): forward to configured `upstreams`.
