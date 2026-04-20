@@ -5,9 +5,10 @@ from __future__ import annotations
 import time
 from typing import Dict, List, Optional
 
-from dnslib import QTYPE, DNSRecord
+from dnslib import DNSRecord
 
 from foghorn.plugins.resolve.base import BasePlugin
+from .edns_utils import ensure_edns_request
 
 
 class DNSRuntimeState:
@@ -62,6 +63,17 @@ class DNSRuntimeState:
 
     # When False (default), .local is not forwarded upstream.
     forward_local: bool = False
+    # EDNS Client Subnet (ECS) runtime controls.
+    ecs_enabled: bool = False
+    ecs_forward_inbound: bool = False
+    ecs_synthesize_from_client_ip: bool = False
+    ecs_source_prefix_v4: int = 24
+    ecs_source_prefix_v6: int = 56
+    ecs_scope_prefix_v4: int = 0
+    ecs_scope_prefix_v6: int = 0
+    ecs_trusted_listeners: list[str] = []
+    ecs_trusted_client_cidrs: list[str] = []
+    ecs_use_for_plugin_targeting: bool = False
 
     # Lazy health state for upstreams keyed by a stable upstream identifier.
     upstream_health: Dict[str, Dict[str, object]] = {}
@@ -202,44 +214,13 @@ class DNSRuntimeState:
         Outputs:
           - None.
         """
-        opt_rr = None
-        additional = getattr(req, "ar", []) or []
-        for rr in additional:
-            if rr.rtype == QTYPE.OPT:
-                opt_rr = rr
-                break
-
-        # If the client did not include EDNS, do not add an OPT RR.
-        if opt_rr is None:
-            return
 
         try:
-            server_max = int(getattr(self, "edns_udp_payload", 1232) or 1232)
+            payload_size = int(getattr(self, "edns_udp_payload", 1232) or 1232)
         except Exception:
-            server_max = 1232
-        if server_max < 512:
-            server_max = 512
-
-        try:
-            client_payload = int(getattr(opt_rr, "rclass", 0) or 0)
-        except Exception:
-            client_payload = 0
-        if client_payload <= 0:
-            payload = server_max
-        elif server_max > 0:
-            payload = min(client_payload, server_max)
-        else:
-            payload = client_payload
-
-        try:
-            ttl_val = int(getattr(opt_rr, "ttl", 0) or 0)
-        except Exception:
-            ttl_val = 0
-        client_do = 0x8000 if (ttl_val & 0x8000) else 0
-        ext_rcode = (ttl_val >> 24) & 0xFF
-        version = (ttl_val >> 16) & 0xFF
-        flags = ttl_val & 0xFFFF
-        flags = (flags & ~0x8000) | client_do
-        opt_rr.rclass = payload
-        opt_rr.ttl = (ext_rcode << 24) | (version << 16) | (flags & 0xFFFF)
-        return
+            payload_size = 1232
+        ensure_edns_request(
+            req,
+            dnssec_mode=str(getattr(self, "dnssec_mode", "ignore") or "ignore"),
+            edns_udp_payload=payload_size,
+        )

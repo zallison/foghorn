@@ -51,6 +51,7 @@ from .runtime_config import (
     RuntimeSnapshot,
     initialize_runtime,
     parse_upstream_health_config,
+    resolve_server_feature_flags,
 )
 from .servers.runtime_state import RingBuffer, RuntimeState
 from .stats import StatsCollector, StatsReporter
@@ -553,15 +554,20 @@ def main(argv: List[str] | None = None) -> int:
     edns_payload = int(dnssec_cfg.get("udp_payload_size", 1232))
     dnssec_validation = str(dnssec_cfg.get("validation", "upstream_ad")).lower()
 
-    # Extended DNS Errors (RFC 8914) feature gate. When false, the resolver
-    # will not add any EDE options of its own and will continue to treat
-    # upstream EDNS options opaquely.
-    enable_ede = bool(server_cfg.get("enable_ede", True))
-
-    # .local forward blocking (RFC 6762). When false (default), queries for
-    # .local names that are not answered by plugins are blocked from being
-    # forwarded to upstream resolvers and return NXDOMAIN instead.
-    forward_local = bool(server_cfg.get("forward_local", False))
+    # Canonical feature gates live under server.features with legacy fallback.
+    features = resolve_server_feature_flags(server_cfg)
+    enable_ede = bool(features["enable_ede"])
+    forward_local = bool(features["forward_local"])
+    ecs_enabled = bool(features["ecs_enabled"])
+    ecs_forward_inbound = bool(features["ecs_forward_inbound"])
+    ecs_synthesize_from_client_ip = bool(features["ecs_synthesize_from_client_ip"])
+    ecs_source_prefix_v4 = int(features["ecs_source_prefix_v4"])
+    ecs_source_prefix_v6 = int(features["ecs_source_prefix_v6"])
+    ecs_scope_prefix_v4 = int(features["ecs_scope_prefix_v4"])
+    ecs_scope_prefix_v6 = int(features["ecs_scope_prefix_v6"])
+    ecs_trusted_listeners = list(features["ecs_trusted_listeners"] or [])
+    ecs_trusted_client_cidrs = list(features["ecs_trusted_client_cidrs"] or [])
+    ecs_use_for_plugin_targeting = bool(features["ecs_use_for_plugin_targeting"])
 
     # Resolver search-domain qualification settings.
     _search_cfg_main = resolver_cfg.get("search") or {}
@@ -688,6 +694,16 @@ def main(argv: List[str] | None = None) -> int:
             edns_payload=edns_payload,
             enable_ede=enable_ede,
             forward_local=forward_local,
+            ecs_enabled=ecs_enabled,
+            ecs_forward_inbound=ecs_forward_inbound,
+            ecs_synthesize_from_client_ip=ecs_synthesize_from_client_ip,
+            ecs_source_prefix_v4=ecs_source_prefix_v4,
+            ecs_source_prefix_v6=ecs_source_prefix_v6,
+            ecs_scope_prefix_v4=ecs_scope_prefix_v4,
+            ecs_scope_prefix_v6=ecs_scope_prefix_v6,
+            ecs_trusted_listeners=ecs_trusted_listeners,
+            ecs_trusted_client_cidrs=ecs_trusted_client_cidrs,
+            ecs_use_for_plugin_targeting=ecs_use_for_plugin_targeting,
             search_domain=search_domain_main,
             qualify_single_label=qualify_single_label_main,
             qualify_non_proper_tld=qualify_non_proper_tld_main,
@@ -2081,6 +2097,16 @@ def _initialize_runtime_snapshot(
     edns_payload: int,
     enable_ede: bool,
     forward_local: bool,
+    ecs_enabled: bool,
+    ecs_forward_inbound: bool,
+    ecs_synthesize_from_client_ip: bool,
+    ecs_source_prefix_v4: int,
+    ecs_source_prefix_v6: int,
+    ecs_scope_prefix_v4: int,
+    ecs_scope_prefix_v6: int,
+    ecs_trusted_listeners: list[str],
+    ecs_trusted_client_cidrs: list[str],
+    ecs_use_for_plugin_targeting: bool,
     search_domain: str = "",
     qualify_single_label: bool = True,
     qualify_non_proper_tld: object = False,
@@ -2123,6 +2149,14 @@ def _initialize_runtime_snapshot(
       - edns_payload: Effective EDNS UDP payload size.
       - enable_ede: EDE feature toggle.
       - forward_local: .local forwarding toggle.
+      - ecs_enabled: Enable EDNS Client Subnet support.
+      - ecs_forward_inbound: Forward trusted inbound ECS options upstream.
+      - ecs_synthesize_from_client_ip: Synthesize ECS when inbound ECS is absent.
+      - ecs_source_prefix_v4/v6: ECS source prefix lengths used for synthesis.
+      - ecs_scope_prefix_v4/v6: ECS scope prefix lengths used for synthesis.
+      - ecs_trusted_listeners: Listener names trusted for inbound ECS usage.
+      - ecs_trusted_client_cidrs: Source CIDRs trusted for inbound ECS usage.
+      - ecs_use_for_plugin_targeting: Allow trusted ECS to drive plugin targeting.
       - min_cache_ttl: Cache TTL floor.
       - stats_collector: Stats collector instance or None.
       - cache_plugin: Cache plugin instance or None.
@@ -2192,6 +2226,16 @@ def _initialize_runtime_snapshot(
             edns_udp_payload=int(effective_edns),
             enable_ede=bool(enable_ede),
             forward_local=bool(forward_local),
+            ecs_enabled=bool(ecs_enabled),
+            ecs_forward_inbound=bool(ecs_forward_inbound),
+            ecs_synthesize_from_client_ip=bool(ecs_synthesize_from_client_ip),
+            ecs_source_prefix_v4=max(0, min(32, int(ecs_source_prefix_v4))),
+            ecs_source_prefix_v6=max(0, min(128, int(ecs_source_prefix_v6))),
+            ecs_scope_prefix_v4=max(0, min(32, int(ecs_scope_prefix_v4))),
+            ecs_scope_prefix_v6=max(0, min(128, int(ecs_scope_prefix_v6))),
+            ecs_trusted_listeners=list(ecs_trusted_listeners or []),
+            ecs_trusted_client_cidrs=list(ecs_trusted_client_cidrs or []),
+            ecs_use_for_plugin_targeting=bool(ecs_use_for_plugin_targeting),
             min_cache_ttl=int(min_cache_ttl),
             # Cache prefetch is not config-plumbed yet; keep defaults.
             cache_prefetch_enabled=False,

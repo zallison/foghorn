@@ -211,6 +211,16 @@ class DNSServer:
         cache_prefetch_allow_stale_after_expiry: float = 0.0,
         enable_ede: bool = False,
         forward_local: bool = False,
+        ecs_enabled: bool = False,
+        ecs_forward_inbound: bool = False,
+        ecs_synthesize_from_client_ip: bool = False,
+        ecs_source_prefix_v4: int = 24,
+        ecs_source_prefix_v6: int = 56,
+        ecs_scope_prefix_v4: int = 0,
+        ecs_scope_prefix_v6: int = 0,
+        ecs_trusted_listeners: list[str] | None = None,
+        ecs_trusted_client_cidrs: list[str] | None = None,
+        ecs_use_for_plugin_targeting: bool = False,
         max_response_bytes: int | None = None,
         axfr_enabled: bool = False,
         axfr_allow_clients: list[str] | None = None,
@@ -233,6 +243,14 @@ class DNSServer:
             cache_prefetch_*: Cache prefetch and stale-while-revalidate thresholds.
             enable_ede: Enable RFC 8914 Extended DNS Errors on synthesized replies.
             forward_local: Whether `.local` should be forwarded upstream.
+            ecs_enabled: Enable EDNS Client Subnet parsing/forward controls.
+            ecs_forward_inbound: Forward trusted inbound ECS to upstreams.
+            ecs_synthesize_from_client_ip: Synthesize ECS from source IP when absent.
+            ecs_source_prefix_v4/v6: Prefix lengths used for synthesized ECS.
+            ecs_scope_prefix_v4/v6: Scope-prefix lengths used for synthesized ECS.
+            ecs_trusted_listeners: Listener names allowed to provide trusted ECS.
+            ecs_trusted_client_cidrs: Source CIDRs allowed to provide trusted ECS.
+            ecs_use_for_plugin_targeting: Allow trusted ECS to drive plugin IP targeting.
             max_response_bytes: Optional explicit response size cap.
             axfr_enabled/axfr_allow_clients: Transfer policy knobs used by TCP/DoT listeners.
             create_server: If True, binds `ThreadingUDPServer`; if False, only configures class state.
@@ -396,6 +414,100 @@ class DNSServer:
                 forward_local,
             )
             DNSRuntimeState.forward_local = False
+        try:
+            DNSRuntimeState.ecs_enabled = bool(ecs_enabled)
+        except Exception:
+            DNSRuntimeState.ecs_enabled = False
+        try:
+            DNSRuntimeState.ecs_forward_inbound = bool(ecs_forward_inbound)
+        except Exception:
+            DNSRuntimeState.ecs_forward_inbound = False
+        try:
+            DNSRuntimeState.ecs_synthesize_from_client_ip = bool(
+                ecs_synthesize_from_client_ip
+            )
+        except Exception:
+            DNSRuntimeState.ecs_synthesize_from_client_ip = False
+        try:
+            DNSRuntimeState.ecs_source_prefix_v4 = max(
+                0,
+                min(32, int(ecs_source_prefix_v4)),
+            )
+        except Exception:
+            DNSRuntimeState.ecs_source_prefix_v4 = 24
+        try:
+            DNSRuntimeState.ecs_source_prefix_v6 = max(
+                0,
+                min(128, int(ecs_source_prefix_v6)),
+            )
+        except Exception:
+            DNSRuntimeState.ecs_source_prefix_v6 = 56
+        try:
+            DNSRuntimeState.ecs_scope_prefix_v4 = max(
+                0,
+                min(32, int(ecs_scope_prefix_v4)),
+            )
+        except Exception:
+            DNSRuntimeState.ecs_scope_prefix_v4 = 0
+        try:
+            DNSRuntimeState.ecs_scope_prefix_v6 = max(
+                0,
+                min(128, int(ecs_scope_prefix_v6)),
+            )
+        except Exception:
+            DNSRuntimeState.ecs_scope_prefix_v6 = 0
+
+        listeners_raw: list[str] = []
+        try:
+            if ecs_trusted_listeners is not None:
+                listeners_raw = [str(v) for v in list(ecs_trusted_listeners)]
+        except Exception:
+            listeners_raw = []
+        normalized_listeners: list[str] = []
+        for entry in listeners_raw:
+            token = str(entry or "").strip().lower()
+            if not token:
+                continue
+            expanded: list[str]
+            if token == "secure":
+                expanded = ["dot", "doh"]
+            elif token in {"unsecure", "insecure"}:
+                expanded = ["udp", "tcp"]
+            else:
+                expanded = [token]
+            for candidate in expanded:
+                if candidate in {"udp", "tcp", "dot", "doh"}:
+                    if candidate not in normalized_listeners:
+                        normalized_listeners.append(candidate)
+        DNSRuntimeState.ecs_trusted_listeners = normalized_listeners
+
+        cidrs_raw: list[str] = []
+        try:
+            if ecs_trusted_client_cidrs is not None:
+                cidrs_raw = [str(v) for v in list(ecs_trusted_client_cidrs)]
+        except Exception:
+            cidrs_raw = []
+        normalized_cidrs: list[str] = []
+        for entry in cidrs_raw:
+            text = str(entry or "").strip()
+            if not text:
+                continue
+            try:
+                network = ipaddress.ip_network(text, strict=False)
+            except ValueError:
+                logger.warning(
+                    "Ignoring invalid ecs_trusted_client_cidrs entry %r",
+                    entry,
+                )
+                continue
+            normalized_cidrs.append(str(network))
+        DNSRuntimeState.ecs_trusted_client_cidrs = normalized_cidrs
+        try:
+            DNSRuntimeState.ecs_use_for_plugin_targeting = bool(
+                ecs_use_for_plugin_targeting
+            )
+        except Exception:
+            DNSRuntimeState.ecs_use_for_plugin_targeting = False
 
         # AXFR/IXFR transfer policy (applies to TCP/DoT listeners).
         try:

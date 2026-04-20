@@ -33,6 +33,7 @@ Notes:
 from __future__ import annotations
 
 import copy
+import ipaddress
 import logging
 import threading
 import time
@@ -227,6 +228,16 @@ class RuntimeSnapshot:
     edns_udp_payload: int
     enable_ede: bool
     forward_local: bool
+    ecs_enabled: bool
+    ecs_forward_inbound: bool
+    ecs_synthesize_from_client_ip: bool
+    ecs_source_prefix_v4: int
+    ecs_source_prefix_v6: int
+    ecs_scope_prefix_v4: int
+    ecs_scope_prefix_v6: int
+    ecs_trusted_listeners: List[str]
+    ecs_trusted_client_cidrs: List[str]
+    ecs_use_for_plugin_targeting: bool
     min_cache_ttl: int
     cache_prefetch_enabled: bool
     cache_prefetch_min_ttl: int
@@ -274,6 +285,155 @@ class ReloadResult:
     restart_required: bool
     restart_reasons: List[str]
     error: str | None = None
+
+
+def resolve_server_feature_flags(server_cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """Brief: Resolve canonical server feature flags with legacy-key fallback.
+
+    Inputs:
+      - server_cfg: Parsed `server` configuration mapping.
+
+    Outputs:
+      - dict with normalized feature values:
+          - enable_ede / forward_local booleans.
+          - ecs_* controls for resolver ingestion/forwarding/targeting.
+
+    Notes:
+      - Canonical keys are under `server.features`.
+      - Legacy `server.enable_ede` and `server.forward_local` remain supported.
+      - When both are set, `server.features.*` takes precedence.
+    """
+
+    cfg = server_cfg if isinstance(server_cfg, dict) else {}
+    features_obj = cfg.get("features")
+    features = features_obj if isinstance(features_obj, dict) else {}
+
+    def _to_bool(value: object, default: bool = False) -> bool:
+        if value is None:
+            return bool(default)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        if isinstance(value, str):
+            text = value.strip().lower()
+            if text in {"1", "true", "yes", "on"}:
+                return True
+            if text in {"0", "false", "no", "off"}:
+                return False
+        return bool(default)
+
+    def _to_int(
+        value: object,
+        default: int,
+        *,
+        minimum: int,
+        maximum: int,
+    ) -> int:
+        try:
+            parsed = int(value)
+        except Exception:
+            parsed = int(default)
+        return max(int(minimum), min(int(maximum), int(parsed)))
+
+    enable_ede = (
+        _to_bool(features.get("enable_ede"), False)
+        if "enable_ede" in features
+        else _to_bool(cfg.get("enable_ede"), False)
+    )
+    forward_local = (
+        _to_bool(features.get("forward_local"), False)
+        if "forward_local" in features
+        else _to_bool(cfg.get("forward_local"), False)
+    )
+
+    ecs_obj = features.get("ecs")
+    ecs_cfg = ecs_obj if isinstance(ecs_obj, dict) else {}
+
+    trusted_listener_raw = ecs_cfg.get("trusted_listeners", [])
+    if isinstance(trusted_listener_raw, str):
+        trusted_listener_values = [trusted_listener_raw]
+    elif isinstance(trusted_listener_raw, list):
+        trusted_listener_values = trusted_listener_raw
+    else:
+        trusted_listener_values = []
+    trusted_listeners: list[str] = []
+    for raw in trusted_listener_values:
+        token = str(raw or "").strip().lower()
+        if not token:
+            continue
+        expanded: list[str]
+        if token == "secure":
+            expanded = ["dot", "doh"]
+        elif token in {"unsecure", "insecure"}:
+            expanded = ["udp", "tcp"]
+        else:
+            expanded = [token]
+        for candidate in expanded:
+            if candidate in {"udp", "tcp", "dot", "doh"}:
+                if candidate not in trusted_listeners:
+                    trusted_listeners.append(candidate)
+
+    trusted_cidrs_raw = ecs_cfg.get("trusted_client_cidrs", [])
+    if isinstance(trusted_cidrs_raw, str):
+        trusted_cidrs_values = [trusted_cidrs_raw]
+    elif isinstance(trusted_cidrs_raw, list):
+        trusted_cidrs_values = trusted_cidrs_raw
+    else:
+        trusted_cidrs_values = []
+    trusted_client_cidrs: list[str] = []
+    for raw in trusted_cidrs_values:
+        text = str(raw or "").strip()
+        if not text:
+            continue
+        try:
+            trusted_client_cidrs.append(str(ipaddress.ip_network(text, strict=False)))
+        except ValueError:
+            logger.warning(
+                "Ignoring invalid server.features.ecs.trusted_client_cidrs entry %r",
+                raw,
+            )
+
+    return {
+        "enable_ede": bool(enable_ede),
+        "forward_local": bool(forward_local),
+        "ecs_enabled": _to_bool(ecs_cfg.get("enabled"), False),
+        "ecs_forward_inbound": _to_bool(ecs_cfg.get("forward_inbound"), False),
+        "ecs_synthesize_from_client_ip": _to_bool(
+            ecs_cfg.get("synthesize_from_client_ip"),
+            False,
+        ),
+        "ecs_source_prefix_v4": _to_int(
+            ecs_cfg.get("source_prefix_v4", 24),
+            24,
+            minimum=0,
+            maximum=32,
+        ),
+        "ecs_source_prefix_v6": _to_int(
+            ecs_cfg.get("source_prefix_v6", 56),
+            56,
+            minimum=0,
+            maximum=128,
+        ),
+        "ecs_scope_prefix_v4": _to_int(
+            ecs_cfg.get("scope_prefix_v4", 0),
+            0,
+            minimum=0,
+            maximum=32,
+        ),
+        "ecs_scope_prefix_v6": _to_int(
+            ecs_cfg.get("scope_prefix_v6", 0),
+            0,
+            minimum=0,
+            maximum=128,
+        ),
+        "ecs_trusted_listeners": trusted_listeners,
+        "ecs_trusted_client_cidrs": trusted_client_cidrs,
+        "ecs_use_for_plugin_targeting": _to_bool(
+            ecs_cfg.get("use_for_plugin_targeting"),
+            False,
+        ),
+    }
 
 
 _LOCK = threading.Lock()
@@ -766,8 +926,7 @@ def _build_snapshot(
     except Exception:  # pragma: no cover - defensive
         edns_udp_payload = 1232
 
-    enable_ede = bool(server_cfg.get("enable_ede", False))
-    forward_local = bool(server_cfg.get("forward_local", False))
+    features = resolve_server_feature_flags(server_cfg)
 
     # Resolver search-domain qualification settings.
     search_cfg = resolver_cfg.get("search") or {}
@@ -898,8 +1057,20 @@ def _build_snapshot(
         dnssec_mode=str(dnssec_mode),
         dnssec_validation=str(dnssec_validation),
         edns_udp_payload=max(512, int(edns_udp_payload)),
-        enable_ede=bool(enable_ede),
-        forward_local=bool(forward_local),
+        enable_ede=bool(features["enable_ede"]),
+        forward_local=bool(features["forward_local"]),
+        ecs_enabled=bool(features["ecs_enabled"]),
+        ecs_forward_inbound=bool(features["ecs_forward_inbound"]),
+        ecs_synthesize_from_client_ip=bool(
+            features["ecs_synthesize_from_client_ip"]
+        ),
+        ecs_source_prefix_v4=int(features["ecs_source_prefix_v4"]),
+        ecs_source_prefix_v6=int(features["ecs_source_prefix_v6"]),
+        ecs_scope_prefix_v4=int(features["ecs_scope_prefix_v4"]),
+        ecs_scope_prefix_v6=int(features["ecs_scope_prefix_v6"]),
+        ecs_trusted_listeners=list(features["ecs_trusted_listeners"] or []),
+        ecs_trusted_client_cidrs=list(features["ecs_trusted_client_cidrs"] or []),
+        ecs_use_for_plugin_targeting=bool(features["ecs_use_for_plugin_targeting"]),
         min_cache_ttl=int(min_cache_ttl),
         cache_prefetch_enabled=bool(current.cache_prefetch_enabled),
         cache_prefetch_min_ttl=int(current.cache_prefetch_min_ttl),
@@ -1096,6 +1267,16 @@ def _default_snapshot() -> RuntimeSnapshot:
         edns_udp_payload=1232,
         enable_ede=False,
         forward_local=False,
+        ecs_enabled=False,
+        ecs_forward_inbound=False,
+        ecs_synthesize_from_client_ip=False,
+        ecs_source_prefix_v4=24,
+        ecs_source_prefix_v6=56,
+        ecs_scope_prefix_v4=0,
+        ecs_scope_prefix_v6=0,
+        ecs_trusted_listeners=[],
+        ecs_trusted_client_cidrs=[],
+        ecs_use_for_plugin_targeting=False,
         min_cache_ttl=0,
         cache_prefetch_enabled=False,
         cache_prefetch_min_ttl=0,
