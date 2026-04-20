@@ -5,7 +5,7 @@ import ipaddress
 import logging
 import random
 import threading
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from dnslib import (  # noqa: F401  (re-exported for udp_server._ensure_edns)
     EDNS0,
     OPCODE,
@@ -53,6 +53,12 @@ from .server_response_utils import (
     _strip_response_cookie_options,
     _set_response_id,
     compute_effective_ttl,  # noqa: F401
+)
+from .edns_utils import (
+    parse_ecs_from_request,
+    synthesize_ecs_from_client_ip,
+    strip_ecs_options_from_request,
+    upsert_ecs_option,
 )
 
 logger = logging.getLogger("foghorn.server")
@@ -161,6 +167,181 @@ def _is_forward_local_blocked_query(qname: str, qtype: int) -> bool:
     if qname.endswith(".local") or qname == "local":
         return True
     return qtype == QTYPE.PTR and _is_rfc1918_ptr_query_name(qname)
+
+
+@registered_lru_cache(maxsize=4096)
+def _parse_trusted_ecs_network(cidr_text: str) -> Optional[ipaddress._BaseNetwork]:
+    """Brief: Parse a trusted ECS CIDR string into an ipaddress network object.
+
+    Inputs:
+      - cidr_text: CIDR text from runtime ECS trust configuration.
+
+    Outputs:
+      - ipaddress network object when valid, otherwise None.
+    """
+
+    try:
+        text = str(cidr_text or "").strip()
+    except Exception:
+        return None
+    if not text:
+        return None
+    try:
+        return ipaddress.ip_network(text, strict=False)
+    except ValueError:
+        return None
+
+
+def _is_listener_trusted_for_ecs(
+    listener: Optional[str],
+    secure: Optional[bool],
+    trusted_listeners: list[str],
+) -> bool:
+    """Brief: Determine whether inbound listener metadata qualifies ECS as trusted.
+
+    Inputs:
+      - listener: Logical listener name for the current query.
+      - secure: Optional transport security flag.
+      - trusted_listeners: Runtime allowlist of trusted listener names.
+
+    Outputs:
+      - bool: True when listener/secure metadata indicates a trusted source.
+    """
+
+    normalized = {
+        str(value).strip().lower()
+        for value in (trusted_listeners or [])
+        if str(value).strip()
+    }
+    if not normalized:
+        return False
+
+    listener_name = str(listener or "").strip().lower()
+    if listener_name:
+        return listener_name in normalized
+
+    if secure is True:
+        return "dot" in normalized or "doh" in normalized
+    if secure is False:
+        return "udp" in normalized or "tcp" in normalized
+    return False
+
+
+def _is_source_ip_trusted_for_ecs(client_ip: str, trusted_cidrs: list[str]) -> bool:
+    """Brief: Determine whether transport source IP is in trusted ECS CIDRs.
+
+    Inputs:
+      - client_ip: Transport source IP text.
+      - trusted_cidrs: Runtime allowlist CIDRs for trusted inbound ECS.
+
+    Outputs:
+      - bool: True when client_ip belongs to any trusted CIDR.
+    """
+
+    if not trusted_cidrs:
+        return False
+    try:
+        source_ip = ipaddress.ip_address(str(client_ip or "").strip())
+    except Exception:
+        return False
+
+    for cidr_text in trusted_cidrs:
+        network = _parse_trusted_ecs_network(str(cidr_text))
+        if network is None:
+            continue
+        try:
+            if source_ip in network:
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _synthesize_ecs_for_source_ip(
+    client_ip: str,
+    *,
+    source_prefix_v4: int,
+    source_prefix_v6: int,
+    scope_prefix_v4: int,
+    scope_prefix_v6: int,
+) -> Optional[Dict[str, Any]]:
+    """Brief: Synthesize an ECS mapping from transport source IP.
+
+    Inputs:
+      - client_ip: Transport source IP text.
+      - source_prefix_v4/v6: ECS source-prefix values for synthesis.
+      - scope_prefix_v4/v6: ECS scope-prefix values for synthesis.
+
+    Outputs:
+      - ECS mapping dict when source IP is valid; otherwise None.
+    """
+
+    try:
+        source_ip = ipaddress.ip_address(str(client_ip or "").strip())
+    except Exception:
+        return None
+
+    if int(source_ip.version) == 4:
+        scope_prefix = max(0, min(32, int(scope_prefix_v4)))
+    else:
+        scope_prefix = max(0, min(128, int(scope_prefix_v6)))
+
+    return synthesize_ecs_from_client_ip(
+        str(source_ip),
+        ipv4_prefix=int(source_prefix_v4),
+        ipv6_prefix=int(source_prefix_v6),
+        scope_prefix=int(scope_prefix),
+    )
+
+
+def _build_request_result_meta(
+    *,
+    source_ip: str,
+    effective_target_ip: str,
+    listener: Optional[str],
+    secure: Optional[bool],
+    inbound_ecs: Optional[Dict[str, Any]],
+    inbound_ecs_trusted: bool,
+    outbound_ecs: Optional[Dict[str, Any]],
+    ecs_cache_bypass: bool,
+) -> Dict[str, Any]:
+    """Brief: Build per-query source/ECS metadata for query_log result payloads.
+
+    Inputs:
+      - source_ip: Transport source IP (client_ip).
+      - effective_target_ip: Trust-aware targeting IP used by plugins.
+      - listener: Optional listener name.
+      - secure: Optional transport security flag.
+      - inbound_ecs: Parsed inbound ECS option (if present).
+      - inbound_ecs_trusted: Whether inbound ECS was trusted.
+      - outbound_ecs: ECS mapping applied to upstream query (if any).
+      - ecs_cache_bypass: Whether ECS context bypassed cache lookup/storage.
+
+    Outputs:
+      - dict: Metadata safe to merge into result context payloads.
+    """
+
+    meta: Dict[str, Any] = {
+        "source_ip": str(source_ip or ""),
+        "effective_target_ip": str(effective_target_ip or source_ip or ""),
+    }
+    if listener is not None:
+        meta["listener"] = listener
+    if secure is not None:
+        meta["secure"] = bool(secure)
+
+    ecs_meta: Dict[str, Any] = {}
+    if inbound_ecs is not None:
+        ecs_meta["inbound"] = dict(inbound_ecs)
+        ecs_meta["inbound_trusted"] = bool(inbound_ecs_trusted)
+    if outbound_ecs is not None:
+        ecs_meta["outbound"] = dict(outbound_ecs)
+    if ecs_cache_bypass:
+        ecs_meta["cache_bypass"] = True
+    if ecs_meta:
+        meta["ecs"] = ecs_meta
+
+    return meta
 
 
 # Cache of pre/post plugin ordering to avoid sorting on every query.
@@ -675,6 +856,26 @@ def _resolve_core(
             edns_udp_payload=max(512, int(snap.edns_udp_payload)),
             enable_ede=bool(snap.enable_ede),
             forward_local=bool(snap.forward_local),
+            ecs_enabled=bool(getattr(snap, "ecs_enabled", False)),
+            ecs_forward_inbound=bool(getattr(snap, "ecs_forward_inbound", False)),
+            ecs_synthesize_from_client_ip=bool(
+                getattr(snap, "ecs_synthesize_from_client_ip", False)
+            ),
+            ecs_source_prefix_v4=max(0, min(32, int(getattr(snap, "ecs_source_prefix_v4", 24)))),
+            ecs_source_prefix_v6=max(
+                0, min(128, int(getattr(snap, "ecs_source_prefix_v6", 56)))
+            ),
+            ecs_scope_prefix_v4=max(0, min(32, int(getattr(snap, "ecs_scope_prefix_v4", 0)))),
+            ecs_scope_prefix_v6=max(
+                0, min(128, int(getattr(snap, "ecs_scope_prefix_v6", 0)))
+            ),
+            ecs_trusted_listeners=list(getattr(snap, "ecs_trusted_listeners", []) or []),
+            ecs_trusted_client_cidrs=list(
+                getattr(snap, "ecs_trusted_client_cidrs", []) or []
+            ),
+            ecs_use_for_plugin_targeting=bool(
+                getattr(snap, "ecs_use_for_plugin_targeting", False)
+            ),
             min_cache_ttl=max(0, int(snap.min_cache_ttl)),
             cache_prefetch_enabled=bool(snap.cache_prefetch_enabled),
             cache_prefetch_min_ttl=max(0, int(snap.cache_prefetch_min_ttl)),
@@ -697,6 +898,16 @@ def _resolve_core(
     # query_log result payloads when present.
     ede_code_for_logs: Optional[int] = None
     ede_text_for_logs: Optional[str] = None
+    request_result_meta = _build_request_result_meta(
+        source_ip=str(client_ip or ""),
+        effective_target_ip=str(client_ip or ""),
+        listener=listener,
+        secure=secure,
+        inbound_ecs=None,
+        inbound_ecs_trusted=False,
+        outbound_ecs=None,
+        ecs_cache_bypass=False,
+    )
 
     try:
         rcode_name = "UNKNOWN"
@@ -781,6 +992,118 @@ def _resolve_core(
             Exception
         ):  # pragma: no cover - defensive: qualification failure is non-fatal
             pass
+        ecs_enabled = bool(getattr(handler, "ecs_enabled", False))
+        ecs_forward_inbound = bool(getattr(handler, "ecs_forward_inbound", False))
+        ecs_synthesize_from_client_ip = bool(
+            getattr(handler, "ecs_synthesize_from_client_ip", False)
+        )
+        ecs_source_prefix_v4 = max(
+            0,
+            min(32, int(getattr(handler, "ecs_source_prefix_v4", 24))),
+        )
+        ecs_source_prefix_v6 = max(
+            0,
+            min(128, int(getattr(handler, "ecs_source_prefix_v6", 56))),
+        )
+        ecs_scope_prefix_v4 = max(
+            0,
+            min(32, int(getattr(handler, "ecs_scope_prefix_v4", 0))),
+        )
+        ecs_scope_prefix_v6 = max(
+            0,
+            min(128, int(getattr(handler, "ecs_scope_prefix_v6", 0))),
+        )
+        ecs_trusted_listeners = list(
+            getattr(handler, "ecs_trusted_listeners", []) or []
+        )
+        ecs_trusted_client_cidrs = list(
+            getattr(handler, "ecs_trusted_client_cidrs", []) or []
+        )
+        ecs_use_for_plugin_targeting = bool(
+            getattr(handler, "ecs_use_for_plugin_targeting", False)
+        )
+
+        inbound_ecs: Optional[Dict[str, Any]] = None
+        inbound_ecs_trusted = False
+        trusted_inbound_ecs: Optional[Dict[str, Any]] = None
+        outbound_ecs: Optional[Dict[str, Any]] = None
+        effective_target_ip = str(client_ip or "")
+
+        resolver_mode_for_ecs = str(getattr(handler, "resolver_mode", "forward")).lower()
+        if resolver_mode_for_ecs == "none":
+            resolver_mode_for_ecs = "master"
+
+        if ecs_enabled:
+            inbound_ecs = parse_ecs_from_request(req)
+            if inbound_ecs is not None:
+                inbound_ecs_trusted = bool(
+                    _is_listener_trusted_for_ecs(
+                        listener=listener,
+                        secure=secure,
+                        trusted_listeners=ecs_trusted_listeners,
+                    )
+                    or _is_source_ip_trusted_for_ecs(
+                        client_ip=client_ip,
+                        trusted_cidrs=ecs_trusted_client_cidrs,
+                    )
+                )
+                if inbound_ecs_trusted:
+                    trusted_inbound_ecs = dict(inbound_ecs)
+
+            if (
+                resolver_mode_for_ecs == "forward"
+                and ecs_forward_inbound
+                and trusted_inbound_ecs is not None
+            ):
+                outbound_ecs = dict(trusted_inbound_ecs)
+            elif resolver_mode_for_ecs == "forward" and ecs_synthesize_from_client_ip:
+                outbound_ecs = _synthesize_ecs_for_source_ip(
+                    client_ip=client_ip,
+                    source_prefix_v4=ecs_source_prefix_v4,
+                    source_prefix_v6=ecs_source_prefix_v6,
+                    scope_prefix_v4=ecs_scope_prefix_v4,
+                    scope_prefix_v6=ecs_scope_prefix_v6,
+                )
+
+            if resolver_mode_for_ecs == "forward" and inbound_ecs is not None:
+                try:
+                    strip_ecs_options_from_request(req)
+                except Exception:
+                    pass
+
+            if outbound_ecs is not None:
+                try:
+                    if not upsert_ecs_option(
+                        req,
+                        outbound_ecs,
+                        create_opt_if_missing=False,
+                        edns_udp_payload=int(getattr(handler, "edns_udp_payload", 1232)),
+                        preserve_do_bit=True,
+                    ):
+                        outbound_ecs = None
+                except Exception:
+                    outbound_ecs = None
+
+            if ecs_use_for_plugin_targeting and trusted_inbound_ecs is not None:
+                target_ip = str(trusted_inbound_ecs.get("address") or "").strip()
+                if target_ip:
+                    effective_target_ip = target_ip
+
+        if not effective_target_ip:
+            effective_target_ip = str(client_ip or "")
+        ecs_cache_bypass = bool(
+            outbound_ecs is not None or effective_target_ip != str(client_ip or "")
+        )
+        request_result_meta = _build_request_result_meta(
+            source_ip=str(client_ip or ""),
+            effective_target_ip=str(effective_target_ip or client_ip or ""),
+            listener=listener,
+            secure=secure,
+            inbound_ecs=inbound_ecs,
+            inbound_ecs_trusted=inbound_ecs_trusted,
+            outbound_ecs=outbound_ecs,
+            ecs_cache_bypass=ecs_cache_bypass,
+        )
 
         cache_key = (qname.lower(), qtype)
 
@@ -799,6 +1122,12 @@ def _resolve_core(
         # Attach qname so BasePlugin domain-targeting helpers can use it.
         try:
             ctx.qname = qname
+        except Exception:  # pragma: no cover - defensive
+            pass
+        try:
+            ctx.ecs = dict(trusted_inbound_ecs) if trusted_inbound_ecs is not None else None
+            ctx.effective_target_ip = str(effective_target_ip or client_ip or "")
+            ctx.source_ip = str(client_ip or "")
         except Exception:  # pragma: no cover - defensive
             pass
         plugins_list = list(getattr(handler, "plugins", []) or [])
@@ -974,10 +1303,7 @@ def _resolve_core(
                                 }
                                 if deny_source != "pre_plugin":
                                     result_ctx["plugin"] = deny_source
-                                if listener is not None:
-                                    result_ctx["listener"] = listener
-                                if secure is not None:
-                                    result_ctx["secure"] = bool(secure)
+                                result_ctx.update(request_result_meta)
                                 stats.record_query_result(
                                     client_ip=client_ip,
                                     qname=qname,
@@ -1121,10 +1447,7 @@ def _resolve_core(
                                 }
                                 if override_source != "pre_plugin_override":
                                     result_ctx["plugin"] = override_source
-                                if listener is not None:
-                                    result_ctx["listener"] = listener
-                                if secure is not None:
-                                    result_ctx["secure"] = bool(secure)
+                                result_ctx.update(request_result_meta)
                                 qtype_name = _qtype_label_for_stats(qtype)
                                 stats.record_query_result(
                                     client_ip=client_ip,
@@ -1171,7 +1494,9 @@ def _resolve_core(
         cached: Optional[bytes] = None
         seconds_remaining: Optional[float] = None
         ttl_original: Optional[int] = None
-        bypass_cache = bool(getattr(_CACHE_LOCAL, "bypass_cache", False))
+        bypass_cache = bool(
+            getattr(_CACHE_LOCAL, "bypass_cache", False) or ecs_cache_bypass
+        )
         prefetch_enabled = bool(getattr(handler, "cache_prefetch_enabled", False))
         window_after = float(
             getattr(
@@ -1241,10 +1566,7 @@ def _resolve_core(
                     ]
                     first = answers[0]["rdata"] if answers else None
                     result_ctx = {"source": "cache", "answers": answers}
-                    if listener is not None:
-                        result_ctx["listener"] = listener
-                    if secure is not None:
-                        result_ctx["secure"] = bool(secure)
+                    result_ctx.update(request_result_meta)
                     qtype_name = _qtype_label_for_stats(qtype)
                     stats.record_query_result(
                         client_ip=client_ip,
@@ -1355,6 +1677,8 @@ def _resolve_core(
                 try:
                     qtype_name = _qtype_label_for_stats(qtype)
                     stats.record_response_rcode("NXDOMAIN", qname)
+                    result_ctx = {"source": "local_blocked"}
+                    result_ctx.update(request_result_meta)
                     stats.record_query_result(
                         client_ip=client_ip,
                         qname=qname,
@@ -1364,7 +1688,7 @@ def _resolve_core(
                         status="local_blocked",
                         error=None,
                         first=None,
-                        result={"source": "local_blocked"},
+                        result=result_ctx,
                     )
                 except Exception:  # pragma: no cover - defensive
                     pass
@@ -1384,6 +1708,7 @@ def _resolve_core(
         reply: Optional[bytes] = None
         used_upstream: Optional[Dict] = None
         reason: Optional[str] = None
+        upstream_url = ""
 
         # Decide between forwarding, recursion, and authoritative-only (no
         # forwarding) based on resolver_mode.
@@ -1746,10 +2071,7 @@ def _resolve_core(
                         result_ctx["upstream"] = str(upstream_id)
                     if upstream_url:
                         result_ctx["upstream_url"] = str(upstream_url)
-                    if listener is not None:
-                        result_ctx["listener"] = listener
-                    if secure is not None:
-                        result_ctx["secure"] = bool(secure)
+                    result_ctx.update(request_result_meta)
                     stats.record_query_result(
                         client_ip=client_ip,
                         qname=qname,
@@ -1786,6 +2108,14 @@ def _resolve_core(
         ctx2 = PluginContext(client_ip=client_ip, listener=listener, secure=secure)
         try:
             ctx2.qname = qname
+        except Exception:  # pragma: no cover - defensive
+            pass
+        try:
+            ctx2.ecs = (
+                dict(trusted_inbound_ecs) if trusted_inbound_ecs is not None else None
+            )
+            ctx2.effective_target_ip = str(effective_target_ip or client_ip or "")
+            ctx2.source_ip = str(client_ip or "")
         except Exception:  # pragma: no cover - defensive
             pass
         out = reply
@@ -1978,7 +2308,7 @@ def _resolve_core(
                 elif has_ns and rcode == RCODE.NOERROR and not r.rr:
                     ttl = _compute_negative_ttl(r, getattr(handler, "min_cache_ttl", 0))
 
-            if ttl is not None and ttl > 0:
+            if ttl is not None and ttl > 0 and not ecs_cache_bypass:
                 cache = getattr(plugin_base, "DNS_CACHE", None)
                 if cache is not None:
                     cache_payload = _strip_response_cookie_options(out)
@@ -2057,10 +2387,7 @@ def _resolve_core(
                         ede_text_for_logs is not None
                     ):  # pragma: no cover - defensive/metrics path excluded from coverage
                         result_ctx["ede_text"] = str(ede_text_for_logs)
-                if listener is not None:
-                    result_ctx["listener"] = listener
-                if secure is not None:
-                    result_ctx["secure"] = bool(secure)
+                result_ctx.update(request_result_meta)
                 qtype_name = _qtype_label_for_stats(qtype)
                 status = "ok" if rcode_name == "NOERROR" else "error"
                 stats.record_query_result(
@@ -2134,14 +2461,7 @@ def _resolve_core(
                         qname = ""
                         qtype_name = ""
                     result_ctx = {"source": "server", "error": "unhandled_exception"}
-                    if (
-                        listener is not None
-                    ):  # pragma: no cover - defensive/metrics path excluded from coverage
-                        result_ctx["listener"] = listener
-                    if (
-                        secure is not None
-                    ):  # pragma: no cover - defensive/metrics path excluded from coverage
-                        result_ctx["secure"] = bool(secure)
+                    result_ctx.update(request_result_meta)
                     if qtype_name:
                         stats.record_query_result(
                             client_ip=client_ip,
