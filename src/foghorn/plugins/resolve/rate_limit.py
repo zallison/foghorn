@@ -176,6 +176,8 @@ class RateLimitConfig(BaseModel):
         for rate-limited queries (previous behavior).  Default 3.
       - psl_strict: When True, fail startup if PSL extraction is unavailable
         in domain-based modes.
+      - use_effective_target_ip: When true, use ctx.effective_target_ip for
+        rate-limit identity instead of transport source ctx.client_ip.
 
     Outputs:
       - RateLimitConfig instance with normalized field types.
@@ -216,6 +218,7 @@ class RateLimitConfig(BaseModel):
     deny_log_interval_seconds: int = Field(default=60, ge=0)
     deny_log_first_n: int = Field(default=3, ge=0)
     psl_strict: bool = Field(default=False)
+    use_effective_target_ip: bool = Field(default=False)
 
     @model_validator(mode="before")
     @classmethod
@@ -410,6 +413,10 @@ class RateLimit(BasePlugin):
         self.assume_udp_when_listener_missing = self._parse_bool_config(
             "assume_udp_when_listener_missing",
             True,
+        )
+        self.use_effective_target_ip = self._parse_bool_config(
+            "use_effective_target_ip",
+            False,
         )
         self._missing_listener_warned = False
 
@@ -1540,8 +1547,17 @@ class RateLimit(BasePlugin):
           - On insecure UDP transports, client identity uses CIDR bucketing via
             bucket_network_prefix_v4/bucket_network_prefix_v6.
         """
+        raw_client_ip_obj: object
+        if bool(getattr(self, "use_effective_target_ip", False)):
+            raw_client_ip_obj = getattr(
+                ctx,
+                "effective_target_ip",
+                getattr(ctx, "client_ip", "unknown"),
+            )
+        else:
+            raw_client_ip_obj = getattr(ctx, "client_ip", "unknown")
 
-        raw_client_ip = str(getattr(ctx, "client_ip", "") or "unknown")
+        raw_client_ip = str(raw_client_ip_obj or "unknown")
         client_ip = raw_client_ip
         listener = str(getattr(ctx, "listener", "") or "").lower()
         secure = bool(getattr(ctx, "secure", False))
@@ -2646,7 +2662,14 @@ class RateLimit(BasePlugin):
         if not self.targets(ctx):
             return None
 
-        client_ip = getattr(ctx, "client_ip", None)
+        if bool(getattr(self, "use_effective_target_ip", False)):
+            client_ip = getattr(
+                ctx,
+                "effective_target_ip",
+                getattr(ctx, "client_ip", None),
+            )
+        else:
+            client_ip = getattr(ctx, "client_ip", None)
         if not client_ip:
             # Without a usable client identity, do not attempt to rate-limit.
             return None
