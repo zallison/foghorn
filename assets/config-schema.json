@@ -63,7 +63,7 @@
         ],
         "config_schema": {
           "additionalProperties": true,
-          "description": "Brief: Typed configuration model for AccessControl used for startup validation.\n\nInputs:\n  - default: Default policy (\"allow\" or \"deny\").\n  - allow: List of CIDR/IP strings to allow.\n  - deny: List of CIDR/IP strings to deny.\n  - deny_response: Response code when denying ('nxdomain', 'refused', 'servfail',\n    'noerror_empty'/'nodata', 'ip', or 'drop').\n\nOutputs:\n  - AccessControlConfig instance with normalized types.",
+          "description": "Brief: Typed configuration model for AccessControl used for startup validation.\n\nInputs:\n  - default: Default policy (\"allow\" or \"deny\").\n  - allow: List of CIDR/IP strings to allow.\n  - deny: List of CIDR/IP strings to deny.\n  - deny_response: Response code when denying ('nxdomain', 'refused', 'servfail',\n    'noerror_empty'/'nodata', 'ip', or 'drop').\n  - use_effective_target_ip: When true, evaluate allow/deny rules against\n    ctx.effective_target_ip instead of transport source ctx.client_ip.\n\nOutputs:\n  - AccessControlConfig instance with normalized types.",
           "properties": {
             "allow": {
               "description": "Type: array.",
@@ -94,56 +94,18 @@
               "description": "Type: string. Default: \"refused\".",
               "title": "Deny Response",
               "type": "string"
+            },
+            "use_effective_target_ip": {
+              "default": false,
+              "description": "Type: boolean. Default: false.",
+              "title": "Use Effective Target Ip",
+              "type": "boolean"
             }
           },
           "title": "AccessControlConfig",
           "type": "object"
         },
         "module": "foghorn.plugins.resolve.access_control.AccessControl"
-      },
-      "dns_rebinding": {
-        "aliases": [
-          "dns_rebinding",
-          "no_rebinding",
-          "rebinding"
-        ],
-        "config_schema": {
-          "additionalProperties": true,
-          "description": "Brief: Typed configuration model for DnsRebinding.\n\nInputs:\n  - allowlist_domains: Domain names allowed to resolve to private addresses.\n  - allowlist_mode: Domain matching mode ('suffix' or 'exact').\n  - private_cidrs: CIDRs treated as private/rebinding-sensitive.\n\nOutputs:\n  - DnsRebindingConfig instance with normalized field types.",
-          "properties": {
-            "allowlist_domains": {
-              "description": "Type: array.",
-              "items": {
-                "description": "Type: string.",
-                "type": "string"
-              },
-              "title": "Allowlist Domains",
-              "type": "array"
-            },
-            "allowlist_mode": {
-              "default": "suffix",
-              "description": "Type: string. Valid values: \"suffix\", \"exact\". Default: \"suffix\".",
-              "enum": [
-                "suffix",
-                "exact"
-              ],
-              "title": "Allowlist Mode",
-              "type": "string"
-            },
-            "private_cidrs": {
-              "description": "Type: array.",
-              "items": {
-                "description": "Type: string.",
-                "type": "string"
-              },
-              "title": "Private Cidrs",
-              "type": "array"
-            }
-          },
-          "title": "DnsRebindingConfig",
-          "type": "object"
-        },
-        "module": "foghorn.plugins.resolve.dns_rebinding.DnsRebinding"
       },
       "docker_hosts": {
         "aliases": [
@@ -1038,7 +1000,7 @@
         ],
         "config_schema": {
           "additionalProperties": true,
-          "description": "Brief: Typed configuration model for RateLimit.\n\nInputs:\n  - mode: 'per_client' (default), 'per_client_domain', or 'per_domain'\n    controlling how rate profiles are keyed.\n  - window_seconds: Measurement window size in seconds (>= 1).\n  - warmup_windows: Number of completed windows to observe before enforcing.\n  - alpha: EWMA smoothing factor when the new RPS is >= the learned average\n    (controls how quickly we ramp *up*).\n  - alpha_down: Optional EWMA factor when the new RPS is < the learned\n    average (controls how quickly we ramp *down*). Defaults to alpha when\n    omitted.\n  - burst_factor: Allowed multiplier over learned average RPS when enforcing.\n  - burst_windows: Number of consecutive burst windows allowed before the\n    burst factor is disabled (0 means unlimited).\n  - burst_reset_windows: Number of consecutive completed windows at or below\n    threshold required to reset burst state back to zero.\n  - min_enforce_rps: Minimum RPS threshold for enforcement.\n  - min_burst_threshold: Minimum burst-threshold floor used when deriving\n    avg_rps * burst_factor; defaults to min_boot_rps/min_boost_rps when\n    provided, otherwise defaults to min_enforce_rps.\n  - min_boot_rps: Deprecated alias for min_burst_threshold.\n  - min_boost_rps: Deprecated alias for min_burst_threshold.\n  - max_enforce_rps: Hard upper bound on allowed RPS per key (0 disables).\n  - global_max_rps: Optional hard upper bound on total RPS across all keys\n    (0 disables).\n  - db_path: Path to sqlite3 database storing learned profiles.\n\n  - max_profiles: Maximum number of rows permitted in rate_profiles (>= 1).\n  - active_window_max_keys: Maximum number of keys tracked in-memory for the\n    currently active request window (>= 1). This bounds request-path memory\n    overhead for admin snapshot visibility and rollover flush handling.\n  - profile_ttl_seconds: Best-effort TTL for profiles; rows older than this\n    are pruned during periodic maintenance (0 disables TTL pruning).\n  - prune_interval_seconds: Minimum seconds between prune passes (>= 0).\n\n  - assume_udp_when_listener_missing: When True, treat missing/unknown\n    listener values on insecure transports as UDP for spoofing mitigation.\n  - bucket_network_prefix_v4: IPv4 prefix length used for UDP client-IP\n    bucketing on insecure transports.\n  - bucket_network_prefix_v6: IPv6 prefix length used for UDP client-IP\n    bucketing on insecure transports.\n  - limit_recalc_windows: Number of completed windows between per-bucket\n    allowed-RPS recalculations. Default 10 windows.\n  - warmup_max_rps: Optional hard RPS cap enforced during warmup\n    (0 disables).\n  - bootstrap_rps: Optional baseline RPS used to seed profiles when\n    no historical samples exist. When omitted, defaults to global_max_rps\n    when explicitly set; otherwise defaults to 50. Set to 0 to disable\n    bootstrap seeding.\n\n  - deny_response: Policy for limited queries ('nxdomain', 'refused', 'servfail',\n    'noerror_empty'/'nodata', 'ip', or 'drop'). Defaults to 'nxdomain'.\n  - deny_response_ip4 / deny_response_ip6: Optional IPs used when deny_response=='ip'.\n  - ttl: Optional TTL used when synthesizing IP responses.\n  - stats_log_interval_seconds: Interval for periodic rate-limit summary logs\n    (0 disables).\n  - stats_window_seconds: Optional lookback window in seconds applied when\n    computing periodic summary avg/max values (0 uses all profiles).\n  - deny_log_interval_seconds: Minimum seconds between per-key deny log\n    messages (0 logs every deny; default 60).  Suppressed denies are\n    counted and the total is included in the next emitted message.\n  - deny_log_first_n: Number of denied queries to write a persistent\n    query-log row for at the start of each blocked episode per key.\n    After this many logged denies the query-log row is suppressed for the\n    remainder of the episode; counting resets when the key's rate drops\n    back below the allowed threshold.  0 suppresses all query-log rows\n    for rate-limited queries (previous behavior).  Default 3.\n  - psl_strict: When True, fail startup if PSL extraction is unavailable\n    in domain-based modes.\n\nOutputs:\n  - RateLimitConfig instance with normalized field types.",
+          "description": "Brief: Typed configuration model for RateLimit.\n\nInputs:\n  - mode: 'per_client' (default), 'per_client_domain', or 'per_domain'\n    controlling how rate profiles are keyed.\n  - window_seconds: Measurement window size in seconds (>= 1).\n  - warmup_windows: Number of completed windows to observe before enforcing.\n  - alpha: EWMA smoothing factor when the new RPS is >= the learned average\n    (controls how quickly we ramp *up*).\n  - alpha_down: Optional EWMA factor when the new RPS is < the learned\n    average (controls how quickly we ramp *down*). Defaults to alpha when\n    omitted.\n  - burst_factor: Allowed multiplier over learned average RPS when enforcing.\n  - burst_windows: Number of consecutive burst windows allowed before the\n    burst factor is disabled (0 means unlimited).\n  - burst_reset_windows: Number of consecutive completed windows at or below\n    threshold required to reset burst state back to zero.\n  - min_enforce_rps: Minimum RPS threshold for enforcement.\n  - min_burst_threshold: Minimum burst-threshold floor used when deriving\n    avg_rps * burst_factor; defaults to min_boot_rps/min_boost_rps when\n    provided, otherwise defaults to min_enforce_rps.\n  - min_boot_rps: Deprecated alias for min_burst_threshold.\n  - min_boost_rps: Deprecated alias for min_burst_threshold.\n  - max_enforce_rps: Hard upper bound on allowed RPS per key (0 disables).\n  - global_max_rps: Optional hard upper bound on total RPS across all keys\n    (0 disables).\n  - db_path: Path to sqlite3 database storing learned profiles.\n\n  - max_profiles: Maximum number of rows permitted in rate_profiles (>= 1).\n  - active_window_max_keys: Maximum number of keys tracked in-memory for the\n    currently active request window (>= 1). This bounds request-path memory\n    overhead for admin snapshot visibility and rollover flush handling.\n  - profile_ttl_seconds: Best-effort TTL for profiles; rows older than this\n    are pruned during periodic maintenance (0 disables TTL pruning).\n  - prune_interval_seconds: Minimum seconds between prune passes (>= 0).\n\n  - assume_udp_when_listener_missing: When True, treat missing/unknown\n    listener values on insecure transports as UDP for spoofing mitigation.\n  - bucket_network_prefix_v4: IPv4 prefix length used for UDP client-IP\n    bucketing on insecure transports.\n  - bucket_network_prefix_v6: IPv6 prefix length used for UDP client-IP\n    bucketing on insecure transports.\n  - limit_recalc_windows: Number of completed windows between per-bucket\n    allowed-RPS recalculations. Default 10 windows.\n  - warmup_max_rps: Optional hard RPS cap enforced during warmup\n    (0 disables).\n  - bootstrap_rps: Optional baseline RPS used to seed profiles when\n    no historical samples exist. When omitted, defaults to global_max_rps\n    when explicitly set; otherwise defaults to 50. Set to 0 to disable\n    bootstrap seeding.\n\n  - deny_response: Policy for limited queries ('nxdomain', 'refused', 'servfail',\n    'noerror_empty'/'nodata', 'ip', or 'drop'). Defaults to 'nxdomain'.\n  - deny_response_ip4 / deny_response_ip6: Optional IPs used when deny_response=='ip'.\n  - ttl: Optional TTL used when synthesizing IP responses.\n  - stats_log_interval_seconds: Interval for periodic rate-limit summary logs\n    (0 disables).\n  - stats_window_seconds: Optional lookback window in seconds applied when\n    computing periodic summary avg/max values (0 uses all profiles).\n  - deny_log_interval_seconds: Minimum seconds between per-key deny log\n    messages (0 logs every deny; default 60).  Suppressed denies are\n    counted and the total is included in the next emitted message.\n  - deny_log_first_n: Number of denied queries to write a persistent\n    query-log row for at the start of each blocked episode per key.\n    After this many logged denies the query-log row is suppressed for the\n    remainder of the episode; counting resets when the key's rate drops\n    back below the allowed threshold.  0 suppresses all query-log rows\n    for rate-limited queries (previous behavior).  Default 3.\n  - psl_strict: When True, fail startup if PSL extraction is unavailable\n    in domain-based modes.\n  - use_effective_target_ip: When true, use ctx.effective_target_ip for\n    rate-limit identity instead of transport source ctx.client_ip.\n\nOutputs:\n  - RateLimitConfig instance with normalized field types.",
           "properties": {
             "active_window_max_keys": {
               "default": 2048,
@@ -1272,6 +1234,12 @@
               "minimum": 0,
               "title": "Ttl",
               "type": "integer"
+            },
+            "use_effective_target_ip": {
+              "default": false,
+              "description": "Type: boolean. Default: false.",
+              "title": "Use Effective Target Ip",
+              "type": "boolean"
             },
             "warmup_max_rps": {
               "default": 0.0,
@@ -3087,7 +3055,7 @@
         ],
         "config_schema": {
           "additionalProperties": true,
-          "description": "Brief: Typed configuration model for AccessControl used for startup validation.\n\nInputs:\n  - default: Default policy (\"allow\" or \"deny\").\n  - allow: List of CIDR/IP strings to allow.\n  - deny: List of CIDR/IP strings to deny.\n  - deny_response: Response code when denying ('nxdomain', 'refused', 'servfail',\n    'noerror_empty'/'nodata', 'ip', or 'drop').\n\nOutputs:\n  - AccessControlConfig instance with normalized types.",
+          "description": "Brief: Typed configuration model for AccessControl used for startup validation.\n\nInputs:\n  - default: Default policy (\"allow\" or \"deny\").\n  - allow: List of CIDR/IP strings to allow.\n  - deny: List of CIDR/IP strings to deny.\n  - deny_response: Response code when denying ('nxdomain', 'refused', 'servfail',\n    'noerror_empty'/'nodata', 'ip', or 'drop').\n  - use_effective_target_ip: When true, evaluate allow/deny rules against\n    ctx.effective_target_ip instead of transport source ctx.client_ip.\n\nOutputs:\n  - AccessControlConfig instance with normalized types.",
           "properties": {
             "allow": {
               "description": "Type: array.",
@@ -3118,56 +3086,18 @@
               "description": "Type: string. Default: \"refused\".",
               "title": "Deny Response",
               "type": "string"
+            },
+            "use_effective_target_ip": {
+              "default": false,
+              "description": "Type: boolean. Default: false.",
+              "title": "Use Effective Target Ip",
+              "type": "boolean"
             }
           },
           "title": "AccessControlConfig",
           "type": "object"
         },
         "module": "foghorn.plugins.resolve.access_control.AccessControl"
-      },
-      "dns_rebinding": {
-        "aliases": [
-          "dns_rebinding",
-          "no_rebinding",
-          "rebinding"
-        ],
-        "config_schema": {
-          "additionalProperties": true,
-          "description": "Brief: Typed configuration model for DnsRebinding.\n\nInputs:\n  - allowlist_domains: Domain names allowed to resolve to private addresses.\n  - allowlist_mode: Domain matching mode ('suffix' or 'exact').\n  - private_cidrs: CIDRs treated as private/rebinding-sensitive.\n\nOutputs:\n  - DnsRebindingConfig instance with normalized field types.",
-          "properties": {
-            "allowlist_domains": {
-              "description": "Type: array.",
-              "items": {
-                "description": "Type: string.",
-                "type": "string"
-              },
-              "title": "Allowlist Domains",
-              "type": "array"
-            },
-            "allowlist_mode": {
-              "default": "suffix",
-              "description": "Type: string. Valid values: \"suffix\", \"exact\". Default: \"suffix\".",
-              "enum": [
-                "suffix",
-                "exact"
-              ],
-              "title": "Allowlist Mode",
-              "type": "string"
-            },
-            "private_cidrs": {
-              "description": "Type: array.",
-              "items": {
-                "description": "Type: string.",
-                "type": "string"
-              },
-              "title": "Private Cidrs",
-              "type": "array"
-            }
-          },
-          "title": "DnsRebindingConfig",
-          "type": "object"
-        },
-        "module": "foghorn.plugins.resolve.dns_rebinding.DnsRebinding"
       },
       "docker_hosts": {
         "aliases": [
@@ -4062,7 +3992,7 @@
         ],
         "config_schema": {
           "additionalProperties": true,
-          "description": "Brief: Typed configuration model for RateLimit.\n\nInputs:\n  - mode: 'per_client' (default), 'per_client_domain', or 'per_domain'\n    controlling how rate profiles are keyed.\n  - window_seconds: Measurement window size in seconds (>= 1).\n  - warmup_windows: Number of completed windows to observe before enforcing.\n  - alpha: EWMA smoothing factor when the new RPS is >= the learned average\n    (controls how quickly we ramp *up*).\n  - alpha_down: Optional EWMA factor when the new RPS is < the learned\n    average (controls how quickly we ramp *down*). Defaults to alpha when\n    omitted.\n  - burst_factor: Allowed multiplier over learned average RPS when enforcing.\n  - burst_windows: Number of consecutive burst windows allowed before the\n    burst factor is disabled (0 means unlimited).\n  - burst_reset_windows: Number of consecutive completed windows at or below\n    threshold required to reset burst state back to zero.\n  - min_enforce_rps: Minimum RPS threshold for enforcement.\n  - min_burst_threshold: Minimum burst-threshold floor used when deriving\n    avg_rps * burst_factor; defaults to min_boot_rps/min_boost_rps when\n    provided, otherwise defaults to min_enforce_rps.\n  - min_boot_rps: Deprecated alias for min_burst_threshold.\n  - min_boost_rps: Deprecated alias for min_burst_threshold.\n  - max_enforce_rps: Hard upper bound on allowed RPS per key (0 disables).\n  - global_max_rps: Optional hard upper bound on total RPS across all keys\n    (0 disables).\n  - db_path: Path to sqlite3 database storing learned profiles.\n\n  - max_profiles: Maximum number of rows permitted in rate_profiles (>= 1).\n  - active_window_max_keys: Maximum number of keys tracked in-memory for the\n    currently active request window (>= 1). This bounds request-path memory\n    overhead for admin snapshot visibility and rollover flush handling.\n  - profile_ttl_seconds: Best-effort TTL for profiles; rows older than this\n    are pruned during periodic maintenance (0 disables TTL pruning).\n  - prune_interval_seconds: Minimum seconds between prune passes (>= 0).\n\n  - assume_udp_when_listener_missing: When True, treat missing/unknown\n    listener values on insecure transports as UDP for spoofing mitigation.\n  - bucket_network_prefix_v4: IPv4 prefix length used for UDP client-IP\n    bucketing on insecure transports.\n  - bucket_network_prefix_v6: IPv6 prefix length used for UDP client-IP\n    bucketing on insecure transports.\n  - limit_recalc_windows: Number of completed windows between per-bucket\n    allowed-RPS recalculations. Default 10 windows.\n  - warmup_max_rps: Optional hard RPS cap enforced during warmup\n    (0 disables).\n  - bootstrap_rps: Optional baseline RPS used to seed profiles when\n    no historical samples exist. When omitted, defaults to global_max_rps\n    when explicitly set; otherwise defaults to 50. Set to 0 to disable\n    bootstrap seeding.\n\n  - deny_response: Policy for limited queries ('nxdomain', 'refused', 'servfail',\n    'noerror_empty'/'nodata', 'ip', or 'drop'). Defaults to 'nxdomain'.\n  - deny_response_ip4 / deny_response_ip6: Optional IPs used when deny_response=='ip'.\n  - ttl: Optional TTL used when synthesizing IP responses.\n  - stats_log_interval_seconds: Interval for periodic rate-limit summary logs\n    (0 disables).\n  - stats_window_seconds: Optional lookback window in seconds applied when\n    computing periodic summary avg/max values (0 uses all profiles).\n  - deny_log_interval_seconds: Minimum seconds between per-key deny log\n    messages (0 logs every deny; default 60).  Suppressed denies are\n    counted and the total is included in the next emitted message.\n  - deny_log_first_n: Number of denied queries to write a persistent\n    query-log row for at the start of each blocked episode per key.\n    After this many logged denies the query-log row is suppressed for the\n    remainder of the episode; counting resets when the key's rate drops\n    back below the allowed threshold.  0 suppresses all query-log rows\n    for rate-limited queries (previous behavior).  Default 3.\n  - psl_strict: When True, fail startup if PSL extraction is unavailable\n    in domain-based modes.\n\nOutputs:\n  - RateLimitConfig instance with normalized field types.",
+          "description": "Brief: Typed configuration model for RateLimit.\n\nInputs:\n  - mode: 'per_client' (default), 'per_client_domain', or 'per_domain'\n    controlling how rate profiles are keyed.\n  - window_seconds: Measurement window size in seconds (>= 1).\n  - warmup_windows: Number of completed windows to observe before enforcing.\n  - alpha: EWMA smoothing factor when the new RPS is >= the learned average\n    (controls how quickly we ramp *up*).\n  - alpha_down: Optional EWMA factor when the new RPS is < the learned\n    average (controls how quickly we ramp *down*). Defaults to alpha when\n    omitted.\n  - burst_factor: Allowed multiplier over learned average RPS when enforcing.\n  - burst_windows: Number of consecutive burst windows allowed before the\n    burst factor is disabled (0 means unlimited).\n  - burst_reset_windows: Number of consecutive completed windows at or below\n    threshold required to reset burst state back to zero.\n  - min_enforce_rps: Minimum RPS threshold for enforcement.\n  - min_burst_threshold: Minimum burst-threshold floor used when deriving\n    avg_rps * burst_factor; defaults to min_boot_rps/min_boost_rps when\n    provided, otherwise defaults to min_enforce_rps.\n  - min_boot_rps: Deprecated alias for min_burst_threshold.\n  - min_boost_rps: Deprecated alias for min_burst_threshold.\n  - max_enforce_rps: Hard upper bound on allowed RPS per key (0 disables).\n  - global_max_rps: Optional hard upper bound on total RPS across all keys\n    (0 disables).\n  - db_path: Path to sqlite3 database storing learned profiles.\n\n  - max_profiles: Maximum number of rows permitted in rate_profiles (>= 1).\n  - active_window_max_keys: Maximum number of keys tracked in-memory for the\n    currently active request window (>= 1). This bounds request-path memory\n    overhead for admin snapshot visibility and rollover flush handling.\n  - profile_ttl_seconds: Best-effort TTL for profiles; rows older than this\n    are pruned during periodic maintenance (0 disables TTL pruning).\n  - prune_interval_seconds: Minimum seconds between prune passes (>= 0).\n\n  - assume_udp_when_listener_missing: When True, treat missing/unknown\n    listener values on insecure transports as UDP for spoofing mitigation.\n  - bucket_network_prefix_v4: IPv4 prefix length used for UDP client-IP\n    bucketing on insecure transports.\n  - bucket_network_prefix_v6: IPv6 prefix length used for UDP client-IP\n    bucketing on insecure transports.\n  - limit_recalc_windows: Number of completed windows between per-bucket\n    allowed-RPS recalculations. Default 10 windows.\n  - warmup_max_rps: Optional hard RPS cap enforced during warmup\n    (0 disables).\n  - bootstrap_rps: Optional baseline RPS used to seed profiles when\n    no historical samples exist. When omitted, defaults to global_max_rps\n    when explicitly set; otherwise defaults to 50. Set to 0 to disable\n    bootstrap seeding.\n\n  - deny_response: Policy for limited queries ('nxdomain', 'refused', 'servfail',\n    'noerror_empty'/'nodata', 'ip', or 'drop'). Defaults to 'nxdomain'.\n  - deny_response_ip4 / deny_response_ip6: Optional IPs used when deny_response=='ip'.\n  - ttl: Optional TTL used when synthesizing IP responses.\n  - stats_log_interval_seconds: Interval for periodic rate-limit summary logs\n    (0 disables).\n  - stats_window_seconds: Optional lookback window in seconds applied when\n    computing periodic summary avg/max values (0 uses all profiles).\n  - deny_log_interval_seconds: Minimum seconds between per-key deny log\n    messages (0 logs every deny; default 60).  Suppressed denies are\n    counted and the total is included in the next emitted message.\n  - deny_log_first_n: Number of denied queries to write a persistent\n    query-log row for at the start of each blocked episode per key.\n    After this many logged denies the query-log row is suppressed for the\n    remainder of the episode; counting resets when the key's rate drops\n    back below the allowed threshold.  0 suppresses all query-log rows\n    for rate-limited queries (previous behavior).  Default 3.\n  - psl_strict: When True, fail startup if PSL extraction is unavailable\n    in domain-based modes.\n  - use_effective_target_ip: When true, use ctx.effective_target_ip for\n    rate-limit identity instead of transport source ctx.client_ip.\n\nOutputs:\n  - RateLimitConfig instance with normalized field types.",
           "properties": {
             "active_window_max_keys": {
               "default": 2048,
@@ -4296,6 +4226,12 @@
               "minimum": 0,
               "title": "Ttl",
               "type": "integer"
+            },
+            "use_effective_target_ip": {
+              "default": false,
+              "description": "Type: boolean. Default: false.",
+              "title": "Use Effective Target Ip",
+              "type": "boolean"
             },
             "warmup_max_rps": {
               "default": 0.0,
@@ -6717,12 +6653,128 @@
         },
         "enable_ede": {
           "default": false,
-          "description": "Enable generation and pass-through of Extended DNS Errors (RFC 8914) for EDNS clients.",
+          "description": "Deprecated legacy alias for server.features.enable_ede.",
           "type": "boolean"
+        },
+        "features": {
+          "additionalProperties": false,
+          "description": "Canonical feature-gate controls for resolver behavior.",
+          "properties": {
+            "comment": {
+              "description": "Optional human metadata string (max 254 characters).",
+              "maxLength": 254,
+              "type": "string"
+            },
+            "ecs": {
+              "additionalProperties": false,
+              "description": "EDNS Client Subnet (ECS) trust, forwarding, and targeting controls.",
+              "properties": {
+                "comment": {
+                  "description": "Optional human metadata string (max 254 characters).",
+                  "maxLength": 254,
+                  "type": "string"
+                },
+                "enabled": {
+                  "default": false,
+                  "description": "Enable ECS parsing and policy controls in the resolver.",
+                  "type": "boolean"
+                },
+                "forward_inbound": {
+                  "default": false,
+                  "description": "Forward trusted inbound ECS to upstream resolvers in forward mode.",
+                  "type": "boolean"
+                },
+                "id": {
+                  "description": "Optional human metadata string (max 254 characters).",
+                  "maxLength": 254,
+                  "type": "string"
+                },
+                "scope_prefix_v4": {
+                  "default": 0,
+                  "description": "IPv4 scope prefix length used for synthesized ECS.",
+                  "maximum": 32,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "scope_prefix_v6": {
+                  "default": 0,
+                  "description": "IPv6 scope prefix length used for synthesized ECS.",
+                  "maximum": 128,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "source_prefix_v4": {
+                  "default": 24,
+                  "description": "IPv4 source prefix length used for synthesized ECS.",
+                  "maximum": 32,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "source_prefix_v6": {
+                  "default": 56,
+                  "description": "IPv6 source prefix length used for synthesized ECS.",
+                  "maximum": 128,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "synthesize_from_client_ip": {
+                  "default": false,
+                  "description": "When inbound ECS is absent, synthesize ECS from transport source IP in forward mode.",
+                  "type": "boolean"
+                },
+                "trusted_client_cidrs": {
+                  "default": [],
+                  "description": "Source CIDRs trusted to provide inbound ECS metadata.",
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "trusted_listeners": {
+                  "default": [],
+                  "description": "Listener classes trusted to provide inbound ECS metadata.",
+                  "items": {
+                    "enum": [
+                      "udp",
+                      "tcp",
+                      "dot",
+                      "doh",
+                      "secure",
+                      "insecure"
+                    ],
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "use_for_plugin_targeting": {
+                  "default": false,
+                  "description": "Allow trusted inbound ECS to drive plugin target-IP matching.",
+                  "type": "boolean"
+                }
+              },
+              "type": "object"
+            },
+            "enable_ede": {
+              "default": false,
+              "description": "Enable generation and pass-through of Extended DNS Errors (RFC 8914) for EDNS clients.",
+              "type": "boolean"
+            },
+            "forward_local": {
+              "default": false,
+              "description": "Allow forwarding .local queries to upstream resolvers. Default false blocks them per RFC 6762.",
+              "type": "boolean"
+            },
+            "id": {
+              "description": "Optional human metadata string (max 254 characters).",
+              "maxLength": 254,
+              "type": "string"
+            }
+          },
+          "type": "object"
         },
         "forward_local": {
           "default": false,
-          "description": "Allow forwarding .local queries to upstream resolvers. Default false blocks them per RFC 6762.",
+          "description": "Deprecated legacy alias for server.features.forward_local.",
           "type": "boolean"
         },
         "http": {

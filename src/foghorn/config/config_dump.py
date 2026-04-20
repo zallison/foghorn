@@ -428,8 +428,69 @@ def _expand_server_feature_flags(server_cfg: Dict[str, Any]) -> None:
       - None.
     """
 
-    server_cfg.setdefault("enable_ede", bool(server_cfg.get("enable_ede", False)))
-    server_cfg.setdefault("forward_local", bool(server_cfg.get("forward_local", False)))
+    features_cfg = server_cfg.get("features")
+    if not isinstance(features_cfg, dict):
+        features_cfg = {}
+        server_cfg["features"] = features_cfg
+
+    legacy_enable_ede = bool(server_cfg.get("enable_ede", False))
+    legacy_forward_local = bool(server_cfg.get("forward_local", False))
+
+    features_cfg["enable_ede"] = bool(features_cfg.get("enable_ede", legacy_enable_ede))
+    features_cfg["forward_local"] = bool(
+        features_cfg.get("forward_local", legacy_forward_local)
+    )
+
+    ecs_cfg = features_cfg.get("ecs")
+    if not isinstance(ecs_cfg, dict):
+        ecs_cfg = {}
+        features_cfg["ecs"] = ecs_cfg
+    ecs_cfg["enabled"] = bool(ecs_cfg.get("enabled", False))
+    ecs_cfg["forward_inbound"] = bool(ecs_cfg.get("forward_inbound", False))
+    ecs_cfg["synthesize_from_client_ip"] = bool(
+        ecs_cfg.get("synthesize_from_client_ip", False)
+    )
+    try:
+        ecs_cfg["source_prefix_v4"] = max(
+            0, min(32, int(ecs_cfg.get("source_prefix_v4", 24)))
+        )
+    except Exception:
+        ecs_cfg["source_prefix_v4"] = 24
+    try:
+        ecs_cfg["source_prefix_v6"] = max(
+            0,
+            min(128, int(ecs_cfg.get("source_prefix_v6", 56))),
+        )
+    except Exception:
+        ecs_cfg["source_prefix_v6"] = 56
+    try:
+        ecs_cfg["scope_prefix_v4"] = max(
+            0, min(32, int(ecs_cfg.get("scope_prefix_v4", 0)))
+        )
+    except Exception:
+        ecs_cfg["scope_prefix_v4"] = 0
+    try:
+        ecs_cfg["scope_prefix_v6"] = max(
+            0,
+            min(128, int(ecs_cfg.get("scope_prefix_v6", 0))),
+        )
+    except Exception:
+        ecs_cfg["scope_prefix_v6"] = 0
+    trusted_listeners = ecs_cfg.get("trusted_listeners")
+    if not isinstance(trusted_listeners, list):
+        trusted_listeners = []
+    ecs_cfg["trusted_listeners"] = [str(v) for v in trusted_listeners if str(v).strip()]
+    trusted_cidrs = ecs_cfg.get("trusted_client_cidrs")
+    if not isinstance(trusted_cidrs, list):
+        trusted_cidrs = []
+    ecs_cfg["trusted_client_cidrs"] = [str(v) for v in trusted_cidrs if str(v).strip()]
+    ecs_cfg["use_for_plugin_targeting"] = bool(
+        ecs_cfg.get("use_for_plugin_targeting", False)
+    )
+
+    # Preserve legacy keys for backward compatibility in config-dump views.
+    server_cfg["enable_ede"] = bool(features_cfg.get("enable_ede", False))
+    server_cfg["forward_local"] = bool(features_cfg.get("forward_local", False))
 
     axfr_cfg = server_cfg.get("axfr")
     if not isinstance(axfr_cfg, dict):

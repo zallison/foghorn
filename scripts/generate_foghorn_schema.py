@@ -2227,20 +2227,108 @@ def _build_v2_root_schema(
                     "axfr": axfr_schema,
                     # Preferred v2 placement for admin HTTP/web UI config.
                     "http": webserver_schema,
-                    # Feature gate for Extended DNS Errors (RFC 8914). When true,
-                    # the resolver pipeline is allowed to attach EDE options to
-                    # responses for EDNS-capable clients.
+                    "features": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "description": "Canonical feature-gate controls for resolver behavior.",
+                        "properties": {
+                            "enable_ede": {
+                                "type": "boolean",
+                                "description": "Enable generation and pass-through of Extended DNS Errors (RFC 8914) for EDNS clients.",
+                                "default": False,
+                            },
+                            "forward_local": {
+                                "type": "boolean",
+                                "description": "Allow forwarding .local queries to upstream resolvers. Default false blocks them per RFC 6762.",
+                                "default": False,
+                            },
+                            "ecs": {
+                                "type": "object",
+                                "additionalProperties": False,
+                                "description": "EDNS Client Subnet (ECS) trust, forwarding, and targeting controls.",
+                                "properties": {
+                                    "enabled": {
+                                        "type": "boolean",
+                                        "default": False,
+                                        "description": "Enable ECS parsing and policy controls in the resolver.",
+                                    },
+                                    "forward_inbound": {
+                                        "type": "boolean",
+                                        "default": False,
+                                        "description": "Forward trusted inbound ECS to upstream resolvers in forward mode.",
+                                    },
+                                    "synthesize_from_client_ip": {
+                                        "type": "boolean",
+                                        "default": False,
+                                        "description": "When inbound ECS is absent, synthesize ECS from transport source IP in forward mode.",
+                                    },
+                                    "source_prefix_v4": {
+                                        "type": "integer",
+                                        "minimum": 0,
+                                        "maximum": 32,
+                                        "default": 24,
+                                        "description": "IPv4 source prefix length used for synthesized ECS.",
+                                    },
+                                    "source_prefix_v6": {
+                                        "type": "integer",
+                                        "minimum": 0,
+                                        "maximum": 128,
+                                        "default": 56,
+                                        "description": "IPv6 source prefix length used for synthesized ECS.",
+                                    },
+                                    "scope_prefix_v4": {
+                                        "type": "integer",
+                                        "minimum": 0,
+                                        "maximum": 32,
+                                        "default": 0,
+                                        "description": "IPv4 scope prefix length used for synthesized ECS.",
+                                    },
+                                    "scope_prefix_v6": {
+                                        "type": "integer",
+                                        "minimum": 0,
+                                        "maximum": 128,
+                                        "default": 0,
+                                        "description": "IPv6 scope prefix length used for synthesized ECS.",
+                                    },
+                                    "trusted_listeners": {
+                                        "type": "array",
+                                        "items": {
+                                            "type": "string",
+                                            "enum": [
+                                                "udp",
+                                                "tcp",
+                                                "dot",
+                                                "doh",
+                                                "secure",
+                                                "insecure",
+                                            ],
+                                        },
+                                        "default": [],
+                                        "description": "Listener classes trusted to provide inbound ECS metadata.",
+                                    },
+                                    "trusted_client_cidrs": {
+                                        "type": "array",
+                                        "items": {"type": "string"},
+                                        "default": [],
+                                        "description": "Source CIDRs trusted to provide inbound ECS metadata.",
+                                    },
+                                    "use_for_plugin_targeting": {
+                                        "type": "boolean",
+                                        "default": False,
+                                        "description": "Allow trusted inbound ECS to drive plugin target-IP matching.",
+                                    },
+                                },
+                            },
+                        },
+                    },
                     "enable_ede": {
                         "type": "boolean",
-                        "description": "Enable generation and pass-through of Extended DNS Errors (RFC 8914) for EDNS clients.",
+                        "description": "Deprecated legacy alias for server.features.enable_ede.",
                         "default": False,
                     },
-                    # RFC 6762 specifies that .local is reserved for mDNS. By
-                    # default Foghorn blocks forwarding .local queries to
-                    # upstream resolvers; set this to true to allow forwarding.
                     "forward_local": {
                         "type": "boolean",
-                        "description": "Allow forwarding .local queries to upstream resolvers. Default false blocks them per RFC 6762.",
+                        "description": "Deprecated legacy alias for server.features.forward_local.",
                         "default": False,
                     },
                 },

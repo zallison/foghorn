@@ -139,8 +139,21 @@ server:
         reset_on_ttl_change: false
 
   # ----- Feature gates -----
-  enable_ede: false     # Extended DNS Errors
-  forward_local: false  # Forward requests for .local upstream?
+  features:
+    enable_ede: false     # Extended DNS Errors
+    forward_local: false  # Forward requests for .local upstream?
+    ecs:
+      enabled: false
+      forward_inbound: false
+      synthesize_from_client_ip: false
+      source_prefix_v4: 24
+      source_prefix_v6: 56
+      scope_prefix_v4: 0
+      scope_prefix_v6: 0
+      # Accepted values: udp, tcp, dot, doh, secure, insecure.
+      trusted_listeners: []
+      trusted_client_cidrs: []
+      use_for_plugin_targeting: false
 
   # ----- Admin HTTP server (web UI) -----
   http:
