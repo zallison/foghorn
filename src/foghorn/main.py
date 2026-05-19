@@ -1975,7 +1975,7 @@ def _initialize_statistics_subsystem(
                 )
             else:
                 logger.info(
-                    "Started statistics backend %s",
+                    "Starting Statistics backend %s",
                     stats_persistence_store.__class__.__name__,
                 )
 
@@ -2050,7 +2050,7 @@ def _initialize_statistics_subsystem(
         if not logging_only_effective:
             try:
                 stats_collector.warm_load_from_store()
-                logger.info("Started statistics warm-load")
+                logger.info("Starting Statistics warm-load")
             except (
                 Exception
             ) as exc:  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
@@ -2068,11 +2068,12 @@ def _initialize_statistics_subsystem(
             log_level=stats_cfg.get("log_level", "info"),
             persistence_store=stats_persistence_store,
         )
-        stats_reporter.start()
+
         logger.info(
-            "Started statistics collection (interval=%ds)",
+            "Starting Statistics collection (interval=%ds)",
             stats_reporter.interval_seconds,
         )
+        stats_reporter.start()
 
     return stats_collector, stats_reporter, stats_persistence_store
 
