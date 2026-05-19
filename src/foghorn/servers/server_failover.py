@@ -177,6 +177,47 @@ def _upstream_identity_label(
     return f"transport={transport}"
 
 
+def _upstream_summary_label(upstream: Dict, host: str, port: int) -> str:
+    """Brief: Build a compact upstream label for aggregate failure logs.
+
+    Inputs:
+      - upstream: Upstream configuration mapping.
+      - host: Normalized upstream host string.
+      - port: Normalized upstream port integer.
+
+    Outputs:
+      - str: Compact label preferring upstream id, then host[:port], then URL.
+    """
+
+    try:
+        explicit_id = str(upstream.get("id") or "").strip()
+    except Exception:
+        explicit_id = ""
+    if explicit_id:
+        return explicit_id
+
+    host_text = str(host or "").strip()
+    try:
+        port_num = int(port or 0)
+    except Exception:
+        port_num = 0
+    if host_text and port_num > 0:
+        return f"{host_text}:{port_num}"
+    if host_text:
+        return host_text
+
+    try:
+        url = str(upstream.get("url") or upstream.get("endpoint") or "").strip()
+    except Exception:
+        url = ""
+    if url:
+        return url
+
+    if port_num > 0:
+        return str(port_num)
+    return "unknown"
+
+
 def _is_connection_refused_error(exc: Exception) -> bool:
     """Brief: Return True when an exception indicates connection refused.
 
@@ -255,6 +296,49 @@ def _upstream_fail_count(upstream: Dict) -> float:
         return float(entry.get("fail_count", 0.0) or 0.0)
     except Exception:
         return 0.0
+
+
+def _upstream_health_state(upstream: Dict, now_ts: Optional[float] = None) -> str:
+    """Brief: Return coarse upstream health state for aggregate failure summaries.
+
+    Inputs:
+      - upstream: Upstream configuration mapping.
+      - now_ts: Optional timestamp override for deterministic callers/tests.
+
+    Outputs:
+      - str: "up" when available, otherwise "down" or explicit non-up state.
+    """
+
+    now = float(now_ts) if now_ts is not None else time.time()
+    try:
+        up_id = DNSRuntimeState._upstream_id(upstream)
+    except Exception:
+        up_id = ""
+    if not up_id:
+        return "up"
+
+    try:
+        entry = DNSRuntimeState.upstream_health.get(up_id)
+    except Exception:
+        entry = None
+    if not isinstance(entry, dict):
+        return "up"
+
+    try:
+        explicit_state = str(entry.get("state") or "").strip().lower()
+    except Exception:
+        explicit_state = ""
+    if explicit_state and explicit_state != "up":
+        return explicit_state
+
+    try:
+        down_until = float(entry.get("down_until", 0.0) or 0.0)
+    except Exception:
+        down_until = 0.0
+    if down_until > now:
+        return "down"
+
+    return "up"
 
 
 def _should_show_in_log(fail_count: float) -> bool:
@@ -461,7 +545,7 @@ def _send_query_with_failover_impl(
     last_exception_lock = threading.Lock()
     attempted_upstream_labels: list[str] = []
     attempted_upstream_label_set: Set[str] = set()
-    attempted_upstream_health: dict[str, str] = {}
+    attempted_upstream_states: dict[str, str] = {}
     attempted_upstream_fail_counts: dict[str, float] = {}
     attempted_upstreams_lock = threading.Lock()
 
@@ -1008,6 +1092,68 @@ def _send_query_with_failover_impl(
         safe = re.sub(r"(https?://[^\s\?]+)\?[^\s)]*", r"\1?...", safe)
         return safe
 
+    def _format_last_error_compact(exc: Optional[Exception]) -> str:
+        """Brief: Build compact last-error text for aggregate failure logging.
+
+        Inputs:
+          - exc: Last upstream exception observed during this query.
+
+        Outputs:
+          - str: Compact text, preferring "[errno] message" when available.
+        """
+
+        if exc is None:
+            return "unknown"
+
+        err_msg = _sanitize_error_message(str(exc)).strip()
+        errno_code: Optional[int] = None
+        try:
+            raw_errno = getattr(exc, "errno", None)
+            if raw_errno is not None:
+                errno_code = int(raw_errno)
+        except Exception:
+            errno_code = None
+
+        parsed_errno = None
+        match = re.match(r"^\[Errno\s+(-?\d+)\]\s*", err_msg)
+        if match:
+            try:
+                parsed_errno = int(match.group(1))
+            except Exception:
+                parsed_errno = None
+            err_msg = re.sub(r"^\[Errno\s+-?\d+\]\s*", "", err_msg).strip()
+
+        if errno_code is None:
+            errno_code = parsed_errno
+
+        if not err_msg:
+            err_msg = type(exc).__name__
+
+        if errno_code is not None:
+            return f"[{errno_code}] {err_msg}"
+        return err_msg
+
+    def _format_attempted_summary_compact() -> str:
+        """Brief: Build compact attempted-upstream summary for aggregate failures.
+
+        Inputs:
+          - None (reads attempted-upstream metadata captured for this query).
+
+        Outputs:
+          - str: Comma-separated labels like "resolver down (9)".
+        """
+
+        items: list[str] = []
+        for label in attempted_upstream_labels:
+            try:
+                fail_count = int(attempted_upstream_fail_counts.get(label, 0.0) or 0.0)
+            except Exception:
+                fail_count = 0
+            state = str(attempted_upstream_states.get(label, "up") or "up").lower()
+            suffix = " down" if state != "up" else ""
+            items.append(f"{label}{suffix} ({fail_count})")
+        return ", ".join(items) or "none"
+
     def _try_single(upstream: Dict) -> Tuple[Optional[bytes], Optional[Dict], str]:
         """Send query to a single upstream and classify the result.
 
@@ -1024,15 +1170,17 @@ def _send_query_with_failover_impl(
             _upstream_attempt_context(upstream)
         )
         upstream_health = _upstream_health_context(upstream)
+        upstream_state = _upstream_health_state(upstream)
+        summary_label = _upstream_summary_label(upstream, host, port)
         fail_count = _upstream_fail_count(upstream)
         should_warn = _should_show_in_log(fail_count)
         try:
             with attempted_upstreams_lock:
-                if upstream_label not in attempted_upstream_label_set:
-                    attempted_upstream_label_set.add(upstream_label)
-                    attempted_upstream_labels.append(upstream_label)
-                attempted_upstream_health[upstream_label] = upstream_health
-                attempted_upstream_fail_counts[upstream_label] = fail_count
+                if summary_label not in attempted_upstream_label_set:
+                    attempted_upstream_label_set.add(summary_label)
+                    attempted_upstream_labels.append(summary_label)
+                attempted_upstream_states[summary_label] = upstream_state
+                attempted_upstream_fail_counts[summary_label] = fail_count
         except Exception:
             pass
 
@@ -1185,15 +1333,7 @@ def _send_query_with_failover_impl(
             # Shared executor: do not shut down per query.
             pass
 
-    attempted_order = sorted(attempted_upstream_label_set)
-    attempted_summary = ", ".join(attempted_order) or "none"
-    health_summary = (
-        ", ".join(
-            f"{label} [{attempted_upstream_health.get(label, 'state=unknown')}]"
-            for label in attempted_order
-        )
-        or "none"
-    )
+    attempted_summary = _format_attempted_summary_compact()
 
     try:
         all_failed_should_warn = any(
@@ -1206,11 +1346,10 @@ def _send_query_with_failover_impl(
     with last_exception_lock:
         last_error_snapshot = last_exception
     all_failed_logger(
-        "All upstreams failed. qtype=%s. Last error: %s (attempted: %s health: %s)",
-        qtype,
-        _sanitize_error_message(str(last_error_snapshot)),
+        "All upstreams failed. Last error %s [%s] qtype: %s",
+        _format_last_error_compact(last_error_snapshot),
         attempted_summary,
-        health_summary,
+        qtype,
     )
 
     return None, None, "all_failed"
