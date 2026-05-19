@@ -2072,6 +2072,12 @@ def _build_v2_root_schema(
                 "description": "If an upstream has not had a successful response in this many seconds, its status becomes 'unknown' (treated as eligible like healthy).",
                 "default": 300,
             },
+            "max_recheck": {
+                "type": "number",
+                "minimum": 0,
+                "description": "Maximum backoff delay in seconds before retrying an unhealthy upstream.",
+                "default": 300.0,
+            },
             "probe_percent": {
                 "type": "number",
                 "minimum": 0,

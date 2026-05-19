@@ -107,6 +107,50 @@
         },
         "module": "foghorn.plugins.resolve.access_control.AccessControl"
       },
+      "dns_rebinding": {
+        "aliases": [
+          "dns_rebinding",
+          "no_rebinding",
+          "rebinding"
+        ],
+        "config_schema": {
+          "additionalProperties": true,
+          "description": "Brief: Typed configuration model for DnsRebinding.\n\nInputs:\n  - allowlist_domains: Domain names allowed to resolve to private addresses.\n  - allowlist_mode: Domain matching mode ('suffix' or 'exact').\n  - private_cidrs: CIDRs treated as private/rebinding-sensitive.\n\nOutputs:\n  - DnsRebindingConfig instance with normalized field types.",
+          "properties": {
+            "allowlist_domains": {
+              "description": "Type: array.",
+              "items": {
+                "description": "Type: string.",
+                "type": "string"
+              },
+              "title": "Allowlist Domains",
+              "type": "array"
+            },
+            "allowlist_mode": {
+              "default": "suffix",
+              "description": "Type: string. Valid values: \"suffix\", \"exact\". Default: \"suffix\".",
+              "enum": [
+                "suffix",
+                "exact"
+              ],
+              "title": "Allowlist Mode",
+              "type": "string"
+            },
+            "private_cidrs": {
+              "description": "Type: array.",
+              "items": {
+                "description": "Type: string.",
+                "type": "string"
+              },
+              "title": "Private Cidrs",
+              "type": "array"
+            }
+          },
+          "title": "DnsRebindingConfig",
+          "type": "object"
+        },
+        "module": "foghorn.plugins.resolve.dns_rebinding.DnsRebinding"
+      },
       "docker_hosts": {
         "aliases": [
           "docker",
@@ -3098,6 +3142,50 @@
           "type": "object"
         },
         "module": "foghorn.plugins.resolve.access_control.AccessControl"
+      },
+      "dns_rebinding": {
+        "aliases": [
+          "dns_rebinding",
+          "no_rebinding",
+          "rebinding"
+        ],
+        "config_schema": {
+          "additionalProperties": true,
+          "description": "Brief: Typed configuration model for DnsRebinding.\n\nInputs:\n  - allowlist_domains: Domain names allowed to resolve to private addresses.\n  - allowlist_mode: Domain matching mode ('suffix' or 'exact').\n  - private_cidrs: CIDRs treated as private/rebinding-sensitive.\n\nOutputs:\n  - DnsRebindingConfig instance with normalized field types.",
+          "properties": {
+            "allowlist_domains": {
+              "description": "Type: array.",
+              "items": {
+                "description": "Type: string.",
+                "type": "string"
+              },
+              "title": "Allowlist Domains",
+              "type": "array"
+            },
+            "allowlist_mode": {
+              "default": "suffix",
+              "description": "Type: string. Valid values: \"suffix\", \"exact\". Default: \"suffix\".",
+              "enum": [
+                "suffix",
+                "exact"
+              ],
+              "title": "Allowlist Mode",
+              "type": "string"
+            },
+            "private_cidrs": {
+              "description": "Type: array.",
+              "items": {
+                "description": "Type: string.",
+                "type": "string"
+              },
+              "title": "Private Cidrs",
+              "type": "array"
+            }
+          },
+          "title": "DnsRebindingConfig",
+          "type": "object"
+        },
+        "module": "foghorn.plugins.resolve.dns_rebinding.DnsRebinding"
       },
       "docker_hosts": {
         "aliases": [
@@ -7298,6 +7386,12 @@
               "description": "Optional human metadata string (max 254 characters).",
               "maxLength": 254,
               "type": "string"
+            },
+            "max_recheck": {
+              "default": 300.0,
+              "description": "Maximum backoff delay in seconds before retrying an unhealthy upstream.",
+              "minimum": 0,
+              "type": "number"
             },
             "max_serv_fail": {
               "default": 3,
