@@ -1,6 +1,7 @@
 """Shared DNS runtime/config state for resolver and transport handlers."""
 
 from __future__ import annotations
+import logging
 
 import time
 from typing import Dict, List, Optional
@@ -9,6 +10,8 @@ from dnslib import DNSRecord
 
 from foghorn.plugins.resolve.base import BasePlugin
 from .edns_utils import ensure_edns_request
+
+logger = logging.getLogger("foghorn.server")
 
 
 class DNSRuntimeState:
@@ -80,6 +83,8 @@ class DNSRuntimeState:
     # Adaptive probe percentage used when deciding whether to include upstreams
     # currently in backoff/down state for health probing traffic.
     upstream_probe_percent: float | None = None
+    # Maximum backoff/recheck delay in seconds when marking an upstream down.
+    upstream_max_recheck: float = 300.0
 
     @staticmethod
     def _upstream_id(up: Dict) -> str:
@@ -112,19 +117,34 @@ class DNSRuntimeState:
             return str(host) if host is not None else ""
 
     @classmethod
-    def _mark_upstreams_down(cls, upstreams: List[Dict], reason: Optional[str]) -> None:
+    def _mark_upstreams_down(
+        cls,
+        upstreams: List[Dict],
+        reason: Optional[str],
+        max_recheck: Optional[float] = None,
+    ) -> None:
         """Brief: Mark a set of upstreams as temporarily down with backoff.
 
         Inputs:
           - upstreams: List of upstream config dicts.
           - reason: Optional failure reason to track for diagnostics.
+          - max_recheck: Optional maximum backoff delay in seconds.
 
         Outputs:
           - None; updates cls.upstream_health in-place.
         """
         now = time.time()
         base_delay = 5.0
-        max_delay = 300.0
+        try:
+            configured_max_delay = (
+                float(max_recheck)
+                if max_recheck is not None
+                else float(getattr(cls, "upstream_max_recheck", 300.0) or 300.0)
+            )
+        except Exception:
+            configured_max_delay = 300.0
+        max_delay = max(0.0, min(float(configured_max_delay), 86400.0))
+        max_fail_count = 1_000_000
 
         for up in upstreams or []:
             up_id = cls._upstream_id(up)
@@ -134,10 +154,28 @@ class DNSRuntimeState:
                 "fail_count": 0,
                 "down_until": 0.0,
             }
-            fail_count = int(entry.get("fail_count", 0)) + 1
+            try:
+                previous_fail_count = int(entry.get("fail_count", 0) or 0)
+            except Exception:
+                previous_fail_count = 0
+            previous_fail_count = max(0, int(previous_fail_count))
+            try:
+                previous_down_until = float(entry.get("down_until", 0.0) or 0.0)
+            except Exception:
+                previous_down_until = 0.0
+            if previous_down_until > now:
+                previous_state = "down"
+            elif previous_fail_count > 0:
+                previous_state = "degraded"
+            else:
+                previous_state = "up"
+            fail_count = min(previous_fail_count + 1, max_fail_count)
 
             a, b = 1, 1
+            target_multiplier = (max_delay / base_delay) if base_delay > 0 else 1.0
             for _ in range(max(0, fail_count - 1)):
+                if a >= target_multiplier:
+                    break
                 a, b = b, a + b
             delay = min(base_delay * float(a), max_delay)
             updated_entry = dict(entry)
@@ -147,6 +185,25 @@ class DNSRuntimeState:
             if reason:
                 updated_entry["last_error"] = str(reason)
             cls.upstream_health[up_id] = updated_entry
+            if updated_entry["down_until"] > now and previous_state in {
+                "up",
+                "degraded",
+            }:
+                if reason:
+                    logger.warning(
+                        "Upstream %s marked down from %s; fail_count=%g (reason=%s)",
+                        up_id,
+                        previous_state,
+                        float(updated_entry["fail_count"]),
+                        str(reason),
+                    )
+                else:
+                    logger.warning(
+                        "Upstream %s marked down from %s; fail_count=%g",
+                        up_id,
+                        previous_state,
+                        float(updated_entry["fail_count"]),
+                    )
 
     @classmethod
     def _mark_upstream_ok(cls, upstream: Optional[Dict]) -> None:
@@ -164,12 +221,27 @@ class DNSRuntimeState:
         if not up_id:
             return
         entry = cls.upstream_health.get(up_id)
-        if not entry:
+        if not isinstance(entry, dict):
             return
+        try:
+            previous_fail_count = float(entry.get("fail_count", 0.0) or 0.0)
+        except Exception:
+            previous_fail_count = 0.0
+        try:
+            previous_down_until = float(entry.get("down_until", 0.0) or 0.0)
+        except Exception:
+            previous_down_until = 0.0
         updated_entry = dict(entry)
         updated_entry["fail_count"] = 0.0
         updated_entry["down_until"] = 0.0
         cls.upstream_health[up_id] = updated_entry
+        now = time.time()
+        if previous_down_until > now:
+            logger.info(
+                "Upstream %s marked healthy again from down; fail_count reset to 0 (was %g)",
+                up_id,
+                previous_fail_count,
+            )
 
     @classmethod
     def _cleanup_upstream_health(cls, max_age_hours: float = 24.0) -> None:

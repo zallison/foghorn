@@ -861,15 +861,21 @@ def _resolve_core(
             ecs_synthesize_from_client_ip=bool(
                 getattr(snap, "ecs_synthesize_from_client_ip", False)
             ),
-            ecs_source_prefix_v4=max(0, min(32, int(getattr(snap, "ecs_source_prefix_v4", 24)))),
+            ecs_source_prefix_v4=max(
+                0, min(32, int(getattr(snap, "ecs_source_prefix_v4", 24)))
+            ),
             ecs_source_prefix_v6=max(
                 0, min(128, int(getattr(snap, "ecs_source_prefix_v6", 56)))
             ),
-            ecs_scope_prefix_v4=max(0, min(32, int(getattr(snap, "ecs_scope_prefix_v4", 0)))),
+            ecs_scope_prefix_v4=max(
+                0, min(32, int(getattr(snap, "ecs_scope_prefix_v4", 0)))
+            ),
             ecs_scope_prefix_v6=max(
                 0, min(128, int(getattr(snap, "ecs_scope_prefix_v6", 0)))
             ),
-            ecs_trusted_listeners=list(getattr(snap, "ecs_trusted_listeners", []) or []),
+            ecs_trusted_listeners=list(
+                getattr(snap, "ecs_trusted_listeners", []) or []
+            ),
             ecs_trusted_client_cidrs=list(
                 getattr(snap, "ecs_trusted_client_cidrs", []) or []
             ),
@@ -1029,7 +1035,9 @@ def _resolve_core(
         outbound_ecs: Optional[Dict[str, Any]] = None
         effective_target_ip = str(client_ip or "")
 
-        resolver_mode_for_ecs = str(getattr(handler, "resolver_mode", "forward")).lower()
+        resolver_mode_for_ecs = str(
+            getattr(handler, "resolver_mode", "forward")
+        ).lower()
         if resolver_mode_for_ecs == "none":
             resolver_mode_for_ecs = "master"
 
@@ -1077,7 +1085,9 @@ def _resolve_core(
                         req,
                         outbound_ecs,
                         create_opt_if_missing=False,
-                        edns_udp_payload=int(getattr(handler, "edns_udp_payload", 1232)),
+                        edns_udp_payload=int(
+                            getattr(handler, "edns_udp_payload", 1232)
+                        ),
                         preserve_do_bit=True,
                     ):
                         outbound_ecs = None
@@ -1125,7 +1135,9 @@ def _resolve_core(
         except Exception:  # pragma: no cover - defensive
             pass
         try:
-            ctx.ecs = dict(trusted_inbound_ecs) if trusted_inbound_ecs is not None else None
+            ctx.ecs = (
+                dict(trusted_inbound_ecs) if trusted_inbound_ecs is not None else None
+            )
             ctx.effective_target_ip = str(effective_target_ip or client_ip or "")
             ctx.source_ip = str(client_ip or "")
         except Exception:  # pragma: no cover - defensive
@@ -1791,6 +1803,7 @@ def _resolve_core(
             probe_max_percent = 50.0
             probe_increase = 1.0
             probe_decrease = 2.0
+            max_recheck = 300.0
             try:
                 health_cfg = getattr(handler, "upstream_health", None)
                 probe_percent = float(getattr(health_cfg, "probe_percent", 1.0) or 1.0)
@@ -1806,12 +1819,14 @@ def _resolve_core(
                 probe_decrease = float(
                     getattr(health_cfg, "probe_decrease", 2.0) or 2.0
                 )
+                max_recheck = float(getattr(health_cfg, "max_recheck", 300.0) or 300.0)
             except Exception:
                 probe_percent = 1.0
                 probe_min_percent = 1.0
                 probe_max_percent = 50.0
                 probe_increase = 1.0
                 probe_decrease = 2.0
+                max_recheck = 300.0
             if probe_min_percent > probe_max_percent:
                 probe_min_percent, probe_max_percent = (
                     probe_max_percent,
@@ -1821,6 +1836,8 @@ def _resolve_core(
             probe_max_percent = max(probe_min_percent, min(100.0, probe_max_percent))
             probe_increase = max(0.0, probe_increase)
             probe_decrease = max(0.0, probe_decrease)
+            max_recheck = max(0.0, min(86400.0, max_recheck))
+            DNSRuntimeState.upstream_max_recheck = max_recheck
             probe_percent = max(
                 probe_min_percent, min(probe_max_percent, probe_percent)
             )
@@ -1986,7 +2003,11 @@ def _resolve_core(
             # The UDP handler delegates to this shared resolver path, so health
             # updates must happen here as well.
             if reply is None:
-                DNSRuntimeState._mark_upstreams_down(upstreams, reason)
+                DNSRuntimeState._mark_upstreams_down(
+                    upstreams,
+                    reason,
+                    max_recheck=max_recheck,
+                )
                 DNSRuntimeState.upstream_probe_percent = min(
                     probe_max_percent,
                     max(

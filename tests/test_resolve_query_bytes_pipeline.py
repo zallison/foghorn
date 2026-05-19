@@ -32,6 +32,7 @@ class _OverridePlugin(BasePlugin):
         r = DNSRecord.question(qname, "A").reply()
         return PluginDecision(action="override", response=r.pack())
 
+
 class _CaptureContextPlugin(BasePlugin):
     def __init__(self) -> None:
         super().__init__()
@@ -276,6 +277,57 @@ def test_resolve_query_bytes_marks_upstream_health_on_failure(
         assert isinstance(entry, dict)
         assert float(entry.get("fail_count", 0.0) or 0.0) >= 1.0
         assert float(entry.get("down_until", 0.0) or 0.0) > 0.0
+    finally:
+        DNSRuntimeState.upstream_health.clear()
+
+
+def test_resolve_query_bytes_failure_backoff_honors_max_recheck_and_avoids_overflow(
+    monkeypatch: pytest.MonkeyPatch,
+    set_runtime_snapshot,
+) -> None:
+    """Brief: Failure backoff caps at max_recheck even when fail_count is extremely large.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts down_until uses max_recheck and does not overflow.
+    """
+
+    import foghorn.servers.dns_runtime_state as runtime_state_mod
+
+    q = DNSRecord.question("health-recheck.example", "A")
+    up = {"host": "2.2.2.2", "port": 53}
+    up_id = DNSRuntimeState._upstream_id(up)
+
+    monkeypatch.setattr(
+        server_mod,
+        "send_query_with_failover",
+        lambda *a, **k: (None, None, "all_failed"),
+    )
+    monkeypatch.setattr(runtime_state_mod.time, "time", lambda: 1000.0)
+
+    set_runtime_snapshot(
+        plugins=[],
+        upstream_addrs=[up],
+        upstream_health=parse_upstream_health_config({"health": {"max_recheck": 42.0}}),
+    )
+
+    DNSRuntimeState.upstream_health.clear()
+    try:
+        DNSRuntimeState.upstream_health[up_id] = {
+            "fail_count": 10**1000,
+            "down_until": 0.0,
+        }
+
+        wire = resolve_query_bytes(q.pack(), "127.0.0.1")
+        resp = DNSRecord.parse(wire)
+        assert resp.header.rcode == RCODE.SERVFAIL
+
+        entry = DNSRuntimeState.upstream_health.get(up_id)
+        assert isinstance(entry, dict)
+        assert float(entry.get("down_until", 0.0) or 0.0) == pytest.approx(1042.0)
+        assert float(entry.get("fail_count", 0.0) or 0.0) == pytest.approx(1000000.0)
     finally:
         DNSRuntimeState.upstream_health.clear()
 
@@ -1274,7 +1326,9 @@ def test_resolve_query_bytes_ecs_synth_bypasses_cache(
         RR("ecs-synth-cache.example.", QTYPE.A, rdata=A("192.0.2.30"), ttl=60)
     )
     plugin_base.DNS_CACHE = InMemoryTTLCache()
-    plugin_base.DNS_CACHE.set(("ecs-synth-cache.example", QTYPE.A), 60, cache_reply.pack())
+    plugin_base.DNS_CACHE.set(
+        ("ecs-synth-cache.example", QTYPE.A), 60, cache_reply.pack()
+    )
 
     upstream_calls = {"n": 0, "ecs": None}
 
@@ -1370,9 +1424,7 @@ def test_resolve_query_bytes_ecs_result_metadata_in_query_log(
     assert out.header.rcode == RCODE.NOERROR
 
     result_entries = [
-        payload
-        for name, payload in stats.calls
-        if name == "record_query_result"
+        payload for name, payload in stats.calls if name == "record_query_result"
     ]
     assert result_entries
     _args, kwargs = result_entries[-1]
