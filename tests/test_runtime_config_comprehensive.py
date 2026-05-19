@@ -95,6 +95,17 @@ def test_parse_upstream_health_config_clamp_bounds() -> None:
     assert 0.0 <= result.unknown_after_seconds <= 86400.0
 
 
+def test_parse_upstream_health_config_max_recheck_alias_and_bounds() -> None:
+    """max_recheck supports alias input and enforces configured bounds."""
+    alias_cfg = {"health": {"max_recheck_seconds": 42}}
+    alias_result = parse_upstream_health_config(alias_cfg)
+    assert alias_result.max_recheck == 42.0
+
+    clamp_cfg = {"health": {"max_recheck": 100000.0}}
+    clamp_result = parse_upstream_health_config(clamp_cfg)
+    assert clamp_result.max_recheck == 86400.0
+
+
 def test_initialize_runtime_basic() -> None:
     """Initialize runtime with snapshot and config path."""
     clear_runtime()

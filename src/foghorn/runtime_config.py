@@ -76,6 +76,7 @@ class UpstreamHealthConfig:
     probe_max_percent: float
     probe_increase: float
     probe_decrease: float
+    max_recheck: float
 
 
 def parse_upstream_health_config(upstream_cfg: Dict[str, Any]) -> UpstreamHealthConfig:
@@ -102,6 +103,8 @@ def parse_upstream_health_config(upstream_cfg: Dict[str, Any]) -> UpstreamHealth
         # Backward-compatible alias used by earlier configs/docs.
         if "probe_percent" not in health_cfg and "probe_pct" in health_cfg:
             health_cfg["probe_percent"] = health_cfg.get("probe_pct")
+        if "max_recheck" not in health_cfg and "max_recheck_seconds" in health_cfg:
+            health_cfg["max_recheck"] = health_cfg.get("max_recheck_seconds")
 
     profile_name = str(health_cfg.get("profile") or "").strip()
     if profile_name:
@@ -162,6 +165,7 @@ def parse_upstream_health_config(upstream_cfg: Dict[str, Any]) -> UpstreamHealth
     unknown_after_seconds = _clamp_float(
         "unknown_after_seconds", 300.0, lo=0.0, hi=86400.0
     )
+    max_recheck = _clamp_float("max_recheck", 300.0, lo=0.0, hi=86400.0)
 
     # probe_min_percent must never be 0.0; if probe_percent ever hits 0 we may
     # stop probing unhealthy upstreams entirely and never observe them recover.
@@ -189,6 +193,7 @@ def parse_upstream_health_config(upstream_cfg: Dict[str, Any]) -> UpstreamHealth
         probe_max_percent=float(probe_max),
         probe_increase=float(probe_increase),
         probe_decrease=float(probe_decrease),
+        max_recheck=float(max_recheck),
     )
 
 
@@ -1061,9 +1066,7 @@ def _build_snapshot(
         forward_local=bool(features["forward_local"]),
         ecs_enabled=bool(features["ecs_enabled"]),
         ecs_forward_inbound=bool(features["ecs_forward_inbound"]),
-        ecs_synthesize_from_client_ip=bool(
-            features["ecs_synthesize_from_client_ip"]
-        ),
+        ecs_synthesize_from_client_ip=bool(features["ecs_synthesize_from_client_ip"]),
         ecs_source_prefix_v4=int(features["ecs_source_prefix_v4"]),
         ecs_source_prefix_v6=int(features["ecs_source_prefix_v6"]),
         ecs_scope_prefix_v4=int(features["ecs_scope_prefix_v4"]),

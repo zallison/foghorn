@@ -567,6 +567,7 @@ def _expand_upstreams_defaults(out: Dict[str, Any]) -> None:
     health_cfg.setdefault("probe_max_percent", 50.0)
     health_cfg.setdefault("probe_increase", 1.0)
     health_cfg.setdefault("probe_decrease", 1.0)
+    health_cfg.setdefault("max_recheck", 300.0)
 
     # Optional backup upstream endpoints.
     backup_cfg = upstream_cfg.get("backup")
