@@ -42,9 +42,13 @@ def _normalize_generate_policy(raw_policy: object, *, log: logging.Logger) -> st
     if normalized in {"yes", "no", "maybe"}:
         return normalized
 
+    raw_policy_type = type(raw_policy).__name__
     log.warning(
-        "ZoneRecords: unsupported dnssec_signing.generate=%r; defaulting to 'maybe'",
-        raw_policy,
+        (
+            "ZoneRecords: unsupported dnssec_signing.generate value "
+            "type=%s; defaulting to 'maybe'"
+        ),
+        raw_policy_type,
     )
     return "maybe"
 
@@ -445,10 +449,11 @@ def auto_sign_zones(
             except Exception as exc:  # pragma: no cover - defensive
                 # Keep the existing log message used by ZoneRecords so callers
                 # relying on it continue to see the same text.
+                exc_type_name = type(exc).__name__
                 log.warning(
-                    "ZoneRecords DNSSEC auto-sign skipped for %s: %s",
+                    "ZoneRecords DNSSEC auto-sign skipped for %s: %s (details redacted)",
                     apex_owner,
-                    exc,
+                    exc_type_name,
                 )
                 continue
 
