@@ -86,11 +86,20 @@ def _one_shot_http_request(
 
     conn = http.client.HTTPConnection(host, port, timeout=5)
     try:
-        conn.request(method, path, body=body, headers=dict(headers or {}))
+        request_send_error: OSError | None = None
+        try:
+            conn.request(method, path, body=body, headers=dict(headers or {}))
+        except (BrokenPipeError, ConnectionResetError) as exc:
+            # Some Python/platform combinations can surface an early-close
+            # here when the server rejects oversized uploads based on
+            # Content-Length before reading the full body.
+            request_send_error = exc
         resp = conn.getresponse()
         status = int(resp.status)
         resp_headers = {str(k).lower(): str(v) for k, v in resp.getheaders()}
         data = resp.read()
+        if request_send_error is not None and status < 400:
+            raise request_send_error
     finally:
         conn.close()
         t.join(timeout=1.0)

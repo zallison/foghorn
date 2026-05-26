@@ -2,7 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
+
 ## [Unreleased]
+
+## 0.7.1
 ### Added
 - Added a new resolve plugin `DnsRebinding` (`type: dns_rebinding`) that inspects post-resolve A/AAAA answers and denies rebinding-style responses when non-allowlisted names resolve to configured private CIDRs.
 - Added `DnsRebinding` plugin aliases (`dns_rebinding`, `no_rebinding`, `rebinding`) and typed config fields for `allowlist_domains`, `allowlist_mode`, and `private_cidrs`, with schema generation updates in `assets/config-schema.json`.
