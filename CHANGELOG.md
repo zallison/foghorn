@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 
 ## [Unreleased]
+### Tests
+- Stabilized `test_reload_records_from_watchdog_sends_notify_for_changed_zones` by disabling background watchdog observer/polling in that test fixture, removing a CI-only race where zone NOTIFY capture could intermittently miss updates.
 
 ## 0.7.1
 ### Added
