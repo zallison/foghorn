@@ -853,7 +853,6 @@ def test_load_records_qtype_numeric_and_negative_ttl(tmp_path: pathlib.Path) -> 
 
     mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
     ZoneRecords = mod.ZoneRecords
-
     plugin = ZoneRecords(
         file_paths=[str(records_file)],
     )
@@ -1177,8 +1176,11 @@ def test_reload_records_from_watchdog_sends_notify_for_changed_zones(
         + "\n",
         encoding="utf-8",
     )
-
-    plugin = ZoneRecords(file_paths=[str(records_file)])
+    plugin = ZoneRecords(
+        file_paths=[str(records_file)],
+        watchdog_enabled=False,
+        watchdog_poll_interval_seconds=0.0,
+    )
     plugin.setup()
 
     # Mutate the zone file so that the apex RRset changes.
