@@ -16,6 +16,7 @@ This document summarizes how Foghorn’s behavior maps onto major DNS-related RF
 |      8484 | DNS over HTTPS (DoH)                            | Implemented                                              |
 | 4033–4035 | DNSSEC protocol/records/validation              | Partially implemented                                    |
 |      6891 | Extension Mechanisms for DNS (EDNS(0))          | Partially implemented                                    |
+|      7871 | Client Subnet in DNS Queries (ECS)              | Partially implemented (trust-gated forward mode)        |
 |      8914 | Extended DNS Errors                             | Partially implemented (EDE for policy/upstream failures) |
 |      5936 | DNS Zone Transfer Protocol (AXFR/IXFR)          | Partially implemented (AXFR client + limited server)                      |
 |      1996 | DNS NOTIFY                                      | Not implemented                                          |
@@ -104,7 +105,14 @@ Foghorn implements a minimal but standards-aware subset of EDNS(0):
 - Mirrors a client's EDNS version and advertised UDP payload size when present, clamped by a configurable `edns_udp_payload` (default 1232).
 - When a client does **not** send EDNS, assumes the classic 512-byte UDP size and marks oversized responses as truncated (TC=1) to encourage TCP fallback.
 - Sets the DO bit in EDNS flags when `dnssec.mode` requires it (`passthrough` / `validate`) and clears it in `ignore` mode, while preserving other EDNS flag bits.
-- Does **not** implement advanced EDNS options (cookies, NSID, ECS, extended errors, etc.).
+- Supports a constrained RFC 7871 ECS flow in forward mode when enabled:
+  - Parses inbound ECS from client OPT records.
+  - Trust-gates inbound ECS using `ecs.trusted_listeners` and/or `ecs.trusted_client_cidrs`.
+  - Forwards only trusted inbound ECS when `ecs.forward_inbound` is enabled.
+  - Optionally synthesizes outbound ECS from transport source IP when `ecs.synthesize_from_client_ip` is enabled.
+  - Preserves no-OPT fallback behavior (no synthetic OPT creation for ECS on requests without EDNS).
+  - Bypasses shared response caching when ECS context affects upstream query semantics.
+- Other advanced EDNS options (for example DNS Cookies and NSID) are not implemented as first-class features.
 
 For most modern resolvers and authoritative servers, this EDNS(0) support is sufficient to enable larger responses and DNSSEC records, while remaining conservative for legacy non-EDNS clients.
 

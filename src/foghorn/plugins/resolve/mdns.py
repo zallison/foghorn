@@ -1254,8 +1254,10 @@ class MdnsBridge(BasePlugin):
         if prev and prev != raw_instance:
             log = getattr(self, "logger", logger)
             log.warning(
-                "MdnsBridge: canonical instance collision canonical=%s",
+                "MdnsBridge: canonical instance collision canonical=%s prev=%s new=%s",
                 canonical,
+                prev,
+                raw_instance,
             )
         else:
             self._canonical_instance_raw[canonical] = raw_instance

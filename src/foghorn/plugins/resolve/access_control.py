@@ -49,6 +49,8 @@ class AccessControlConfig(BaseModel):
       - deny: List of CIDR/IP strings to deny.
       - deny_response: Response code when denying ('nxdomain', 'refused', 'servfail',
         'noerror_empty'/'nodata', 'ip', or 'drop').
+      - use_effective_target_ip: When true, evaluate allow/deny rules against
+        ctx.effective_target_ip instead of transport source ctx.client_ip.
 
     Outputs:
       - AccessControlConfig instance with normalized types.
@@ -58,6 +60,7 @@ class AccessControlConfig(BaseModel):
     allow: List[str] = Field(default_factory=list)
     deny: List[str] = Field(default_factory=list)
     deny_response: str = Field(default="refused")
+    use_effective_target_ip: bool = Field(default=False)
 
     model_config = ConfigDict(extra="allow")
 
@@ -102,6 +105,8 @@ class AccessControl(BasePlugin):
           - deny_response_ip4 (str, optional): IPv4 for deny_response="ip".
           - deny_response_ip6 (str, optional): IPv6 for deny_response="ip".
           - ttl (int, optional): TTL used for synthesized A responses.
+          - use_effective_target_ip (bool, optional): Evaluate allow/deny rules
+            using ctx.effective_target_ip when true.
 
         Outputs:
           - None
@@ -152,6 +157,9 @@ class AccessControl(BasePlugin):
             )
             deny_resp = "refused"
         self.deny_response = deny_resp
+        self.use_effective_target_ip = bool(
+            self.config.get("use_effective_target_ip", False)
+        )
 
         # Optional IP-mode parameters (AccessControlConfig permits extras).
         self.deny_response_ip4 = self.config.get("deny_response_ip4")
@@ -261,24 +269,42 @@ class AccessControl(BasePlugin):
         if not self.targets(ctx):
             return None
 
-        ip = _parse_client_ip(str(ctx.client_ip))
+        source_ip_text = str(getattr(ctx, "client_ip", "") or "")
+        target_ip_text = source_ip_text
+        if bool(getattr(self, "use_effective_target_ip", False)):
+            target_ip_text = str(
+                getattr(ctx, "effective_target_ip", source_ip_text) or source_ip_text
+            )
+
+        ip = _parse_client_ip(target_ip_text)
 
         # Deny takes precedence.
         for n in self.deny_nets:
             if ip in n:
                 logger.warning(
-                    "Access denied for %s (deny rule: %s)", ctx.client_ip, str(n)
+                    "Access denied for %s (target=%s, deny rule: %s)",
+                    source_ip_text,
+                    target_ip_text,
+                    str(n),
                 )
                 return self._build_deny_decision(qname, qtype, req, ctx)
 
         for n in self.allow_nets:
             if ip in n:
                 logger.debug(
-                    "Access allowed for %s (allow rule: %s)", ctx.client_ip, str(n)
+                    "Access allowed for %s (target=%s, allow rule: %s)",
+                    source_ip_text,
+                    target_ip_text,
+                    str(n),
                 )
                 return None
 
-        logger.debug("Access %s for %s (default policy)", self.default, ctx.client_ip)
+        logger.debug(
+            "Access %s for %s (target=%s, default policy)",
+            self.default,
+            source_ip_text,
+            target_ip_text,
+        )
         if self.default == "deny":
             return self._build_deny_decision(qname, qtype, req, ctx)
         return self._decision(action="allow")

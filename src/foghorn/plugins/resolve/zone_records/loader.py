@@ -800,13 +800,11 @@ def load_records(plugin: object) -> None:
             try:
                 text = str(raw_line)
             except Exception as exc:  # pragma: no cover - defensive
-                value_type = type(raw_line).__name__
-                error_type = type(exc).__name__
                 logger.warning(
-                    "Skipping non-string inline record at index %d (type=%s; error=%s)",
+                    "Skipping non-string inline record at index %d: %r (%s)",
                     lineno,
-                    value_type,
-                    error_type,
+                    raw_line,
+                    exc,
                 )
                 continue
             process_record_line(
@@ -879,12 +877,13 @@ def load_records(plugin: object) -> None:
 
     # Load RFC-1035 BIND-style zone files
     if selected in {"all", "bind"}:
-        for bind_index, bind_entry in enumerate(bind_paths):
-            entry = _normalize_bind_zone_entry(bind_entry)
+        for idx, raw_entry in enumerate(bind_paths):
+            entry = _normalize_bind_zone_entry(raw_entry)
             if not entry:
                 logger.warning(
-                    "ZoneRecords: skipping invalid bind_paths entry at index %d",
-                    bind_index,
+                    "ZoneRecords: skipping invalid bind_paths entry at index %d (type=%s)",
+                    idx,
+                    type(raw_entry).__name__,
                 )
                 continue
 
