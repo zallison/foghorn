@@ -387,7 +387,7 @@ def resolve_server_feature_flags(server_cfg: Dict[str, Any]) -> Dict[str, Any]:
     else:
         trusted_cidrs_values = []
     trusted_client_cidrs: list[str] = []
-    for raw in trusted_cidrs_values:
+    for index, raw in enumerate(trusted_cidrs_values):
         text = str(raw or "").strip()
         if not text:
             continue
@@ -395,8 +395,8 @@ def resolve_server_feature_flags(server_cfg: Dict[str, Any]) -> Dict[str, Any]:
             trusted_client_cidrs.append(str(ipaddress.ip_network(text, strict=False)))
         except ValueError:
             logger.warning(
-                "Ignoring invalid server.features.ecs.trusted_client_cidrs entry %r",
-                raw,
+                "Ignoring invalid server.features.ecs.trusted_client_cidrs entry at index %d",
+                index,
             )
 
     return {

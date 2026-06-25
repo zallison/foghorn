@@ -877,11 +877,13 @@ def load_records(plugin: object) -> None:
 
     # Load RFC-1035 BIND-style zone files
     if selected in {"all", "bind"}:
-        for raw_entry in bind_paths:
+        for idx, raw_entry in enumerate(bind_paths):
             entry = _normalize_bind_zone_entry(raw_entry)
             if not entry:
                 logger.warning(
-                    "ZoneRecords: skipping invalid bind_paths entry %r", raw_entry
+                    "ZoneRecords: skipping invalid bind_paths entry at index %d (type=%s)",
+                    idx,
+                    type(raw_entry).__name__,
                 )
                 continue
 

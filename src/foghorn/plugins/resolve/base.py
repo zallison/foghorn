@@ -657,8 +657,8 @@ class BasePlugin:
             entries = [str(x) for x in raw]
         else:
             logger.warning(
-                "BasePlugin: ignoring invalid target_qtypes value %r (expected str or list)",
-                raw,
+                "BasePlugin: ignoring invalid target_qtypes type %s (expected str or list)",
+                type(raw).__name__,
             )
             return ["*"]
 
@@ -735,8 +735,8 @@ class BasePlugin:
             entries = [str(x) for x in raw]
         else:
             logger.warning(
-                "BasePlugin: ignoring invalid targets value %r (expected str or list)",
-                raw,
+                "BasePlugin: ignoring invalid targets value type=%s (expected str or list)",
+                type(raw).__name__,
             )
             return networks
 
@@ -747,7 +747,10 @@ class BasePlugin:
             try:
                 net = ipaddress.ip_network(text, strict=False)
             except Exception:
-                logger.warning("BasePlugin: skipping invalid target entry %r", text)
+                logger.warning(
+                    "BasePlugin: skipping invalid target entry (length=%d)",
+                    len(text),
+                )
                 continue
             networks.append(net)
 
@@ -781,8 +784,8 @@ class BasePlugin:
             entries = [str(x) for x in raw]
         else:
             logger.warning(
-                "BasePlugin: ignoring invalid targets_domains value %r (expected str or list)",
-                raw,
+                "BasePlugin: ignoring invalid targets_domains type %s (expected str or list)",
+                type(raw).__name__,
             )
             entries = []
 
@@ -867,8 +870,8 @@ class BasePlugin:
                 _add_token(listeners, text)
         else:
             logger.warning(
-                "BasePlugin: ignoring invalid targets_listener value %r (expected str or list)",
-                raw,
+                "BasePlugin: ignoring invalid targets_listener type %r (expected str or list)",
+                type(raw),
             )
 
         # If an "any" token was seen at any point, listeners will have been
@@ -1093,8 +1096,8 @@ class BasePlugin:
             entries = list(raw)
         else:
             logger.warning(
-                "BasePlugin: ignoring invalid target_opcodes value %r (expected str/int or list)",
-                raw,
+                "BasePlugin: ignoring invalid target_opcodes value of type %s (expected str/int or list)",
+                type(raw).__name__,
             )
             return ["QUERY"]
 
@@ -1160,8 +1163,8 @@ class BasePlugin:
             entries = list(raw)
         else:
             logger.warning(
-                "BasePlugin: ignoring invalid target_rcodes value %r (expected str/int or list)",
-                raw,
+                "BasePlugin: ignoring invalid target_rcodes value type %s (expected str/int or list)",
+                type(raw).__name__,
             )
             return ["*"]
 
