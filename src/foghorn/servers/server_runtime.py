@@ -496,8 +496,7 @@ class DNSServer:
                 network = ipaddress.ip_network(text, strict=False)
             except ValueError:
                 logger.warning(
-                    "Ignoring invalid ecs_trusted_client_cidrs entry %r",
-                    entry,
+                    "Ignoring invalid ecs_trusted_client_cidrs entry"
                 )
                 continue
             normalized_cidrs.append(str(network))
