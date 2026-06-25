@@ -44,6 +44,7 @@ Key plugins include:
   - Or silently drop the connection
 - **[ZoneRecords](docs/plugins/resolve/zone_records.md)**: Load BIND9 zone files and/or define arbitrary records without creating a full zone. Supports combining multiple files and enabling DNSSEC.
 - **[UpstreamRouter](docs/plugins/resolve/upstream_router.md)**: Route queries to different upstreams based on name, for example forwarding `.corp` to a VPN resolver.
+- **[DnsRebinding](docs/plugins/resolve/dns_rebinding.md)**: Blocks private A/AAAA answers for non-allowlisted names to reduce DNS rebinding risk.
 - Additional plugins for:
   - [Rate limiting](docs/plugins/resolve/rate_limit.md) - Static or Dynamic
   - [Docker host discovery](docs/plugins/resolve/docker_hosts.md) - Add containers to DNS
@@ -111,6 +112,7 @@ Creating new plugins is simple. You can implement custom DNS logic without writi
   - [4.8 Rate limiting (rate)](#48-rate-limiting-rate)
   - [4.9 Per-domain upstream routing (router)](#49-per-domain-upstream-routing-router)
   - [4.10 Inline and file-based records (zone)](#410-inline-and-file-based-records-zone)
+  - [4.11 DNS rebinding protection (dns_rebinding)](#411-dns-rebinding-protection-dns_rebinding)
 - [5. Example Plugins](#5-example-plugins)
   - [5.1 DNS prefetch (prefetch)](#51-dns-prefetch-prefetch)
   - [5.2 Example rewrites (examples)](#52-example-rewrites-examples)
@@ -274,6 +276,7 @@ If you have a `diagram.dot` and want to render it to `diagram.png`:
 dot -Tpng diagram.dot -o diagram.png
 ```
 
+
 ---
 
 ## Additional Documentation
@@ -382,8 +385,18 @@ options edns0 trust-ad
 
 Without `trust-ad`, glibc clears the AD flag before handing answers to applications, so tools like OpenSSH will ignore SSHFP records even when Foghorn has validated them.
 
-- `server.enable_ede`
-  - Optional toggle for RFC 8914 Extended DNS Errors; when true and the client advertises EDNS(0), Foghorn can attach EDE options to certain policy or upstream-failure responses and surface per-code stats in the admin UI.
+- `server.features`
+  - Canonical feature flag map for resolver behavior.
+  - Includes:
+    - `enable_ede`: RFC 8914 Extended DNS Errors (attach EDE options on selected synthetic responses when EDNS is present).
+    - `forward_local`: allow forwarding `.local` and RFC1918 PTR lookups.
+    - `ecs.enabled`: enable EDNS Client Subnet handling.
+    - `ecs.forward_inbound`: forward inbound ECS only when it is trusted.
+    - `ecs.synthesize_from_client_ip`: synthesize outbound ECS from transport source IP in forward mode.
+    - `ecs.trusted_listeners` / `ecs.trusted_client_cidrs`: trust gates for inbound ECS.
+    - `ecs.use_for_plugin_targeting`: allow trusted inbound ECS to influence plugin targeting IP selection.
+  - When ECS influences upstream selection/targeting, cache reads/writes are bypassed to avoid cross-subnet contamination.
+  - Legacy `server.enable_ede` and `server.forward_local` keys are still accepted as compatibility aliases.
 - `server.resolver`
   - Timeouts, recursion depth, and resolver mode:
 	- `forward` (default): forward to configured `upstreams`.
@@ -1047,7 +1060,31 @@ plugins:
 	  ttl: 300
 ```
 
----
+### 4.11 DNS rebinding protection (`dns_rebinding`)
+
+Blocks post-resolve answers when a non-allowlisted queried name resolves to private address space.
+
+```yaml
+plugins:
+  - type: dns_rebinding
+    hooks:
+      post_resolve:
+        priority: 40
+    config:
+      allowlist_mode: suffix   # suffix | exact
+      allowlist_domains:
+        - printer.example.com
+        - lan.example.com
+      private_cidrs:
+        - 10.0.0.0/8
+        - 172.16.0.0/12
+        - 192.168.0.0/16
+        - 127.0.0.0/8
+        - 169.254.0.0/16
+        - ::1/128
+        - fc00::/7
+        - fe80::/10
+```
 
 ## 5. Example Plugins
 

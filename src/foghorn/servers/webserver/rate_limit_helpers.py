@@ -556,46 +556,79 @@ def _find_rate_limit_burst_count_readers(
     return readers
 
 
-def _resolve_rate_limit_reader_for_path(
+def _resolve_rate_limit_reader_for_db_path(
     readers: Dict[str, Any],
     db_path: str,
 ) -> Any:
-    """Brief: Resolve a per-db reader callable with alias-tolerant fallback.
+    """Brief: Resolve a db_path-keyed plugin reader with resilient path matching.
 
     Inputs:
-      - readers: Mapping of db_path variants to reader callables.
-      - db_path: Configured database path currently being summarized.
+      - readers: Mapping keyed by plugin db_path variants.
+      - db_path: Configured db_path to resolve against readers.
 
     Outputs:
-      - Callable reader when a direct/absolute/realpath key matches, or when
-        exactly one unique callable exists across all aliases; otherwise None.
+      - Reader callable when exactly one unambiguous match is found.
+      - None when no match (or multiple ambiguous fallback matches) exists.
+
+    Notes:
+      - Performs exact matching first.
+      - Falls back to suffix matching for relative plugin paths when process cwd
+        differs from the cwd used to produce the configured db_path.
     """
 
     if not isinstance(readers, dict) or not readers:
         return None
 
-    candidate_paths: list[str] = [str(db_path)]
-    try:
-        candidate_paths.append(os.path.abspath(str(db_path)))
-    except Exception:
-        pass
-    try:
-        candidate_paths.append(os.path.realpath(str(db_path)))
-    except Exception:
-        pass
+    path_text = str(db_path or "").strip()
+    if not path_text:
+        return None
 
-    for candidate_path in candidate_paths:
-        reader = readers.get(candidate_path)
-        if callable(reader):
-            return reader
+    reader = readers.get(path_text)
+    if reader is not None:
+        return reader
 
-    unique_readers: dict[int, Any] = {}
-    for reader in readers.values():
-        if not callable(reader):
+    try:
+        path_abs = os.path.abspath(path_text)
+    except Exception:
+        path_abs = path_text
+
+    reader = readers.get(path_abs)
+    if reader is not None:
+        return reader
+
+    try:
+        path_norm = os.path.normpath(path_text)
+    except Exception:
+        path_norm = path_text
+    path_suffix = str(path_norm).replace("\\", "/").lstrip("/")
+
+    if not path_suffix:
+        return None
+
+    fallback_matches: dict[int, Any] = {}
+    for candidate_key, candidate_reader in readers.items():
+        candidate_text = str(candidate_key or "").strip()
+        if not candidate_text:
             continue
-        unique_readers[id(reader)] = reader
-    if len(unique_readers) == 1:
-        return next(iter(unique_readers.values()))
+        try:
+            candidate_norm = os.path.normpath(candidate_text)
+        except Exception:
+            candidate_norm = candidate_text
+        candidate_suffix = str(candidate_norm).replace("\\", "/")
+        while candidate_suffix.startswith("./"):
+            candidate_suffix = candidate_suffix[2:]
+        while candidate_suffix.startswith("../"):
+            candidate_suffix = candidate_suffix[3:]
+        candidate_suffix = candidate_suffix.lstrip("/")
+        if not candidate_suffix:
+            continue
+        if path_suffix == candidate_suffix or path_suffix.endswith(
+            f"/{candidate_suffix}"
+        ):
+            fallback_matches[id(candidate_reader)] = candidate_reader
+
+    if len(fallback_matches) == 1:
+        return next(iter(fallback_matches.values()))
     return None
 
 
@@ -731,19 +764,19 @@ def _collect_rate_limit_stats(
         )
         if window_seconds <= 0:
             window_seconds = 10
-        current_rps_reader = _resolve_rate_limit_reader_for_path(
+        current_rps_reader = _resolve_rate_limit_reader_for_db_path(
             db_current_rps_readers,
             path,
         )
-        current_rps_snapshot_reader = _resolve_rate_limit_reader_for_path(
+        current_rps_snapshot_reader = _resolve_rate_limit_reader_for_db_path(
             db_current_rps_snapshot_readers,
             path,
         )
-        burst_count_reader = _resolve_rate_limit_reader_for_path(
+        burst_count_reader = _resolve_rate_limit_reader_for_db_path(
             db_burst_count_readers,
             path,
         )
-        recalculated_allowed_rps_reader = _resolve_rate_limit_reader_for_path(
+        recalculated_allowed_rps_reader = _resolve_rate_limit_reader_for_db_path(
             db_recalculated_allowed_rps_readers,
             path,
         )

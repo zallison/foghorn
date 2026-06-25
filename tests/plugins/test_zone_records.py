@@ -60,7 +60,9 @@ def test_load_records_uniques_and_preserves_order_single_file(
     mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
     ZoneRecords = mod.ZoneRecords
 
-    plugin = ZoneRecords(file_paths=[str(records_file)])
+    plugin = ZoneRecords(
+        file_paths=[str(records_file)],
+    )
     plugin.setup()
 
     key = ("example.com", int(QTYPE.A))
@@ -807,7 +809,9 @@ def test_load_records_malformed_line_wrong_field_count(tmp_path: pathlib.Path) -
     mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
     ZoneRecords = mod.ZoneRecords
 
-    plugin = ZoneRecords(file_paths=[str(records_file)])
+    plugin = ZoneRecords(
+        file_paths=[str(records_file)],
+    )
     with pytest.raises(ValueError):
         plugin.setup()
 
@@ -849,7 +853,6 @@ def test_load_records_qtype_numeric_and_negative_ttl(tmp_path: pathlib.Path) -> 
 
     mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
     ZoneRecords = mod.ZoneRecords
-
     plugin = ZoneRecords(
         file_paths=[str(records_file)],
     )
@@ -941,9 +944,7 @@ def test_load_records_qtype_unknown_raises(monkeypatch, tmp_path: pathlib.Path) 
     monkeypatch.setattr(loader_mod, "QTYPE", DummyQType())
     ZoneRecords = mod.ZoneRecords
 
-    plugin = ZoneRecords(
-        file_paths=[str(records_file)],
-    )
+    plugin = ZoneRecords(file_paths=[str(records_file)])
     with pytest.raises(ValueError):
         plugin.setup()
 
@@ -1175,7 +1176,6 @@ def test_reload_records_from_watchdog_sends_notify_for_changed_zones(
         + "\n",
         encoding="utf-8",
     )
-
     plugin = ZoneRecords(
         file_paths=[str(records_file)],
         watchdog_enabled=False,

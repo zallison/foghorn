@@ -4,10 +4,11 @@ import socketserver
 import time
 from typing import Callable, Dict, List
 
-from dnslib import QTYPE, RCODE, DNSRecord
+from dnslib import RCODE, DNSRecord
 
 from ..plugins.resolve.base import PluginDecision
 from .dns_runtime_state import DNSRuntimeState
+from .edns_utils import client_udp_payload_limit
 
 logger = logging.getLogger("foghorn.server")
 
@@ -27,19 +28,7 @@ def _client_udp_payload_limit(req: DNSRecord) -> int:
         the OPT RR (rclass), clamped to >= 512.
     """
 
-    try:
-        additional = getattr(req, "ar", None) or []
-        for rr in additional:
-            if getattr(rr, "rtype", None) == QTYPE.OPT:
-                try:
-                    payload = int(getattr(rr, "rclass", 0) or 0)
-                except Exception:
-                    payload = 0
-                return max(512, payload) if payload > 0 else 512
-    except Exception:
-        return 512
-
-    return 512
+    return client_udp_payload_limit(req)
 
 
 def _pack_minimal_tc_header(*, req_id: int, rcode: int, rd: bool = True) -> bytes:

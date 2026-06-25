@@ -8,6 +8,7 @@ import os
 import sys
 from dataclasses import dataclass
 from typing import (
+    Any,
     ClassVar,
     Dict,
     List,
@@ -201,6 +202,11 @@ class PluginContext:
 
     Attributes (inputs to plugins):
       - client_ip: Requestor's IP address.
+      - source_ip: Transport source IP address (same as client_ip for compatibility).
+      - ecs: Optional normalized EDNS Client Subnet mapping when provided by the
+        resolver pipeline.
+      - effective_target_ip: IP used by BasePlugin.targets() for IP/CIDR
+        matching; defaults to source_ip unless explicitly set by the resolver.
       - listener: Optional string naming the listener/transport that received the
         query.
       - secure: Optional bool flag for transport security (True/False/None).
@@ -244,9 +250,12 @@ class PluginContext:
 
         Outputs:
           - None (sets client_ip, listener, secure, upstream_candidates,
-            upstream_override, qname, rcode).
+            upstream_override, qname, rcode, source_ip, ecs, effective_target_ip).
         """
         self.client_ip = client_ip
+        self.source_ip = client_ip
+        self.ecs: Optional[Dict[str, Any]] = None
+        self.effective_target_ip = client_ip
         self.listener = listener
         # Preserve None when not explicitly provided so callers can distinguish
         # between "unknown" and an explicit True/False value.
@@ -647,10 +656,9 @@ class BasePlugin:
         elif isinstance(raw, (list, tuple)):
             entries = [str(x) for x in raw]
         else:
-            input_type = type(raw).__name__
             logger.warning(
-                "BasePlugin: ignoring invalid target_qtypes value type=%s (expected str or list)",
-                input_type,
+                "BasePlugin: ignoring invalid target_qtypes type %s (expected str or list)",
+                type(raw).__name__,
             )
             return ["*"]
 
@@ -726,10 +734,9 @@ class BasePlugin:
         elif isinstance(raw, (list, tuple)):
             entries = [str(x) for x in raw]
         else:
-            input_type = type(raw).__name__
             logger.warning(
                 "BasePlugin: ignoring invalid targets value type=%s (expected str or list)",
-                input_type,
+                type(raw).__name__,
             )
             return networks
 
@@ -740,7 +747,10 @@ class BasePlugin:
             try:
                 net = ipaddress.ip_network(text, strict=False)
             except Exception:
-                logger.warning("BasePlugin: skipping invalid target entry %r", text)
+                logger.warning(
+                    "BasePlugin: skipping invalid target entry (length=%d)",
+                    len(text),
+                )
                 continue
             networks.append(net)
 
@@ -773,10 +783,9 @@ class BasePlugin:
         elif isinstance(raw, (list, tuple)):
             entries = [str(x) for x in raw]
         else:
-            input_type = type(raw).__name__
             logger.warning(
-                "BasePlugin: ignoring invalid targets_domains value type=%s (expected str or list)",
-                input_type,
+                "BasePlugin: ignoring invalid targets_domains type %s (expected str or list)",
+                type(raw).__name__,
             )
             entries = []
 
@@ -860,10 +869,9 @@ class BasePlugin:
                     continue
                 _add_token(listeners, text)
         else:
-            input_type = type(raw).__name__
             logger.warning(
-                "BasePlugin: ignoring invalid targets_listener value type=%s (expected str or list)",
-                input_type,
+                "BasePlugin: ignoring invalid targets_listener type %r (expected str or list)",
+                type(raw),
             )
 
         # If an "any" token was seen at any point, listeners will have been
@@ -874,7 +882,8 @@ class BasePlugin:
         """Brief: Determine whether this plugin targets the given client IP.
 
         Inputs:
-          - ctx: PluginContext providing client_ip and listener info for the request.
+          - ctx: PluginContext providing effective_target_ip/client_ip and
+            listener info for the request.
             Callers may optionally attach a qname attribute (or similar) when
             they wish to use domain-based targeting helpers.
 
@@ -945,13 +954,14 @@ class BasePlugin:
         if not self._target_networks and not self._ignore_networks:
             return True
 
-        client_ip = getattr(ctx, "client_ip", "")
-        if not client_ip:
+        target_ip = getattr(ctx, "effective_target_ip", None)
+        if not target_ip:
+            target_ip = getattr(ctx, "client_ip", "")
+        if not target_ip:
             # With explicit targets/ignores but no usable client IP, treat as
             # not targeted.
             return False
-
-        cache_key = (str(client_ip), 0)
+        cache_key = (str(target_ip), 0)
 
         # Consult per-client cache first to avoid repeated IP parsing and CIDR
         # scans under sustained load.
@@ -994,9 +1004,9 @@ class BasePlugin:
                 pass
 
         try:
-            addr = ipaddress.ip_address(client_ip)
+            addr = ipaddress.ip_address(target_ip)
         except Exception:
-            # Invalid client IP with explicit targets/ignores -> not targeted.
+            # Invalid targeting IP with explicit targets/ignores -> not targeted.
             result = False
         else:
             # Ignore list takes precedence regardless of targets configuration.
@@ -1085,10 +1095,9 @@ class BasePlugin:
         elif isinstance(raw, (list, tuple)):
             entries = list(raw)
         else:
-            input_type = type(raw).__name__
             logger.warning(
-                "BasePlugin: ignoring invalid target_opcodes value type=%s (expected str/int or list)",
-                input_type,
+                "BasePlugin: ignoring invalid target_opcodes value of type %s (expected str/int or list)",
+                type(raw).__name__,
             )
             return ["QUERY"]
 
@@ -1153,10 +1162,9 @@ class BasePlugin:
         elif isinstance(raw, (list, tuple)):
             entries = list(raw)
         else:
-            input_type = type(raw).__name__
             logger.warning(
-                "BasePlugin: ignoring invalid target_rcodes value type=%s (expected str/int or list)",
-                input_type,
+                "BasePlugin: ignoring invalid target_rcodes value type %s (expected str/int or list)",
+                type(raw).__name__,
             )
             return ["*"]
 

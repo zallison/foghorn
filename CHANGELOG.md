@@ -2,17 +2,44 @@
 
 All notable changes to this project will be documented in this file.
 
+
 ## [Unreleased]
+### Fixed
+- RateLimit webserver stats now resolve runtime reader callbacks by `db_path` using exact, absolute, and normalized suffix matching, preventing missed current-window/profile metrics when configured paths and plugin runtime paths differ.
+
+## 0.7.1
+### Added
+- Added a new resolve plugin `DnsRebinding` (`type: dns_rebinding`) that inspects post-resolve A/AAAA answers and denies rebinding-style responses when non-allowlisted names resolve to configured private CIDRs.
+- Added `DnsRebinding` plugin aliases (`dns_rebinding`, `no_rebinding`, `rebinding`) and typed config fields for `allowlist_domains`, `allowlist_mode`, and `private_cidrs`, with schema generation updates in `assets/config-schema.json`.
+- Added `upstreams.health.max_recheck` (with compatibility alias `max_recheck_seconds`) so operators can cap unhealthy-upstream retry backoff, and exposed the field in runtime parsing/default config expansion and generated schema metadata.
 ### Fixed
 - InMemoryTTL cache initialization now treats invalid `min_cache_ttl` values as `0` instead of raising during plugin construction.
 - InMemoryTTL admin snapshot counting now handles malformed cache store payloads defensively and treats malformed rows as expired entries instead of failing snapshot generation.
+- Restored MySQL/MariaDB stats backend alias registration by defining `MySqlStatsStore.aliases = ("mysql", "mariadb")` as a real class attribute, so alias-based backend selection works reliably.
+- Resolver forward-mode ECS handling now strips untrusted inbound ECS from outbound upstream requests before optional trusted/synthesized ECS injection, preventing spoofed ECS leakage.
+- Upstream-health backoff handling now clamps extreme `fail_count` values safely and enforces `max_recheck` caps without overflow, even for malformed or extremely large prior counters.
+- Failover aggregate errors now emit a compact `All upstreams failed` message including concise last-error details plus per-upstream fail counts/state markers, and upstream recovery now logs when degraded/down entries are marked healthy again.
 
 ### Changed
 - `foghorn.utils.ip_networks` helper signatures and docs now explicitly support optional iterable inputs for membership helpers and document defensive parsing behavior.
+- Statistics subsystem startup logs now use explicit `Starting ...` phrasing and emit before the statistics reporter thread starts, aligning log timing with startup behavior.
+- Clarified `MultiStatsStore` query-log backend semantics and method docs (including sync `increment_count` vs queued `insert_query_log`) and documented effective primary-backend selection behavior in loader docs.
+- Added defensive `# pragma: no cover` annotations to non-fatal fallback branches in query-log backend retention/pagination helpers and zone journal lock/fsync/temp-cleanup paths.
+- Resolver/runtime/config paths now use canonical `server.features` ECS toggles (`ecs.enabled`, trust controls, forwarding/synthesis, plugin-targeting opt-in) with compatibility aliases preserved for legacy `server.enable_ede` and `server.forward_local` keys.
+- Query result payloads now include source/effective-target/ECS metadata for ECS-aware requests, and ECS-influenced lookups bypass shared cache read/write paths to prevent cross-subnet contamination.
+- Consolidated EDNS request/response helpers (payload clamping, EDE attachment, COOKIE handling, ECS parse/serialize/upsert/strip) into `src/foghorn/servers/edns_utils.py` and updated server/runtime/UDP call sites to use the shared module.
+- AccessControl and RateLimit now support `use_effective_target_ip`, allowing policy and identity evaluation against resolver-derived targeting IP when enabled.
 
 ### Tests
 - Added branch-complete defensive regression coverage for `InMemoryTTLCache` in `tests/cache_plugins/test_in_memory_ttl_branches.py`, including malformed cache internals and import-fallback paths.
 - Added focused helper coverage for `foghorn.utils.ip_networks` in `tests/utils/test_ip_networks.py` for `None`/blank/bad-input parsing and CIDR membership edge cases.
+- Expanded query-log backend loader tests with branch-focused coverage for `MultiStatsStore`/`load_stats_store_backend` edge paths (empty backend list, queue-capacity derivation, invalid backend entries, primary selection, and fan-out error tolerance).
+- Expanded ZoneRecords journal tests with edge/corner coverage for normalization, action validation, tail scanning, writer/reader limits, manifest/snapshot handling, and compaction failure paths.
+- Added focused `DnsRebinding` plugin tests for private IPv4/IPv6 deny behavior, allowlist exact/suffix handling, non-private skip behavior, and BasePlugin target gating; added resolver pipeline coverage to assert post-resolve deny is enforced as NXDOMAIN.
+- Added resolver ECS regression coverage in `tests/test_resolve_query_bytes_pipeline.py` for trusted inbound forwarding, untrusted ECS suppression, synthesized ECS cache bypass behavior, and ECS metadata emission in query-log result contexts.
+
+### Documentation
+- Added `docs/plugins/resolve/dns_rebinding.md` and `example_configs/plugin_dns_rebinding.yaml`, and updated README/API resolve plugin documentation to include `DnsRebinding` behavior and configuration examples.
 
 ## [0.7.0]
 ### Release themes (summary)

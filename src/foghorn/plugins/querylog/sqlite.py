@@ -333,7 +333,14 @@ class SqliteStatsStore(BaseStatsStore):
         return conn
 
     def health_check(self) -> bool:
-        """Return True when the underlying SQLite store is usable."""
+        """Brief: Return whether the SQLite backend connection is currently usable.
+
+        Inputs:
+            None.
+
+        Outputs:
+            bool: True when a trivial query succeeds, otherwise False.
+        """
 
         try:
             with self._lock:
@@ -345,7 +352,15 @@ class SqliteStatsStore(BaseStatsStore):
             return False
 
     def _execute(self, sql: str, params: Tuple[Any, ...]) -> None:
-        """Execute a single SQL statement, with optional batching."""
+        """Brief: Execute one SQL statement immediately or queue it for batch flush.
+
+        Inputs:
+            sql: SQL statement with positional placeholders.
+            params: Tuple of bound SQL parameters.
+
+        Outputs:
+            None.
+        """
 
         if not self._batch_writes:
             try:
@@ -362,8 +377,7 @@ class SqliteStatsStore(BaseStatsStore):
 
     def _maybe_flush_locked(self) -> None:
         """Flush pending batched operations if thresholds are exceeded."""
-
-        if not self._batch_writes:
+        if not self._batch_writes:  # pragma: nocover - helper is used by batched paths
             return
 
         now = time.time()
@@ -434,7 +448,23 @@ class SqliteStatsStore(BaseStatsStore):
         first: Optional[str],
         result_json: str,
     ) -> None:
-        """Append a DNS query entry to the query_log table."""
+        """Brief: Append one DNS query-log row and apply retention policy checks.
+
+        Inputs:
+            ts: Query timestamp (Unix seconds).
+            client_ip: Client source IP string.
+            name: Queried domain name.
+            qtype: DNS record type string.
+            upstream_id: Upstream identifier when present.
+            rcode: DNS response code when present.
+            status: Query processing/cache status string.
+            error: Optional error text.
+            first: Optional first-answer string.
+            result_json: JSON payload string persisted with the row.
+
+        Outputs:
+            None.
+        """
 
         try:
             sql = (
@@ -531,7 +561,7 @@ class SqliteStatsStore(BaseStatsStore):
             bool: True when one or more rows were deleted.
         """
 
-        if max_records <= 0:
+        if max_records <= 0:  # pragma: nocover - invalid cap already normalized out
             return False
 
         cutoff_row = self._conn.execute(
@@ -562,7 +592,7 @@ class SqliteStatsStore(BaseStatsStore):
             bool: True when one or more rows were deleted.
         """
 
-        if max_bytes <= 0:
+        if max_bytes <= 0:  # pragma: nocover - invalid cap already normalized out
             return False
 
         changed = False
@@ -603,7 +633,9 @@ class SqliteStatsStore(BaseStatsStore):
                     "DELETE FROM query_log WHERE id IN (SELECT id FROM query_log ORDER BY ts ASC, id ASC LIMIT ?)",
                     (int(rows_to_delete),),
                 )
-            if not bool(getattr(cur, "rowcount", 0)):
+            if not bool(
+                getattr(cur, "rowcount", 0)
+            ):  # pragma: nocover - guarded delete should remove rows unless concurrent external mutation occurs
                 break
             changed = True
 
@@ -654,7 +686,24 @@ class SqliteStatsStore(BaseStatsStore):
         page: int = 1,
         page_size: int = 100,
     ) -> Dict[str, Any]:
-        """Select query_log rows with basic filtering and pagination."""
+        """Brief: Query raw query-log rows with filters and paginated ordering.
+
+        Inputs:
+            client_ip: Optional exact client IP filter.
+            qtype: Optional DNS qtype filter (case-insensitive input).
+            qname: Optional domain filter; matches exact name and subdomains.
+            rcode: Optional DNS rcode filter (case-insensitive input).
+            status: Optional normalized status filter.
+            source: Optional source filter matched from result_json text.
+            ede_code: Optional EDE code filter from result_json.
+            start_ts: Optional inclusive lower timestamp bound.
+            end_ts: Optional exclusive upper timestamp bound.
+            page: 1-based page number.
+            page_size: Maximum items per page.
+
+        Outputs:
+            Dict[str, Any]: Pagination metadata and list of normalized row items.
+        """
 
         # Defensive normalization
         try:
@@ -819,6 +868,8 @@ class SqliteStatsStore(BaseStatsStore):
         total_pages = 0
         if page_size_i > 0:
             total_pages = (total + page_size_i - 1) // page_size_i
+        else:  # pragma: nocover - page_size_i is clamped to >= 1 above
+            total_pages = 0
 
         return {
             "total": total,
@@ -839,7 +890,21 @@ class SqliteStatsStore(BaseStatsStore):
         rcode: Optional[str] = None,
         group_by: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Aggregate query_log counts into fixed time buckets."""
+        """Brief: Aggregate query-log counts into fixed-width time buckets.
+
+        Inputs:
+            start_ts: Inclusive start timestamp.
+            end_ts: Exclusive end timestamp.
+            interval_seconds: Bucket width in seconds.
+            client_ip: Optional exact client IP filter.
+            qtype: Optional exact qtype filter.
+            qname: Optional domain/subdomain filter.
+            rcode: Optional exact rcode filter.
+            group_by: Optional grouping dimension; returns sparse grouped rows.
+
+        Outputs:
+            Dict[str, Any]: Bucketed counts (dense single-series or sparse grouped).
+        """
 
         try:
             start_f = float(start_ts)
@@ -917,11 +982,15 @@ class SqliteStatsStore(BaseStatsStore):
                 for bucket, group_value, c in cur:
                     try:
                         b_i = int(bucket)
-                    except Exception:
+                    except (
+                        Exception
+                    ):  # pragma: nocover - SQLite CAST yields integer-like bucket
                         continue
                     try:
                         c_i = int(c)
-                    except Exception:
+                    except (
+                        Exception
+                    ):  # pragma: nocover - SQLite COUNT yields integer-like values
                         c_i = 0
                     rows.append(
                         (
@@ -943,11 +1012,15 @@ class SqliteStatsStore(BaseStatsStore):
                 for bucket, c in cur:
                     try:
                         b_i = int(bucket)
-                    except Exception:
+                    except (
+                        Exception
+                    ):  # pragma: nocover - SQLite CAST yields integer-like bucket
                         continue
                     try:
                         c_i = int(c)
-                    except Exception:
+                    except (
+                        Exception
+                    ):  # pragma: nocover - SQLite COUNT yields integer-like values
                         c_i = 0
                     rows.append((b_i, None, c_i))
         except Exception as exc:  # pragma: no cover - defensive
@@ -1036,7 +1109,15 @@ class SqliteStatsStore(BaseStatsStore):
             return False
 
     def export_counts(self) -> Dict[str, Dict[str, int]]:
-        """Export all aggregate counters from the counts table."""
+        """Brief: Export all aggregate counters from the counts table.
+
+        Inputs:
+            None.
+
+        Outputs:
+            Dict[str, Dict[str, int]]: Mapping of scope -> key -> integer value.
+            Rows with non-integer values are skipped defensively.
+        """
 
         result: Dict[str, Dict[str, int]] = {}
         try:
@@ -1074,7 +1155,14 @@ class SqliteStatsStore(BaseStatsStore):
     def rebuild_counts_from_query_log(
         self, logger_obj: Optional[logging.Logger] = None
     ) -> None:
-        """Rebuild counts table by aggregating over all rows in query_log."""
+        """Brief: Recompute aggregate counters by scanning all query_log rows.
+
+        Inputs:
+            logger_obj: Optional logger to receive progress/error messages.
+
+        Outputs:
+            None.
+        """
 
         log = logger_obj or logger
         log.warning(

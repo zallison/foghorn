@@ -2,18 +2,24 @@
 
 from __future__ import annotations
 
-import copy
 import logging
 from typing import Optional
 
 from cachetools import TTLCache
-from dnslib import QTYPE, RCODE, DNSRecord, EDNSOption
+from dnslib import QTYPE, RCODE, DNSRecord
 
 from foghorn.utils.register_caches import registered_cached
+from .edns_utils import (
+    attach_ede_option,
+    bind_response_cookie_to_request,
+    echo_client_edns,
+    ensure_edns_request,
+    extract_client_cookie_from_request,
+    strip_cookie_options_from_response_record,
+    strip_response_cookie_options,
+)
 
 logger = logging.getLogger("foghorn.server")
-_EDNS_COOKIE_OPTION_CODE = 10
-_DNS_COOKIE_CLIENT_BYTES = 8
 
 
 def _compute_effective_ttl_cache_key(resp: object, min_cache_ttl: int) -> tuple:
@@ -246,28 +252,7 @@ def _extract_client_cookie_from_request(req: DNSRecord) -> Optional[bytes]:
       - This helper returns only the client-cookie portion (first 8 bytes).
     """
 
-    try:
-        for rr in getattr(req, "ar", None) or []:
-            if getattr(rr, "rtype", None) != QTYPE.OPT:
-                continue
-            for opt in getattr(rr, "rdata", None) or []:
-                if not isinstance(opt, EDNSOption):
-                    continue
-                try:
-                    if int(getattr(opt, "code", -1)) != _EDNS_COOKIE_OPTION_CODE:
-                        continue
-                except Exception:
-                    continue
-                try:
-                    raw = bytes(getattr(opt, "data", b"") or b"")
-                except Exception:
-                    raw = b""
-                if len(raw) < _DNS_COOKIE_CLIENT_BYTES:
-                    return None
-                return raw[:_DNS_COOKIE_CLIENT_BYTES]
-    except Exception:
-        return None
-    return None
+    return extract_client_cookie_from_request(req)
 
 
 def _strip_cookie_options_from_response_record(resp: DNSRecord) -> bool:
@@ -280,26 +265,7 @@ def _strip_cookie_options_from_response_record(resp: DNSRecord) -> bool:
       - bool: True when at least one COOKIE option was removed.
     """
 
-    changed = False
-    for rr in getattr(resp, "ar", None) or []:
-        if getattr(rr, "rtype", None) != QTYPE.OPT:
-            continue
-        rdata_list = getattr(rr, "rdata", None)
-        if not isinstance(rdata_list, list):
-            continue
-        filtered = []
-        removed = False
-        for opt in rdata_list:
-            if isinstance(opt, EDNSOption) and int(getattr(opt, "code", -1)) == int(
-                _EDNS_COOKIE_OPTION_CODE
-            ):
-                removed = True
-                continue
-            filtered.append(opt)
-        if removed:
-            rr.rdata = filtered
-            changed = True
-    return changed
+    return strip_cookie_options_from_response_record(resp)
 
 
 def _strip_response_cookie_options(response_wire: bytes) -> bytes:
@@ -312,16 +278,7 @@ def _strip_response_cookie_options(response_wire: bytes) -> bytes:
       - bytes: Response bytes with COOKIE options removed.
     """
 
-    if not isinstance(response_wire, (bytes, bytearray, memoryview)):
-        return response_wire
-    try:
-        msg = DNSRecord.parse(bytes(response_wire))
-        changed = _strip_cookie_options_from_response_record(msg)
-        if not changed:
-            return bytes(response_wire)
-        return msg.pack()
-    except Exception:
-        return response_wire
+    return strip_response_cookie_options(response_wire)
 
 
 def _bind_response_cookie_to_request(req: DNSRecord, response_wire: bytes) -> bytes:
@@ -339,60 +296,7 @@ def _bind_response_cookie_to_request(req: DNSRecord, response_wire: bytes) -> by
       - Non-COOKIE EDNS options are preserved.
     """
 
-    if not isinstance(response_wire, (bytes, bytearray, memoryview)):
-        return response_wire
-    try:
-        msg = DNSRecord.parse(bytes(response_wire))
-        changed = _strip_cookie_options_from_response_record(msg)
-
-        client_cookie = _extract_client_cookie_from_request(req)
-        if client_cookie is None:
-            if changed:
-                return msg.pack()
-            return bytes(response_wire)
-
-        opt_rr = None
-        for rr in getattr(msg, "ar", None) or []:
-            if getattr(rr, "rtype", None) == QTYPE.OPT:
-                opt_rr = rr
-                break
-
-        if opt_rr is None:
-            client_opts = [
-                rr
-                for rr in (getattr(req, "ar", None) or [])
-                if getattr(rr, "rtype", None) == QTYPE.OPT
-            ]
-            if not client_opts:
-                if changed:
-                    return msg.pack()
-                return bytes(response_wire)
-            msg.add_ar(copy.deepcopy(client_opts[0]))
-            changed = True
-            for rr in getattr(msg, "ar", None) or []:
-                if getattr(rr, "rtype", None) == QTYPE.OPT:
-                    opt_rr = rr
-                    break
-            if opt_rr is None:
-                if changed:
-                    return msg.pack()
-                return bytes(response_wire)
-
-        rdata_list = getattr(opt_rr, "rdata", None)
-        if not isinstance(rdata_list, list):
-            opt_rr.rdata = []
-            rdata_list = opt_rr.rdata
-        rdata_list.append(EDNSOption(_EDNS_COOKIE_OPTION_CODE, bytes(client_cookie)))
-        changed = True
-
-        if changed:
-            return msg.pack()
-        return bytes(response_wire)
-    except Exception:
-        return response_wire
-
-
-_EDNS_PAYLOAD_CLAMP_WARNED: set[int] = set()
+    return bind_response_cookie_to_request(req, response_wire)
 
 
 def _ensure_edns_request(
@@ -412,58 +316,11 @@ def _ensure_edns_request(
       >>> req = DNSRecord.question("example.com", "A")
       >>> _ensure_edns_request(req, dnssec_mode="validate", edns_udp_payload=1232)
     """
-    _ = dnssec_mode
-    # Locate an existing OPT record, if any, in the additional section.
-    opt_rr = None
-    additional = getattr(req, "ar", []) or []
-    for rr in additional:
-        if getattr(rr, "rtype", None) == QTYPE.OPT:
-            opt_rr = rr
-            break
-
-    # If the client did not include EDNS, do not add an OPT RR.
-    if opt_rr is None:
-        return
-
-    # Respect the client's DO bit only; do not set it unless requested.
-    try:
-        ttl_val = int(getattr(opt_rr, "ttl", 0) or 0)
-    except Exception:
-        ttl_val = 0
-    client_do = 0x8000 if (ttl_val & 0x8000) else 0
-
-    try:
-        server_max = int(edns_udp_payload)
-    except Exception:
-        server_max = 1232
-    if server_max < 512:
-        server_max = 512
-    if server_max > 4096:
-        # Clamp oversized EDNS UDP payload values to avoid pathological UDP
-        # fragmentation and oversized responses.
-        if server_max not in _EDNS_PAYLOAD_CLAMP_WARNED:
-            _EDNS_PAYLOAD_CLAMP_WARNED.add(server_max)
-            logger.warning(
-                "Clamping edns_udp_payload from %d to 4096 bytes", int(server_max)
-            )
-        server_max = 4096
-
-    try:
-        client_payload = int(getattr(opt_rr, "rclass", 0) or 0)
-    except Exception:
-        client_payload = 0
-    if client_payload <= 0:
-        payload = server_max
-    else:
-        payload = min(client_payload, server_max) if server_max > 0 else client_payload
-
-    ext_rcode = (ttl_val >> 24) & 0xFF
-    version = (ttl_val >> 16) & 0xFF
-    flags = ttl_val & 0xFFFF
-    flags = (flags & ~0x8000) | client_do
-    opt_rr.rclass = payload
-    opt_rr.ttl = (ext_rcode << 24) | (version << 16) | (flags & 0xFFFF)
-    return
+    ensure_edns_request(
+        req,
+        dnssec_mode=dnssec_mode,
+        edns_udp_payload=edns_udp_payload,
+    )
 
 
 def _echo_client_edns(req: DNSRecord, resp: DNSRecord) -> None:
@@ -482,29 +339,7 @@ def _echo_client_edns(req: DNSRecord, resp: DNSRecord) -> None:
       - If resp already carries an OPT RR, it is left unchanged so upstream or
         plugin-provided EDNS semantics are preserved.
     """
-    try:
-        client_opts = [
-            rr
-            for rr in (getattr(req, "ar", None) or [])
-            if getattr(rr, "rtype", None) == QTYPE.OPT
-        ]
-        if not client_opts:
-            return
-        existing_opts = [
-            rr
-            for rr in (getattr(resp, "ar", None) or [])
-            if getattr(rr, "rtype", None) == QTYPE.OPT
-        ]
-        if existing_opts:
-            return
-        # Echo the first client OPT RR to keep behaviour simple and
-        # deterministic; typical queries only carry a single OPT.
-        # NOTE: Copy the OPT RR to avoid aliasing/mutating the original request
-        # object when we later append EDNS options (e.g., EDE).
-        resp.add_ar(copy.deepcopy(client_opts[0]))
-    except Exception:  # pragma: no cover - defensive: best-effort only
-        # EDNS echo should never prevent a response from being generated.
-        return
+    echo_client_edns(req, resp)
 
 
 def _attach_ede_option(
@@ -532,68 +367,9 @@ def _attach_ede_option(
       - EXTRA-TEXT is truncated to 255 UTF-8 bytes.
     """
 
-    try:
-        try:
-            from foghorn.runtime_config import get_runtime_snapshot
-
-            enable_ede = bool(get_runtime_snapshot().enable_ede)
-        except Exception:
-            enable_ede = False
-        if not enable_ede:
-            return
-
-        client_opts = [
-            rr
-            for rr in (getattr(req, "ar", None) or [])
-            if getattr(rr, "rtype", None) == QTYPE.OPT
-        ]
-        if not client_opts:
-            return
-
-        # Locate or create an OPT RR on the response.
-        opt_rr = None
-        for rr in getattr(resp, "ar", None) or []:
-            if getattr(rr, "rtype", None) == QTYPE.OPT:
-                opt_rr = rr
-                break
-        if opt_rr is None:
-            # Conservative: echo the first client OPT into the response, then
-            # re-scan to obtain the actual instance attached to resp.
-            # NOTE: Copy to avoid mutating req.ar when we append EDNS options.
-            resp.add_ar(copy.deepcopy(client_opts[0]))
-            for rr in getattr(resp, "ar", None) or []:
-                if getattr(rr, "rtype", None) == QTYPE.OPT:
-                    opt_rr = rr
-                    break
-        if (
-            opt_rr is None
-        ):  # pragma: no cover - defensive/metrics path excluded from coverage
-            return
-
-        try:
-            code = (
-                int(info_code) & 0xFFFF
-            )  # pragma: no cover - defensive/metrics path excluded from coverage
-        except (
-            Exception
-        ):  # pragma: no cover - defensive/metrics path excluded from coverage
-            code = 0
-        payload = code.to_bytes(2, "big")
-        if text:
-            try:
-                encoded = str(text).encode("utf-8")
-                # Bound EXTRA-TEXT to 255 bytes to reduce risk of oversized UDP
-                # responses while keeping diagnostics useful.
-                if len(encoded) > 255:
-                    encoded = encoded[:255].decode("utf-8", "ignore").encode("utf-8")
-                payload += encoded  # pragma: no cover - defensive/metrics path excluded from coverage
-            except Exception:
-                # Best-effort: ignore text encoding failures.
-                pass
-
-        # Append the EDE option (option-code 15) to the OPT rdata list.
-        rdata_list = getattr(opt_rr, "rdata", None)
-        if isinstance(rdata_list, list):
-            rdata_list.append(EDNSOption(15, payload))
-    except Exception:  # pragma: no cover - defensive: best-effort only
-        return
+    attach_ede_option(
+        req,
+        resp,
+        info_code,
+        text=text,
+    )

@@ -199,7 +199,10 @@ class Filter(BasePlugin):
 
         self.default = str(raw_default).lower()
         if self.default not in {"allow", "deny"}:
-            logger.warning("unknown default policy; defaulting to 'deny'")
+            logger.warning(
+                "unknown default policy %r; defaulting to 'deny'",
+                raw_default,
+            )
             self.default = "deny"
 
         # TTL used when synthesizing A/AAAA responses (e.g., when deny_response="ip")
