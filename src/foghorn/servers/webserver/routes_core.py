@@ -1707,90 +1707,209 @@ def _register_plugin_routes(app: FastAPI, auth_dep: Any) -> None:
         entries = buf.snapshot(limit=max(0, int(limit)))
         return {"server_time": _utc_now_iso(), "entries": entries}
 
+    def _plugin_snapshot_response(plugin_name: str) -> Dict[str, Any]:
+        """Brief: Build the common JSON response shape for plugin snapshots.
+
+        Inputs:
+          - plugin_name: Target plugin instance name.
+
+        Outputs:
+          - Dict containing server_time, plugin, and data keys.
+        """
+
+        plugins_list = getattr(app.state, "plugins", []) or []
+        try:
+            snap = _admin_logic.build_plugin_snapshot_payload(plugins_list, plugin_name)
+        except _admin_logic.AdminLogicHttpError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+        return {
+            "server_time": _utc_now_iso(),
+            "plugin": snap["plugin"],
+            "data": _json_safe(snap["data"]),
+        }
+
+    @app.get("/api/v1/plugins/{plugin_name}/snapshot", dependencies=[Depends(auth_dep)])
+    async def get_plugin_snapshot(plugin_name: str) -> Dict[str, Any]:
+        return _plugin_snapshot_response(plugin_name)
+
     @app.get(
         "/api/v1/plugins/{plugin_name}/access_control", dependencies=[Depends(auth_dep)]
     )
-    async def get_access_control_snapshot(plugin_name: str) -> Dict[str, Any]:
-        plugins_list = getattr(app.state, "plugins", []) or []
-        try:
-            snap = _admin_logic.build_named_plugin_snapshot(
-                plugins_list, plugin_name, label="AccessControl"
-            )
-        except _admin_logic.AdminLogicHttpError as exc:
-            raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
-
-        return {
-            "server_time": _utc_now_iso(),
-            "plugin": snap["plugin"],
-            "data": _json_safe(snap["data"]),
-        }
-
     @app.get(
         "/api/v1/plugins/{plugin_name}/rate_limit", dependencies=[Depends(auth_dep)]
     )
-    async def get_rate_limit_snapshot(plugin_name: str) -> Dict[str, Any]:
-        plugins_list = getattr(app.state, "plugins", []) or []
-        try:
-            snap = _admin_logic.build_named_plugin_snapshot(
-                plugins_list, plugin_name, label="RateLimit"
-            )
-        except _admin_logic.AdminLogicHttpError as exc:
-            raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
-
-        return {
-            "server_time": _utc_now_iso(),
-            "plugin": snap["plugin"],
-            "data": _json_safe(snap["data"]),
-        }
-
     @app.get(
         "/api/v1/plugins/{plugin_name}/docker_hosts", dependencies=[Depends(auth_dep)]
     )
-    async def get_docker_hosts_snapshot(plugin_name: str) -> Dict[str, Any]:
-        plugins_list = getattr(app.state, "plugins", []) or []
-        try:
-            snap = _admin_logic.build_named_plugin_snapshot(
-                plugins_list, plugin_name, label="DockerHosts"
-            )
-        except _admin_logic.AdminLogicHttpError as exc:
-            raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
-
-        return {
-            "server_time": _utc_now_iso(),
-            "plugin": snap["plugin"],
-            "data": _json_safe(snap["data"]),
-        }
-
     @app.get(
         "/api/v1/plugins/{plugin_name}/etc_hosts", dependencies=[Depends(auth_dep)]
     )
-    async def get_etc_hosts_snapshot(plugin_name: str) -> Dict[str, Any]:
-        plugins_list = getattr(app.state, "plugins", []) or []
-        try:
-            snap = _admin_logic.build_named_plugin_snapshot(
-                plugins_list, plugin_name, label="EtcHosts"
-            )
-        except _admin_logic.AdminLogicHttpError as exc:
-            raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
-
-        return {
-            "server_time": _utc_now_iso(),
-            "plugin": snap["plugin"],
-            "data": _json_safe(snap["data"]),
-        }
-
     @app.get("/api/v1/plugins/{plugin_name}/mdns", dependencies=[Depends(auth_dep)])
-    async def get_mdns_snapshot(plugin_name: str) -> Dict[str, Any]:
+    @app.get(
+        "/api/v1/plugins/{plugin_name}/zone_records", dependencies=[Depends(auth_dep)]
+    )
+    async def get_plugin_snapshot_compat_alias(plugin_name: str) -> Dict[str, Any]:
+        """Brief: Compatibility aliases for existing plugin-specific snapshots.
+
+        Inputs:
+          - plugin_name: Target plugin instance name.
+
+        Outputs:
+          - Dict containing server_time, plugin, and data keys.
+        """
+
+        return _plugin_snapshot_response(plugin_name)
+
+    @app.get(
+        "/api/v1/plugins/{plugin_name}/access_control/rules",
+        dependencies=[Depends(auth_dep)],
+    )
+    async def get_access_control_rules(plugin_name: str) -> Dict[str, Any]:
         plugins_list = getattr(app.state, "plugins", []) or []
         try:
-            snap = _admin_logic.build_named_plugin_snapshot(
-                plugins_list, plugin_name, label="MdnsBridge"
+            payload = _admin_logic.build_plugin_access_control_rules_payload(
+                plugins_list, plugin_name
             )
         except _admin_logic.AdminLogicHttpError as exc:
             raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+        payload["server_time"] = _utc_now_iso()
+        return _json_safe(payload)
 
-        return {
-            "server_time": _utc_now_iso(),
-            "plugin": snap["plugin"],
-            "data": _json_safe(snap["data"]),
-        }
+    @app.get(
+        "/api/v1/plugins/{plugin_name}/etc_hosts/lookup",
+        dependencies=[Depends(auth_dep)],
+    )
+    async def get_etc_hosts_lookup(
+        plugin_name: str, name: str | None = None
+    ) -> Dict[str, Any]:
+        plugins_list = getattr(app.state, "plugins", []) or []
+        try:
+            payload = _admin_logic.build_plugin_etc_hosts_lookup_payload(
+                plugins_list, plugin_name, name=str(name or "")
+            )
+        except _admin_logic.AdminLogicHttpError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+        payload["server_time"] = _utc_now_iso()
+        return _json_safe(payload)
+
+    @app.get(
+        "/api/v1/plugins/{plugin_name}/docker_hosts/containers/{name}",
+        dependencies=[Depends(auth_dep)],
+    )
+    async def get_docker_container_by_name(
+        plugin_name: str, name: str
+    ) -> Dict[str, Any]:
+        plugins_list = getattr(app.state, "plugins", []) or []
+        try:
+            payload = _admin_logic.build_plugin_docker_container_payload(
+                plugins_list, plugin_name, name=name
+            )
+        except _admin_logic.AdminLogicHttpError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+        payload["server_time"] = _utc_now_iso()
+        return _json_safe(payload)
+
+    @app.get(
+        "/api/v1/plugins/{plugin_name}/mdns/services", dependencies=[Depends(auth_dep)]
+    )
+    async def get_mdns_services(
+        plugin_name: str,
+        status_text: str | None = Query(None, alias="status"),
+        service_type: str | None = Query(None, alias="type"),
+    ) -> Dict[str, Any]:
+        plugins_list = getattr(app.state, "plugins", []) or []
+        try:
+            payload = _admin_logic.build_plugin_mdns_services_payload(
+                plugins_list,
+                plugin_name,
+                status=status_text,
+                service_type=service_type,
+            )
+        except _admin_logic.AdminLogicHttpError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+        payload["server_time"] = _utc_now_iso()
+        return _json_safe(payload)
+
+    @app.get(
+        "/api/v1/plugins/{plugin_name}/rate_limit/profiles",
+        dependencies=[Depends(auth_dep)],
+    )
+    async def get_rate_limit_profiles(
+        plugin_name: str, limit: int | None = None, sort: str | None = None
+    ) -> Dict[str, Any]:
+        plugins_list = getattr(app.state, "plugins", []) or []
+        try:
+            payload = _admin_logic.build_plugin_rate_limit_profiles_payload(
+                plugins_list, plugin_name, limit=limit, sort=sort
+            )
+        except _admin_logic.AdminLogicHttpError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+        payload["server_time"] = _utc_now_iso()
+        return _json_safe(payload)
+
+    @app.get(
+        "/api/v1/plugins/{plugin_name}/zone_records/lookup",
+        dependencies=[Depends(auth_dep)],
+    )
+    async def get_zone_records_lookup(
+        plugin_name: str, owner: str | None = None, qtype: str | None = None
+    ) -> Dict[str, Any]:
+        plugins_list = getattr(app.state, "plugins", []) or []
+        try:
+            payload = _admin_logic.build_plugin_zone_records_lookup_payload(
+                plugins_list,
+                plugin_name,
+                owner=str(owner or ""),
+                qtype=qtype,
+            )
+        except _admin_logic.AdminLogicHttpError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+        payload["server_time"] = _utc_now_iso()
+        return _json_safe(payload)
+
+    @app.post(
+        "/api/v1/plugins/{plugin_name}/etc_hosts/reload",
+        dependencies=[Depends(auth_dep)],
+    )
+    async def post_etc_hosts_reload(plugin_name: str) -> Dict[str, Any]:
+        plugins_list = getattr(app.state, "plugins", []) or []
+        try:
+            payload = _admin_logic.build_plugin_reload_payload(
+                plugins_list, plugin_name, plugin_kind="etc_hosts"
+            )
+        except _admin_logic.AdminLogicHttpError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+        payload["server_time"] = _utc_now_iso()
+        return _json_safe(payload)
+
+    @app.post(
+        "/api/v1/plugins/{plugin_name}/docker_hosts/reload",
+        dependencies=[Depends(auth_dep)],
+    )
+    async def post_docker_hosts_reload(plugin_name: str) -> Dict[str, Any]:
+        plugins_list = getattr(app.state, "plugins", []) or []
+        try:
+            payload = _admin_logic.build_plugin_reload_payload(
+                plugins_list, plugin_name, plugin_kind="docker_hosts"
+            )
+        except _admin_logic.AdminLogicHttpError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+        payload["server_time"] = _utc_now_iso()
+        return _json_safe(payload)
+
+    @app.get(
+        "/api/v1/plugins/{plugin_name}/upstream_router/evaluate",
+        dependencies=[Depends(auth_dep)],
+    )
+    async def get_upstream_router_evaluate(
+        plugin_name: str, qname: str | None = None
+    ) -> Dict[str, Any]:
+        plugins_list = getattr(app.state, "plugins", []) or []
+        try:
+            payload = _admin_logic.build_plugin_upstream_evaluate_payload(
+                plugins_list, plugin_name, qname=str(qname or "")
+            )
+        except _admin_logic.AdminLogicHttpError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+        payload["server_time"] = _utc_now_iso()
+        return _json_safe(payload)

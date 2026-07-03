@@ -1136,28 +1136,28 @@ def test_named_plugin_snapshot_endpoints_raise_mapped_http_errors(
       - Access-control/rate-limit/etc-hosts/mdns routes return mapped status/detail.
     """
 
-    def _raise_named_snapshot(
-        plugins_list: list[object], plugin_name: str, label: str
-    ) -> dict[str, Any]:
-        _ = (plugins_list, plugin_name)
+    def _raise_snapshot(plugins_list: list[object], plugin_name: str) -> dict[str, Any]:
+        _ = plugins_list
         raise admin_logic_mod.AdminLogicHttpError(
-            status_code=418, detail=f"bad-{label}"
+            status_code=418, detail=f"bad-{plugin_name}"
         )
 
     monkeypatch.setattr(
         routes_core_mod._admin_logic,
-        "build_named_plugin_snapshot",
-        _raise_named_snapshot,
+        "build_plugin_snapshot_payload",
+        _raise_snapshot,
     )
 
     app = _create_test_app()
     client = TestClient(app)
 
     for path in [
+        "/api/v1/plugins/demo/snapshot",
         "/api/v1/plugins/demo/access_control",
         "/api/v1/plugins/demo/rate_limit",
         "/api/v1/plugins/demo/etc_hosts",
         "/api/v1/plugins/demo/mdns",
+        "/api/v1/plugins/demo/zone_records",
     ]:
         resp = client.get(path)
         assert resp.status_code == 418
@@ -1165,12 +1165,15 @@ def test_named_plugin_snapshot_endpoints_raise_mapped_http_errors(
 
     monkeypatch.setattr(
         routes_core_mod._admin_logic,
-        "build_named_plugin_snapshot",
-        lambda _plugins, plugin_name, label: {
+        "build_plugin_snapshot_payload",
+        lambda _plugins, plugin_name: {
             "plugin": plugin_name,
-            "data": {"label": label},
+            "data": {"ok": True},
         },
     )
+    ok_snapshot = client.get("/api/v1/plugins/demo/snapshot")
+    assert ok_snapshot.status_code == 200
+    assert ok_snapshot.json()["plugin"] == "demo"
     ok_access = client.get("/api/v1/plugins/demo/access_control")
     assert ok_access.status_code == 200
     assert ok_access.json()["plugin"] == "demo"
@@ -1178,3 +1181,128 @@ def test_named_plugin_snapshot_endpoints_raise_mapped_http_errors(
     ok_rate = client.get("/api/v1/plugins/demo/rate_limit")
     assert ok_rate.status_code == 200
     assert ok_rate.json()["plugin"] == "demo"
+
+
+def test_plugin_api_expansion_routes_delegate_to_admin_logic(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Brief: Expanded plugin routes delegate to admin-logic helpers.
+
+    Inputs:
+      - monkeypatch fixtures replacing helper return values.
+
+    Outputs:
+      - New GET/POST plugin routes return successful payloads with server_time.
+    """
+
+    monkeypatch.setattr(
+        routes_core_mod._admin_logic,
+        "build_plugin_access_control_rules_payload",
+        lambda _plugins, plugin_name: {"plugin": plugin_name, "rules": {"ok": True}},
+    )
+    monkeypatch.setattr(
+        routes_core_mod._admin_logic,
+        "build_plugin_etc_hosts_lookup_payload",
+        lambda _plugins, plugin_name, name: {
+            "plugin": plugin_name,
+            "entry": {"name": name, "value": "127.0.0.1"},
+        },
+    )
+    monkeypatch.setattr(
+        routes_core_mod._admin_logic,
+        "build_plugin_docker_container_payload",
+        lambda _plugins, plugin_name, name: {
+            "plugin": plugin_name,
+            "containers": [{"name": name}],
+        },
+    )
+    monkeypatch.setattr(
+        routes_core_mod._admin_logic,
+        "build_plugin_mdns_services_payload",
+        lambda _plugins, plugin_name, status, service_type: {
+            "plugin": plugin_name,
+            "status": status,
+            "type": service_type,
+            "services": [],
+        },
+    )
+    monkeypatch.setattr(
+        routes_core_mod._admin_logic,
+        "build_plugin_rate_limit_profiles_payload",
+        lambda _plugins, plugin_name, limit, sort: {
+            "plugin": plugin_name,
+            "limit": limit,
+            "sort": {"field": sort or "avg_rps", "direction": "desc"},
+            "profiles": [],
+            "total": 0,
+        },
+    )
+    monkeypatch.setattr(
+        routes_core_mod._admin_logic,
+        "build_plugin_zone_records_lookup_payload",
+        lambda _plugins, plugin_name, owner, qtype: {
+            "plugin": plugin_name,
+            "owner": owner,
+            "qtype": qtype,
+            "records": [],
+        },
+    )
+    monkeypatch.setattr(
+        routes_core_mod._admin_logic,
+        "build_plugin_reload_payload",
+        lambda _plugins, plugin_name, plugin_kind: {
+            "plugin": plugin_name,
+            "action": "reload",
+            "kind": plugin_kind,
+            "data": {"ok": True},
+        },
+    )
+    monkeypatch.setattr(
+        routes_core_mod._admin_logic,
+        "build_plugin_upstream_evaluate_payload",
+        lambda _plugins, plugin_name, qname: {
+            "plugin": plugin_name,
+            "qname": qname,
+            "matched": False,
+            "candidates": [],
+        },
+    )
+
+    app = _create_test_app()
+    client = TestClient(app)
+
+    assert client.get("/api/v1/plugins/demo/access_control/rules").status_code == 200
+    assert (
+        client.get("/api/v1/plugins/demo/etc_hosts/lookup?name=example.com").status_code
+        == 200
+    )
+    assert (
+        client.get("/api/v1/plugins/demo/docker_hosts/containers/web").status_code
+        == 200
+    )
+    assert (
+        client.get(
+            "/api/v1/plugins/demo/mdns/services?status=up&type=_http._tcp"
+        ).status_code
+        == 200
+    )
+    assert (
+        client.get(
+            "/api/v1/plugins/demo/rate_limit/profiles?limit=10&sort=-samples"
+        ).status_code
+        == 200
+    )
+    assert (
+        client.get(
+            "/api/v1/plugins/demo/zone_records/lookup?owner=example.com&qtype=A"
+        ).status_code
+        == 200
+    )
+    assert client.post("/api/v1/plugins/demo/etc_hosts/reload").status_code == 200
+    assert client.post("/api/v1/plugins/demo/docker_hosts/reload").status_code == 200
+    assert (
+        client.get(
+            "/api/v1/plugins/demo/upstream_router/evaluate?qname=www.example.com"
+        ).status_code
+        == 200
+    )

@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from functools import cmp_to_key
 from typing import Any, Dict, Iterable, List, Optional
+from dnslib import QTYPE
 
 from ...plugins.resolve.base import AdminPageSpec
 from ...security_limits import (
@@ -21,6 +22,7 @@ from ...security_limits import (
     enforce_query_log_aggregate_grouped_result_limit,
 )
 from ...stats import StatsCollector
+from ...utils import dns_names
 from .config_helpers import _ts_to_utc_iso
 
 
@@ -975,4 +977,507 @@ def build_named_plugin_snapshot(
     return {
         "plugin": plugin_name,
         "data": snapshot,
+    }
+
+
+def build_plugin_snapshot_payload(
+    plugins: Iterable[object], plugin_name: str
+) -> Dict[str, Any]:
+    """Brief: Build a generic snapshot payload for a named plugin.
+
+    Inputs:
+      - plugins: Iterable of plugin instances.
+      - plugin_name: Target plugin name.
+
+    Outputs:
+      - Dict with keys: plugin, data.
+    """
+
+    return build_named_plugin_snapshot(plugins, plugin_name, label="Plugin")
+
+
+def build_plugin_access_control_rules_payload(
+    plugins: Iterable[object], plugin_name: str
+) -> Dict[str, Any]:
+    """Brief: Return explicit access-control CIDR rules and effective policy.
+
+    Inputs:
+      - plugins: Iterable of plugin instances.
+      - plugin_name: Target AccessControl plugin name.
+
+    Outputs:
+      - Dict with keys: plugin, rules.
+    """
+
+    target = find_plugin_instance_by_name(plugins, plugin_name)
+    if target is None:
+        raise AdminLogicHttpError(status_code=404, detail="plugin not found")
+
+    allow_nets = getattr(target, "allow_nets", []) or []
+    deny_nets = getattr(target, "deny_nets", []) or []
+    allow_cidrs = sorted({str(net) for net in allow_nets if net is not None})
+    deny_cidrs = sorted({str(net) for net in deny_nets if net is not None})
+
+    return {
+        "plugin": str(plugin_name),
+        "rules": {
+            "allow_cidrs": allow_cidrs,
+            "deny_cidrs": deny_cidrs,
+            "default": str(getattr(target, "default", "allow") or "allow"),
+            "deny_response": str(
+                getattr(target, "deny_response", "refused") or "refused"
+            ),
+        },
+    }
+
+
+def build_plugin_etc_hosts_lookup_payload(
+    plugins: Iterable[object], plugin_name: str, *, name: str
+) -> Dict[str, Any]:
+    """Brief: Resolve a normalized EtcHosts in-memory mapping entry by name.
+
+    Inputs:
+      - plugins: Iterable of plugin instances.
+      - plugin_name: Target EtcHosts plugin name.
+      - name: Query name to resolve.
+
+    Outputs:
+      - Dict with keys: plugin, entry.
+    """
+
+    target = find_plugin_instance_by_name(plugins, plugin_name)
+    if target is None:
+        raise AdminLogicHttpError(status_code=404, detail="plugin not found")
+
+    name_norm = dns_names.normalize_name(name)
+    if not name_norm:
+        raise AdminLogicHttpError(status_code=400, detail="name is required")
+
+    lock = getattr(target, "_hosts_lock", None)
+    if lock is None:
+        mapping = dict(getattr(target, "hosts", {}) or {})
+        src_map = dict(getattr(target, "_entry_sources", {}) or {})
+    else:
+        with lock:
+            mapping = dict(getattr(target, "hosts", {}) or {})
+            src_map = dict(getattr(target, "_entry_sources", {}) or {})
+
+    if name_norm not in mapping:
+        raise AdminLogicHttpError(status_code=404, detail="host entry not found")
+
+    return {
+        "plugin": str(plugin_name),
+        "entry": {
+            "name": name_norm,
+            "value": str(mapping.get(name_norm)),
+            "source": src_map.get(name_norm),
+        },
+    }
+
+
+def build_plugin_docker_container_payload(
+    plugins: Iterable[object], plugin_name: str, *, name: str
+) -> Dict[str, Any]:
+    """Brief: Return Docker snapshot container rows filtered by container name.
+
+    Inputs:
+      - plugins: Iterable of plugin instances.
+      - plugin_name: Target DockerHosts plugin name.
+      - name: Container display name to match (case-insensitive).
+
+    Outputs:
+      - Dict with keys: plugin, containers.
+    """
+
+    name_text = str(name or "").strip()
+    if not name_text:
+        raise AdminLogicHttpError(status_code=400, detail="container name is required")
+
+    snap = build_named_plugin_snapshot(plugins, plugin_name, label="DockerHosts")
+    data = snap.get("data")
+    containers_raw = data.get("containers") if isinstance(data, dict) else None
+    containers = (
+        [it for it in containers_raw if isinstance(it, dict)]
+        if isinstance(containers_raw, list)
+        else []
+    )
+    needle = name_text.lower()
+    matches = [it for it in containers if str(it.get("name", "")).lower() == needle]
+    if not matches:
+        raise AdminLogicHttpError(status_code=404, detail="container not found")
+    return {
+        "plugin": str(plugin_name),
+        "containers": matches,
+    }
+
+
+def build_plugin_mdns_services_payload(
+    plugins: Iterable[object],
+    plugin_name: str,
+    *,
+    status: str | None,
+    service_type: str | None,
+) -> Dict[str, Any]:
+    """Brief: Filter mDNS service rows by status and/or service type.
+
+    Inputs:
+      - plugins: Iterable of plugin instances.
+      - plugin_name: Target mDNS plugin name.
+      - status: Optional status filter (up/down).
+      - service_type: Optional service type filter (case-insensitive exact match).
+
+    Outputs:
+      - Dict with keys: plugin, status, type, services.
+    """
+
+    snap = build_named_plugin_snapshot(plugins, plugin_name, label="MdnsBridge")
+    data = snap.get("data")
+    up_raw = data.get("services") if isinstance(data, dict) else None
+    down_raw = data.get("down_services") if isinstance(data, dict) else None
+    up_rows = [it for it in (up_raw or []) if isinstance(it, dict)]
+    down_rows = [it for it in (down_raw or []) if isinstance(it, dict)]
+
+    status_norm = str(status or "").strip().lower()
+    if status_norm and status_norm not in {"up", "down"}:
+        raise AdminLogicHttpError(
+            status_code=400, detail="status must be 'up' or 'down'"
+        )
+
+    if status_norm == "up":
+        rows = up_rows
+    elif status_norm == "down":
+        rows = down_rows
+    else:
+        rows = up_rows + down_rows
+
+    type_norm = str(service_type or "").strip().lower()
+    if type_norm:
+        rows = [
+            it for it in rows if str(it.get("type", "")).strip().lower() == type_norm
+        ]
+
+    return {
+        "plugin": str(plugin_name),
+        "status": status_norm or None,
+        "type": type_norm or None,
+        "services": rows,
+    }
+
+
+def _parse_qtype_value(raw: str | None) -> int | None:
+    """Brief: Parse qtype text/code into an integer QTYPE value.
+
+    Inputs:
+      - raw: QTYPE string or integer-like value.
+
+    Outputs:
+      - Parsed integer QTYPE value, or None when omitted/invalid.
+    """
+
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    if text.isdigit():
+        try:
+            return int(text)
+        except Exception:
+            return None
+    upper = text.upper()
+    try:
+        attr_val = getattr(QTYPE, upper)
+    except Exception:
+        attr_val = None
+    if isinstance(attr_val, int):
+        return int(attr_val)
+    try:
+        qtype_val = QTYPE.get(upper, None)
+    except Exception:
+        qtype_val = None
+    return int(qtype_val) if isinstance(qtype_val, int) else None
+
+
+def build_plugin_zone_records_lookup_payload(
+    plugins: Iterable[object], plugin_name: str, *, owner: str, qtype: str | None
+) -> Dict[str, Any]:
+    """Brief: Lookup zone records by normalized owner and optional qtype.
+
+    Inputs:
+      - plugins: Iterable of plugin instances.
+      - plugin_name: Target ZoneRecords plugin name.
+      - owner: Record owner name.
+      - qtype: Optional record type filter.
+
+    Outputs:
+      - Dict with keys: plugin, owner, qtype, records.
+    """
+
+    target = find_plugin_instance_by_name(plugins, plugin_name)
+    if target is None:
+        raise AdminLogicHttpError(status_code=404, detail="plugin not found")
+
+    owner_norm = dns_names.normalize_name(owner)
+    if not owner_norm:
+        raise AdminLogicHttpError(status_code=400, detail="owner is required")
+
+    qtype_code = _parse_qtype_value(qtype)
+    if qtype and qtype_code is None:
+        raise AdminLogicHttpError(status_code=400, detail="invalid qtype")
+
+    lock = getattr(target, "_records_lock", None)
+    if lock is not None:
+        with lock:
+            name_index = dict(getattr(target, "_name_index", {}) or {})
+    else:
+        name_index = dict(getattr(target, "_name_index", {}) or {})
+
+    per_owner_raw = name_index.get(owner_norm)
+    per_owner = per_owner_raw if isinstance(per_owner_raw, dict) else {}
+    if not per_owner:
+        raise AdminLogicHttpError(status_code=404, detail="owner not found")
+
+    records: list[dict[str, Any]] = []
+    for code, entry in sorted(per_owner.items(), key=lambda kv: int(kv[0])):
+        if qtype_code is not None and int(code) != int(qtype_code):
+            continue
+        try:
+            ttl, values, sources = entry
+        except Exception:
+            continue
+        records.append(
+            {
+                "owner": owner_norm,
+                "qtype": int(code),
+                "qtype_name": str(QTYPE.get(int(code), str(int(code)))),
+                "ttl": int(ttl),
+                "values": list(values or []),
+                "sources": list(sources or []),
+            }
+        )
+
+    return {
+        "plugin": str(plugin_name),
+        "owner": owner_norm,
+        "qtype": int(qtype_code) if qtype_code is not None else None,
+        "records": records,
+    }
+
+
+def _parse_sort_expression(sort: str | None) -> tuple[str, bool]:
+    """Brief: Parse profile sort expressions into field and descending flag.
+
+    Inputs:
+      - sort: Sort expression (e.g. '-avg_rps', 'avg_rps:desc').
+
+    Outputs:
+      - (field, descending) tuple.
+    """
+
+    text = str(sort or "").strip()
+    if not text:
+        return ("avg_rps", True)
+    if text.startswith("-"):
+        return (text[1:].strip() or "avg_rps", True)
+    if ":" in text:
+        field, _, dir_text = text.partition(":")
+        return (field.strip() or "avg_rps", dir_text.strip().lower() == "desc")
+    return (text, False)
+
+
+def build_plugin_rate_limit_profiles_payload(
+    plugins: Iterable[object],
+    plugin_name: str,
+    *,
+    limit: int | None,
+    sort: str | None,
+) -> Dict[str, Any]:
+    """Brief: Return deterministic profile rows from a RateLimit plugin DB.
+
+    Inputs:
+      - plugins: Iterable of plugin instances.
+      - plugin_name: Target RateLimit plugin name.
+      - limit: Optional max rows.
+      - sort: Optional sort expression.
+
+    Outputs:
+      - Dict with keys: plugin, total, limit, sort, profiles.
+    """
+
+    target = find_plugin_instance_by_name(plugins, plugin_name)
+    if target is None:
+        raise AdminLogicHttpError(status_code=404, detail="plugin not found")
+
+    db_lock = getattr(target, "_db_lock", None)
+    conn = getattr(target, "_conn", None)
+    if db_lock is None or conn is None:
+        raise AdminLogicHttpError(
+            status_code=404, detail="rate-limit profile storage is unavailable"
+        )
+
+    try:
+        lim = int(limit or 50)
+    except Exception:
+        lim = 50
+    lim = max(1, min(lim, 5000))
+
+    field, desc = _parse_sort_expression(sort)
+    allowed_sort_fields = {
+        "key",
+        "avg_rps",
+        "max_rps",
+        "samples",
+        "last_update",
+        "current_rps",
+    }
+    if field not in allowed_sort_fields:
+        raise AdminLogicHttpError(status_code=400, detail="unsupported sort field")
+
+    try:
+        with db_lock:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT key, avg_rps, max_rps, samples, last_update FROM rate_profiles"
+            )
+            rows = list(cur.fetchall() or [])
+    except Exception as exc:
+        raise AdminLogicHttpError(
+            status_code=500, detail=f"failed to read rate-limit profiles: {exc}"
+        ) from exc
+
+    current_rps_map: dict[str, float] = {}
+    get_current_snapshot = getattr(target, "_get_current_window_rps_snapshot", None)
+    if callable(get_current_snapshot):
+        try:
+            raw_current = get_current_snapshot(limit=0)
+        except Exception:
+            raw_current = {}
+        if isinstance(raw_current, dict):
+            current_rps_map = {
+                str(k): float(v)
+                for k, v in raw_current.items()
+                if k is not None and v is not None
+            }
+
+    out_rows: list[dict[str, Any]] = []
+    for key_text, avg_rps, max_rps, samples, last_update in rows:
+        key_norm = str(key_text or "")
+        out_rows.append(
+            {
+                "key": key_norm,
+                "avg_rps": float(avg_rps or 0.0),
+                "max_rps": float(max_rps or 0.0),
+                "samples": int(samples or 0),
+                "last_update": int(last_update or 0),
+                "last_update_iso": _ts_to_utc_iso(float(last_update or 0)),
+                "current_rps": float(current_rps_map.get(key_norm, 0.0)),
+            }
+        )
+
+    def _sort_key_fn(item: dict[str, Any]) -> tuple[Any, str]:
+        raw_val = item.get(field)
+        if raw_val is None:
+            return (0, str(item.get("key", "")))
+        return (raw_val, str(item.get("key", "")))
+
+    out_rows.sort(key=_sort_key_fn, reverse=bool(desc))
+
+    return {
+        "plugin": str(plugin_name),
+        "total": len(out_rows),
+        "limit": int(lim),
+        "sort": {
+            "field": field,
+            "direction": "desc" if desc else "asc",
+        },
+        "profiles": out_rows[:lim],
+    }
+
+
+def build_plugin_reload_payload(
+    plugins: Iterable[object], plugin_name: str, *, plugin_kind: str
+) -> Dict[str, Any]:
+    """Brief: Trigger EtcHosts/DockerHosts reload and return post-reload summary.
+
+    Inputs:
+      - plugins: Iterable of plugin instances.
+      - plugin_name: Target plugin instance name.
+      - plugin_kind: One of 'etc_hosts' or 'docker_hosts'.
+
+    Outputs:
+      - Dict with keys: plugin, action, data.
+    """
+
+    target = find_plugin_instance_by_name(plugins, plugin_name)
+    if target is None:
+        raise AdminLogicHttpError(status_code=404, detail="plugin not found")
+
+    if plugin_kind == "etc_hosts":
+        reload_fn = getattr(target, "_load_hosts", None)
+    elif plugin_kind == "docker_hosts":
+        reload_fn = getattr(target, "_reload_from_docker", None)
+    else:
+        raise AdminLogicHttpError(status_code=400, detail="unsupported plugin kind")
+
+    if not callable(reload_fn):
+        raise AdminLogicHttpError(
+            status_code=404, detail="plugin reload is unavailable"
+        )
+
+    try:
+        reload_fn()
+        snapshot = (
+            target.get_http_snapshot() if hasattr(target, "get_http_snapshot") else {}
+        )
+    except Exception as exc:
+        raise AdminLogicHttpError(
+            status_code=500, detail=f"reload failed: {exc}"
+        ) from exc
+
+    return {
+        "plugin": str(plugin_name),
+        "action": "reload",
+        "data": snapshot,
+    }
+
+
+def build_plugin_upstream_evaluate_payload(
+    plugins: Iterable[object], plugin_name: str, *, qname: str
+) -> Dict[str, Any]:
+    """Brief: Evaluate upstream candidates for qname without forwarding a query.
+
+    Inputs:
+      - plugins: Iterable of plugin instances.
+      - plugin_name: Target UpstreamRouter plugin name.
+      - qname: DNS query name to evaluate.
+
+    Outputs:
+      - Dict with keys: plugin, qname, matched, candidates.
+    """
+
+    target = find_plugin_instance_by_name(plugins, plugin_name)
+    if target is None:
+        raise AdminLogicHttpError(status_code=404, detail="plugin not found")
+
+    qname_norm = dns_names.normalize_name(qname)
+    if not qname_norm:
+        raise AdminLogicHttpError(status_code=400, detail="qname is required")
+
+    matcher = getattr(target, "_match_upstream_candidates", None)
+    if not callable(matcher):
+        raise AdminLogicHttpError(
+            status_code=404, detail="upstream evaluation is unavailable"
+        )
+
+    try:
+        candidates = matcher(qname_norm)
+    except Exception as exc:
+        raise AdminLogicHttpError(
+            status_code=500, detail=f"upstream evaluation failed: {exc}"
+        ) from exc
+
+    out_candidates = list(candidates or []) if isinstance(candidates, list) else []
+    return {
+        "plugin": str(plugin_name),
+        "qname": qname_norm,
+        "matched": bool(out_candidates),
+        "candidates": out_candidates,
     }

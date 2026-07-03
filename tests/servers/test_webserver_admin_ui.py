@@ -91,6 +91,7 @@ def web_app(web_config: Dict[str, Any]) -> TestClient:
         _EtcHostsPlugin("docker_hosts"),
         _EtcHostsPlugin("etc_hosts"),
         _EtcHostsPlugin("mdns"),
+        _EtcHostsPlugin("zone_records"),
     ]
     app = create_app(
         stats=None,
@@ -170,6 +171,10 @@ def test_cache_snapshot_404_and_success(
 
 
 def test_plugin_specific_snapshot_endpoints(web_app: TestClient) -> None:
+    # Generic snapshot endpoint
+    r_snapshot = web_app.get("/api/v1/plugins/docker_hosts/snapshot")
+    assert r_snapshot.status_code == 200
+    assert r_snapshot.json()["plugin"] == "docker_hosts"
     # DockerHosts snapshot
     r_docker = web_app.get("/api/v1/plugins/docker_hosts/docker_hosts")
     assert r_docker.status_code == 200
@@ -184,9 +189,13 @@ def test_plugin_specific_snapshot_endpoints(web_app: TestClient) -> None:
     r_mdns = web_app.get("/api/v1/plugins/mdns/mdns")
     assert r_mdns.status_code == 200
     assert r_mdns.json()["plugin"] == "mdns"
+    # ZoneRecords compatibility alias snapshot
+    r_zone_records = web_app.get("/api/v1/plugins/zone_records/zone_records")
+    assert r_zone_records.status_code == 200
+    assert r_zone_records.json()["plugin"] == "zone_records"
 
     # Unknown plugin -> 404
-    r_unknown = web_app.get("/api/v1/plugins/unknown/docker_hosts")
+    r_unknown = web_app.get("/api/v1/plugins/unknown/snapshot")
     assert r_unknown.status_code == 404
 
 

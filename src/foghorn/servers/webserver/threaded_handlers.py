@@ -2843,6 +2843,176 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             },
         )
 
+    def _handle_plugin_api_get(self, path: str, params: Dict[str, list[str]]) -> bool:
+        """Brief: Handle expanded plugin GET endpoints under /api/v1/plugins/{name}/.
+
+        Inputs:
+          - path: Parsed URL path.
+          - params: Query-string mapping from urllib.parse.parse_qs.
+
+        Outputs:
+          - bool: True when this method handled/sent a response.
+        """
+
+        prefix = "/api/v1/plugins/"
+        if not path.startswith(prefix):
+            return False
+
+        rest = path[len(prefix) :]
+        if "/" not in rest:
+            return False
+        plugin_part, endpoint_part = rest.split("/", 1)
+        plugin_name = urllib.parse.unquote(plugin_part.strip("/"))
+        endpoint = urllib.parse.unquote(endpoint_part.strip("/"))
+        if not plugin_name or not endpoint:
+            return False
+
+        if not self._require_auth():
+            return True
+
+        plugins_list = getattr(self._server(), "plugins", []) or []
+
+        def _send_snapshot() -> None:
+            try:
+                snap = _admin_logic.build_plugin_snapshot_payload(
+                    plugins_list, plugin_name
+                )
+            except _admin_logic.AdminLogicHttpError as exc:
+                self._send_json(
+                    exc.status_code,
+                    {"detail": exc.detail, "server_time": _utc_now_iso()},
+                )
+                return
+            self._send_json(
+                200,
+                {
+                    "server_time": _utc_now_iso(),
+                    "plugin": snap.get("plugin"),
+                    "data": _json_safe(snap.get("data")),
+                },
+            )
+
+        if endpoint in {
+            "snapshot",
+            "access_control",
+            "rate_limit",
+            "docker_hosts",
+            "etc_hosts",
+            "mdns",
+            "zone_records",
+        }:
+            _send_snapshot()
+            return True
+
+        try:
+            if endpoint == "access_control/rules":
+                payload = _admin_logic.build_plugin_access_control_rules_payload(
+                    plugins_list, plugin_name
+                )
+            elif endpoint == "etc_hosts/lookup":
+                payload = _admin_logic.build_plugin_etc_hosts_lookup_payload(
+                    plugins_list,
+                    plugin_name,
+                    name=str(self._get_query_param(params, "name", "") or ""),
+                )
+            elif endpoint.startswith("docker_hosts/containers/"):
+                container_name = endpoint[len("docker_hosts/containers/") :].strip()
+                payload = _admin_logic.build_plugin_docker_container_payload(
+                    plugins_list,
+                    plugin_name,
+                    name=container_name,
+                )
+            elif endpoint == "mdns/services":
+                payload = _admin_logic.build_plugin_mdns_services_payload(
+                    plugins_list,
+                    plugin_name,
+                    status=self._get_query_param(params, "status"),
+                    service_type=self._get_query_param(params, "type"),
+                )
+            elif endpoint == "rate_limit/profiles":
+                payload = _admin_logic.build_plugin_rate_limit_profiles_payload(
+                    plugins_list,
+                    plugin_name,
+                    limit=self._get_int_param(params, "limit", 50),
+                    sort=self._get_query_param(params, "sort"),
+                )
+            elif endpoint == "zone_records/lookup":
+                payload = _admin_logic.build_plugin_zone_records_lookup_payload(
+                    plugins_list,
+                    plugin_name,
+                    owner=str(self._get_query_param(params, "owner", "") or ""),
+                    qtype=self._get_query_param(params, "qtype"),
+                )
+            elif endpoint == "upstream_router/evaluate":
+                payload = _admin_logic.build_plugin_upstream_evaluate_payload(
+                    plugins_list,
+                    plugin_name,
+                    qname=str(self._get_query_param(params, "qname", "") or ""),
+                )
+            else:
+                return False
+        except _admin_logic.AdminLogicHttpError as exc:
+            self._send_json(
+                exc.status_code,
+                {"detail": exc.detail, "server_time": _utc_now_iso()},
+            )
+            return True
+
+        payload["server_time"] = _utc_now_iso()
+        self._send_json(200, _json_safe(payload))
+        return True
+
+    def _handle_plugin_api_post(self, path: str) -> bool:
+        """Brief: Handle plugin POST endpoints under /api/v1/plugins/{name}/.
+
+        Inputs:
+          - path: Parsed URL path.
+
+        Outputs:
+          - bool: True when this method handled/sent a response.
+        """
+
+        prefix = "/api/v1/plugins/"
+        if not path.startswith(prefix):
+            return False
+
+        rest = path[len(prefix) :]
+        if "/" not in rest:
+            return False
+        plugin_part, endpoint_part = rest.split("/", 1)
+        plugin_name = urllib.parse.unquote(plugin_part.strip("/"))
+        endpoint = urllib.parse.unquote(endpoint_part.strip("/"))
+        if not plugin_name or not endpoint:
+            return False
+
+        if endpoint not in {"etc_hosts/reload", "docker_hosts/reload"}:
+            return False
+
+        if not self._require_auth():
+            return True
+
+        plugins_list = getattr(self._server(), "plugins", []) or []
+        plugin_kind = (
+            "etc_hosts" if endpoint.startswith("etc_hosts/") else "docker_hosts"
+        )
+
+        try:
+            payload = _admin_logic.build_plugin_reload_payload(
+                plugins_list,
+                plugin_name,
+                plugin_kind=plugin_kind,
+            )
+        except _admin_logic.AdminLogicHttpError as exc:
+            self._send_json(
+                exc.status_code,
+                {"detail": exc.detail, "server_time": _utc_now_iso()},
+            )
+            return True
+
+        payload["server_time"] = _utc_now_iso()
+        self._send_json(200, _json_safe(payload))
+        return True
+
     def _handle_docker_hosts_snapshot(self, path: str) -> None:
         """Brief: Handle GET /api/v1/plugins/{plugin_name}/docker_hosts.
 
@@ -3135,6 +3305,8 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             self._handle_plugins_ui_descriptors()
         elif path.startswith("/api/v1/plugin_pages/"):
             self._handle_plugin_page_detail_route(path)
+        elif self._handle_plugin_api_get(path, params):
+            return
         elif path.startswith("/api/v1/plugins/") and path.endswith("/docker_hosts"):
             self._handle_docker_hosts_snapshot(path)
         elif path.startswith("/api/v1/plugins/") and path.endswith("/mdns"):
@@ -3280,6 +3452,8 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
                     },
                 },
             )
+        elif self._handle_plugin_api_post(path):
+            return
         else:
             self._send_text(404, "not found")
 

@@ -450,6 +450,7 @@ def test_threaded_plugin_admin_endpoints() -> None:
         _SnapshotPlugin("docker_hosts"),
         _SnapshotPlugin("mdns"),
         _SnapshotPlugin("etc_hosts"),
+        _SnapshotPlugin("zone_records"),
         _SnapshotPlugin("access_control"),
         _SnapshotPlugin("rate_limit"),
     ]
@@ -501,9 +502,11 @@ def test_threaded_plugin_admin_endpoints() -> None:
 
     # Snapshot endpoints
     for p in [
+        "/api/v1/plugins/docker_hosts/snapshot",
         "/api/v1/plugins/docker_hosts/docker_hosts",
         "/api/v1/plugins/mdns/mdns",
         "/api/v1/plugins/etc_hosts/etc_hosts",
+        "/api/v1/plugins/zone_records/zone_records",
         "/api/v1/plugins/access_control/access_control",
         "/api/v1/plugins/rate_limit/rate_limit",
     ]:
@@ -516,14 +519,17 @@ def test_threaded_plugin_admin_endpoints() -> None:
             "docker_hosts",
             "mdns",
             "etc_hosts",
+            "zone_records",
             "access_control",
             "rate_limit",
         }
         assert isinstance(payload.get("data"), dict)
     for p in [
+        "/api/v1/plugins/unknown/snapshot",
         "/api/v1/plugins/unknown/docker_hosts",
         "/api/v1/plugins/unknown/mdns",
         "/api/v1/plugins/unknown/etc_hosts",
+        "/api/v1/plugins/unknown/zone_records",
         "/api/v1/plugins/unknown/access_control",
         "/api/v1/plugins/unknown/rate_limit",
     ]:
@@ -565,6 +571,114 @@ def test_threaded_ratelimit_and_upstream_status_endpoints() -> None:
     data2 = json.loads(b2.decode("utf-8"))
     assert "server_time" in data2
     assert "items" in data2
+
+
+def test_threaded_plugin_api_expansion_routes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Brief: Threaded expanded plugin routes use admin-logic helper payloads.
+
+    Inputs:
+      - monkeypatch replacing admin-logic helper functions.
+
+    Outputs:
+      - New plugin GET/POST routes return HTTP 200 and expected payload keys.
+    """
+
+    from foghorn.servers.webserver import threaded_handlers as th_mod
+
+    monkeypatch.setattr(
+        th_mod._admin_logic,
+        "build_plugin_access_control_rules_payload",
+        lambda _plugins, plugin_name: {"plugin": plugin_name, "rules": {"ok": True}},
+    )
+    monkeypatch.setattr(
+        th_mod._admin_logic,
+        "build_plugin_etc_hosts_lookup_payload",
+        lambda _plugins, plugin_name, name: {
+            "plugin": plugin_name,
+            "entry": {"name": name, "value": "127.0.0.1"},
+        },
+    )
+    monkeypatch.setattr(
+        th_mod._admin_logic,
+        "build_plugin_docker_container_payload",
+        lambda _plugins, plugin_name, name: {
+            "plugin": plugin_name,
+            "containers": [{"name": name}],
+        },
+    )
+    monkeypatch.setattr(
+        th_mod._admin_logic,
+        "build_plugin_mdns_services_payload",
+        lambda _plugins, plugin_name, status, service_type: {
+            "plugin": plugin_name,
+            "status": status,
+            "type": service_type,
+            "services": [],
+        },
+    )
+    monkeypatch.setattr(
+        th_mod._admin_logic,
+        "build_plugin_rate_limit_profiles_payload",
+        lambda _plugins, plugin_name, limit, sort: {
+            "plugin": plugin_name,
+            "limit": limit,
+            "sort": {"field": sort or "avg_rps", "direction": "desc"},
+            "profiles": [],
+            "total": 0,
+        },
+    )
+    monkeypatch.setattr(
+        th_mod._admin_logic,
+        "build_plugin_zone_records_lookup_payload",
+        lambda _plugins, plugin_name, owner, qtype: {
+            "plugin": plugin_name,
+            "owner": owner,
+            "qtype": qtype,
+            "records": [],
+        },
+    )
+    monkeypatch.setattr(
+        th_mod._admin_logic,
+        "build_plugin_reload_payload",
+        lambda _plugins, plugin_name, plugin_kind: {
+            "plugin": plugin_name,
+            "action": "reload",
+            "kind": plugin_kind,
+            "data": {"ok": True},
+        },
+    )
+    monkeypatch.setattr(
+        th_mod._admin_logic,
+        "build_plugin_upstream_evaluate_payload",
+        lambda _plugins, plugin_name, qname: {
+            "plugin": plugin_name,
+            "qname": qname,
+            "matched": False,
+            "candidates": [],
+        },
+    )
+
+    cfg = {"webserver": {"auth": {"mode": "none"}}}
+    endpoints = [
+        ("GET", "/api/v1/plugins/demo/access_control/rules"),
+        ("GET", "/api/v1/plugins/demo/etc_hosts/lookup?name=example.com"),
+        ("GET", "/api/v1/plugins/demo/docker_hosts/containers/web"),
+        ("GET", "/api/v1/plugins/demo/mdns/services?status=up&type=_http._tcp"),
+        ("GET", "/api/v1/plugins/demo/rate_limit/profiles?limit=10&sort=-samples"),
+        ("GET", "/api/v1/plugins/demo/zone_records/lookup?owner=example.com&qtype=A"),
+        ("POST", "/api/v1/plugins/demo/etc_hosts/reload"),
+        ("POST", "/api/v1/plugins/demo/docker_hosts/reload"),
+        ("GET", "/api/v1/plugins/demo/upstream_router/evaluate?qname=www.example.com"),
+    ]
+
+    for method, path in endpoints:
+        st, _h, body = _one_shot_http_request(method=method, path=path, config=cfg)
+        assert st == 200
+        payload = json.loads(body.decode("utf-8"))
+        assert payload.get("plugin") == "demo"
+        assert "server_time" in payload
 
 
 def test_threaded_plugin_pages_and_ratelimit_require_auth_in_token_mode() -> None:
