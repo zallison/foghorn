@@ -637,6 +637,55 @@ def test_docker_hosts_iter_containers_logs_and_returns_empty_on_exception(caplog
     assert any("failed to list containers" in r.getMessage() for r in caplog.records)
 
 
+def test_docker_hosts_iter_containers_rate_limits_repeated_errors(monkeypatch, caplog):
+    """Brief: Repeated endpoint-list failures are logged with throttling.
+
+    Inputs:
+      - monkeypatch/caplog: pytest fixtures.
+
+    Outputs:
+      - None; asserts duplicate warnings are suppressed inside the throttle
+        interval and emitted again after the interval elapses.
+    """
+
+    mod = importlib.import_module("foghorn.plugins.resolve.docker_hosts")
+    DockerHosts = mod.DockerHosts
+
+    # Keep setup deterministic and independent of local Docker availability.
+    monkeypatch.setattr(mod, "docker", None, raising=True)
+
+    plugin = DockerHosts(endpoints=[{"url": "unix:///var/run/docker.sock"}])  # type: ignore[arg-type]
+    monkeypatch.setattr(plugin, "_reload_from_docker", lambda: None)
+    plugin.setup()
+
+    class BadContainers:
+        def list(self):  # noqa: D401
+            """Always raise to exercise repeated failure logging."""
+
+            raise RuntimeError("boom")
+
+    plugin._clients = {  # type: ignore[attr-defined]
+        "unix:///var/run/docker.sock": types.SimpleNamespace(containers=BadContainers())
+    }
+
+    timeline = iter([100.0, 101.0, 170.0])
+    monkeypatch.setattr(mod.time, "monotonic", lambda: next(timeline))
+
+    caplog.set_level("WARNING", logger=mod.__name__)
+    endpoint = {"url": "unix:///var/run/docker.sock"}
+    assert list(plugin._iter_containers_for_endpoint(endpoint)) == []
+    assert list(plugin._iter_containers_for_endpoint(endpoint)) == []
+    assert list(plugin._iter_containers_for_endpoint(endpoint)) == []
+
+    list_failures = [
+        r for r in caplog.records if "failed to list containers" in r.getMessage()
+    ]
+    assert len(list_failures) == 2
+    assert any(
+        "suppressed 1 repeated warning(s)" in r.getMessage() for r in caplog.records
+    )
+
+
 def test_docker_hosts_reload_from_docker_logs_when_no_containers(monkeypatch, caplog):
     """Brief: _reload_from_docker logs a warning when no endpoints yield containers.
 

@@ -210,6 +210,7 @@ class RateLimitConfig(BaseModel):
     bootstrap_rps: float = Field(default=50.0, ge=0.0)
 
     deny_response: str = Field(default="nxdomain")
+    deny_delay: int = Field(default=0, ge=0)
     deny_response_ip4: Optional[str] = None
     deny_response_ip6: Optional[str] = None
     ttl: int = Field(default=60, ge=0)
@@ -2544,6 +2545,10 @@ class RateLimit(BasePlugin):
             configuration.  The suppress_query_log value is forwarded to all
             returned decisions.
         """
+
+        delay = getattr(self, "deny_delay", 0)
+        if delay > 0:
+            time.sleep(delay)
 
         mode = (getattr(self, "deny_response", "nxdomain") or "nxdomain").lower()
         if mode == "drop":

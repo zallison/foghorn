@@ -111,8 +111,10 @@ def test_enforces_after_learning_when_rate_spikes(tmp_path, monkeypatch):
         burst_factor=1.5,
         min_enforce_rps=0.0,
         global_max_rps=1000.0,
+        deny_delay=0,
     )
     plugin.setup()
+    plugin.deny_delay = 0
     ctx = PluginContext(client_ip="1.2.3.4", listener="tcp")
 
     with closing(plugin._conn):
@@ -157,8 +159,10 @@ def test_hard_cap_enforces_when_avg_below_min_enforce_rps(tmp_path, monkeypatch)
         max_enforce_rps=10.0,
         bootstrap_rps=10.0,
         deny_response="nxdomain",
+        deny_delay=0,
     )
     plugin.setup()
+    plugin.deny_delay = 0
     ctx = PluginContext(client_ip="1.2.3.4", listener="tcp")
 
     with closing(plugin._conn):

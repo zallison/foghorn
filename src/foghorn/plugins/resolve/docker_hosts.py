@@ -14,6 +14,7 @@ import ipaddress
 import logging
 import re
 import threading
+import time
 from typing import Dict, Iterable, List, Optional, Tuple
 
 from dnslib import AAAA, PTR, QTYPE, RR, TXT, A, DNSHeader, DNSRecord
@@ -175,6 +176,7 @@ class DockerHosts(BasePlugin):
 
     setup_provides_dns = True
     setup_requires_dns = True
+    _warning_log_interval_seconds = 60.0
 
     @classmethod
     def get_config_model(cls):
@@ -188,6 +190,47 @@ class DockerHosts(BasePlugin):
         """
 
         return DockerHostsConfig
+
+    def _log_warning_rate_limited(self, key: str, message: str, *args: object) -> None:
+        """Brief: Emit warning logs at most once per interval for each key.
+
+        Inputs:
+          - key: Stable identifier for a warning class (for example
+            "list-containers:<endpoint>").
+          - message: Log message template passed to logger.warning().
+          - args: Optional %-format arguments for message.
+
+        Outputs:
+          - None; either logs immediately or suppresses duplicate warnings until
+            the rate-limit interval elapses.
+        """
+
+        interval = float(getattr(self, "_warning_log_interval_seconds", 60.0))
+        if interval <= 0:
+            logger.warning(message, *args)
+            return
+
+        now = time.monotonic()
+        suppressed_count = 0
+        with self._warning_log_state_lock:
+            last_logged = self._warning_log_last_by_key.get(key)
+            if last_logged is not None and (now - last_logged) < interval:
+                self._warning_log_suppressed_by_key[key] = (
+                    self._warning_log_suppressed_by_key.get(key, 0) + 1
+                )
+                return
+
+            suppressed_count = self._warning_log_suppressed_by_key.get(key, 0)
+            self._warning_log_suppressed_by_key[key] = 0
+            self._warning_log_last_by_key[key] = now
+
+        if suppressed_count > 0:
+            logger.warning(
+                "DockerHosts: suppressed %d repeated warning(s) for %s",
+                suppressed_count,
+                key,
+            )
+        logger.warning(message, *args)
 
     def setup(self) -> None:
         """Brief: Initialize DockerHosts and build the initial container mapping.
@@ -205,6 +248,10 @@ class DockerHosts(BasePlugin):
 
         # Runtime configuration
         self._ttl = int(self.config.get("ttl", 300))
+        self._warning_log_interval_seconds = 60.0
+        self._warning_log_state_lock = threading.Lock()
+        self._warning_log_last_by_key: Dict[str, float] = {}
+        self._warning_log_suppressed_by_key: Dict[str, int] = {}
 
         # Health/status allowlist. Containers whose effective health/status is
         # not in this list are skipped.
@@ -534,7 +581,8 @@ class DockerHosts(BasePlugin):
             ) as exc:  # pragma: nocover defensive: periodic reload failures are logged but not worth fragile tests
                 # Avoid emitting a full stack trace for periodic reload failures so
                 # that transient Docker connectivity issues do not flood logs.
-                logger.warning(
+                self._log_warning_rate_limited(
+                    "periodic-reload-error",
                     "DockerHosts: error during periodic reload; keeping previous mappings: %s",
                     exc,
                 )
@@ -579,7 +627,8 @@ class DockerHosts(BasePlugin):
             except (
                 Exception
             ) as exc:  # pragma: nocover defensive: connection and auth errors depend on external Docker daemon state
-                logger.warning(
+                self._log_warning_rate_limited(
+                    f"create-client:{url}",
                     "DockerHosts: failed to create client for %s during reload: %s",
                     url,
                     exc,
@@ -601,8 +650,11 @@ class DockerHosts(BasePlugin):
             containers = client.containers.list()
             return [c.attrs for c in containers]
         except Exception as exc:
-            logger.warning(
-                "DockerHosts: failed to list containers for %s: %s", url, exc
+            self._log_warning_rate_limited(
+                f"list-containers:{url}",
+                "DockerHosts: failed to list containers for %s: %s",
+                url,
+                exc,
             )
             return []
 
@@ -1093,12 +1145,14 @@ class DockerHosts(BasePlugin):
                     )
 
         if total_containers and not mapped_containers:
-            logger.warning(
+            self._log_warning_rate_limited(
+                "mapped-containers-empty",
                 "DockerHosts: inspected %d containers but none had usable hostname/IP",
                 total_containers,
             )
         elif not new_v4 and not new_v6:
-            logger.warning(
+            self._log_warning_rate_limited(
+                "no-hostname-ip-mappings",
                 "DockerHosts: no hostname/IP mappings were added from any endpoint (no running containers or all were skipped)",
             )
 
