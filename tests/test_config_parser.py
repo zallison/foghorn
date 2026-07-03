@@ -400,6 +400,99 @@ def test_normalize_upstream_config_invalid_layout_and_timeout_fallback() -> None
     assert upstreams and timeout_ms == 2000
 
 
+def test_normalize_upstream_config_accepts_url_form_non_doh_endpoints() -> None:
+    """Brief: normalize_upstream_config accepts url-form udp/tcp/dot endpoints.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts URL-form non-DoH entries normalize to host/port/transport.
+    """
+
+    cfg = {
+        "upstreams": {
+            "endpoints": [
+                {"url": "dot://dns.example:853"},
+                {"url": "tcp://8.8.8.8"},
+                {"url": "udp://1.1.1.1:5300"},
+            ]
+        }
+    }
+
+    upstreams, _ = cp.normalize_upstream_config(cfg)
+    assert upstreams[0]["transport"] == "dot"
+    assert upstreams[0]["host"] == "dns.example"
+    assert upstreams[0]["port"] == 853
+
+    assert upstreams[1]["transport"] == "tcp"
+    assert upstreams[1]["host"] == "8.8.8.8"
+    assert upstreams[1]["port"] == 53
+
+    assert upstreams[2]["transport"] == "udp"
+    assert upstreams[2]["host"] == "1.1.1.1"
+    assert upstreams[2]["port"] == 5300
+
+
+def test_normalize_upstream_config_accepts_doh_url_without_transport() -> None:
+    """Brief: normalize_upstream_config infers transport=doh from DoH URL schemes.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts DoH URL forms remain URL-based records.
+    """
+
+    cfg = {
+        "upstreams": {
+            "endpoints": [
+                {
+                    "url": "https://dns.google/dns-query",
+                    "method": "GET",
+                    "headers": {"x-test": "1"},
+                },
+                {
+                    "url": "doh://dns.quad9.net/dns-query",
+                    "method": "POST",
+                },
+            ]
+        }
+    }
+
+    upstreams, _ = cp.normalize_upstream_config(cfg)
+    assert upstreams[0]["transport"] == "doh"
+    assert upstreams[0]["url"] == "https://dns.google/dns-query"
+    assert upstreams[0]["method"] == "GET"
+    assert upstreams[1]["transport"] == "doh"
+    assert upstreams[1]["url"] == "https://dns.quad9.net/dns-query"
+    assert upstreams[1]["method"] == "POST"
+
+
+def test_normalize_upstream_config_rejects_url_with_conflicting_fields() -> None:
+    """Brief: normalize_upstream_config rejects conflicting URL + host/port fields.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts conflicting URL-form input raises ValueError.
+    """
+
+    cfg = {
+        "upstreams": {
+            "endpoints": [
+                {
+                    "url": "dot://dns.example:853",
+                    "host": "1.1.1.1",
+                }
+            ]
+        }
+    }
+    with pytest.raises(ValueError, match="must not set 'host'"):
+        cp.normalize_upstream_config(cfg)
+
+
 def test_normalize_upstream_backup_config_returns_empty_when_missing() -> None:
     """Brief: normalize_upstream_backup_config returns [] when backup is absent.
 

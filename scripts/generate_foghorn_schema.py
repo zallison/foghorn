@@ -1091,6 +1091,7 @@ def _build_v2_root_schema(
                     ),
                 },
             )
+
             # Obsolete root-level defaults under server.listen are intentionally
             # removed; listeners must now be configured under listen.dns and/or
             # per-listener blocks (udp/tcp/dot/doh).
@@ -1944,6 +1945,62 @@ def _build_v2_root_schema(
                 },
             )
 
+    defs["upstream_url"] = {
+        "type": "object",
+        "additionalProperties": False,
+        "description": (
+            "Type: object. URL-form upstream endpoint for udp/tcp/dot schemes "
+            "(for example dot://1.1.1.1:853)."
+        ),
+        "properties": {
+            "transport": {
+                "type": "string",
+                "enum": ["udp", "tcp", "dot"],
+                "description": (
+                    "Optional explicit transport. When set, it must match the URL "
+                    "scheme."
+                ),
+            },
+            "url": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^(udp|tcp|dot)://",
+                "description": (
+                    "URL-form upstream endpoint. Supported schemes: udp, tcp, dot."
+                ),
+            },
+            "tls": {
+                "type": "object",
+                "additionalProperties": True,
+                "description": (
+                    "Optional TLS settings used by dot transport; values are "
+                    "validated by runtime normalization."
+                ),
+            },
+            "pool": {
+                "type": "object",
+                "additionalProperties": True,
+                "description": (
+                    "Optional connection pool settings for tcp/dot transports."
+                ),
+            },
+            "abort_on_fail": {
+                "type": "boolean",
+                "description": (
+                    "When true (default behavior), startup fails if this upstream's "
+                    "TLS CA file validation fails."
+                ),
+            },
+            "abort_on_failure": {
+                "type": "boolean",
+                "description": (
+                    "Alias for abort_on_fail. When true, TLS CA validation errors "
+                    "for this upstream are fatal."
+                ),
+            },
+        },
+        "required": ["url"],
+    }
     # Decorated cache overrides are modelled via a dedicated definition so that
     # both tooling and runtime helpers share the same canonical module+name
     # shape. Always override any existing definition to keep the schema in sync
@@ -2033,6 +2090,8 @@ def _build_v2_root_schema(
 
     upstream_host_ref = {"$ref": "#/$defs/upstream_host"}
     upstream_doh_ref = {"$ref": "#/$defs/upstream_doh"}
+    upstream_url_ref = {"$ref": "#/$defs/upstream_url"}
+    upstream_endpoint_refs = [upstream_host_ref, upstream_doh_ref, upstream_url_ref]
 
     upstreams_backup_v2: Dict[str, Any] = {
         "type": "object",
@@ -2041,7 +2100,7 @@ def _build_v2_root_schema(
             "endpoints": {
                 "type": "array",
                 "minItems": 1,
-                "items": {"oneOf": [upstream_host_ref, upstream_doh_ref]},
+                "items": {"oneOf": upstream_endpoint_refs},
             }
         },
         "required": ["endpoints"],
@@ -2139,7 +2198,7 @@ def _build_v2_root_schema(
                 "type": "array",
                 "minItems": 1,
                 "items": {
-                    "oneOf": [upstream_host_ref, upstream_doh_ref],
+                    "oneOf": upstream_endpoint_refs,
                 },
             },
             "backup": {

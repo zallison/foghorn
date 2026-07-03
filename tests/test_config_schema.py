@@ -145,6 +145,40 @@ def test_server_listen_host_port_are_rejected_as_obsolete() -> None:
     assert "server.listen.port" in msg
 
 
+def test_validate_config_accepts_url_form_upstream_entries() -> None:
+    """Brief: validate_config accepts and normalizes non-DoH URL-form upstreams.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts URL-form upstreams are normalized to host/port/transport.
+    """
+
+    cfg = _minimal_forward_config()
+    cfg["upstreams"] = {
+        "endpoints": [
+            {"url": "dot://dns.example:853"},
+            {"url": "tcp://8.8.8.8"},
+            {"url": "doh://dns.google/dns-query"},
+        ]
+    }
+
+    validate_config(cfg, config_path="inline-config")
+    endpoints = cfg["upstreams"]["endpoints"]
+    assert endpoints[0]["transport"] == "dot"
+    assert endpoints[0]["host"] == "dns.example"
+    assert endpoints[0]["port"] == 853
+    assert "url" not in endpoints[0]
+
+    assert endpoints[1]["transport"] == "tcp"
+    assert endpoints[1]["host"] == "8.8.8.8"
+    assert endpoints[1]["port"] == 53
+    assert "url" not in endpoints[1]
+    assert endpoints[2]["transport"] == "doh"
+    assert endpoints[2]["url"] == "https://dns.google/dns-query"
+
+
 def test_server_listen_dns_udp_tcp_flags_are_rejected_as_obsolete() -> None:
     """Brief: server.listen.dns.udp/tcp legacy flags must be rejected.
 

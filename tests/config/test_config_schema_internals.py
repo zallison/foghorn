@@ -37,6 +37,104 @@ def test_normalize_cache_config_treats_null_module_as_none_alias_and_strips_null
     assert "config" not in cache_cfg
 
 
+def test_normalize_upstream_urls_for_validation_rewrites_non_doh_url_forms() -> None:
+    """Brief: _normalize_upstream_urls_for_validation rewrites non-DoH url forms.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts primary/backup URL-form entries become host/port transport.
+    """
+
+    cfg: Dict[str, Any] = {
+        "upstreams": {
+            "endpoints": [{"url": "dot://dns.example:853"}],
+            "backup": {"endpoints": [{"url": "tcp://8.8.8.8"}]},
+        }
+    }
+
+    config_schema_mod._normalize_upstream_urls_for_validation(cfg)
+
+    primary = cfg["upstreams"]["endpoints"][0]
+    backup = cfg["upstreams"]["backup"]["endpoints"][0]
+    assert primary["transport"] == "dot"
+    assert primary["host"] == "dns.example"
+    assert primary["port"] == 853
+    assert "url" not in primary
+
+    assert backup["transport"] == "tcp"
+    assert backup["host"] == "8.8.8.8"
+    assert backup["port"] == 53
+    assert "url" not in backup
+
+
+def test_normalize_upstream_urls_for_validation_keeps_doh_url_form() -> None:
+    """Brief: _normalize_upstream_urls_for_validation preserves DoH URL endpoints.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts https URL forms normalize to transport=doh and keep url.
+    """
+
+    cfg: Dict[str, Any] = {
+        "upstreams": {
+            "endpoints": [{"url": "https://dns.google/dns-query"}],
+        }
+    }
+
+    config_schema_mod._normalize_upstream_urls_for_validation(cfg)
+
+    endpoint = cfg["upstreams"]["endpoints"][0]
+    assert endpoint["transport"] == "doh"
+    assert endpoint["url"] == "https://dns.google/dns-query"
+
+
+def test_normalize_upstream_urls_for_validation_rewrites_doh_scheme_alias() -> None:
+    """Brief: _normalize_upstream_urls_for_validation rewrites doh:// to https://.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts doh:// URL form is canonicalized to https://.
+    """
+
+    cfg: Dict[str, Any] = {
+        "upstreams": {
+            "endpoints": [{"url": "doh://dns.google/dns-query?x=1"}],
+        }
+    }
+
+    config_schema_mod._normalize_upstream_urls_for_validation(cfg)
+
+    endpoint = cfg["upstreams"]["endpoints"][0]
+    assert endpoint["transport"] == "doh"
+    assert endpoint["url"] == "https://dns.google/dns-query?x=1"
+
+
+def test_normalize_upstream_urls_for_validation_rejects_transport_conflict() -> None:
+    """Brief: _normalize_upstream_urls_for_validation rejects URL/transport mismatch.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts conflicting transport and URL scheme raises ValueError.
+    """
+
+    cfg: Dict[str, Any] = {
+        "upstreams": {
+            "endpoints": [{"url": "dot://dns.example:853", "transport": "tcp"}],
+        }
+    }
+
+    with pytest.raises(ValueError, match=r"conflicts with .* scheme"):
+        config_schema_mod._normalize_upstream_urls_for_validation(cfg)
+
+
 def test_normalize_variables_legacy_alias_and_basic_substitution() -> None:
     """Brief: _normalize_variables_for_validation expands legacy variables and substitutes.
 

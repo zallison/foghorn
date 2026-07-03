@@ -12,6 +12,7 @@ import logging
 import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse
 
 try:
     from jsonschema import Draft202012Validator, ValidationError
@@ -33,6 +34,14 @@ _PLUGIN_HOOK_ALLOWED_KEYS = {
     "id",
 }
 _PLUGIN_HOOK_NODE_ALLOWED_KEYS = {"priority", "comment", "id"}
+_UPSTREAM_URL_SCHEME_TO_TRANSPORT = {
+    "udp": "udp",
+    "tcp": "tcp",
+    "dot": "dot",
+    "doh": "doh",
+    "http": "doh",
+    "https": "doh",
+}
 
 
 def _validate_plugin_hooks_for_validation(
@@ -170,6 +179,134 @@ def _normalize_cache_config_for_validation(cfg: Dict[str, Any]) -> None:
     if subcfg is None:
         # Schema expects an object when present; keep validation permissive.
         cache_cfg.pop("config", None)
+
+
+def _normalize_single_upstream_url_endpoint_for_validation(
+    endpoint: Dict[str, Any], *, endpoint_path: str
+) -> None:
+    """Brief: Normalize one URL-form upstream endpoint in-place.
+
+    Inputs:
+      - endpoint: Upstream endpoint mapping.
+      - endpoint_path: Human-readable endpoint path used in error messages.
+
+    Outputs:
+      - None. For non-DoH URL schemes, writes host/port/transport and removes
+        the url key. For DoH URL schemes, normalizes transport=doh and keeps
+        the url key.
+
+    Raises:
+      - ValueError: When URL form is invalid or conflicts with explicit fields.
+    """
+
+    raw_url = endpoint.get("url")
+    if raw_url is None:
+        return
+    if not isinstance(raw_url, str) or not raw_url.strip():
+        raise ValueError(f"{endpoint_path}.url must be a non-empty string")
+
+    url_text = str(raw_url).strip()
+    parsed = urlparse(url_text)
+    scheme = str(parsed.scheme or "").strip().lower()
+    if not scheme:
+        raise ValueError(f"{endpoint_path}.url must include a URL scheme")
+    if scheme not in _UPSTREAM_URL_SCHEME_TO_TRANSPORT:
+        supported = ", ".join(sorted(_UPSTREAM_URL_SCHEME_TO_TRANSPORT.keys()))
+        raise ValueError(
+            f"{endpoint_path}.url uses unsupported scheme {scheme!r}; "
+            + f"supported schemes: {supported}"
+        )
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError(f"{endpoint_path}.url must not include userinfo")
+    if not str(parsed.hostname or "").strip():
+        raise ValueError(f"{endpoint_path}.url must include a hostname")
+
+    expected_transport = _UPSTREAM_URL_SCHEME_TO_TRANSPORT[scheme]
+    explicit_transport = endpoint.get("transport")
+    if explicit_transport is not None:
+        explicit_text = str(explicit_transport).strip().lower()
+        if explicit_text != expected_transport:
+            raise ValueError(
+                f"{endpoint_path}.transport={explicit_transport!r} conflicts with "
+                + f"{endpoint_path}.url scheme {scheme!r}"
+            )
+        endpoint["transport"] = explicit_text
+    else:
+        endpoint["transport"] = expected_transport
+
+    if expected_transport == "doh":
+        canonical_url = (
+            parsed._replace(scheme="https").geturl() if scheme == "doh" else url_text
+        )
+        for disallowed_key in ("host", "port"):
+            if disallowed_key in endpoint:
+                raise ValueError(
+                    f"{endpoint_path} must not set {disallowed_key!r} when "
+                    + f"{endpoint_path}.url uses DoH scheme {scheme!r}"
+                )
+        endpoint["url"] = canonical_url
+        return
+
+    for disallowed_key in ("host", "port"):
+        if disallowed_key in endpoint:
+            raise ValueError(
+                f"{endpoint_path} must not set {disallowed_key!r} when using "
+                + f"{endpoint_path}.url form"
+            )
+
+    if parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
+        raise ValueError(
+            f"{endpoint_path}.url for scheme {scheme!r} must not include path, "
+            + "query, or fragment"
+        )
+    try:
+        parsed_port = parsed.port
+    except ValueError as exc:
+        raise ValueError(f"{endpoint_path}.url has invalid port: {exc}") from exc
+    if parsed_port is None:
+        parsed_port = 853 if expected_transport == "dot" else 53
+    if parsed_port < 1 or parsed_port > 65535:
+        raise ValueError(f"{endpoint_path}.url port must be within 1..65535")
+
+    endpoint["host"] = str(parsed.hostname).strip()
+    endpoint["port"] = int(parsed_port)
+    endpoint.pop("url", None)
+
+
+def _normalize_upstream_urls_for_validation(cfg: Dict[str, Any]) -> None:
+    """Brief: Normalize URL-form upstream endpoints in primary and backup lists.
+
+    Inputs:
+      - cfg: Parsed YAML configuration mapping (mutated in-place).
+
+    Outputs:
+      - None.
+    """
+
+    upstreams_cfg = cfg.get("upstreams")
+    if not isinstance(upstreams_cfg, dict):
+        return
+
+    def _normalize_endpoints(raw: Any, *, path_prefix: str) -> None:
+        if not isinstance(raw, list):
+            return
+        for idx, endpoint in enumerate(raw):
+            if not isinstance(endpoint, dict):
+                continue
+            _normalize_single_upstream_url_endpoint_for_validation(
+                endpoint,
+                endpoint_path=f"{path_prefix}[{idx}]",
+            )
+
+    _normalize_endpoints(
+        upstreams_cfg.get("endpoints"), path_prefix="upstreams.endpoints"
+    )
+    backup_cfg = upstreams_cfg.get("backup")
+    if isinstance(backup_cfg, dict):
+        _normalize_endpoints(
+            backup_cfg.get("endpoints"),
+            path_prefix="upstreams.backup.endpoints",
+        )
 
 
 _VAR_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
@@ -677,6 +814,7 @@ def validate_config(
             cfg,
             whole_node_injection_allowlist=config_var_keys,
         )
+        _normalize_upstream_urls_for_validation(cfg)
         _normalize_cache_config_for_validation(cfg)
         _normalize_dnssec_config_for_validation(cfg)
         _normalize_plugin_entries_for_validation(cfg)
@@ -691,6 +829,7 @@ def validate_config(
         cfg,
         whole_node_injection_allowlist=config_var_keys,
     )
+    _normalize_upstream_urls_for_validation(cfg)
     _normalize_cache_config_for_validation(cfg)
     _normalize_dnssec_config_for_validation(cfg)
     _normalize_plugin_entries_for_validation(cfg)

@@ -113,3 +113,44 @@ def test_generated_schema_includes_listener_overload_response_fields(tmp_path) -
     for listener in ("udp", "tcp", "dot", "doh"):
         child_props = listen_props[listener]["properties"]
         assert child_props["overload_response"]["enum"] == expected_values
+
+
+def test_generated_schema_includes_upstream_url_endpoint_variant(tmp_path) -> None:
+    """Brief: Generated schema includes URL-form upstream endpoint definition.
+
+    Inputs:
+      - tmp_path: pytest temporary directory for schema output.
+
+    Outputs:
+      - None; asserts $defs.upstream_url exists and endpoint oneOf refs include it.
+    """
+
+    out_path = tmp_path / "schema.json"
+    ns = _load_schema_module()
+    main_fn = ns.get("main")
+    assert callable(main_fn)
+
+    rc = main_fn(["-o", str(out_path)])
+    assert rc == 0
+    data = json.loads(out_path.read_text(encoding="utf-8"))
+
+    defs = data.get("$defs", {})
+    upstream_url = defs.get("upstream_url", {})
+    assert isinstance(upstream_url, dict)
+    assert upstream_url.get("required") == ["url"]
+    assert (
+        upstream_url.get("properties", {})
+        .get("url", {})
+        .get("pattern", "")
+        .startswith("^(udp|tcp|dot)://")
+    )
+
+    endpoint_one_of = data["properties"]["upstreams"]["properties"]["endpoints"][
+        "items"
+    ]["oneOf"]
+    assert {"$ref": "#/$defs/upstream_url"} in endpoint_one_of
+
+    backup_one_of = data["properties"]["upstreams"]["properties"]["backup"]["allOf"][0][
+        "properties"
+    ]["endpoints"]["items"]["oneOf"]
+    assert {"$ref": "#/$defs/upstream_url"} in backup_one_of

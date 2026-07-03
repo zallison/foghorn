@@ -1134,6 +1134,13 @@
               "title": "Db Path",
               "type": "string"
             },
+            "deny_delay": {
+              "default": 0,
+              "description": "Type: integer. Default: 0.",
+              "minimum": 0,
+              "title": "Deny Delay",
+              "type": "integer"
+            },
             "deny_log_first_n": {
               "default": 3,
               "description": "Type: integer. Default: 3.",
@@ -4170,6 +4177,13 @@
               "title": "Db Path",
               "type": "string"
             },
+            "deny_delay": {
+              "default": 0,
+              "description": "Type: integer. Default: 0.",
+              "minimum": 0,
+              "title": "Deny Delay",
+              "type": "integer"
+            },
             "deny_log_first_n": {
               "default": 3,
               "description": "Type: integer. Default: 3.",
@@ -6218,6 +6232,83 @@
         "host"
       ],
       "type": "object"
+    },
+    "upstream_url": {
+      "additionalProperties": false,
+      "description": "Type: object. URL-form upstream endpoint for udp/tcp/dot schemes (for example dot://1.1.1.1:853).",
+      "properties": {
+        "abort_on_fail": {
+          "description": "When true (default behavior), startup fails if this upstream's TLS CA file validation fails.",
+          "type": "boolean"
+        },
+        "abort_on_failure": {
+          "description": "Alias for abort_on_fail. When true, TLS CA validation errors for this upstream are fatal.",
+          "type": "boolean"
+        },
+        "comment": {
+          "description": "Optional human metadata string (max 254 characters).",
+          "maxLength": 254,
+          "type": "string"
+        },
+        "id": {
+          "description": "Optional human metadata string (max 254 characters).",
+          "maxLength": 254,
+          "type": "string"
+        },
+        "pool": {
+          "additionalProperties": true,
+          "description": "Optional connection pool settings for tcp/dot transports.",
+          "properties": {
+            "comment": {
+              "description": "Optional human metadata string (max 254 characters).",
+              "maxLength": 254,
+              "type": "string"
+            },
+            "id": {
+              "description": "Optional human metadata string (max 254 characters).",
+              "maxLength": 254,
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "tls": {
+          "additionalProperties": true,
+          "description": "Optional TLS settings used by dot transport; values are validated by runtime normalization.",
+          "properties": {
+            "comment": {
+              "description": "Optional human metadata string (max 254 characters).",
+              "maxLength": 254,
+              "type": "string"
+            },
+            "id": {
+              "description": "Optional human metadata string (max 254 characters).",
+              "maxLength": 254,
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "transport": {
+          "description": "Optional explicit transport. When set, it must match the URL scheme.",
+          "enum": [
+            "udp",
+            "tcp",
+            "dot"
+          ],
+          "type": "string"
+        },
+        "url": {
+          "description": "URL-form upstream endpoint. Supported schemes: udp, tcp, dot.",
+          "minLength": 1,
+          "pattern": "^(udp|tcp|dot)://",
+          "type": "string"
+        }
+      },
+      "required": [
+        "url"
+      ],
+      "type": "object"
     }
   },
   "$id": "https://example.com/foghorn/config.schema.json",
@@ -7334,6 +7425,9 @@
                       },
                       {
                         "$ref": "#/$defs/upstream_doh"
+                      },
+                      {
+                        "$ref": "#/$defs/upstream_url"
                       }
                     ]
                   },
@@ -7367,6 +7461,9 @@
               },
               {
                 "$ref": "#/$defs/upstream_doh"
+              },
+              {
+                "$ref": "#/$defs/upstream_url"
               }
             ]
           },

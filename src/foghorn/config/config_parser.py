@@ -23,6 +23,7 @@ import logging
 import os
 import ssl
 from typing import Any, Dict, List, Optional, Tuple, Union
+from urllib.parse import urlparse
 
 import yaml
 
@@ -31,6 +32,15 @@ from ..plugins.resolve.base import BasePlugin
 from ..plugins.resolve.registry import discover_plugins, get_plugin_class
 from .plugin_profiles import resolve_plugin_profile
 from .config_schema import validate_config
+
+_UPSTREAM_URL_SCHEME_TO_TRANSPORT = {
+    "udp": "udp",
+    "tcp": "tcp",
+    "dot": "dot",
+    "doh": "doh",
+    "http": "doh",
+    "https": "doh",
+}
 
 
 def _is_var_key(key: str) -> bool:
@@ -392,6 +402,108 @@ def parse_config_file(
     return cfg
 
 
+def _normalize_url_form_upstream_entry(
+    endpoint: Dict[str, Any],
+) -> Optional[Dict[str, Union[str, int, dict]]]:
+    """Brief: Normalize one URL-form upstream entry into runtime endpoint shape.
+
+    Inputs:
+      - endpoint: Raw upstream endpoint mapping.
+
+    Outputs:
+      - dict when endpoint contains URL-form upstream input, else None.
+
+    Raises:
+      - ValueError: When URL form is invalid or conflicts with explicit fields.
+    """
+
+    raw_url = endpoint.get("url")
+    if raw_url is None:
+        return None
+    if not isinstance(raw_url, str) or not raw_url.strip():
+        raise ValueError("upstream url must be a non-empty string")
+
+    url_text = str(raw_url).strip()
+    parsed = urlparse(url_text)
+    scheme = str(parsed.scheme or "").strip().lower()
+    if not scheme:
+        raise ValueError("upstream url must include a URL scheme")
+    if scheme not in _UPSTREAM_URL_SCHEME_TO_TRANSPORT:
+        supported = ", ".join(sorted(_UPSTREAM_URL_SCHEME_TO_TRANSPORT.keys()))
+        raise ValueError(
+            f"unsupported upstream url scheme {scheme!r}; supported: {supported}"
+        )
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError("upstream url must not include userinfo credentials")
+    if not str(parsed.hostname or "").strip():
+        raise ValueError("upstream url must include a hostname")
+
+    expected_transport = _UPSTREAM_URL_SCHEME_TO_TRANSPORT[scheme]
+    explicit_transport = endpoint.get("transport")
+    if explicit_transport is not None:
+        explicit_text = str(explicit_transport).strip().lower()
+        if explicit_text != expected_transport:
+            raise ValueError(
+                f"upstream transport {explicit_transport!r} conflicts with "
+                + f"url scheme {scheme!r}"
+            )
+
+    if expected_transport == "doh":
+        canonical_url = (
+            parsed._replace(scheme="https").geturl() if scheme == "doh" else url_text
+        )
+        for disallowed_key in ("host", "port"):
+            if disallowed_key in endpoint:
+                raise ValueError(
+                    f"url-form DoH upstream must not set {disallowed_key!r}"
+                )
+        rec: Dict[str, Union[str, int, dict]] = {
+            "transport": "doh",
+            "url": canonical_url,
+        }
+        if "id" in endpoint and str(endpoint.get("id", "")).strip():
+            rec["id"] = str(endpoint.get("id")).strip()
+        if "method" in endpoint:
+            rec["method"] = str(endpoint.get("method"))
+        if "headers" in endpoint and isinstance(endpoint["headers"], dict):
+            rec["headers"] = endpoint["headers"]
+        if "tls" in endpoint and isinstance(endpoint["tls"], dict):
+            rec["tls"] = endpoint["tls"]
+        return rec
+
+    for disallowed_key in ("host", "port"):
+        if disallowed_key in endpoint:
+            raise ValueError(
+                f"url-form upstream must not set {disallowed_key!r} explicitly"
+            )
+    if parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
+        raise ValueError(
+            f"url-form upstream with scheme {scheme!r} must not include path, "
+            + "query, or fragment"
+        )
+    try:
+        parsed_port = parsed.port
+    except ValueError as exc:
+        raise ValueError(f"upstream url has invalid port: {exc}") from exc
+    if parsed_port is None:
+        parsed_port = 853 if expected_transport == "dot" else 53
+    if parsed_port < 1 or parsed_port > 65535:
+        raise ValueError("upstream url port must be within 1..65535")
+
+    rec2: Dict[str, Union[str, int, dict]] = {
+        "host": str(parsed.hostname).strip(),
+        "port": int(parsed_port),
+        "transport": expected_transport,
+    }
+    if "id" in endpoint and str(endpoint.get("id", "")).strip():
+        rec2["id"] = str(endpoint.get("id")).strip()
+    if "tls" in endpoint and isinstance(endpoint["tls"], dict):
+        rec2["tls"] = endpoint["tls"]
+    if "pool" in endpoint and isinstance(endpoint["pool"], dict):
+        rec2["pool"] = endpoint["pool"]
+    return rec2
+
+
 def _normalize_upstream_endpoints_list(
     upstream_raw: List[Any],
 ) -> List[Dict[str, Union[str, int, dict]]]:
@@ -417,6 +529,10 @@ def _normalize_upstream_endpoints_list(
     for u in upstream_raw:
         if not isinstance(u, dict):
             raise ValueError("each upstream entry must be a mapping")
+        normalized_url_form = _normalize_url_form_upstream_entry(u)
+        if normalized_url_form is not None:
+            upstreams.append(normalized_url_form)
+            continue
 
         transport = str(u.get("transport", "udp")).strip().lower()
 
