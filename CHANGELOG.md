@@ -4,8 +4,21 @@ All notable changes to this project will be documented in this file.
 
 
 ## [Unreleased]
+### Added
+- Config schema/parsing now supports URL-form upstream endpoint entries via a new `upstream_url` schema definition, including DoH URL handling and endpoint-list normalization for primary and backup upstreams.
+- RateLimit config now includes `deny_delay` (seconds) to optionally pause before deny responses are emitted.
+- Admin web API now includes generic plugin snapshots at `/api/v1/plugins/{plugin_name}/snapshot` plus expanded plugin endpoints for access-control rules, etc-hosts lookup/reload, docker container lookup/reload, mDNS service filtering, rate-limit profile listing, zone-record lookup, and upstream-router evaluation.
+
+### Changed
+- FastAPI and threaded fallback plugin routing now share expanded admin payload helpers, improving route-surface parity while preserving compatibility aliases for existing plugin snapshot paths.
+- DockerHosts warning emission is now key-based and time-throttled to suppress repeated noisy warning bursts while still reporting suppressed counts.
 ### Fixed
 - RateLimit webserver stats now resolve runtime reader callbacks by `db_path` using exact, absolute, and normalized suffix matching, preventing missed current-window/profile metrics when configured paths and plugin runtime paths differ.
+
+### Tests
+- Added/expanded coverage for URL-form upstream schema generation and config normalization/validation paths.
+- Added DockerHosts regression coverage for warning-throttling behavior and updated RateLimit tests for the new `deny_delay` option.
+- Added FastAPI and threaded webserver coverage for expanded plugin API routes, snapshot alias compatibility, and shared admin-logic delegation.
 
 ## 0.7.1
 ### Added
