@@ -307,3 +307,37 @@ def test_admin_index_html_includes_ede_tooltips_and_section_title() -> None:
     )
     assert "sourceText === 'upstream'" in text
     assert "upstreamBits.join(' | ')" in text
+
+
+def test_admin_index_html_persists_paged_table_search_and_sort_state() -> None:
+    """Brief: Admin UI paged tables preserve search/sort state across refreshes.
+
+    Inputs:
+      - None; reads packaged html/index.html from resolve_www_root.
+
+    Outputs:
+      - Asserts that paged-table view state helpers and restore/write wiring
+        for search/sort are present in the shipped admin UI script.
+    """
+
+    from foghorn.servers import webserver as ws
+
+    html_root = Path(ws.resolve_www_root({}))
+    index_path = html_root / "index.html"
+    text = index_path.read_text(encoding="utf-8")
+
+    # State store and key helpers for paged plugin/cache tables.
+    assert "var tablePagedViewStateStore = {};" in text
+    assert "function getPagedTableViewStateKey(section, pluginName, extraQuery)" in text
+    assert "function readPagedTableViewState(viewStateKey, columns)" in text
+    assert "function writePagedTableViewState(viewStateKey, viewState)" in text
+
+    # Search and sort state must be restored and persisted during reloads.
+    assert "state.search = storedViewState.search || '';" in text
+    assert "searchInput.value = state.search;" in text
+    assert (
+        "state.search = payload && payload.search != null ? String(payload.search) : state.search;"
+        in text
+    )
+    assert "sortKey: state.sortKey," in text
+    assert "sortDir: state.sortDir," in text

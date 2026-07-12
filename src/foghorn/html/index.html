@@ -315,6 +315,7 @@
 			var pluginUiPages = {};
 			var pluginRefreshTimers = {};
 			var tableSortStateStore = {};
+			var tablePagedViewStateStore = {};
 			var activePluginName = null;
 			var activeTab = 'stats';
 			var autoRefreshTimer = null;
@@ -3285,6 +3286,62 @@ textBtn.type = 'button';
 					dir: sortState.dir === 'desc' ? 'desc' : 'asc',
 				};
 			}
+			function getPagedTableViewStateKey(section, pluginName, extraQuery) {
+				return getTableSortStateKey('paged-view', section, pluginName, extraQuery);
+			}
+			function readPagedTableViewState(viewStateKey, columns) {
+				if (!viewStateKey || !tablePagedViewStateStore) {
+					return null;
+				}
+				var state = tablePagedViewStateStore[viewStateKey];
+				if (!state || typeof state !== 'object') {
+					return null;
+				}
+				var sortKey = state.sortKey ? String(state.sortKey) : '';
+				if (sortKey && !getTableColumnByKey(Array.isArray(columns) ? columns : [], sortKey)) {
+					sortKey = '';
+				}
+				var sortDir = '';
+				if (state.sortDir === 'asc' || state.sortDir === 'desc') {
+					sortDir = state.sortDir;
+				}
+				var search = state.search != null ? String(state.search) : '';
+				var pageSize = parseInt(state.pageSize, 10);
+				if (isNaN(pageSize) || pageSize < 1) {
+					pageSize = null;
+				}
+				var filters = {};
+				if (state.filters && typeof state.filters === 'object') {
+					Object.keys(state.filters).forEach(function (k) {
+						filters[String(k)] = !!state.filters[k];
+					});
+				}
+				return {
+					search: search,
+					sortKey: sortKey,
+					sortDir: sortDir,
+					pageSize: pageSize,
+					filters: filters,
+				};
+			}
+			function writePagedTableViewState(viewStateKey, viewState) {
+				if (!viewStateKey || !tablePagedViewStateStore || !viewState || typeof viewState !== 'object') {
+					return;
+				}
+				var filters = {};
+				if (viewState.filters && typeof viewState.filters === 'object') {
+					Object.keys(viewState.filters).forEach(function (k) {
+						filters[String(k)] = !!viewState.filters[k];
+					});
+				}
+				tablePagedViewStateStore[viewStateKey] = {
+					search: viewState.search != null ? String(viewState.search) : '',
+					sortKey: viewState.sortKey ? String(viewState.sortKey) : '',
+					sortDir: viewState.sortDir === 'desc' ? 'desc' : (viewState.sortDir === 'asc' ? 'asc' : ''),
+					pageSize: viewState.pageSize != null ? Number(viewState.pageSize) : null,
+					filters: filters,
+				};
+			}
 
 			function renderSortableHeader(columns, sortState, onSort) {
 				var thead = document.createElement('thead');
@@ -4138,6 +4195,25 @@ textBtn.type = 'button';
 					state.sortKey = storedSortState.key;
 					state.sortDir = storedSortState.dir === 'desc' ? 'desc' : 'asc';
 				}
+				var viewStateKey = getPagedTableViewStateKey(section, pluginName, extraQuery);
+				var storedViewState = readPagedTableViewState(viewStateKey, columns);
+				if (storedViewState) {
+					state.search = storedViewState.search || '';
+					if (storedViewState.sortKey) {
+						state.sortKey = storedViewState.sortKey;
+						state.sortDir = storedViewState.sortDir === 'desc' ? 'desc' : 'asc';
+					}
+					if (storedViewState.pageSize && storedViewState.pageSize > 0) {
+						state.pageSize = storedViewState.pageSize;
+					}
+					if (storedViewState.filters && typeof storedViewState.filters === 'object') {
+						Object.keys(state.filters).forEach(function (fid) {
+							if (Object.prototype.hasOwnProperty.call(storedViewState.filters, fid)) {
+								state.filters[fid] = !!storedViewState.filters[fid];
+							}
+						});
+					}
+				}
 				var requestToken = 0;
 
 				var group = document.createElement('section');
@@ -4160,6 +4236,7 @@ textBtn.type = 'button';
 				searchInput.type = 'search';
 				searchInput.className = 'fh-table-search';
 				searchInput.placeholder = 'Search...';
+				searchInput.value = state.search;
 				searchWrap.appendChild(searchInput);
 				controlsDiv.appendChild(searchWrap);
 
@@ -4171,6 +4248,22 @@ textBtn.type = 'button';
 						enabledFilters[String(fid)] = true;
 					}
 				});
+				function persistPagedViewState() {
+					var filtersToStore = {};
+					Object.keys(state.filters || {}).forEach(function (k) {
+						if (!enabledFilters || !enabledFilters[k]) {
+							return;
+						}
+						filtersToStore[k] = !!state.filters[k];
+					});
+					writePagedTableViewState(viewStateKey, {
+						search: state.search,
+						sortKey: state.sortKey,
+						sortDir: state.sortDir,
+						pageSize: state.pageSize,
+						filters: filtersToStore,
+					});
+				}
 				if (filterIds.length) {
 					var filterRow = document.createElement('div');
 					filterRow.className = 'fh-table-controls-row';
@@ -4194,6 +4287,7 @@ textBtn.type = 'button';
 						cb.addEventListener('change', function () {
 							state.filters[fid] = cb.checked;
 							state.page = 1;
+							persistPagedViewState();
 							loadPage();
 						});
 						filterRow.appendChild(label);
@@ -4230,6 +4324,7 @@ textBtn.type = 'button';
 					if (!isNaN(n) && n > 0) {
 						state.pageSize = n;
 						state.page = 1;
+						persistPagedViewState();
 						loadPage();
 					}
 				});
@@ -4292,6 +4387,7 @@ textBtn.type = 'button';
 								dir: state.sortDir,
 							});
 							state.page = 1;
+							persistPagedViewState();
 							loadPage();
 						});
 						hrow.appendChild(th);
@@ -4377,6 +4473,7 @@ textBtn.type = 'button';
 					searchTimer = setTimeout(function () {
 						state.search = String(searchInput.value || '').trim();
 						state.page = 1;
+						persistPagedViewState();
 						loadPage();
 					}, 200);
 				});
@@ -4414,13 +4511,19 @@ textBtn.type = 'button';
 							state.pageSize = payload && payload.page_size ? payload.page_size : state.pageSize;
 							state.sortKey = payload && payload.sort_key ? payload.sort_key : state.sortKey;
 							state.sortDir = payload && payload.sort_dir ? payload.sort_dir : state.sortDir;
+							state.search = payload && payload.search != null ? String(payload.search) : state.search;
 							state.lastItems = payload && Array.isArray(payload.items) ? payload.items : [];
-							if (state.sortKey) {
-								writeTableSortState(sortStateKey, {
-									key: state.sortKey,
-									dir: state.sortDir,
-								});
+							if (sizeSelect.value !== String(state.pageSize)) {
+								sizeSelect.value = String(state.pageSize);
 							}
+							if (searchInput.value !== state.search) {
+								searchInput.value = state.search;
+							}
+							writeTableSortState(sortStateKey, {
+								key: state.sortKey,
+								dir: state.sortDir || 'asc',
+							});
+							persistPagedViewState();
 
 							table.textContent = '';
 							table.appendChild(renderHeader());
