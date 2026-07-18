@@ -8,17 +8,25 @@ All notable changes to this project will be documented in this file.
 - Config schema/parsing now supports URL-form upstream endpoint entries via a new `upstream_url` schema definition, including DoH URL handling and endpoint-list normalization for primary and backup upstreams.
 - RateLimit config now includes `deny_delay` (seconds) to optionally pause before deny responses are emitted.
 - Admin web API now includes generic plugin snapshots at `/api/v1/plugins/{plugin_name}/snapshot` plus expanded plugin endpoints for access-control rules, etc-hosts lookup/reload, docker container lookup/reload, mDNS service filtering, rate-limit profile listing, zone-record lookup, and upstream-router evaluation.
+- Added a dedicated `/api/v1/admin/*` action surface (with threaded parity) for status/capabilities, config verify, query-log clear, rate-limit key list/clear, records validate/apply/delete, restart scheduling status, and admin audit retrieval/clear.
+- Added a shared in-memory `AdminRuntimeState` container to track last config verify results, restart metadata, and bounded admin audit events across both FastAPI and threaded handlers.
+- Added backend capability hooks for query-log clear operations (`supports_query_log_clear` / `clear_query_log`) and implemented filter-aware clear/dry-run behavior for SQLite, MySQL/MariaDB, PostgreSQL, and MongoDB query-log stores.
 
 ### Changed
 - FastAPI and threaded fallback plugin routing now share expanded admin payload helpers, improving route-surface parity while preserving compatibility aliases for existing plugin snapshot paths.
 - DockerHosts warning emission is now key-based and time-throttled to suppress repeated noisy warning bursts while still reporting suppressed counts.
+- AXFR TSIG config handling now prefers nested `server.axfr.tsig.keys` and `server.axfr.tsig.key_sources` while preserving legacy `server.axfr.tsig_keys` compatibility in runtime parsing and effective-config output.
+- AXFR TSIG validation/error messaging now references nested `server.axfr.tsig.keys` semantics while explicitly noting the legacy `server.axfr.tsig_keys` compatibility path.
 ### Fixed
 - RateLimit webserver stats now resolve runtime reader callbacks by `db_path` using exact, absolute, and normalized suffix matching, preventing missed current-window/profile metrics when configured paths and plugin runtime paths differ.
+- Admin plugin/cache paged tables now retain active search text, sort selection, page size, and enabled filters across auto-refresh cycles, preventing view resets while monitoring mDNS and other plugin pages.
 
 ### Tests
 - Added/expanded coverage for URL-form upstream schema generation and config normalization/validation paths.
 - Added DockerHosts regression coverage for warning-throttling behavior and updated RateLimit tests for the new `deny_delay` option.
 - Added FastAPI and threaded webserver coverage for expanded plugin API routes, snapshot alias compatibility, and shared admin-logic delegation.
+- Added admin UI regression coverage asserting paged table view-state persistence wiring for search/sort restoration in shipped `index.html`.
+- Added regression coverage for admin action routes/handlers and AXFR TSIG runtime/schema/config resolution compatibility paths.
 
 ## 0.7.1
 ### Added

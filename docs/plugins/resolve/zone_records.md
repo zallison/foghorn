@@ -450,7 +450,10 @@ configured under `server.axfr`:
 - `enabled: bool` – enable/disable serving AXFR/IXFR.
 - `allow_clients: list[str]` – required client CIDR/IP allowlist.
 - `require_tsig: bool` – require TSIG on inbound AXFR/IXFR requests.
-- `tsig_keys: list[object]` – accepted TSIG keys (`name`, `secret`, optional `algorithm`).
+- `tsig: object` – preferred TSIG config:
+  - `keys: list[object]` – accepted TSIG keys (`name`, `secret`, optional `algorithm`).
+  - `key_sources: list[object]` – external key sources (built-in type: `file`).
+- `tsig_keys: list[object]` – legacy alias for `tsig.keys`.
 - `max_zone_rrs: int | null` – optional cap on transfer RR count per zone.
 - `max_concurrent_transfers: int` – global limit for concurrent transfers.
 - `rate_limit_per_client_per_second: float` – per-client request token refill

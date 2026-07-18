@@ -237,7 +237,7 @@ def _prepare_axfr_tsig_signer(
         if require_tsig:
             return (
                 None,
-                "AXFR TSIG required but no usable server.axfr.tsig_keys configured",
+                "AXFR TSIG required but no usable server.axfr.tsig.keys (or legacy server.axfr.tsig_keys) configured",
             )
         return None, None
 
