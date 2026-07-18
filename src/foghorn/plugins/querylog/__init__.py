@@ -423,6 +423,44 @@ class MultiStatsStore(BaseStatsStore):
         primary = self._backends[0]
         return primary.has_query_log()
 
+    def supports_query_log_clear(self) -> bool:
+        """Brief: Return whether query-log clear is supported by primary backend.
+
+        Inputs:
+          - None.
+
+        Outputs:
+          - bool capability flag.
+        """
+
+        primary = self._backends[0]
+        supports_fn = getattr(primary, "supports_query_log_clear", None)
+        if not callable(supports_fn):
+            return False
+        try:
+            return bool(supports_fn())
+        except Exception:
+            return False
+
+    def clear_query_log(
+        self,
+        *,
+        filters: Optional[dict[str, Any]] = None,
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        """Brief: Clear query-log rows through the primary backend.
+
+        Inputs:
+          - filters: Optional clear filter mapping.
+          - dry_run: When True, only return matched row count.
+
+        Outputs:
+          - Backend-provided clear result payload.
+        """
+
+        primary = self._backends[0]
+        return primary.clear_query_log(filters=filters, dry_run=dry_run)
+
 
 def _normalize_backend_name(raw: str) -> str:
     """Brief: Normalize a backend identifier or instance name.

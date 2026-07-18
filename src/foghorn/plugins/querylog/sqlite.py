@@ -24,7 +24,7 @@ import os
 import sqlite3
 import threading
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from foghorn.plugins.querylog.base import BaseStatsStore
 from foghorn.plugins.sql_safety import resolve_query_log_group_column
@@ -1151,6 +1151,172 @@ class SqliteStatsStore(BaseStatsStore):
         except Exception as exc:  # pragma: no cover - defensive
             logger.error("SqliteStatsStore has_query_log error: %s", exc, exc_info=True)
             return False
+
+    def supports_query_log_clear(self) -> bool:
+        """Brief: Return True because SQLite backend supports filtered clears.
+
+        Inputs:
+            None.
+
+        Outputs:
+            bool: Always True.
+        """
+
+        return True
+
+    @staticmethod
+    def _append_optional_text_filter(
+        raw_filters: Dict[str, Any],
+        key: str,
+        *,
+        where: List[str],
+        params: List[Any],
+        normalized: Dict[str, Any],
+        clause: str,
+        normalizer: Callable[[str], str],
+    ) -> None:
+        """Brief: Add a normalized text filter to SQL fragments when present.
+
+        Inputs:
+            raw_filters: Raw filter mapping provided by the caller.
+            key: Filter key to inspect in ``raw_filters``.
+            where: Mutable list of SQL WHERE fragments.
+            params: Mutable SQL bind-parameter list.
+            normalized: Mutable normalized-filter output mapping.
+            clause: SQL clause with one placeholder for the filter value.
+            normalizer: Callable applied to the stripped filter text.
+
+        Outputs:
+            None.
+        """
+
+        raw_value = raw_filters.get(key)
+        if raw_value is None:
+            return
+        value_text = str(raw_value).strip()
+        if not value_text:
+            return
+        value = normalizer(value_text)
+        where.append(clause)
+        params.append(value)
+        normalized[key] = value
+
+    def clear_query_log(
+        self,
+        *,
+        filters: Optional[Dict[str, Any]] = None,
+        dry_run: bool = False,
+    ) -> Dict[str, Any]:
+        """Brief: Delete query-log rows matching optional filters.
+
+        Inputs:
+            filters: Optional filter mapping supporting keys:
+              - before_ts (float-like): delete rows where ts < before_ts
+              - client_ip (str): exact client_ip match
+              - qname (str): exact or subdomain name match
+              - qtype (str): case-insensitive qtype equality
+              - rcode (str): case-insensitive rcode equality
+              - status (str): case-insensitive status equality
+            dry_run: When True, only return match counts.
+
+        Outputs:
+            Dict with keys matched/deleted/dry_run/filters.
+        """
+
+        raw = dict(filters or {})
+        where: List[str] = []
+        params: List[Any] = []
+        normalized: Dict[str, Any] = {}
+
+        before_ts_raw = raw.get("before_ts")
+        if before_ts_raw is not None and str(before_ts_raw).strip():
+            try:
+                before_ts = float(before_ts_raw)
+            except Exception as exc:
+                raise ValueError(f"invalid before_ts filter: {exc}") from exc
+            where.append("ts < ?")
+            params.append(float(before_ts))
+            normalized["before_ts"] = float(before_ts)
+
+        self._append_optional_text_filter(
+            raw,
+            "client_ip",
+            where=where,
+            params=params,
+            normalized=normalized,
+            clause="client_ip = ?",
+            normalizer=str,
+        )
+
+        qname_raw = raw.get("qname")
+        if qname_raw is not None and str(qname_raw).strip():
+            qname = _normalize_domain(str(qname_raw))
+            where.append("(name = ? OR name LIKE ?)")
+            params.extend([qname, f"%.{qname}"])
+            normalized["qname"] = qname
+
+        self._append_optional_text_filter(
+            raw,
+            "qtype",
+            where=where,
+            params=params,
+            normalized=normalized,
+            clause="qtype = ?",
+            normalizer=str.upper,
+        )
+        self._append_optional_text_filter(
+            raw,
+            "rcode",
+            where=where,
+            params=params,
+            normalized=normalized,
+            clause="rcode = ?",
+            normalizer=str.upper,
+        )
+        self._append_optional_text_filter(
+            raw,
+            "status",
+            where=where,
+            params=params,
+            normalized=normalized,
+            clause="LOWER(COALESCE(status, '')) = ?",
+            normalizer=str.lower,
+        )
+
+        where_sql = (" WHERE " + " AND ".join(where)) if where else ""
+
+        if self._batch_writes:
+            with self._lock:
+                self._flush_locked()
+
+        try:
+            cur = self._conn.execute(
+                f"SELECT COUNT(1) FROM query_log{where_sql}",  # noqa: S608 - where_sql contains only fixed allowlisted clauses with bound params
+                tuple(params),
+            )
+            row = cur.fetchone()
+            matched = int(row[0]) if row else 0
+        except Exception as exc:
+            raise RuntimeError(f"failed to count query_log rows: {exc}") from exc
+
+        deleted = 0
+        if not dry_run and matched > 0:
+            try:
+                with self._conn:
+                    cur_del = self._conn.execute(
+                        f"DELETE FROM query_log{where_sql}",  # noqa: S608 - where_sql contains only fixed allowlisted clauses with bound params
+                        tuple(params),
+                    )
+                deleted = int(getattr(cur_del, "rowcount", 0) or 0)
+            except Exception as exc:
+                raise RuntimeError(f"failed to delete query_log rows: {exc}") from exc
+
+        return {
+            "matched": int(matched),
+            "deleted": int(0 if dry_run else deleted),
+            "dry_run": bool(dry_run),
+            "filters": normalized,
+        }
 
     def rebuild_counts_from_query_log(
         self, logger_obj: Optional[logging.Logger] = None

@@ -27,7 +27,7 @@ import logging
 import math
 import threading
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .base import BaseStatsStore
 from foghorn.plugins.sql_safety import (
@@ -971,6 +971,161 @@ class MySqlStatsStore(BaseStatsStore):
         cur = self._conn.cursor()
         cur.execute("SELECT 1 FROM query_log LIMIT 1")
         return cur.fetchone() is not None
+
+    def supports_query_log_clear(self) -> bool:
+        """Brief: Return True because MySQL backend supports filtered clears.
+
+        Inputs:
+            None.
+
+        Outputs:
+            bool: Always True.
+        """
+
+        return True
+
+    @staticmethod
+    def _append_optional_text_filter(
+        raw_filters: Dict[str, Any],
+        key: str,
+        *,
+        where: List[str],
+        params: List[Any],
+        normalized: Dict[str, Any],
+        clause: str,
+        normalizer: Callable[[str], str],
+    ) -> None:
+        """Brief: Add a normalized text filter to SQL fragments when present.
+
+        Inputs:
+            raw_filters: Raw filter mapping provided by the caller.
+            key: Filter key to inspect in ``raw_filters``.
+            where: Mutable list of SQL WHERE fragments.
+            params: Mutable SQL bind-parameter list.
+            normalized: Mutable normalized-filter output mapping.
+            clause: SQL clause with one placeholder for the filter value.
+            normalizer: Callable applied to the stripped filter text.
+
+        Outputs:
+            None.
+        """
+
+        raw_value = raw_filters.get(key)
+        if raw_value is None:
+            return
+        value_text = str(raw_value).strip()
+        if not value_text:
+            return
+        value = normalizer(value_text)
+        where.append(clause)
+        params.append(value)
+        normalized[key] = value
+
+    def clear_query_log(
+        self,
+        *,
+        filters: Optional[Dict[str, Any]] = None,
+        dry_run: bool = False,
+    ) -> Dict[str, Any]:
+        """Brief: Delete query-log rows matching optional filters.
+
+        Inputs:
+            filters: Optional filter mapping supporting before_ts, client_ip,
+                qname, qtype, rcode, and status.
+            dry_run: When True, only return match counts.
+
+        Outputs:
+            Dict with keys matched/deleted/dry_run/filters.
+        """
+
+        raw = dict(filters or {})
+        where: List[str] = []
+        params: List[Any] = []
+        normalized: Dict[str, Any] = {}
+        ph = self._placeholder
+
+        before_ts_raw = raw.get("before_ts")
+        if before_ts_raw is not None and str(before_ts_raw).strip():
+            try:
+                before_ts = float(before_ts_raw)
+            except Exception as exc:
+                raise ValueError(f"invalid before_ts filter: {exc}") from exc
+            where.append(f"ts < {ph}")
+            params.append(float(before_ts))
+            normalized["before_ts"] = float(before_ts)
+
+        self._append_optional_text_filter(
+            raw,
+            "client_ip",
+            where=where,
+            params=params,
+            normalized=normalized,
+            clause=f"client_ip = {ph}",
+            normalizer=str,
+        )
+
+        qname_raw = raw.get("qname")
+        if qname_raw is not None and str(qname_raw).strip():
+            qname = dns_names.normalize_name(str(qname_raw))
+            where.append(f"(name = {ph} OR name LIKE {ph})")
+            params.extend([qname, f"%.{qname}"])
+            normalized["qname"] = qname
+
+        self._append_optional_text_filter(
+            raw,
+            "qtype",
+            where=where,
+            params=params,
+            normalized=normalized,
+            clause=f"qtype = {ph}",
+            normalizer=str.upper,
+        )
+        self._append_optional_text_filter(
+            raw,
+            "rcode",
+            where=where,
+            params=params,
+            normalized=normalized,
+            clause=f"rcode = {ph}",
+            normalizer=str.upper,
+        )
+        self._append_optional_text_filter(
+            raw,
+            "status",
+            where=where,
+            params=params,
+            normalized=normalized,
+            clause=f"LOWER(COALESCE(status, '')) = {ph}",
+            normalizer=str.lower,
+        )
+
+        where_sql = (" WHERE " + " AND ".join(where)) if where else ""
+
+        self._flush_pending_writes()
+        cur = self._conn.cursor()
+        cur.execute(
+            f"SELECT COUNT(1) FROM query_log{where_sql}",  # noqa: S608 - where_sql contains only fixed allowlisted clauses with bound params
+            tuple(params),
+        )
+        row = cur.fetchone()
+        matched = int(row[0]) if row else 0
+
+        deleted = 0
+        if not dry_run and matched > 0:
+            cur_del = self._conn.cursor()
+            cur_del.execute(
+                f"DELETE FROM query_log{where_sql}",  # noqa: S608 - where_sql contains only fixed allowlisted clauses with bound params
+                tuple(params),
+            )
+            self._conn.commit()
+            deleted = int(getattr(cur_del, "rowcount", 0) or 0)
+
+        return {
+            "matched": int(matched),
+            "deleted": int(0 if dry_run else deleted),
+            "dry_run": bool(dry_run),
+            "filters": normalized,
+        }
 
     def select_query_log(
         self,

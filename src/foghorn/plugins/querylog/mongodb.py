@@ -25,7 +25,7 @@ import re
 import threading
 import time
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 from foghorn.security_limits import (
     MAX_QUERY_LOG_AGG_GROUPED_RESULTS,
     enforce_query_log_aggregate_bucket_limit,
@@ -643,6 +643,151 @@ class MongoStatsStore(BaseStatsStore):
             logger.error("MongoStatsStore has_query_log error: %s", exc, exc_info=True)
             return False
 
+    def supports_query_log_clear(self) -> bool:
+        """Brief: Return True because MongoDB backend supports filtered clears.
+
+        Inputs:
+            None.
+
+        Outputs:
+            bool: Always True.
+        """
+
+        return True
+
+    @staticmethod
+    def _append_optional_text_filter(
+        raw_filters: Dict[str, Any],
+        key: str,
+        *,
+        filters: Dict[str, Any],
+        normalized: Dict[str, Any],
+        field: str,
+        normalizer: Callable[[str], str],
+        case_insensitive_exact: bool = False,
+        normalized_value_normalizer: Optional[Callable[[str], str]] = None,
+    ) -> None:
+        """Brief: Add a normalized optional text filter to Mongo query fragments.
+
+        Inputs:
+            raw_filters: Raw filter mapping provided by the caller.
+            key: Filter key to inspect in ``raw_filters``.
+            filters: Mutable Mongo query filter document.
+            normalized: Mutable normalized-filter output mapping.
+            field: Mongo document field name to match.
+            normalizer: Callable applied to stripped filter text.
+            case_insensitive_exact: When True, use anchored case-insensitive regex.
+            normalized_value_normalizer: Optional callable to normalize reported
+                value stored in ``normalized``.
+
+        Outputs:
+            None.
+        """
+
+        raw_value = raw_filters.get(key)
+        if raw_value is None:
+            return
+        value_text = str(raw_value).strip()
+        if not value_text:
+            return
+        value = normalizer(value_text)
+        if case_insensitive_exact:
+            filters[field] = {"$regex": f"^{re.escape(value)}$", "$options": "i"}
+        else:
+            filters[field] = value
+        if normalized_value_normalizer is not None:
+            normalized[key] = normalized_value_normalizer(value)
+        else:
+            normalized[key] = value
+
+    def clear_query_log(
+        self,
+        *,
+        filters: Optional[Dict[str, Any]] = None,
+        dry_run: bool = False,
+    ) -> Dict[str, Any]:
+        """Brief: Delete query-log rows matching optional filters.
+
+        Inputs:
+            filters: Optional filter mapping supporting before_ts, client_ip,
+                qname, qtype, rcode, and status.
+            dry_run: When True, only return match counts.
+
+        Outputs:
+            Dict with keys matched/deleted/dry_run/filters.
+        """
+
+        raw = dict(filters or {})
+        filters = {}
+        normalized: Dict[str, Any] = {}
+
+        before_ts_raw = raw.get("before_ts")
+        if before_ts_raw is not None and str(before_ts_raw).strip():
+            try:
+                before_ts = float(before_ts_raw)
+            except Exception as exc:
+                raise ValueError(f"invalid before_ts filter: {exc}") from exc
+            filters["ts"] = {"$lt": float(before_ts)}
+            normalized["before_ts"] = float(before_ts)
+
+        self._append_optional_text_filter(
+            raw,
+            "client_ip",
+            filters=filters,
+            normalized=normalized,
+            field="client_ip",
+            normalizer=str,
+        )
+
+        qname_raw = raw.get("qname")
+        if qname_raw is not None and str(qname_raw).strip():
+            qname = _normalize_domain(str(qname_raw))
+            filters["name"] = {
+                "$regex": f"(^|\\.){re.escape(qname)}$",
+                "$options": "i",
+            }
+            normalized["qname"] = qname
+
+        self._append_optional_text_filter(
+            raw,
+            "qtype",
+            filters=filters,
+            normalized=normalized,
+            field="qtype",
+            normalizer=str.upper,
+        )
+        self._append_optional_text_filter(
+            raw,
+            "rcode",
+            filters=filters,
+            normalized=normalized,
+            field="rcode",
+            normalizer=str.upper,
+        )
+        self._append_optional_text_filter(
+            raw,
+            "status",
+            filters=filters,
+            normalized=normalized,
+            field="status",
+            normalizer=str,
+            case_insensitive_exact=True,
+            normalized_value_normalizer=str.lower,
+        )
+
+        self._flush_pending_query_log_docs()
+        matched = int(self._query_log.count_documents(filters))
+        deleted = 0
+        if not dry_run and matched > 0:
+            deleted_res = self._query_log.delete_many(filters)
+            deleted = int(getattr(deleted_res, "deleted_count", 0) or 0)
+        return {
+            "matched": int(matched),
+            "deleted": int(0 if dry_run else deleted),
+            "dry_run": bool(dry_run),
+            "filters": normalized,
+        }
+
     def select_query_log(
         self,
         client_ip: Optional[str] = None,
@@ -678,19 +823,22 @@ class MongoStatsStore(BaseStatsStore):
 
         page_i, page_size_i = BaseStatsStore._normalize_page_args(page, page_size)
 
-        flt: Dict[str, Any] = {}
+        filters: Dict[str, Any] = {}
         if client_ip:
-            flt["client_ip"] = client_ip.strip()
+            filters["client_ip"] = client_ip.strip()
         if qtype:
-            flt["qtype"] = qtype.strip().upper()
+            filters["qtype"] = qtype.strip().upper()
         if qname:
-            flt["name"] = _normalize_domain(qname)
+            filters["name"] = _normalize_domain(qname)
         if rcode:
-            flt["rcode"] = rcode.strip().upper()
+            filters["rcode"] = rcode.strip().upper()
         if status:
             status_s = status.strip()
             if status_s:
-                flt["status"] = {"$regex": f"^{re.escape(status_s)}$", "$options": "i"}
+                filters["status"] = {
+                    "$regex": f"^{re.escape(status_s)}$",
+                    "$options": "i",
+                }
         source_or: List[Dict[str, Any]] | None = None
         if source:
             source_s = source.strip().lower()
@@ -707,10 +855,10 @@ class MongoStatsStore(BaseStatsStore):
             try:
                 ede_code_i = int(ede_code_s)
             except Exception:
-                flt["_id"] = {"$exists": False}
+                filters["_id"] = {"$exists": False}
             else:
                 if ede_code_i < 0:
-                    flt["_id"] = {"$exists": False}
+                    filters["_id"] = {"$exists": False}
                 else:
                     ede_code_txt = str(ede_code_i)
                     ede_or = [
@@ -754,22 +902,22 @@ class MongoStatsStore(BaseStatsStore):
                         },
                     ]
         if source_or and ede_or:
-            flt["$and"] = [{"$or": source_or}, {"$or": ede_or}]
+            filters["$and"] = [{"$or": source_or}, {"$or": ede_or}]
         elif source_or:
-            flt["$or"] = source_or
+            filters["$or"] = source_or
         elif ede_or:
-            flt["$or"] = ede_or
+            filters["$or"] = ede_or
         if isinstance(start_ts, (int, float)) or isinstance(end_ts, (int, float)):
             ts_cond: Dict[str, Any] = {}
             if isinstance(start_ts, (int, float)):
                 ts_cond["$gte"] = float(start_ts)
             if isinstance(end_ts, (int, float)):
                 ts_cond["$lt"] = float(end_ts)
-            flt["ts"] = ts_cond
+            filters["ts"] = ts_cond
         self._flush_pending_query_log_docs()
 
         try:
-            total = int(self._query_log.count_documents(flt))
+            total = int(self._query_log.count_documents(filters))
         except Exception as exc:  # pragma: no cover - defensive
             logger.error(
                 "MongoStatsStore select_query_log count error: %s", exc, exc_info=True
@@ -780,7 +928,7 @@ class MongoStatsStore(BaseStatsStore):
         items: List[Dict[str, Any]] = []
         try:
             cursor = (
-                self._query_log.find(flt)
+                self._query_log.find(filters)
                 .sort([("ts", -1), ("_id", -1)])
                 .skip(offset)
                 .limit(page_size_i)
@@ -881,15 +1029,15 @@ class MongoStatsStore(BaseStatsStore):
                 "items": [],
             }
 
-        flt: Dict[str, Any] = {"ts": {"$gte": start_f, "$lt": end_f}}
+        filters: Dict[str, Any] = {"ts": {"$gte": start_f, "$lt": end_f}}
         if client_ip:
-            flt["client_ip"] = client_ip.strip()
+            filters["client_ip"] = client_ip.strip()
         if qtype:
-            flt["qtype"] = qtype.strip().upper()
+            filters["qtype"] = qtype.strip().upper()
         if qname:
-            flt["name"] = _normalize_domain(qname)
+            filters["name"] = _normalize_domain(qname)
         if rcode:
-            flt["rcode"] = rcode.strip().upper()
+            filters["rcode"] = rcode.strip().upper()
 
         group_col = None
         group_label = None
@@ -910,7 +1058,7 @@ class MongoStatsStore(BaseStatsStore):
         try:
             if group_col:
                 pipeline = [
-                    {"$match": flt},
+                    {"$match": filters},
                     {
                         "$project": {
                             "bucket": {
@@ -952,7 +1100,7 @@ class MongoStatsStore(BaseStatsStore):
                     )
             else:
                 pipeline = [
-                    {"$match": flt},
+                    {"$match": filters},
                     {
                         "$project": {
                             "bucket": {

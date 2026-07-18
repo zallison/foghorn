@@ -886,6 +886,42 @@ class BaseStatsStore:
 
         raise NotImplementedError("has_query_log() must be implemented by a subclass")
 
+    def supports_query_log_clear(self) -> bool:
+        """Brief: Return True when this backend supports administrative row clears.
+
+        Inputs:
+          - None.
+
+        Outputs:
+          - bool: Clear capability flag.
+        """
+
+        return False
+
+    def clear_query_log(
+        self,
+        *,
+        filters: Optional[Dict[str, Any]] = None,
+        dry_run: bool = False,
+    ) -> Dict[str, Any]:
+        """Brief: Delete query-log rows matching optional filters.
+
+        Inputs:
+          - filters: Optional filter mapping (backend-defined subset).
+          - dry_run: When True, only return matched row count.
+
+        Outputs:
+          - Dict with keys:
+              - matched: Number of rows matching the filter.
+              - deleted: Number of deleted rows (0 for dry_run).
+              - dry_run: Effective dry-run flag.
+              - filters: Normalized filter mapping.
+        """
+
+        raise NotImplementedError(
+            "clear_query_log() is not implemented by this backend"
+        )
+
     # ------------------------------------------------------------------
     # Optional shared helpers for backends
     # ------------------------------------------------------------------
