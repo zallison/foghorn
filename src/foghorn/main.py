@@ -51,6 +51,7 @@ from .runtime_config import (
     RuntimeSnapshot,
     initialize_runtime,
     parse_upstream_health_config,
+    resolve_axfr_tsig_keys,
     resolve_server_feature_flags,
 )
 from .servers.runtime_state import RingBuffer, RuntimeState
@@ -653,20 +654,7 @@ def main(argv: List[str] | None = None) -> int:
         axfr_message_max_bytes = 64000
     axfr_message_max_bytes = max(512, min(65535, int(axfr_message_max_bytes)))
     axfr_require_tsig = bool(axfr_cfg.get("require_tsig", False))
-    axfr_tsig_keys_raw = axfr_cfg.get("tsig_keys") or []
-    axfr_tsig_keys: list[dict[str, str]] = []
-    if isinstance(axfr_tsig_keys_raw, list):
-        for entry in axfr_tsig_keys_raw:
-            if not isinstance(entry, dict):
-                continue
-            name = str(entry.get("name") or "").strip()
-            secret = str(entry.get("secret") or "").strip()
-            algorithm = str(entry.get("algorithm") or "hmac-sha256").strip().lower()
-            if not name or not secret:
-                continue
-            axfr_tsig_keys.append(
-                {"name": name, "secret": secret, "algorithm": algorithm}
-            )
+    axfr_tsig_keys = resolve_axfr_tsig_keys(axfr_cfg)
 
     # When performing local DNSSEC validation (including local_extended), point
     # the validator's internal resolver at the configured upstream hosts so that

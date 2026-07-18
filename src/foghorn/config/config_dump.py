@@ -524,10 +524,24 @@ def _expand_server_feature_flags(server_cfg: Dict[str, Any]) -> None:
         message_max = 64000
     axfr_cfg["message_max_bytes"] = max(512, min(65535, int(message_max)))
     axfr_cfg.setdefault("require_tsig", False)
-    tsig_keys = axfr_cfg.get("tsig_keys")
+    tsig_cfg = axfr_cfg.get("tsig")
+    if not isinstance(tsig_cfg, dict):
+        tsig_cfg = {}
+    tsig_keys = tsig_cfg.get("keys")
     if not isinstance(tsig_keys, list):
         tsig_keys = []
-    axfr_cfg["tsig_keys"] = tsig_keys
+    key_sources = tsig_cfg.get("key_sources")
+    if not isinstance(key_sources, list):
+        key_sources = []
+    legacy_tsig_keys = axfr_cfg.get("tsig_keys")
+    if not isinstance(legacy_tsig_keys, list):
+        legacy_tsig_keys = []
+    if not tsig_keys and legacy_tsig_keys:
+        tsig_keys = legacy_tsig_keys
+    tsig_cfg["keys"] = tsig_keys
+    tsig_cfg["key_sources"] = key_sources
+    axfr_cfg["tsig"] = tsig_cfg
+    axfr_cfg["tsig_keys"] = legacy_tsig_keys if legacy_tsig_keys else tsig_keys
 
 
 def _expand_upstreams_defaults(out: Dict[str, Any]) -> None:

@@ -441,6 +441,71 @@ def resolve_server_feature_flags(server_cfg: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def resolve_axfr_tsig_keys(axfr_cfg: Dict[str, Any]) -> List[Dict[str, str]]:
+    """Brief: Resolve AXFR TSIG keys using the shared UPDATE key-source resolver.
+
+    Inputs:
+      - axfr_cfg: `server.axfr` mapping that may contain:
+          * tsig.keys / tsig.key_sources (preferred shape)
+          * tsig_keys (legacy alias for tsig.keys)
+
+    Outputs:
+      - List of normalized TSIG key dicts containing `name`, `secret`, and
+        normalized `algorithm`.
+
+    Notes:
+      - Resolution uses update_helpers.resolve_tsig_key_configs() so AXFR and
+        DNS UPDATE share inline/source loading semantics.
+      - When both `tsig.keys` and legacy `tsig_keys` are present, entries are
+        combined in that order before source-based keys are appended.
+    """
+
+    if not isinstance(axfr_cfg, dict):
+        return []
+
+    tsig_cfg_raw = axfr_cfg.get("tsig")
+    tsig_cfg = tsig_cfg_raw if isinstance(tsig_cfg_raw, dict) else {}
+    inline_keys = tsig_cfg.get("keys")
+    source_defs = tsig_cfg.get("key_sources")
+    legacy_inline_keys = axfr_cfg.get("tsig_keys")
+
+    combined_inline: List[dict] = []
+    for maybe_keys in (inline_keys, legacy_inline_keys):
+        if not isinstance(maybe_keys, list):
+            continue
+        for item in maybe_keys:
+            if isinstance(item, dict):
+                combined_inline.append(dict(item))
+
+    if isinstance(source_defs, list):
+        normalized_sources = list(source_defs)
+    else:
+        normalized_sources = []
+
+    tsig_zone_like_cfg = {
+        "tsig": {
+            "keys": combined_inline,
+            "key_sources": normalized_sources,
+        }
+    }
+
+    from foghorn.plugins.resolve.zone_records import update_helpers as _update_helpers
+
+    resolved_raw = _update_helpers.resolve_tsig_key_configs(tsig_zone_like_cfg)
+
+    resolved: List[Dict[str, str]] = []
+    for entry in resolved_raw:
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("name") or "").strip()
+        secret = str(entry.get("secret") or "").strip()
+        algorithm = str(entry.get("algorithm") or "hmac-sha256").strip().lower()
+        if not name or not secret:
+            continue
+        resolved.append({"name": name, "secret": secret, "algorithm": algorithm})
+    return resolved
+
+
 _LOCK = threading.Lock()
 _ACTIVE: RuntimeSnapshot | None = None
 _CONFIG_PATH: str | None = None
@@ -1025,20 +1090,7 @@ def _build_snapshot(
         axfr_message_max_bytes = 64000
     axfr_message_max_bytes = max(512, min(65535, int(axfr_message_max_bytes)))
     axfr_require_tsig = bool(axfr_cfg.get("require_tsig", False))
-    axfr_tsig_keys_raw = axfr_cfg.get("tsig_keys") or []
-    axfr_tsig_keys: List[Dict[str, str]] = []
-    if isinstance(axfr_tsig_keys_raw, list):
-        for entry in axfr_tsig_keys_raw:
-            if not isinstance(entry, dict):
-                continue
-            name = str(entry.get("name") or "").strip()
-            secret = str(entry.get("secret") or "").strip()
-            algorithm = str(entry.get("algorithm") or "hmac-sha256").strip().lower()
-            if not name or not secret:
-                continue
-            axfr_tsig_keys.append(
-                {"name": name, "secret": secret, "algorithm": algorithm}
-            )
+    axfr_tsig_keys = resolve_axfr_tsig_keys(axfr_cfg)
 
     # Cache prefetch knobs are not yet config-plumbed; preserve current values
     # from the active snapshot when available.
