@@ -20,6 +20,7 @@ import threading
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
 from ...stats import StatsCollector
+from .admin_state import AdminRuntimeState
 from .logging_utils import RingBuffer
 from .runtime import RuntimeState
 from .threaded_handlers import _ThreadedAdminRequestHandler
@@ -194,6 +195,7 @@ class _AdminHTTPServer(http.server.ThreadingHTTPServer):
         # Preserve the plugin list so threaded handlers can look up plugin
         # instances by name when serving plugin-specific pages or APIs.
         self.plugins = list(plugins or [])
+        self.admin_runtime = AdminRuntimeState()
 
         if runtime_state is not None:
             runtime_state.set_listener("webserver", enabled=True, thread=None)

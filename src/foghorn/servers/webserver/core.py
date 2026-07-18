@@ -76,6 +76,7 @@ from .logging_utils import (
     _Suppress2xxAccessFilter,
     install_uvicorn_2xx_suppression,
 )
+from .admin_state import AdminRuntimeState
 from .meta_helpers import (
     _GITHUB_URL,
     FOGHORN_VERSION,
@@ -121,6 +122,7 @@ from ...plugins.resolve.base import AdminPageSpec
 from ...stats import StatsCollector, StatsSnapshot, get_process_uptime_seconds
 from ..udp_server import DNSUDPHandler
 from .routes_core import (
+    _register_admin_routes,
     _register_config_routes,
     _register_core_routes,
     _register_plugin_routes,
@@ -249,6 +251,7 @@ def create_app(
     # Expose loaded plugin instances so plugin-aware endpoints (such as
     # DockerHosts UI helpers) can look up instances by their configured name.
     app.state.plugins = list(plugins or [])
+    app.state.admin_runtime = AdminRuntimeState()
 
     # Best-effort: register the webserver as enabled. The thread/handle liveness
     # is tracked by foghorn.main when runtime_state is provided.
@@ -277,6 +280,7 @@ def create_app(
         _register_stats_routes(app, auth_dep, FOGHORN_VERSION)
         _register_config_routes(app, auth_dep)
         _register_query_log_routes(app, auth_dep)
+        _register_admin_routes(app, auth_dep)
         _register_plugin_routes(app, auth_dep)
 
     _register_static_routes(app, web_cfg, www_root, auth_dep)

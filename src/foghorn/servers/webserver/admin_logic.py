@@ -10,6 +10,7 @@ The functions here deliberately avoid importing FastAPI or http.server types.
 from __future__ import annotations
 
 import math
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from functools import cmp_to_key
@@ -1481,3 +1482,640 @@ def build_plugin_upstream_evaluate_payload(
         "matched": bool(out_candidates),
         "candidates": out_candidates,
     }
+
+
+def get_admin_runtime_state(obj: object) -> object | None:
+    """Brief: Return the attached admin runtime state object when present.
+
+    Inputs:
+      - obj: FastAPI app.state or threaded server instance.
+
+    Outputs:
+      - Admin runtime state object, or None when not configured.
+    """
+
+    try:
+        state = getattr(obj, "admin_runtime", None)
+    except Exception:
+        state = None
+    return state
+
+
+def add_admin_audit_event(
+    runtime_state: object | None,
+    *,
+    action: str,
+    target: str,
+    ok: bool,
+    details: Dict[str, Any] | None = None,
+) -> None:
+    """Brief: Best-effort append to admin action audit state.
+
+    Inputs:
+      - runtime_state: Admin runtime state object.
+      - action: Audit action identifier.
+      - target: Audit action target identifier.
+      - ok: Action success indicator.
+      - details: Optional compact details payload.
+
+    Outputs:
+      - None.
+    """
+
+    if runtime_state is None:
+        return
+    add_fn = getattr(runtime_state, "add_audit_event", None)
+    if not callable(add_fn):
+        return
+    try:
+        add_fn(action=action, target=target, ok=bool(ok), details=details or {})
+    except Exception:
+        return
+
+
+def build_admin_status_payload(
+    *,
+    cfg: Dict[str, Any],
+    config_path: str | None = None,
+    stats_collector: object | None,
+    plugins: Iterable[object],
+    admin_runtime_state: object | None,
+) -> Dict[str, Any]:
+    """Brief: Build unified admin runtime status payload.
+
+    Inputs:
+      - cfg: Current runtime config mapping.
+      - config_path: Active config path.
+      - stats_collector: Current stats collector object (optional).
+      - plugins: Loaded plugin instances.
+      - admin_runtime_state: Optional AdminRuntimeState object.
+
+    Outputs:
+      - Dict with runtime status, plugin count, queue metrics, and restart metadata.
+    """
+
+    queue_metrics: Dict[str, Any] | None = None
+    store = (
+        getattr(stats_collector, "_store", None)
+        if stats_collector is not None
+        else None
+    )
+    if store is not None:
+        get_metrics = getattr(store, "get_async_queue_metrics", None)
+        if callable(get_metrics):
+            try:
+                raw = get_metrics()
+                if isinstance(raw, dict):
+                    queue_metrics = dict(raw)
+            except Exception:
+                queue_metrics = None
+
+    restart_pending: Dict[str, Any] | None = None
+    if admin_runtime_state is not None:
+        get_restart = getattr(admin_runtime_state, "get_restart_pending", None)
+        if callable(get_restart):
+            try:
+                raw = get_restart()
+                if isinstance(raw, dict):
+                    restart_pending = dict(raw)
+            except Exception:
+                restart_pending = None
+
+    try:
+        from foghorn import runtime_config as _runtime_config
+
+        snap = _runtime_config.get_runtime_snapshot()
+        runtime_generation = int(getattr(snap, "generation", 0) or 0)
+    except Exception:
+        runtime_generation = 0
+
+    return {
+        "status": "ok",
+        "runtime_generation": int(runtime_generation),
+        "plugin_count": int(len(list(plugins or []))),
+        "stats_enabled": bool(stats_collector is not None),
+        "query_log_enabled": bool(
+            store is not None and hasattr(store, "select_query_log")
+        ),
+        "config_path_configured": bool(str(config_path or "").strip()),
+        "restart_pending": restart_pending,
+        "query_log_queue": queue_metrics,
+        "timestamp_ts": float(time.time()),
+    }
+
+
+def build_admin_capabilities_payload(
+    *,
+    stats_collector: object | None,
+    plugins: Iterable[object],
+) -> Dict[str, Any]:
+    """Brief: Build capabilities payload for admin actions.
+
+    Inputs:
+      - stats_collector: Current stats collector object (optional).
+      - plugins: Loaded plugin instances.
+
+    Outputs:
+      - Dict describing action-level support flags.
+    """
+
+    store = (
+        getattr(stats_collector, "_store", None)
+        if stats_collector is not None
+        else None
+    )
+    query_log_clear_supported = False
+    if store is not None:
+        supports_clear_fn = getattr(store, "supports_query_log_clear", None)
+        if callable(supports_clear_fn):
+            try:
+                query_log_clear_supported = bool(supports_clear_fn())
+            except Exception:
+                query_log_clear_supported = False
+
+    rate_limit_plugins = []
+    etc_hosts_plugins = []
+    zone_records_plugins = []
+    for plugin in plugins or []:
+        name = str(getattr(plugin, "name", "") or "")
+        klass = str(type(plugin).__name__ or "")
+        if klass == "RateLimit":
+            rate_limit_plugins.append(name or klass)
+        if klass == "EtcHosts":
+            etc_hosts_plugins.append(name or klass)
+        if klass == "ZoneRecords":
+            zone_records_plugins.append(name or klass)
+
+    return {
+        "query_log": {
+            "clear_supported": bool(query_log_clear_supported),
+        },
+        "rate_limit": {
+            "plugin_count": int(len(rate_limit_plugins)),
+            "clear_supported": bool(rate_limit_plugins),
+            "list_keys_supported": bool(rate_limit_plugins),
+            "plugins": list(rate_limit_plugins),
+        },
+        "records": {
+            "etc_hosts_plugins": list(etc_hosts_plugins),
+            "zone_records_plugins": list(zone_records_plugins),
+            "validate_supported": bool(etc_hosts_plugins or zone_records_plugins),
+            "apply_supported": bool(etc_hosts_plugins or zone_records_plugins),
+            "delete_supported": bool(etc_hosts_plugins or zone_records_plugins),
+        },
+        "restart": {
+            "schedule_supported": True,
+            "pending_supported": True,
+        },
+        "config": {
+            "verify_supported": True,
+        },
+        "audit": {
+            "list_supported": True,
+            "clear_supported": True,
+        },
+    }
+
+
+def build_config_verify_payload(
+    *,
+    raw_yaml: str | None,
+    config_path: str | None,
+    current_cfg: Dict[str, Any] | None,
+) -> Dict[str, Any]:
+    """Brief: Parse and verify config input without applying runtime changes.
+
+    Inputs:
+      - raw_yaml: Optional raw YAML text to verify. When absent, verifies on-disk config.
+      - config_path: Active runtime config path.
+      - current_cfg: Current effective runtime config.
+
+    Outputs:
+      - Dict containing verify status, analyze_config_change output, and errors.
+    """
+
+    from foghorn import runtime_config as _runtime_config
+    import os
+    import tempfile
+
+    cfg_path_text = str(config_path or "")
+    if not cfg_path_text:
+        raise AdminLogicHttpError(status_code=500, detail="config_path not configured")
+
+    desired_cfg: Dict[str, Any]
+    path_used = os.path.abspath(cfg_path_text)
+
+    if isinstance(raw_yaml, str):
+        fd: int | None = None
+        tmp_path: str | None = None
+        try:
+            fd, tmp_path = tempfile.mkstemp(
+                prefix="foghorn-admin-verify-", suffix=".yaml"
+            )
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                fd = None
+                f.write(raw_yaml)
+            desired_cfg = _runtime_config.load_config_from_disk(
+                config_path=str(tmp_path)
+            )
+            path_used = str(tmp_path)
+        except AdminLogicHttpError:
+            raise
+        except Exception as exc:
+            raise AdminLogicHttpError(
+                status_code=400,
+                detail=f"failed to parse/validate config: {exc}",
+            ) from exc
+        finally:
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except Exception:
+                    pass
+            if tmp_path:
+                try:
+                    os.remove(tmp_path)
+                except Exception:
+                    pass
+    else:
+        try:
+            desired_cfg = _runtime_config.load_config_from_disk(
+                config_path=cfg_path_text
+            )
+        except Exception as exc:
+            raise AdminLogicHttpError(
+                status_code=400,
+                detail=f"failed to parse/validate config: {exc}",
+            ) from exc
+
+    analysis = _runtime_config.analyze_config_change(
+        desired_cfg,
+        current_cfg=current_cfg or {},
+    )
+
+    return {
+        "status": "ok",
+        "path": str(path_used),
+        "analysis": dict(analysis or {}),
+    }
+
+
+def execute_query_log_clear(
+    *,
+    store: object | None,
+    filters: Dict[str, Any],
+    dry_run: bool,
+) -> Dict[str, Any]:
+    """Brief: Execute query-log clear operation through backend abstraction.
+
+    Inputs:
+      - store: Query-log backend object.
+      - filters: Clear filter mapping.
+      - dry_run: Whether to only compute matched rows.
+
+    Outputs:
+      - Dict with matched/deleted metadata from the backend.
+    """
+
+    if store is None:
+        raise AdminLogicHttpError(status_code=404, detail="query_log store unavailable")
+    supports_clear_fn = getattr(store, "supports_query_log_clear", None)
+    if not callable(supports_clear_fn) or not bool(supports_clear_fn()):
+        raise AdminLogicHttpError(
+            status_code=400,
+            detail="query_log clearing is not supported by active backend",
+        )
+
+    clear_fn = getattr(store, "clear_query_log", None)
+    if not callable(clear_fn):
+        raise AdminLogicHttpError(
+            status_code=400,
+            detail="query_log clearing is not supported by active backend",
+        )
+    try:
+        result = clear_fn(filters=dict(filters or {}), dry_run=bool(dry_run))
+    except Exception as exc:
+        raise AdminLogicHttpError(
+            status_code=500,
+            detail=f"query_log clear failed: {exc}",
+        ) from exc
+    if not isinstance(result, dict):
+        return {
+            "status": "ok",
+            "matched": 0,
+            "deleted": 0,
+            "dry_run": bool(dry_run),
+        }
+    return {
+        "status": "ok",
+        "matched": int(result.get("matched", 0) or 0),
+        "deleted": int(result.get("deleted", 0) or 0),
+        "dry_run": bool(result.get("dry_run", dry_run)),
+        "filters": dict(result.get("filters", filters or {})),
+    }
+
+
+def _find_plugins_by_class_name(
+    plugins: Iterable[object],
+    class_name: str,
+) -> List[object]:
+    """Brief: Return plugin instances whose class name matches class_name.
+
+    Inputs:
+      - plugins: Plugin iterable.
+      - class_name: Exact class name string.
+
+    Outputs:
+      - Matching plugin instances list.
+    """
+
+    out: List[object] = []
+    for plugin in plugins or []:
+        try:
+            if str(type(plugin).__name__) == str(class_name):
+                out.append(plugin)
+        except Exception:
+            continue
+    return out
+
+
+def execute_rate_limit_keys_list(
+    *,
+    plugins: Iterable[object],
+    plugin_name: str | None,
+    page: int,
+    page_size: int,
+    search: str | None,
+) -> Dict[str, Any]:
+    """Brief: List rate-limit keys from one or all RateLimit plugin instances.
+
+    Inputs:
+      - plugins: Loaded plugin instances.
+      - plugin_name: Optional target plugin instance name.
+      - page: 1-based page number.
+      - page_size: Requested page size.
+      - search: Optional search filter.
+
+    Outputs:
+      - Dict with plugin list and per-plugin paginated key payloads.
+    """
+
+    targets = _find_plugins_by_class_name(plugins, "RateLimit")
+    if plugin_name is not None and str(plugin_name).strip():
+        name_text = str(plugin_name).strip()
+        targets = [p for p in targets if str(getattr(p, "name", "")) == name_text]
+    if not targets:
+        raise AdminLogicHttpError(status_code=404, detail="rate-limit plugin not found")
+
+    out_items: List[Dict[str, Any]] = []
+    for plugin in targets:
+        list_fn = getattr(plugin, "admin_list_profile_keys", None)
+        if not callable(list_fn):
+            raise AdminLogicHttpError(
+                status_code=400,
+                detail="rate-limit key listing is unsupported by plugin",
+            )
+        try:
+            payload = list_fn(page=page, page_size=page_size, search=search)
+        except Exception as exc:
+            raise AdminLogicHttpError(
+                status_code=500,
+                detail=f"failed to list rate-limit keys: {exc}",
+            ) from exc
+        out_items.append(
+            {
+                "plugin": str(getattr(plugin, "name", "RateLimit")),
+                "data": dict(payload or {}),
+            }
+        )
+    return {
+        "status": "ok",
+        "items": out_items,
+    }
+
+
+def execute_rate_limit_clear(
+    *,
+    plugins: Iterable[object],
+    plugin_name: str | None,
+    key: str | None,
+    include_global: bool,
+) -> Dict[str, Any]:
+    """Brief: Clear learned rate-limit profiles/windows for one or more plugins.
+
+    Inputs:
+      - plugins: Loaded plugin instances.
+      - plugin_name: Optional target plugin instance name.
+      - key: Optional specific key.
+      - include_global: Whether global profile rows can be removed.
+
+    Outputs:
+      - Dict with per-plugin clear results.
+    """
+
+    targets = _find_plugins_by_class_name(plugins, "RateLimit")
+    if plugin_name is not None and str(plugin_name).strip():
+        name_text = str(plugin_name).strip()
+        targets = [p for p in targets if str(getattr(p, "name", "")) == name_text]
+    if not targets:
+        raise AdminLogicHttpError(status_code=404, detail="rate-limit plugin not found")
+
+    out_items: List[Dict[str, Any]] = []
+    for plugin in targets:
+        clear_fn = getattr(plugin, "admin_clear_profiles", None)
+        if not callable(clear_fn):
+            raise AdminLogicHttpError(
+                status_code=400,
+                detail="rate-limit clearing is unsupported by plugin",
+            )
+        try:
+            payload = clear_fn(key=key, include_global=bool(include_global))
+        except Exception as exc:
+            raise AdminLogicHttpError(
+                status_code=500,
+                detail=f"failed to clear rate-limit profiles: {exc}",
+            ) from exc
+        out_items.append(
+            {
+                "plugin": str(getattr(plugin, "name", "RateLimit")),
+                "data": dict(payload or {}),
+            }
+        )
+
+    return {"status": "ok", "items": out_items}
+
+
+def execute_records_validate(
+    *,
+    plugins: Iterable[object],
+    target: str,
+    plugin_name: str,
+    payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Brief: Validate etc_hosts/zone_records mutation request payload.
+
+    Inputs:
+      - plugins: Loaded plugin instances.
+      - target: One of 'etc_hosts' or 'zone_records'.
+      - plugin_name: Target plugin instance name.
+      - payload: Request payload.
+
+    Outputs:
+      - Dict with normalized validation result.
+    """
+
+    plugin = find_plugin_instance_by_name(plugins, plugin_name)
+    if plugin is None:
+        raise AdminLogicHttpError(status_code=404, detail="plugin not found")
+    if target == "etc_hosts":
+        fn = getattr(plugin, "admin_validate_record_mutation", None)
+        if not callable(fn):
+            raise AdminLogicHttpError(
+                status_code=400,
+                detail="etc_hosts validation unsupported by plugin",
+            )
+        try:
+            out = fn(
+                name=str(payload.get("name", "")), value=str(payload.get("value", ""))
+            )
+        except Exception as exc:
+            raise AdminLogicHttpError(status_code=400, detail=str(exc)) from exc
+        return {"status": "ok", "target": target, "plugin": plugin_name, "result": out}
+    if target == "zone_records":
+        fn = getattr(plugin, "admin_validate_record_mutation", None)
+        if not callable(fn):
+            raise AdminLogicHttpError(
+                status_code=400,
+                detail="zone_records validation unsupported by plugin",
+            )
+        try:
+            out = fn(
+                owner=str(payload.get("owner", "")),
+                qtype=payload.get("qtype", ""),
+                value=str(payload.get("value", "")),
+                ttl=int(payload.get("ttl", 300) or 300),
+            )
+        except Exception as exc:
+            raise AdminLogicHttpError(status_code=400, detail=str(exc)) from exc
+        return {"status": "ok", "target": target, "plugin": plugin_name, "result": out}
+    raise AdminLogicHttpError(status_code=400, detail="unknown records target")
+
+
+def execute_records_apply(
+    *,
+    plugins: Iterable[object],
+    target: str,
+    plugin_name: str,
+    payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Brief: Apply etc_hosts/zone_records mutation request.
+
+    Inputs:
+      - plugins: Loaded plugin instances.
+      - target: One of 'etc_hosts' or 'zone_records'.
+      - plugin_name: Target plugin instance name.
+      - payload: Request payload.
+
+    Outputs:
+      - Dict with apply result.
+    """
+
+    plugin = find_plugin_instance_by_name(plugins, plugin_name)
+    if plugin is None:
+        raise AdminLogicHttpError(status_code=404, detail="plugin not found")
+    persist = bool(payload.get("persist", False))
+    file_path = payload.get("file_path")
+    if target == "etc_hosts":
+        fn = getattr(plugin, "admin_apply_record_mutation", None)
+        if not callable(fn):
+            raise AdminLogicHttpError(
+                status_code=400, detail="etc_hosts apply unsupported"
+            )
+        try:
+            out = fn(
+                name=str(payload.get("name", "")),
+                value=str(payload.get("value", "")),
+                persist=persist,
+                file_path=(str(file_path) if file_path is not None else None),
+            )
+        except Exception as exc:
+            raise AdminLogicHttpError(status_code=400, detail=str(exc)) from exc
+        return {"status": "ok", "target": target, "plugin": plugin_name, "result": out}
+    if target == "zone_records":
+        fn = getattr(plugin, "admin_apply_record_mutation", None)
+        if not callable(fn):
+            raise AdminLogicHttpError(
+                status_code=400, detail="zone_records apply unsupported"
+            )
+        try:
+            out = fn(
+                owner=str(payload.get("owner", "")),
+                qtype=payload.get("qtype", ""),
+                value=str(payload.get("value", "")),
+                ttl=int(payload.get("ttl", 300) or 300),
+                persist=persist,
+                file_path=(str(file_path) if file_path is not None else None),
+            )
+        except Exception as exc:
+            raise AdminLogicHttpError(status_code=400, detail=str(exc)) from exc
+        return {"status": "ok", "target": target, "plugin": plugin_name, "result": out}
+    raise AdminLogicHttpError(status_code=400, detail="unknown records target")
+
+
+def execute_records_delete(
+    *,
+    plugins: Iterable[object],
+    target: str,
+    plugin_name: str,
+    payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Brief: Delete etc_hosts/zone_records mutation target entries.
+
+    Inputs:
+      - plugins: Loaded plugin instances.
+      - target: One of 'etc_hosts' or 'zone_records'.
+      - plugin_name: Target plugin instance name.
+      - payload: Request payload.
+
+    Outputs:
+      - Dict with delete result.
+    """
+
+    plugin = find_plugin_instance_by_name(plugins, plugin_name)
+    if plugin is None:
+        raise AdminLogicHttpError(status_code=404, detail="plugin not found")
+    persist = bool(payload.get("persist", False))
+    file_path = payload.get("file_path")
+    if target == "etc_hosts":
+        fn = getattr(plugin, "admin_delete_record_mutation", None)
+        if not callable(fn):
+            raise AdminLogicHttpError(
+                status_code=400, detail="etc_hosts delete unsupported"
+            )
+        try:
+            out = fn(
+                name=str(payload.get("name", "")),
+                persist=persist,
+                file_path=(str(file_path) if file_path is not None else None),
+            )
+        except Exception as exc:
+            raise AdminLogicHttpError(status_code=400, detail=str(exc)) from exc
+        return {"status": "ok", "target": target, "plugin": plugin_name, "result": out}
+    if target == "zone_records":
+        fn = getattr(plugin, "admin_delete_record_mutation", None)
+        if not callable(fn):
+            raise AdminLogicHttpError(
+                status_code=400, detail="zone_records delete unsupported"
+            )
+        try:
+            out = fn(
+                owner=str(payload.get("owner", "")),
+                qtype=payload.get("qtype"),
+                value=payload.get("value"),
+                persist=persist,
+                file_path=(str(file_path) if file_path is not None else None),
+            )
+        except Exception as exc:
+            raise AdminLogicHttpError(status_code=400, detail=str(exc)) from exc
+        return {"status": "ok", "target": target, "plugin": plugin_name, "result": out}
+    raise AdminLogicHttpError(status_code=400, detail="unknown records target")

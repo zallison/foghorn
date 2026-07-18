@@ -553,16 +553,41 @@ def _register_config_routes(app: FastAPI, auth_dep: Any) -> None:
             "raw_yaml": raw["raw_yaml"],
         }
 
-    def _schedule_restart(*, delay_seconds: float = 1.0) -> None:
+    def _schedule_restart(
+        *, delay_seconds: float = 1.0, reason: str | None = None
+    ) -> None:
         """Brief: Schedule a process restart by delivering SIGHUP.
 
         Inputs:
           - delay_seconds: Delay before sending SIGHUP so HTTP responses can flush.
+          - reason: Optional reason text for admin runtime tracking.
 
         Outputs:
           - None.
         """
 
+        runtime_state = _admin_logic.get_admin_runtime_state(app.state)
+        set_restart = getattr(runtime_state, "set_restart_pending", None)
+        if callable(set_restart):
+            try:
+                set_restart(
+                    delay_seconds=float(delay_seconds),
+                    reason=reason,
+                    signal_name="SIGHUP",
+                )
+            except Exception:
+                pass
+        _admin_logic.add_admin_audit_event(
+            runtime_state,
+            action="restart.schedule",
+            target="process",
+            ok=True,
+            details={
+                "delay_seconds": float(delay_seconds),
+                "signal": "SIGHUP",
+                "reason": (str(reason) if reason is not None else None),
+            },
+        )
         _schedule_process_signal(signal.SIGHUP, delay_seconds=float(delay_seconds))
 
     async def _read_json_body_limited(
@@ -910,7 +935,7 @@ def _register_config_routes(app: FastAPI, auth_dep: Any) -> None:
         """
 
         saved = _save_config_to_disk(body=body)
-        _schedule_restart(delay_seconds=1.0)
+        _schedule_restart(delay_seconds=1.0, reason="config.save_and_restart")
 
         payload = {
             "status": "ok",
@@ -1145,7 +1170,7 @@ def _register_config_routes(app: FastAPI, auth_dep: Any) -> None:
         except Exception:
             delay_seconds = 1.0
 
-        _schedule_restart(delay_seconds=delay_seconds)
+        _schedule_restart(delay_seconds=delay_seconds, reason="restart.endpoint")
 
         payload = {
             "status": "ok",
@@ -1320,6 +1345,357 @@ def _register_query_log_routes(app: FastAPI, auth_dep: Any) -> None:
             )
         except _admin_logic.AdminLogicHttpError as exc:
             raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+        payload["server_time"] = _utc_now_iso()
+        return payload
+
+
+def _register_admin_routes(app: FastAPI, auth_dep: Any) -> None:
+    """Register admin action endpoints under /api/v1/admin."""
+
+    def _get_plugins() -> list[object]:
+        return list(getattr(app.state, "plugins", []) or [])
+
+    def _get_store() -> object | None:
+        collector: Optional[StatsCollector] = getattr(
+            app.state, "stats_collector", None
+        )
+        return getattr(collector, "_store", None) if collector is not None else None
+
+    def _runtime_state() -> object | None:
+        return _admin_logic.get_admin_runtime_state(app.state)
+
+    async def _read_admin_json_body(request: Request) -> Dict[str, Any]:
+        max_bytes = int(MAX_ADMIN_JSON_BODY_BYTES)
+        length = maybe_parse_content_length(request.headers.get("content-length"))
+        if length > max_bytes:
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail=f"request body too large (max {max_bytes:,} bytes)",
+            )
+        raw = await request.body()
+        if len(raw) > max_bytes:
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail=f"request body too large (max {max_bytes:,} bytes)",
+            )
+        if not raw:
+            return {}
+        try:
+            body = json.loads(raw.decode("utf-8") or "{}")
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="invalid JSON body",
+            ) from exc
+        if not isinstance(body, dict):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="request body must be a JSON object",
+            )
+        return body
+
+    def _audit(
+        *,
+        action: str,
+        target: str,
+        ok: bool,
+        details: Dict[str, Any] | None = None,
+    ) -> None:
+        _admin_logic.add_admin_audit_event(
+            _runtime_state(),
+            action=action,
+            target=target,
+            ok=bool(ok),
+            details=details or {},
+        )
+
+    def _raise_from_admin_error(
+        exc: _admin_logic.AdminLogicHttpError,
+        *,
+        action: str,
+        target: str,
+    ) -> None:
+        _audit(
+            action=action, target=target, ok=False, details={"detail": str(exc.detail)}
+        )
+        raise HTTPException(
+            status_code=int(exc.status_code), detail=str(exc.detail)
+        ) from exc
+
+    @app.get("/api/v1/admin/status", dependencies=[Depends(auth_dep)])
+    async def admin_status() -> Dict[str, Any]:
+        payload = _admin_logic.build_admin_status_payload(
+            cfg=getattr(app.state, "config", {}) or {},
+            config_path=getattr(app.state, "config_path", None),
+            stats_collector=getattr(app.state, "stats_collector", None),
+            plugins=_get_plugins(),
+            admin_runtime_state=_runtime_state(),
+        )
+        payload["server_time"] = _utc_now_iso()
+        return payload
+
+    @app.get("/api/v1/admin/capabilities", dependencies=[Depends(auth_dep)])
+    async def admin_capabilities() -> Dict[str, Any]:
+        payload = _admin_logic.build_admin_capabilities_payload(
+            stats_collector=getattr(app.state, "stats_collector", None),
+            plugins=_get_plugins(),
+        )
+        payload["server_time"] = _utc_now_iso()
+        return payload
+
+    @app.get("/api/v1/admin/audit", dependencies=[Depends(auth_dep)])
+    async def admin_audit(
+        limit: int = 100,
+        action: str | None = None,
+    ) -> Dict[str, Any]:
+        runtime_state = _runtime_state()
+        list_fn = getattr(runtime_state, "list_audit_events", None)
+        items: list[Dict[str, Any]] = []
+        if callable(list_fn):
+            try:
+                raw = list_fn(limit=int(limit), action=action)
+                if isinstance(raw, list):
+                    items = [dict(it) for it in raw if isinstance(it, dict)]
+            except Exception:
+                items = []
+        return {
+            "status": "ok",
+            "server_time": _utc_now_iso(),
+            "items": items,
+            "count": len(items),
+        }
+
+    @app.post("/api/v1/admin/audit/clear", dependencies=[Depends(auth_dep)])
+    async def admin_audit_clear() -> Dict[str, Any]:
+        runtime_state = _runtime_state()
+        clear_fn = getattr(runtime_state, "clear_audit_events", None)
+        removed = 0
+        if callable(clear_fn):
+            try:
+                removed = int(clear_fn() or 0)
+            except Exception:
+                removed = 0
+        _audit(
+            action="audit.clear",
+            target="admin",
+            ok=True,
+            details={"removed": int(removed)},
+        )
+        return {"status": "ok", "server_time": _utc_now_iso(), "removed": int(removed)}
+
+    @app.post("/api/v1/admin/config/verify", dependencies=[Depends(auth_dep)])
+    async def admin_config_verify(request: Request) -> Dict[str, Any]:
+        body = await _read_admin_json_body(request)
+        raw_yaml = body.get("raw_yaml")
+        if raw_yaml is not None and not isinstance(raw_yaml, str):
+            raise HTTPException(status_code=400, detail="raw_yaml must be a string")
+        try:
+            payload = _admin_logic.build_config_verify_payload(
+                raw_yaml=(str(raw_yaml) if isinstance(raw_yaml, str) else None),
+                config_path=getattr(app.state, "config_path", None),
+                current_cfg=getattr(app.state, "config", {}) or {},
+            )
+        except _admin_logic.AdminLogicHttpError as exc:
+            _raise_from_admin_error(exc, action="config.verify", target="config")
+            raise
+        runtime_state = _runtime_state()
+        set_last = getattr(runtime_state, "set_last_config_verify", None)
+        if callable(set_last):
+            try:
+                set_last(dict(payload))
+            except Exception:
+                pass
+        _audit(
+            action="config.verify",
+            target="config",
+            ok=True,
+            details={"path": payload.get("path")},
+        )
+        payload["server_time"] = _utc_now_iso()
+        return payload
+
+    @app.post("/api/v1/admin/query_log/clear", dependencies=[Depends(auth_dep)])
+    async def admin_query_log_clear(request: Request) -> Dict[str, Any]:
+        body = await _read_admin_json_body(request)
+        filters = body.get("filters")
+        if filters is None:
+            filters = {}
+        if not isinstance(filters, dict):
+            raise HTTPException(status_code=400, detail="filters must be an object")
+        dry_run = bool(body.get("dry_run", False))
+        try:
+            payload = _admin_logic.execute_query_log_clear(
+                store=_get_store(),
+                filters=filters,
+                dry_run=dry_run,
+            )
+        except _admin_logic.AdminLogicHttpError as exc:
+            _raise_from_admin_error(exc, action="query_log.clear", target="query_log")
+            raise
+        _audit(
+            action="query_log.clear",
+            target="query_log",
+            ok=True,
+            details={
+                "dry_run": bool(payload.get("dry_run", dry_run)),
+                "matched": int(payload.get("matched", 0) or 0),
+                "deleted": int(payload.get("deleted", 0) or 0),
+            },
+        )
+        payload["server_time"] = _utc_now_iso()
+        return payload
+
+    @app.get("/api/v1/admin/rate_limit/keys", dependencies=[Depends(auth_dep)])
+    async def admin_rate_limit_keys(
+        plugin: str | None = None,
+        page: int = 1,
+        page_size: int = 100,
+        search: str | None = None,
+    ) -> Dict[str, Any]:
+        try:
+            payload = _admin_logic.execute_rate_limit_keys_list(
+                plugins=_get_plugins(),
+                plugin_name=plugin,
+                page=max(1, int(page)),
+                page_size=max(1, min(int(page_size), 1000)),
+                search=search,
+            )
+        except _admin_logic.AdminLogicHttpError as exc:
+            _raise_from_admin_error(
+                exc,
+                action="rate_limit.keys",
+                target=(str(plugin) if plugin else "all"),
+            )
+            raise
+        payload["server_time"] = _utc_now_iso()
+        return payload
+
+    @app.post("/api/v1/admin/rate_limit/clear", dependencies=[Depends(auth_dep)])
+    async def admin_rate_limit_clear(request: Request) -> Dict[str, Any]:
+        body = await _read_admin_json_body(request)
+        plugin_name = body.get("plugin")
+        if plugin_name is not None and not isinstance(plugin_name, str):
+            raise HTTPException(status_code=400, detail="plugin must be a string")
+        key = body.get("key")
+        if key is not None and not isinstance(key, str):
+            raise HTTPException(status_code=400, detail="key must be a string")
+        include_global = bool(body.get("include_global", False))
+        try:
+            payload = _admin_logic.execute_rate_limit_clear(
+                plugins=_get_plugins(),
+                plugin_name=(
+                    str(plugin_name) if isinstance(plugin_name, str) else None
+                ),
+                key=(str(key) if isinstance(key, str) else None),
+                include_global=include_global,
+            )
+        except _admin_logic.AdminLogicHttpError as exc:
+            _raise_from_admin_error(
+                exc,
+                action="rate_limit.clear",
+                target=(str(plugin_name) if isinstance(plugin_name, str) else "all"),
+            )
+            raise
+        _audit(
+            action="rate_limit.clear",
+            target=str(plugin_name) if isinstance(plugin_name, str) else "all",
+            ok=True,
+            details={
+                "key": (str(key) if isinstance(key, str) else None),
+                "include_global": include_global,
+            },
+        )
+        payload["server_time"] = _utc_now_iso()
+        return payload
+
+    @app.post(
+        "/api/v1/admin/records/{target}/validate", dependencies=[Depends(auth_dep)]
+    )
+    async def admin_records_validate(target: str, request: Request) -> Dict[str, Any]:
+        body = await _read_admin_json_body(request)
+        plugin_name = body.get("plugin")
+        if not isinstance(plugin_name, str) or not plugin_name.strip():
+            raise HTTPException(status_code=400, detail="plugin is required")
+        target_norm = str(target or "").strip().lower()
+        try:
+            payload = _admin_logic.execute_records_validate(
+                plugins=_get_plugins(),
+                target=target_norm,
+                plugin_name=plugin_name.strip(),
+                payload=body,
+            )
+        except _admin_logic.AdminLogicHttpError as exc:
+            _raise_from_admin_error(
+                exc,
+                action=f"records.{target_norm}.validate",
+                target=plugin_name.strip(),
+            )
+            raise
+        _audit(
+            action=f"records.{target_norm}.validate",
+            target=plugin_name.strip(),
+            ok=True,
+        )
+        payload["server_time"] = _utc_now_iso()
+        return payload
+
+    @app.post("/api/v1/admin/records/{target}/apply", dependencies=[Depends(auth_dep)])
+    async def admin_records_apply(target: str, request: Request) -> Dict[str, Any]:
+        body = await _read_admin_json_body(request)
+        plugin_name = body.get("plugin")
+        if not isinstance(plugin_name, str) or not plugin_name.strip():
+            raise HTTPException(status_code=400, detail="plugin is required")
+        target_norm = str(target or "").strip().lower()
+        try:
+            payload = _admin_logic.execute_records_apply(
+                plugins=_get_plugins(),
+                target=target_norm,
+                plugin_name=plugin_name.strip(),
+                payload=body,
+            )
+        except _admin_logic.AdminLogicHttpError as exc:
+            _raise_from_admin_error(
+                exc,
+                action=f"records.{target_norm}.apply",
+                target=plugin_name.strip(),
+            )
+            raise
+        _audit(
+            action=f"records.{target_norm}.apply",
+            target=plugin_name.strip(),
+            ok=True,
+            details={"persist": bool(body.get("persist", False))},
+        )
+        payload["server_time"] = _utc_now_iso()
+        return payload
+
+    @app.post("/api/v1/admin/records/{target}/delete", dependencies=[Depends(auth_dep)])
+    async def admin_records_delete(target: str, request: Request) -> Dict[str, Any]:
+        body = await _read_admin_json_body(request)
+        plugin_name = body.get("plugin")
+        if not isinstance(plugin_name, str) or not plugin_name.strip():
+            raise HTTPException(status_code=400, detail="plugin is required")
+        target_norm = str(target or "").strip().lower()
+        try:
+            payload = _admin_logic.execute_records_delete(
+                plugins=_get_plugins(),
+                target=target_norm,
+                plugin_name=plugin_name.strip(),
+                payload=body,
+            )
+        except _admin_logic.AdminLogicHttpError as exc:
+            _raise_from_admin_error(
+                exc,
+                action=f"records.{target_norm}.delete",
+                target=plugin_name.strip(),
+            )
+            raise
+        _audit(
+            action=f"records.{target_norm}.delete",
+            target=plugin_name.strip(),
+            ok=True,
+            details={"persist": bool(body.get("persist", False))},
+        )
         payload["server_time"] = _utc_now_iso()
         return payload
 
