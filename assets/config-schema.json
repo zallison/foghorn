@@ -6734,6 +6734,96 @@
               "description": "Require inbound AXFR/IXFR requests to be TSIG-signed with one of server.axfr.tsig_keys. Default: false.",
               "type": "boolean"
             },
+            "tsig": {
+              "additionalProperties": false,
+              "default": {},
+              "description": "TSIG configuration for AXFR/IXFR. Uses the same inline/source resolution shape as dns_update.zones[].tsig. Default: {}.",
+              "properties": {
+                "comment": {
+                  "description": "Optional human metadata string (max 254 characters).",
+                  "maxLength": 254,
+                  "type": "string"
+                },
+                "id": {
+                  "description": "Optional human metadata string (max 254 characters).",
+                  "maxLength": 254,
+                  "type": "string"
+                },
+                "key_sources": {
+                  "default": [],
+                  "description": "External TSIG key sources. Built-in source type is file. Default: [].",
+                  "items": {
+                    "additionalProperties": true,
+                    "description": "Type: object. Object with subkeys: path, type.",
+                    "properties": {
+                      "comment": {
+                        "description": "Optional human metadata string (max 254 characters).",
+                        "maxLength": 254,
+                        "type": "string"
+                      },
+                      "id": {
+                        "description": "Optional human metadata string (max 254 characters).",
+                        "maxLength": 254,
+                        "type": "string"
+                      },
+                      "path": {
+                        "description": "Type: string.",
+                        "type": "string"
+                      },
+                      "type": {
+                        "description": "Type: string.",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "type"
+                    ],
+                    "type": "object"
+                  },
+                  "type": "array"
+                },
+                "keys": {
+                  "default": [],
+                  "description": "Inline AXFR/IXFR TSIG keys (name/algorithm/secret). Default: [].",
+                  "items": {
+                    "additionalProperties": false,
+                    "description": "Type: object. Object with subkeys: algorithm, name, secret.",
+                    "properties": {
+                      "algorithm": {
+                        "default": "hmac-sha256",
+                        "description": "Type: string. Default: \"hmac-sha256\".",
+                        "type": "string"
+                      },
+                      "comment": {
+                        "description": "Optional human metadata string (max 254 characters).",
+                        "maxLength": 254,
+                        "type": "string"
+                      },
+                      "id": {
+                        "description": "Optional human metadata string (max 254 characters).",
+                        "maxLength": 254,
+                        "type": "string"
+                      },
+                      "name": {
+                        "description": "Type: string.",
+                        "type": "string"
+                      },
+                      "secret": {
+                        "description": "Type: string.",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "name",
+                      "secret"
+                    ],
+                    "type": "object"
+                  },
+                  "type": "array"
+                }
+              },
+              "type": "object"
+            },
             "tsig_keys": {
               "default": [],
               "description": "AXFR/IXFR TSIG keys (name/algorithm/secret). Default: [].",

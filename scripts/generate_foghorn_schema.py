@@ -929,28 +929,72 @@ def _augment_server_limits_and_listen_schema(base: Dict[str, Any]) -> None:
                         "default": False,
                         "description": (
                             "Require inbound AXFR/IXFR requests to be TSIG-signed "
-                            "with one of server.axfr.tsig_keys."
+                            "with one of server.axfr.tsig.keys."
                         ),
+                    },
+                )
+                axfr_tsig_key_item = {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "name": {"type": "string"},
+                        "algorithm": {
+                            "type": "string",
+                            "default": "hmac-sha256",
+                        },
+                        "secret": {"type": "string"},
+                    },
+                    "required": ["name", "secret"],
+                }
+                axfr_props.setdefault(
+                    "tsig",
+                    {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "description": (
+                            "TSIG configuration for AXFR/IXFR. Uses the same "
+                            "inline/source resolution shape as dns_update.zones[].tsig."
+                        ),
+                        "properties": {
+                            "keys": {
+                                "type": "array",
+                                "description": (
+                                    "Inline AXFR/IXFR TSIG keys "
+                                    "(name/algorithm/secret)."
+                                ),
+                                "items": dict(axfr_tsig_key_item),
+                                "default": [],
+                            },
+                            "key_sources": {
+                                "type": "array",
+                                "description": (
+                                    "External TSIG key sources. Built-in source "
+                                    "type is file."
+                                ),
+                                "items": {
+                                    "type": "object",
+                                    "additionalProperties": True,
+                                    "properties": {
+                                        "type": {"type": "string"},
+                                        "path": {"type": "string"},
+                                    },
+                                    "required": ["type"],
+                                },
+                                "default": [],
+                            },
+                        },
+                        "default": {},
                     },
                 )
                 axfr_props.setdefault(
                     "tsig_keys",
                     {
                         "type": "array",
-                        "description": "AXFR/IXFR TSIG keys (name/algorithm/secret).",
-                        "items": {
-                            "type": "object",
-                            "additionalProperties": False,
-                            "properties": {
-                                "name": {"type": "string"},
-                                "algorithm": {
-                                    "type": "string",
-                                    "default": "hmac-sha256",
-                                },
-                                "secret": {"type": "string"},
-                            },
-                            "required": ["name", "secret"],
-                        },
+                        "description": (
+                            "Legacy alias for server.axfr.tsig.keys. Prefer "
+                            "server.axfr.tsig.keys."
+                        ),
+                        "items": dict(axfr_tsig_key_item),
                         "default": [],
                     },
                 )
