@@ -735,6 +735,109 @@ def test_main_axfr_invalid_values_and_malformed_tsig_entries(monkeypatch) -> Non
     ]
 
 
+def test_main_axfr_tsig_new_shape_and_legacy_alias_are_combined(
+    monkeypatch, tmp_path
+) -> None:
+    """Brief: main() combines server.axfr.tsig and legacy tsig_keys via shared resolver.
+
+    Inputs:
+      - monkeypatch fixture.
+      - tmp_path with real config and file-based TSIG source definitions.
+
+    Outputs:
+      - None; asserts resolved AXFR TSIG keys include inline, legacy, and file-sourced entries.
+    """
+
+    import time as _time
+
+    source_file = tmp_path / "axfr-source-keys.yaml"
+    source_file.write_text(
+        "keys:\n"
+        "  - name: source.example.\n"
+        "    algorithm: hmac-sha512\n"
+        "    secret: c291cmNl\n",
+        encoding="utf-8",
+    )
+
+    cfg_file = tmp_path / "axfr-unified.yaml"
+    cfg_file.write_text(
+        "server:\n"
+        "  listen:\n"
+        "    udp:\n"
+        "      enabled: false\n"
+        "  resolver:\n"
+        "    mode: forward\n"
+        "    timeout_ms: 2000\n"
+        "  axfr:\n"
+        "    enabled: true\n"
+        "    require_tsig: true\n"
+        "    tsig:\n"
+        "      keys:\n"
+        "        - name: inline.example.\n"
+        "          algorithm: hmac-sha256\n"
+        "          secret: aW5saW5l\n"
+        "      key_sources:\n"
+        f"        - type: file\n          path: {source_file}\n"
+        "    tsig_keys:\n"
+        "      - name: legacy.example.\n"
+        "        algorithm: hmac-sha1\n"
+        "        secret: bGVnYWN5\n"
+        "upstreams:\n"
+        "  strategy: failover\n"
+        "  max_concurrent: 1\n"
+        "  endpoints:\n"
+        "    - host: 1.1.1.1\n"
+        "      port: 53\n"
+        "plugins: []\n",
+        encoding="utf-8",
+    )
+
+    captured: dict[str, Any] = {}
+
+    def _capture_runtime_snapshot(**kwargs: Any) -> None:
+        captured.update(kwargs)
+
+    monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
+    monkeypatch.setattr(main_mod, "start_webserver", lambda *a, **kw: None)
+    monkeypatch.setattr(main_mod, "run_setup_plugins", lambda *_a, **_kw: None)
+    monkeypatch.setattr(
+        main_mod,
+        "_initialize_statistics_subsystem",
+        lambda **_kw: (None, None, None),
+    )
+    monkeypatch.setattr(
+        main_mod,
+        "_initialize_runtime_snapshot",
+        _capture_runtime_snapshot,
+    )
+    monkeypatch.setattr(
+        _time,
+        "sleep",
+        lambda _s: (_ for _ in ()).throw(KeyboardInterrupt),
+    )
+
+    rc = main_mod.main(["--config", str(cfg_file), "--skip-schema-validation"])
+
+    assert rc == 0
+    assert captured["axfr_tsig_keys"] == [
+        {
+            "name": "inline.example.",
+            "algorithm": "hmac-sha256",
+            "secret": "aW5saW5l",
+        },
+        {
+            "name": "legacy.example.",
+            "algorithm": "hmac-sha1",
+            "secret": "bGVnYWN5",
+        },
+        {
+            "name": "source.example.",
+            "algorithm": "hmac-sha512",
+            "secret": "c291cmNl",
+        },
+    ]
+
+
 def test_main_axfr_non_positive_limits_are_clamped(monkeypatch) -> None:
     """Brief: AXFR non-positive limits are clamped to safe defaults.
 

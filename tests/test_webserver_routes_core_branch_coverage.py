@@ -1306,3 +1306,166 @@ def test_plugin_api_expansion_routes_delegate_to_admin_logic(
         ).status_code
         == 200
     )
+
+
+def test_admin_routes_status_verify_actions_and_records(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Brief: /api/v1/admin routes expose status/capabilities and action handlers.
+
+    Inputs:
+      - monkeypatch replacing heavy verification logic.
+      - In-memory fake plugins/store attached to app state.
+
+    Outputs:
+      - Admin status/capabilities/audit and action routes return expected success payloads.
+    """
+
+    class _FakeStore:
+        def supports_query_log_clear(self) -> bool:
+            return True
+
+        def clear_query_log(
+            self,
+            *,
+            filters: dict[str, Any],
+            dry_run: bool,
+        ) -> dict[str, Any]:
+            return {
+                "matched": 2,
+                "deleted": 0 if dry_run else 2,
+                "dry_run": bool(dry_run),
+                "filters": dict(filters),
+            }
+
+    class RateLimit:
+        name = "rl"
+
+        def admin_list_profile_keys(
+            self,
+            *,
+            page: int,
+            page_size: int,
+            search: str | None,
+        ) -> dict[str, Any]:
+            return {
+                "items": ["k1"],
+                "page": page,
+                "page_size": page_size,
+                "search": search,
+            }
+
+        def admin_clear_profiles(
+            self,
+            *,
+            key: str | None = None,
+            include_global: bool = False,
+        ) -> dict[str, Any]:
+            return {"cleared": 1, "key": key, "include_global": include_global}
+
+    class _EtcHostsPlugin:
+        name = "eh"
+
+        def admin_validate_record_mutation(
+            self, *, name: str, value: str
+        ) -> dict[str, Any]:
+            return {"valid": True, "name": name, "value": value}
+
+        def admin_apply_record_mutation(
+            self,
+            *,
+            name: str,
+            value: str,
+            persist: bool,
+            file_path: str | None,
+        ) -> dict[str, Any]:
+            return {
+                "applied": True,
+                "name": name,
+                "persist": persist,
+                "file_path": file_path,
+            }
+
+        def admin_delete_record_mutation(
+            self,
+            *,
+            name: str,
+            persist: bool,
+            file_path: str | None,
+        ) -> dict[str, Any]:
+            return {
+                "deleted": True,
+                "name": name,
+                "persist": persist,
+                "file_path": file_path,
+            }
+
+    monkeypatch.setattr(
+        routes_core_mod._admin_logic,
+        "build_config_verify_payload",
+        lambda **_kw: {
+            "status": "ok",
+            "path": "/tmp/verify.yaml",
+            "analysis": {"changed": True},
+        },
+    )
+    monkeypatch.setattr(
+        routes_core_mod,
+        "_schedule_process_signal",
+        lambda *_a, **_kw: None,
+    )
+
+    app = _create_test_app(plugins=[RateLimit(), _EtcHostsPlugin()])
+    app.state.stats_collector = types.SimpleNamespace(_store=_FakeStore())
+    client = TestClient(app)
+
+    assert client.get("/api/v1/admin/status").status_code == 200
+    caps = client.get("/api/v1/admin/capabilities")
+    assert caps.status_code == 200
+    assert caps.json()["rate_limit"]["clear_supported"] is True
+
+    verify = client.post("/api/v1/admin/config/verify", json={"raw_yaml": "server: {}"})
+    assert verify.status_code == 200
+    assert verify.json()["status"] == "ok"
+
+    qclear = client.post(
+        "/api/v1/admin/query_log/clear",
+        json={"filters": {"qname": "example.com"}, "dry_run": True},
+    )
+    assert qclear.status_code == 200
+    assert qclear.json()["dry_run"] is True
+
+    rl_keys = client.get("/api/v1/admin/rate_limit/keys?plugin=rl")
+    assert rl_keys.status_code == 200
+    rl_clear = client.post(
+        "/api/v1/admin/rate_limit/clear",
+        json={"plugin": "rl", "key": "k1", "include_global": True},
+    )
+    assert rl_clear.status_code == 200
+
+    rec_validate = client.post(
+        "/api/v1/admin/records/etc_hosts/validate",
+        json={"plugin": "eh", "name": "a.example", "value": "127.0.0.1"},
+    )
+    assert rec_validate.status_code == 200
+    rec_apply = client.post(
+        "/api/v1/admin/records/etc_hosts/apply",
+        json={
+            "plugin": "eh",
+            "name": "a.example",
+            "value": "127.0.0.1",
+            "persist": False,
+        },
+    )
+    assert rec_apply.status_code == 200
+    rec_delete = client.post(
+        "/api/v1/admin/records/etc_hosts/delete",
+        json={"plugin": "eh", "name": "a.example", "persist": False},
+    )
+    assert rec_delete.status_code == 200
+
+    restart = client.post("/api/v1/restart", json={"delay_seconds": 0.1})
+    assert restart.status_code == 200
+    audit = client.get("/api/v1/admin/audit")
+    assert audit.status_code == 200
+    assert isinstance(audit.json().get("items"), list)

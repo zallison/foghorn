@@ -251,6 +251,29 @@ def test_expand_server_feature_flags_and_axfr_allow_clients_type_coercion() -> N
     assert server_cfg["forward_local"] is False
     assert server_cfg["axfr"]["enabled"] is False
     assert server_cfg["axfr"]["allow_clients"] == []
+    assert server_cfg["axfr"]["tsig"] == {"keys": [], "key_sources": []}
+    assert server_cfg["axfr"]["tsig_keys"] == []
+
+
+def test_expand_server_feature_flags_axfr_legacy_tsig_keys_populates_tsig_block() -> (
+    None
+):
+    """Legacy server.axfr.tsig_keys are mirrored into server.axfr.tsig.keys."""
+
+    server_cfg = {
+        "axfr": {
+            "tsig_keys": [{"name": "legacy.example.", "secret": "legacy-secret"}],
+        }
+    }
+
+    config_dump._expand_server_feature_flags(server_cfg)
+
+    assert server_cfg["axfr"]["tsig"]["keys"] == [
+        {"name": "legacy.example.", "secret": "legacy-secret"}
+    ]
+    assert server_cfg["axfr"]["tsig_keys"] == [
+        {"name": "legacy.example.", "secret": "legacy-secret"}
+    ]
 
 
 def test_expand_upstreams_defaults_normalizes_endpoints_and_backup_when_forward() -> (

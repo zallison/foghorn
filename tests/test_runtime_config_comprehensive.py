@@ -396,6 +396,83 @@ def test_build_snapshot_axfr_allow_clients_strings() -> None:
     assert snap.axfr_allow_clients == ["1.2.3.4", "5"]
 
 
+def test_resolve_axfr_tsig_keys_combines_new_legacy_and_file_sources(
+    tmp_path,
+) -> None:
+    """server.axfr TSIG resolution merges tsig.keys, legacy tsig_keys, and key_sources."""
+
+    source_file = tmp_path / "axfr-tsig-source.yaml"
+    source_file.write_text(
+        "keys:\n"
+        "  - name: file.example.\n"
+        "    algorithm: hmac-sha512\n"
+        "    secret: c291cmNl\n",
+        encoding="utf-8",
+    )
+
+    axfr_cfg = {
+        "tsig": {
+            "keys": [
+                {"name": "new.example.", "algorithm": "hmac-sha256", "secret": "bmV3"},
+            ],
+            "key_sources": [{"type": "file", "path": str(source_file)}],
+        },
+        "tsig_keys": [
+            {
+                "name": "legacy.example.",
+                "algorithm": "HMAC-SHA1",
+                "secret": "bGVnYWN5",
+            }
+        ],
+    }
+
+    resolved = runtime_config_mod.resolve_axfr_tsig_keys(axfr_cfg)
+    assert [entry["name"] for entry in resolved] == [
+        "new.example.",
+        "legacy.example.",
+        "file.example.",
+    ]
+    assert [entry["algorithm"] for entry in resolved] == [
+        "hmac-sha256",
+        "hmac-sha1",
+        "hmac-sha512",
+    ]
+
+
+def test_build_snapshot_axfr_tsig_key_sources_are_resolved(tmp_path) -> None:
+    """_build_snapshot resolves server.axfr.tsig.key_sources via shared resolver."""
+
+    source_file = tmp_path / "axfr-tsig-build-snapshot.yaml"
+    source_file.write_text(
+        "keys:\n"
+        "  - name: source-only.example.\n"
+        "    algorithm: hmac-sha256\n"
+        "    secret: c291cmNlLW9ubHk=\n",
+        encoding="utf-8",
+    )
+
+    cfg = {
+        "server": {
+            "resolver": {"mode": "recursive"},
+            "axfr": {
+                "require_tsig": True,
+                "tsig": {
+                    "key_sources": [{"type": "file", "path": str(source_file)}],
+                },
+            },
+        }
+    }
+    snap = _build_snapshot(cfg, stats_collector=None, generation=4)
+    assert snap.axfr_require_tsig is True
+    assert snap.axfr_tsig_keys == [
+        {
+            "name": "source-only.example.",
+            "algorithm": "hmac-sha256",
+            "secret": "c291cmNlLW9ubHk=",
+        }
+    ]
+
+
 def test_restart_required_reasons_listen_change() -> None:
     """Detect server.listen changes."""
     old = {"server": {"listen": {"udp": {"port": 53}}}}

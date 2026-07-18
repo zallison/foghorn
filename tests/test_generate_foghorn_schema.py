@@ -154,3 +154,32 @@ def test_generated_schema_includes_upstream_url_endpoint_variant(tmp_path) -> No
         "properties"
     ]["endpoints"]["items"]["oneOf"]
     assert {"$ref": "#/$defs/upstream_url"} in backup_one_of
+
+
+def test_generated_schema_includes_axfr_shared_tsig_fields(tmp_path) -> None:
+    """Brief: Generated schema includes server.axfr.tsig keys/key_sources and legacy alias.
+
+    Inputs:
+      - tmp_path: pytest temporary directory for schema output.
+
+    Outputs:
+      - None; asserts new/legacy AXFR TSIG fields are represented in schema.
+    """
+
+    out_path = tmp_path / "schema.json"
+    ns = _load_schema_module()
+    main_fn = ns.get("main")
+    assert callable(main_fn)
+
+    rc = main_fn(["-o", str(out_path)])
+    assert rc == 0
+    data = json.loads(out_path.read_text(encoding="utf-8"))
+
+    axfr_props = data["properties"]["server"]["properties"]["axfr"]["properties"]
+    tsig_props = axfr_props["tsig"]["properties"]
+
+    assert "keys" in tsig_props
+    assert "key_sources" in tsig_props
+    assert tsig_props["keys"]["items"]["required"] == ["name", "secret"]
+    assert tsig_props["key_sources"]["items"]["required"] == ["type"]
+    assert "tsig_keys" in axfr_props

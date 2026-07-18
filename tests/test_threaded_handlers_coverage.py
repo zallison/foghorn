@@ -1603,3 +1603,228 @@ def test_threaded_reload_and_save_handlers_direct_branching(
     assert calls[-1][0] == 200
     assert h.server.config == {"fresh": 1}
     assert h.server.plugins == ["p2"]
+
+
+def test_threaded_admin_routes_status_actions_and_audit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Brief: Threaded /api/v1/admin routes provide parity with FastAPI handlers.
+
+    Inputs:
+      - monkeypatch replacing heavy config verify and scheduler side effects.
+      - Dummy plugins/store exposing admin methods.
+
+    Outputs:
+      - Admin status/capabilities/action routes return expected success payloads.
+    """
+
+    import importlib
+
+    th_mod = importlib.import_module("foghorn.servers.webserver.threaded_handlers")
+
+    class _FakeStore:
+        def supports_query_log_clear(self) -> bool:
+            return True
+
+        def clear_query_log(
+            self,
+            *,
+            filters: Dict[str, Any],
+            dry_run: bool,
+        ) -> Dict[str, Any]:
+            return {
+                "matched": 1,
+                "deleted": 0 if dry_run else 1,
+                "dry_run": bool(dry_run),
+                "filters": dict(filters),
+            }
+
+    class _Stats:
+        def __init__(self) -> None:
+            self._store = _FakeStore()
+
+    class RateLimit:
+        name = "rl"
+
+        def admin_list_profile_keys(
+            self,
+            *,
+            page: int,
+            page_size: int,
+            search: str | None,
+        ) -> Dict[str, Any]:
+            return {
+                "items": ["k1"],
+                "page": page,
+                "page_size": page_size,
+                "search": search,
+            }
+
+        def admin_clear_profiles(
+            self,
+            *,
+            key: str | None = None,
+            include_global: bool = False,
+        ) -> Dict[str, Any]:
+            return {"cleared": 1, "key": key, "include_global": include_global}
+
+    class _EtcHostsPlugin:
+        name = "eh"
+
+        def admin_validate_record_mutation(
+            self, *, name: str, value: str
+        ) -> Dict[str, Any]:
+            return {"valid": True, "name": name, "value": value}
+
+        def admin_apply_record_mutation(
+            self,
+            *,
+            name: str,
+            value: str,
+            persist: bool,
+            file_path: str | None,
+        ) -> Dict[str, Any]:
+            return {
+                "applied": True,
+                "name": name,
+                "persist": persist,
+                "file_path": file_path,
+            }
+
+        def admin_delete_record_mutation(
+            self,
+            *,
+            name: str,
+            persist: bool,
+            file_path: str | None,
+        ) -> Dict[str, Any]:
+            return {
+                "deleted": True,
+                "name": name,
+                "persist": persist,
+                "file_path": file_path,
+            }
+
+    monkeypatch.setattr(
+        th_mod._admin_logic,
+        "build_config_verify_payload",
+        lambda **_kw: {
+            "status": "ok",
+            "path": "/tmp/verify.yaml",
+            "analysis": {"changed": True},
+        },
+    )
+    monkeypatch.setattr(
+        th_mod,
+        "_schedule_process_signal",
+        lambda *_a, **_kw: None,
+    )
+
+    cfg = {"webserver": {"auth": {"mode": "none"}}}
+    plugins = [RateLimit(), _EtcHostsPlugin()]
+    stats = _Stats()
+
+    st1, _h1, _b1 = _one_shot_http_request(
+        method="GET",
+        path="/api/v1/admin/status",
+        config=cfg,
+        stats=stats,
+        plugins=plugins,
+    )
+    assert st1 == 200
+
+    st2, _h2, b2 = _one_shot_http_request(
+        method="GET",
+        path="/api/v1/admin/capabilities",
+        config=cfg,
+        stats=stats,
+        plugins=plugins,
+    )
+    assert st2 == 200
+    assert json.loads(b2.decode("utf-8"))["rate_limit"]["clear_supported"] is True
+
+    st3, _h3, _b3 = _one_shot_http_request(
+        method="POST",
+        path="/api/v1/admin/config/verify",
+        config=cfg,
+        stats=stats,
+        plugins=plugins,
+        headers={"Content-Type": "application/json"},
+        body=json.dumps({"raw_yaml": "server: {}"}).encode("utf-8"),
+    )
+    assert st3 == 200
+
+    st4, _h4, b4 = _one_shot_http_request(
+        method="POST",
+        path="/api/v1/admin/query_log/clear",
+        config=cfg,
+        stats=stats,
+        plugins=plugins,
+        headers={"Content-Type": "application/json"},
+        body=json.dumps({"filters": {"qname": "a.example"}, "dry_run": True}).encode(
+            "utf-8"
+        ),
+    )
+    assert st4 == 200
+    assert json.loads(b4.decode("utf-8"))["dry_run"] is True
+
+    st5, _h5, _b5 = _one_shot_http_request(
+        method="GET",
+        path="/api/v1/admin/rate_limit/keys?plugin=rl",
+        config=cfg,
+        stats=stats,
+        plugins=plugins,
+    )
+    assert st5 == 200
+
+    st6, _h6, _b6 = _one_shot_http_request(
+        method="POST",
+        path="/api/v1/admin/rate_limit/clear",
+        config=cfg,
+        stats=stats,
+        plugins=plugins,
+        headers={"Content-Type": "application/json"},
+        body=json.dumps({"plugin": "rl", "key": "k1", "include_global": True}).encode(
+            "utf-8"
+        ),
+    )
+    assert st6 == 200
+
+    st7, _h7, _b7 = _one_shot_http_request(
+        method="POST",
+        path="/api/v1/admin/records/etc_hosts/apply",
+        config=cfg,
+        stats=stats,
+        plugins=plugins,
+        headers={"Content-Type": "application/json"},
+        body=json.dumps(
+            {
+                "plugin": "eh",
+                "name": "a.example",
+                "value": "127.0.0.1",
+                "persist": False,
+            }
+        ).encode("utf-8"),
+    )
+    assert st7 == 200
+
+    st8, _h8, _b8 = _one_shot_http_request(
+        method="POST",
+        path="/api/v1/restart",
+        config=cfg,
+        stats=stats,
+        plugins=plugins,
+        headers={"Content-Type": "application/json"},
+        body=json.dumps({"delay_seconds": 0.01}).encode("utf-8"),
+    )
+    assert st8 == 200
+
+    st9, _h9, b9 = _one_shot_http_request(
+        method="GET",
+        path="/api/v1/admin/audit",
+        config=cfg,
+        stats=stats,
+        plugins=plugins,
+    )
+    assert st9 == 200
+    assert isinstance(json.loads(b9.decode("utf-8")).get("items"), list)

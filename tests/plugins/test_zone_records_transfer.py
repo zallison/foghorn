@@ -296,7 +296,7 @@ def test_prepare_axfr_tsig_signer_basic_policy_paths() -> None:
         {"require_tsig": True, "tsig_keys": [{"name": "", "secret": ""}]},
     ) == (
         None,
-        "AXFR TSIG required but no usable server.axfr.tsig_keys configured",
+        "AXFR TSIG required but no usable server.axfr.tsig.keys (or legacy server.axfr.tsig_keys) configured",
     )
 
 
