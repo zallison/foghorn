@@ -25,6 +25,7 @@ from foghorn.plugins.resolve.base import (
     PluginDecision,
     plugin_aliases,
 )
+from foghorn.plugins.resolve.zone_records import update_helpers
 from foghorn.utils import dns_names
 
 logger = logging.getLogger(__name__)
@@ -433,6 +434,259 @@ class EtcHosts(BasePlugin):
             "order": 70,
             "endpoints": {"snapshot": snapshot_url},
             "layout": layout,
+        }
+
+    def _admin_editable_file_paths(self) -> List[str]:
+        """Brief: Return normalized list of file paths allowed for admin persistence.
+
+        Inputs:
+          - None.
+
+        Outputs:
+          - Ordered list of editable file paths.
+        """
+
+        raw = self.config.get("admin_editable_file_paths")
+        if isinstance(raw, list) and raw:
+            paths = [os.path.expanduser(str(p)) for p in raw if str(p).strip()]
+            return list(dict.fromkeys(paths))
+        return list(dict.fromkeys(self.file_paths or []))
+
+    def _admin_validate_name_and_ip(self, *, name: str, value: str) -> tuple[str, str]:
+        """Brief: Validate and normalize admin record name/value inputs.
+
+        Inputs:
+          - name: DNS name text.
+          - value: IP address text.
+
+        Outputs:
+          - Tuple of (normalized_name, normalized_ip_text).
+        """
+
+        name_norm = dns_names.normalize_name(name)
+        if not name_norm:
+            raise ValueError("name is required")
+        try:
+            ip_obj = ipaddress.ip_address(str(value).strip())
+        except Exception as exc:
+            raise ValueError(f"invalid IP value: {exc}") from exc
+        return name_norm, str(ip_obj)
+
+    def _admin_policy_allows(self, *, name: str, value: str) -> tuple[bool, str | None]:
+        """Brief: Evaluate optional admin allow/block policies for record mutation.
+
+        Inputs:
+          - name: Normalized DNS name.
+          - value: Normalized IP text.
+
+        Outputs:
+          - Tuple (allowed, reason).
+        """
+
+        block_names = [str(v) for v in (self.config.get("admin_block_names") or [])]
+        if block_names and update_helpers.matches_name_pattern(name, block_names):
+            return False, "name blocked by admin_block_names"
+
+        allow_names = [str(v) for v in (self.config.get("admin_allow_names") or [])]
+        if allow_names and not update_helpers.matches_name_pattern(name, allow_names):
+            return False, "name not allowed by admin_allow_names"
+
+        allow_ips = [str(v) for v in (self.config.get("admin_allow_update_ips") or [])]
+        if allow_ips:
+            from foghorn.utils import ip_networks
+
+            if not ip_networks.ip_string_in_cidrs(value, allow_ips):
+                return False, "value not allowed by admin_allow_update_ips"
+
+        block_ips = [str(v) for v in (self.config.get("admin_block_update_ips") or [])]
+        if block_ips:
+            from foghorn.utils import ip_networks
+
+            if ip_networks.ip_string_in_cidrs(value, block_ips):
+                return False, "value blocked by admin_block_update_ips"
+
+        return True, None
+
+    def admin_validate_record_mutation(
+        self, *, name: str, value: str
+    ) -> Dict[str, object]:
+        """Brief: Validate an admin etc_hosts record mutation request.
+
+        Inputs:
+          - name: DNS record owner.
+          - value: A or AAAA IP value.
+
+        Outputs:
+          - Dict with normalized fields and policy result.
+        """
+
+        name_norm, value_norm = self._admin_validate_name_and_ip(name=name, value=value)
+        allowed, reason = self._admin_policy_allows(name=name_norm, value=value_norm)
+        return {
+            "name": name_norm,
+            "value": value_norm,
+            "allowed": bool(allowed),
+            "reason": (str(reason) if reason is not None else None),
+        }
+
+    def admin_apply_record_mutation(
+        self,
+        *,
+        name: str,
+        value: str,
+        persist: bool = False,
+        file_path: str | None = None,
+    ) -> Dict[str, object]:
+        """Brief: Apply an admin etc_hosts record insert/update.
+
+        Inputs:
+          - name: DNS record owner.
+          - value: A or AAAA IP value.
+          - persist: When True, append/update an editable hosts file.
+          - file_path: Optional target file path when persist=True.
+
+        Outputs:
+          - Dict describing applied mutation and persistence target.
+        """
+
+        check = self.admin_validate_record_mutation(name=name, value=value)
+        if not bool(check.get("allowed")):
+            raise ValueError(str(check.get("reason") or "mutation rejected by policy"))
+        name_norm = str(check["name"])
+        value_norm = str(check["value"])
+
+        target_path: str | None = None
+        if persist:
+            allowed_paths = self._admin_editable_file_paths()
+            if not allowed_paths:
+                raise ValueError("no editable file paths are configured")
+            if file_path is not None and str(file_path).strip():
+                chosen = os.path.expanduser(str(file_path).strip())
+                if chosen not in allowed_paths:
+                    raise ValueError(
+                        "file_path is not allowed by admin_editable_file_paths"
+                    )
+                target_path = chosen
+            else:
+                target_path = str(allowed_paths[0])
+
+            os.makedirs(os.path.dirname(target_path) or ".", exist_ok=True)
+            existing_lines: List[str] = []
+            if os.path.exists(target_path):
+                with open(target_path, "r", encoding="utf-8") as f:
+                    existing_lines = [ln.rstrip("\n") for ln in f.readlines()]
+            out_lines: List[str] = []
+            replaced = False
+            for raw_line in existing_lines:
+                line = raw_line.split("#", 1)[0].strip()
+                if not line:
+                    out_lines.append(raw_line)
+                    continue
+                parts = line.split()
+                if len(parts) >= 2 and any(
+                    dns_names.normalize_name(host) == name_norm for host in parts[1:]
+                ):
+                    out_lines.append(f"{value_norm} {name_norm} # foghorn-admin")
+                    replaced = True
+                else:
+                    out_lines.append(raw_line)
+            if not replaced:
+                out_lines.append(f"{value_norm} {name_norm} # foghorn-admin")
+            with open(target_path, "w", encoding="utf-8") as f:
+                f.write("\n".join(out_lines).rstrip("\n") + "\n")
+
+        lock = getattr(self, "_hosts_lock", None)
+        if lock is None:
+            self.hosts[name_norm] = value_norm
+            self._entry_sources[name_norm] = (
+                str(target_path) if target_path is not None else "admin-temporary"
+            )
+        else:
+            with lock:
+                self.hosts[name_norm] = value_norm
+                self._entry_sources[name_norm] = (
+                    str(target_path) if target_path is not None else "admin-temporary"
+                )
+
+        return {
+            "name": name_norm,
+            "value": value_norm,
+            "persisted": bool(persist),
+            "file_path": target_path,
+        }
+
+    def admin_delete_record_mutation(
+        self,
+        *,
+        name: str,
+        persist: bool = False,
+        file_path: str | None = None,
+    ) -> Dict[str, object]:
+        """Brief: Delete an admin etc_hosts record from memory and optional file.
+
+        Inputs:
+          - name: DNS record owner.
+          - persist: When True, remove matching rows from an editable hosts file.
+          - file_path: Optional target file path when persist=True.
+
+        Outputs:
+          - Dict describing delete outcome.
+        """
+
+        name_norm = dns_names.normalize_name(name)
+        if not name_norm:
+            raise ValueError("name is required")
+
+        target_path: str | None = None
+        if persist:
+            allowed_paths = self._admin_editable_file_paths()
+            if not allowed_paths:
+                raise ValueError("no editable file paths are configured")
+            if file_path is not None and str(file_path).strip():
+                chosen = os.path.expanduser(str(file_path).strip())
+                if chosen not in allowed_paths:
+                    raise ValueError(
+                        "file_path is not allowed by admin_editable_file_paths"
+                    )
+                target_path = chosen
+            else:
+                target_path = str(allowed_paths[0])
+            if os.path.exists(target_path):
+                with open(target_path, "r", encoding="utf-8") as f:
+                    existing = [ln.rstrip("\n") for ln in f.readlines()]
+                out_lines: List[str] = []
+                for raw_line in existing:
+                    line = raw_line.split("#", 1)[0].strip()
+                    if not line:
+                        out_lines.append(raw_line)
+                        continue
+                    parts = line.split()
+                    if len(parts) >= 2 and any(
+                        dns_names.normalize_name(host) == name_norm
+                        for host in parts[1:]
+                    ):
+                        continue
+                    out_lines.append(raw_line)
+                with open(target_path, "w", encoding="utf-8") as f:
+                    f.write(
+                        "\n".join(out_lines).rstrip("\n") + ("\n" if out_lines else "")
+                    )
+
+        removed = False
+        lock = getattr(self, "_hosts_lock", None)
+        if lock is None:
+            removed = self.hosts.pop(name_norm, None) is not None
+            self._entry_sources.pop(name_norm, None)
+        else:
+            with lock:
+                removed = self.hosts.pop(name_norm, None) is not None
+                self._entry_sources.pop(name_norm, None)
+
+        return {
+            "name": name_norm,
+            "deleted": bool(removed),
+            "persisted": bool(persist),
+            "file_path": target_path,
         }
 
     def _targets_ptr_hostname(self, ctx: PluginContext, hostname: str) -> bool:

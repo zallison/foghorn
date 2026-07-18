@@ -6,7 +6,7 @@ import os
 import sqlite3
 import threading
 import time
-from typing import Mapping, Optional, Tuple
+from typing import Dict, Mapping, Optional, Tuple
 
 from dnslib import QTYPE, RCODE, DNSRecord
 from pydantic import BaseModel, Field, ConfigDict, model_validator
@@ -3275,6 +3275,131 @@ class RateLimit(BasePlugin):
                 stats["window_avg_rps"] = 0.0
                 stats["window_max_rps"] = 0.0
         return stats
+
+    def admin_list_profile_keys(
+        self,
+        *,
+        page: int = 1,
+        page_size: int = 100,
+        search: str | None = None,
+    ) -> Dict[str, object]:
+        """Brief: Return paginated rate-profile key inventory for admin actions.
+
+        Inputs:
+          - page: 1-based page number.
+          - page_size: Number of keys per page.
+          - search: Optional case-insensitive substring filter.
+
+        Outputs:
+          - Dict with total/page/page_size/total_pages/items.
+        """
+
+        try:
+            page_i = int(page)
+        except Exception:
+            page_i = 1
+        if page_i < 1:
+            page_i = 1
+        try:
+            page_size_i = int(page_size)
+        except Exception:
+            page_size_i = 100
+        page_size_i = max(1, min(page_size_i, 1000))
+
+        search_text = str(search or "").strip().lower()
+        with self._db_lock:
+            cur = self._conn.cursor()
+            cur.execute("SELECT key, last_update FROM rate_profiles ORDER BY key ASC")
+            rows = list(cur.fetchall() or [])
+
+        items = []
+        for key, last_update in rows:
+            key_text = str(key or "")
+            if key_text == str(_GLOBAL_RPS_DB_KEY):
+                continue
+            if search_text and search_text not in key_text.lower():
+                continue
+            items.append(
+                {
+                    "key": key_text,
+                    "last_update": int(last_update or 0),
+                }
+            )
+
+        total = int(len(items))
+        offset = int((page_i - 1) * page_size_i)
+        page_items = items[offset : offset + page_size_i]
+        total_pages = (total + page_size_i - 1) // page_size_i if total else 0
+        return {
+            "total": total,
+            "page": page_i,
+            "page_size": page_size_i,
+            "total_pages": int(total_pages),
+            "items": page_items,
+        }
+
+    def admin_clear_profiles(
+        self,
+        *,
+        key: str | None = None,
+        include_global: bool = False,
+    ) -> Dict[str, int]:
+        """Brief: Clear rate-limit learned profiles and active windows.
+
+        Inputs:
+          - key: Optional specific key to clear. When omitted, clears all keys.
+          - include_global: Whether global profile/window rows may be deleted.
+
+        Outputs:
+          - Dict containing number of deleted profile/window rows.
+        """
+
+        deleted_profiles = 0
+        deleted_windows = 0
+        target_key = str(key).strip() if key is not None else ""
+        with self._db_lock:
+            cur = self._conn.cursor()
+            if target_key:
+                if target_key == str(_GLOBAL_RPS_DB_KEY) and not include_global:
+                    return {"deleted_profiles": 0, "deleted_windows": 0}
+                cur.execute(
+                    "DELETE FROM rate_profiles WHERE key = ?",
+                    (target_key,),
+                )
+                deleted_profiles = int(getattr(cur, "rowcount", 0) or 0)
+                cur.execute(
+                    "DELETE FROM rate_profile_windows WHERE key = ?",
+                    (target_key,),
+                )
+                deleted_windows = int(getattr(cur, "rowcount", 0) or 0)
+                self._deny_episode_count.pop(target_key, None)
+                self._burst_exceeded_count.pop(target_key, None)
+                self._below_threshold_count.pop(target_key, None)
+            else:
+                if include_global:
+                    cur.execute("DELETE FROM rate_profiles")
+                    deleted_profiles = int(getattr(cur, "rowcount", 0) or 0)
+                    cur.execute("DELETE FROM rate_profile_windows")
+                    deleted_windows = int(getattr(cur, "rowcount", 0) or 0)
+                else:
+                    cur.execute(
+                        "DELETE FROM rate_profiles WHERE key != ?",
+                        (str(_GLOBAL_RPS_DB_KEY),),
+                    )
+                    deleted_profiles = int(getattr(cur, "rowcount", 0) or 0)
+                    cur.execute(
+                        "DELETE FROM rate_profile_windows WHERE key != ?",
+                        (str(_GLOBAL_RPS_DB_KEY),),
+                    )
+                    deleted_windows = int(getattr(cur, "rowcount", 0) or 0)
+                self._deny_episode_count.clear()
+                self._burst_exceeded_count.clear()
+                self._below_threshold_count.clear()
+            self._conn.commit()
+        return {
+            "deleted_profiles": int(deleted_profiles),
+            "deleted_windows": int(deleted_windows),
+        }
 
     def shutdown(self) -> None:
         """Brief: Close sqlite3 connection on shutdown/reload.

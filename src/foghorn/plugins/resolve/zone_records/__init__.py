@@ -2208,6 +2208,369 @@ class ZoneRecords(BasePlugin):
             "records": rows,
         }
 
+    def _admin_editable_file_paths(self) -> List[str]:
+        """Brief: Return normalized list of file paths allowed for admin persistence.
+
+        Inputs:
+          - None.
+
+        Outputs:
+          - Ordered list of editable zone data file paths.
+        """
+
+        raw = self.config.get("admin_editable_file_paths")
+        if isinstance(raw, list) and raw:
+            paths = [os.path.expanduser(str(p)) for p in raw if str(p).strip()]
+            return list(dict.fromkeys(paths))
+        return list(dict.fromkeys(getattr(self, "file_paths", []) or []))
+
+    @staticmethod
+    def _admin_parse_qtype(raw_qtype: str | int) -> int:
+        """Brief: Parse qtype text/code into dnslib integer code.
+
+        Inputs:
+          - raw_qtype: QTYPE name or integer-like value.
+
+        Outputs:
+          - int qtype code.
+        """
+
+        if isinstance(raw_qtype, int):
+            return int(raw_qtype)
+        text = str(raw_qtype or "").strip()
+        if not text:
+            raise ValueError("qtype is required")
+        if text.isdigit():
+            return int(text)
+        upper = text.upper()
+        try:
+            attr_val = getattr(QTYPE, upper)
+        except Exception as exc:
+            raise ValueError(f"invalid qtype: {raw_qtype}") from exc
+        if not isinstance(attr_val, int):
+            raise ValueError(f"invalid qtype: {raw_qtype}")
+        return int(attr_val)
+
+    def _admin_find_update_zone_cfg(self, owner: str) -> Dict[str, object] | None:
+        """Brief: Resolve DNS UPDATE zone authorization config for an owner name.
+
+        Inputs:
+          - owner: Normalized owner name.
+
+        Outputs:
+          - Zone config mapping when found, else None.
+        """
+
+        dns_update_cfg = getattr(self, "_dns_update_config", None)
+        if not isinstance(dns_update_cfg, dict):
+            return None
+        zones = dns_update_cfg.get("zones")
+        if not isinstance(zones, list):
+            return None
+        owner_norm = dns_names.normalize_name(owner)
+        for item in zones:
+            if not isinstance(item, dict):
+                continue
+            zone_name = dns_names.normalize_name(item.get("zone", ""))
+            if not zone_name:
+                continue
+            if owner_norm == zone_name or owner_norm.endswith(f".{zone_name}"):
+                return dict(item)
+        return None
+
+    def admin_validate_record_mutation(
+        self,
+        *,
+        owner: str,
+        qtype: str | int,
+        value: str,
+        ttl: int = 300,
+    ) -> Dict[str, object]:
+        """Brief: Validate a zone record mutation against update policies.
+
+        Inputs:
+          - owner: Record owner name.
+          - qtype: Record type name or code.
+          - value: RDATA value text.
+          - ttl: Record TTL.
+
+        Outputs:
+          - Dict with normalized fields and policy result.
+        """
+
+        owner_norm = dns_names.normalize_name(owner)
+        if not owner_norm:
+            raise ValueError("owner is required")
+        qtype_i = self._admin_parse_qtype(qtype)
+        ttl_i = int(ttl)
+        if ttl_i < 0:
+            raise ValueError("ttl must be >= 0")
+
+        zone_cfg = self._admin_find_update_zone_cfg(owner_norm)
+        if zone_cfg is not None:
+            from . import update_processor as _update_processor
+
+            if not _update_processor.verify_name_authorization(
+                owner_norm,
+                zone_cfg,
+                plugin=self,
+                zone_apex=str(zone_cfg.get("zone", "")),
+            ):
+                return {
+                    "owner": owner_norm,
+                    "qtype": int(qtype_i),
+                    "ttl": int(ttl_i),
+                    "value": str(value),
+                    "allowed": False,
+                    "reason": "owner blocked by zone update policy",
+                }
+            if not _update_processor.verify_value_authorization(
+                str(value),
+                int(qtype_i),
+                zone_cfg,
+                plugin=self,
+                zone_apex=str(zone_cfg.get("zone", "")),
+            ):
+                return {
+                    "owner": owner_norm,
+                    "qtype": int(qtype_i),
+                    "ttl": int(ttl_i),
+                    "value": str(value),
+                    "allowed": False,
+                    "reason": "value blocked by zone update policy",
+                }
+
+        return {
+            "owner": owner_norm,
+            "qtype": int(qtype_i),
+            "ttl": int(ttl_i),
+            "value": str(value),
+            "allowed": True,
+            "reason": None,
+        }
+
+    def admin_apply_record_mutation(
+        self,
+        *,
+        owner: str,
+        qtype: str | int,
+        value: str,
+        ttl: int = 300,
+        persist: bool = False,
+        file_path: str | None = None,
+    ) -> Dict[str, object]:
+        """Brief: Apply a zone record mutation to in-memory state and optional file.
+
+        Inputs:
+          - owner: Record owner name.
+          - qtype: Record type name or code.
+          - value: RDATA value text.
+          - ttl: Record TTL.
+          - persist: When True, append/update an editable zone file.
+          - file_path: Optional target file path when persist=True.
+
+        Outputs:
+          - Dict describing applied mutation.
+        """
+
+        check = self.admin_validate_record_mutation(
+            owner=owner,
+            qtype=qtype,
+            value=value,
+            ttl=ttl,
+        )
+        if not bool(check.get("allowed")):
+            raise ValueError(str(check.get("reason") or "mutation rejected by policy"))
+        owner_norm = str(check["owner"])
+        qtype_i = int(check["qtype"])
+        ttl_i = int(check["ttl"])
+        value_text = str(check["value"])
+
+        target_path: str | None = None
+        if persist:
+            allowed_paths = self._admin_editable_file_paths()
+            if not allowed_paths:
+                raise ValueError("no editable file paths are configured")
+            if file_path is not None and str(file_path).strip():
+                chosen = os.path.expanduser(str(file_path).strip())
+                if chosen not in allowed_paths:
+                    raise ValueError(
+                        "file_path is not allowed by admin_editable_file_paths"
+                    )
+                target_path = chosen
+            else:
+                target_path = str(allowed_paths[0])
+            os.makedirs(os.path.dirname(target_path) or ".", exist_ok=True)
+            line_text = f"{owner_norm}|{qtype_i}|{ttl_i}|{value_text}"
+            existing_lines: List[str] = []
+            if os.path.exists(target_path):
+                with open(target_path, "r", encoding="utf-8") as f:
+                    existing_lines = [ln.rstrip("\n") for ln in f.readlines()]
+            out_lines: List[str] = []
+            replaced = False
+            for raw_line in existing_lines:
+                line = raw_line.split("#", 1)[0].strip()
+                if not line:
+                    out_lines.append(raw_line)
+                    continue
+                parts = [p.strip() for p in line.split("|")]
+                if len(parts) != 4:
+                    out_lines.append(raw_line)
+                    continue
+                if (
+                    dns_names.normalize_name(parts[0]) == owner_norm
+                    and self._admin_parse_qtype(parts[1]) == qtype_i
+                ):
+                    if not replaced:
+                        out_lines.append(line_text)
+                        replaced = True
+                    continue
+                out_lines.append(raw_line)
+            if not replaced:
+                out_lines.append(line_text)
+            with open(target_path, "w", encoding="utf-8") as f:
+                f.write("\n".join(out_lines).rstrip("\n") + "\n")
+
+        source_label = (
+            str(target_path) if target_path is not None else "admin-temporary"
+        )
+        key = (owner_norm, int(qtype_i))
+        with self._records_lock:
+            existing = self.records.get(key)
+            if existing is None:
+                self.records[key] = (int(ttl_i), [value_text], [source_label])
+            else:
+                cur_ttl, cur_values, cur_sources = existing
+                values = list(cur_values or [])
+                sources = list(cur_sources or [])
+                if value_text not in values:
+                    values.append(value_text)
+                if source_label not in sources:
+                    sources.append(source_label)
+                self.records[key] = (
+                    int(ttl_i) if ttl_i >= 0 else int(cur_ttl),
+                    values,
+                    sources,
+                )
+            self._rebuild_indexes_from_records()
+
+        return {
+            "owner": owner_norm,
+            "qtype": int(qtype_i),
+            "ttl": int(ttl_i),
+            "value": value_text,
+            "persisted": bool(persist),
+            "file_path": target_path,
+        }
+
+    def admin_delete_record_mutation(
+        self,
+        *,
+        owner: str,
+        qtype: str | int | None = None,
+        value: str | None = None,
+        persist: bool = False,
+        file_path: str | None = None,
+    ) -> Dict[str, object]:
+        """Brief: Delete in-memory zone records and optional persisted file rows.
+
+        Inputs:
+          - owner: Record owner name.
+          - qtype: Optional record type (when omitted, removes all owner RRsets).
+          - value: Optional specific record value to remove.
+          - persist: When True, remove matching rows from editable zone file.
+          - file_path: Optional target file path when persist=True.
+
+        Outputs:
+          - Dict describing delete outcome.
+        """
+
+        owner_norm = dns_names.normalize_name(owner)
+        if not owner_norm:
+            raise ValueError("owner is required")
+        qtype_i = self._admin_parse_qtype(qtype) if qtype is not None else None
+        value_text = str(value) if value is not None else None
+
+        target_path: str | None = None
+        if persist:
+            allowed_paths = self._admin_editable_file_paths()
+            if not allowed_paths:
+                raise ValueError("no editable file paths are configured")
+            if file_path is not None and str(file_path).strip():
+                chosen = os.path.expanduser(str(file_path).strip())
+                if chosen not in allowed_paths:
+                    raise ValueError(
+                        "file_path is not allowed by admin_editable_file_paths"
+                    )
+                target_path = chosen
+            else:
+                target_path = str(allowed_paths[0])
+            if os.path.exists(target_path):
+                with open(target_path, "r", encoding="utf-8") as f:
+                    existing = [ln.rstrip("\n") for ln in f.readlines()]
+                out_lines: List[str] = []
+                for raw_line in existing:
+                    line = raw_line.split("#", 1)[0].strip()
+                    if not line:
+                        out_lines.append(raw_line)
+                        continue
+                    parts = [p.strip() for p in line.split("|")]
+                    if len(parts) != 4:
+                        out_lines.append(raw_line)
+                        continue
+                    parts_owner = dns_names.normalize_name(parts[0])
+                    try:
+                        parts_qtype = self._admin_parse_qtype(parts[1])
+                    except Exception:
+                        out_lines.append(raw_line)
+                        continue
+                    parts_value = str(parts[3])
+                    owner_match = parts_owner == owner_norm
+                    qtype_match = qtype_i is None or int(parts_qtype) == int(qtype_i)
+                    value_match = value_text is None or parts_value == value_text
+                    if owner_match and qtype_match and value_match:
+                        continue
+                    out_lines.append(raw_line)
+                with open(target_path, "w", encoding="utf-8") as f:
+                    f.write(
+                        "\n".join(out_lines).rstrip("\n") + ("\n" if out_lines else "")
+                    )
+
+        deleted = 0
+        with self._records_lock:
+            keys = list(self.records.keys())
+            for key in keys:
+                owner_key, qtype_key = key
+                if dns_names.normalize_name(owner_key) != owner_norm:
+                    continue
+                if qtype_i is not None and int(qtype_key) != int(qtype_i):
+                    continue
+                if value_text is None:
+                    if self.records.pop(key, None) is not None:
+                        deleted += 1
+                    continue
+                entry = self.records.get(key)
+                if entry is None:
+                    continue
+                ttl_cur, values_cur, sources_cur = entry
+                values = [v for v in list(values_cur or []) if str(v) != value_text]
+                if not values:
+                    if self.records.pop(key, None) is not None:
+                        deleted += 1
+                else:
+                    self.records[key] = (int(ttl_cur), values, list(sources_cur or []))
+                    deleted += 1
+            self._rebuild_indexes_from_records()
+
+        return {
+            "owner": owner_norm,
+            "qtype": int(qtype_i) if qtype_i is not None else None,
+            "value": value_text,
+            "deleted": int(deleted),
+            "persisted": bool(persist),
+            "file_path": target_path,
+        }
+
     def iter_zone_rrs_for_transfer(
         self, zone_apex: str, client_ip: Optional[str] = None
     ) -> Optional[list]:
