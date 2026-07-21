@@ -36,6 +36,7 @@ from ...utils.config_diagram import (
 )
 from ..udp_server import DNSUDPHandler
 from . import admin_logic as _admin_logic
+from . import admin_rate_limit as _admin_rate_limit
 from . import config_persistence as _config_persistence
 from .config_helpers import (
     _get_config_raw_json,
@@ -1622,6 +1623,247 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         payload["server_time"] = _utc_now_iso()
         self._send_json(200, payload)
 
+    def _handle_admin_restart_status(self) -> None:
+        """Brief: Handle GET /api/v1/admin/restart/status."""
+
+        if not self._require_auth():
+            return
+        if not self._enforce_admin_rate_limit(action="admin.restart.status"):
+            return
+        payload = _admin_logic.build_admin_restart_status_payload(
+            runtime_state=self._admin_runtime_state()
+        )
+        payload["server_time"] = _utc_now_iso()
+        self._send_json(200, payload)
+
+    def _handle_admin_tasks(self, params: Dict[str, list[str]]) -> None:
+        """Brief: Handle GET /api/v1/admin/tasks."""
+
+        if not self._require_auth():
+            return
+        if not self._enforce_admin_rate_limit(action="admin.tasks"):
+            return
+        limit = max(1, min(self._get_int_param(params, "limit", 50), 500))
+        payload = _admin_logic.build_admin_tasks_payload(
+            runtime_state=self._admin_runtime_state(),
+            limit=limit,
+            task_type=self._get_query_param(params, "task_type"),
+            status=self._get_query_param(params, "status"),
+        )
+        payload["server_time"] = _utc_now_iso()
+        self._send_json(200, payload)
+
+    def _handle_admin_config_diff(self, body: Dict[str, Any]) -> None:
+        """Brief: Handle POST /api/v1/admin/config/diff."""
+
+        if not self._require_auth():
+            return
+        if not self._enforce_admin_rate_limit(action="admin.config.diff"):
+            return
+        raw_yaml = body.get("raw_yaml")
+        if raw_yaml is not None and not isinstance(raw_yaml, str):
+            self._send_json(
+                400,
+                {"detail": "raw_yaml must be a string", "server_time": _utc_now_iso()},
+            )
+            return
+        try:
+            payload = _admin_logic.build_config_diff_payload(
+                raw_yaml=(str(raw_yaml) if isinstance(raw_yaml, str) else None),
+                config_path=getattr(self._server(), "config_path", None),
+                current_cfg=getattr(self._server(), "config", {}) or {},
+            )
+        except _admin_logic.AdminLogicHttpError as exc:
+            self._send_json(
+                exc.status_code,
+                {"detail": exc.detail, "server_time": _utc_now_iso()},
+            )
+            return
+        payload["server_time"] = _utc_now_iso()
+        self._send_json(200, payload)
+
+    def _handle_admin_config_lint(self, body: Dict[str, Any]) -> None:
+        """Brief: Handle POST /api/v1/admin/config/lint."""
+
+        if not self._require_auth():
+            return
+        if not self._enforce_admin_rate_limit(action="admin.config.lint"):
+            return
+        raw_yaml = body.get("raw_yaml")
+        if raw_yaml is not None and not isinstance(raw_yaml, str):
+            self._send_json(
+                400,
+                {"detail": "raw_yaml must be a string", "server_time": _utc_now_iso()},
+            )
+            return
+        try:
+            payload = _admin_logic.build_config_lint_payload(
+                raw_yaml=(str(raw_yaml) if isinstance(raw_yaml, str) else None),
+                config_path=getattr(self._server(), "config_path", None),
+                current_cfg=getattr(self._server(), "config", {}) or {},
+            )
+        except _admin_logic.AdminLogicHttpError as exc:
+            self._send_json(
+                exc.status_code,
+                {"detail": exc.detail, "server_time": _utc_now_iso()},
+            )
+            return
+        payload["server_time"] = _utc_now_iso()
+        self._send_json(200, payload)
+
+    def _handle_admin_query_log_export(self, body: Dict[str, Any]) -> None:
+        """Brief: Handle POST /api/v1/admin/query_log/export."""
+
+        if not self._require_auth():
+            return
+        if not self._enforce_admin_rate_limit(action="admin.query_log.export"):
+            return
+        filters = body.get("filters")
+        if filters is None:
+            filters = {}
+        if not isinstance(filters, dict):
+            self._send_json(
+                400,
+                {"detail": "filters must be an object", "server_time": _utc_now_iso()},
+            )
+            return
+        limit = int(body.get("limit", 5000) or 5000)
+        if limit <= 0:
+            self._send_json(
+                400,
+                {"detail": "limit must be > 0", "server_time": _utc_now_iso()},
+            )
+            return
+        export_format = str(body.get("format", "jsonl") or "jsonl")
+        collector: Optional[StatsCollector] = getattr(self._server(), "stats", None)
+        store = getattr(collector, "_store", None) if collector is not None else None
+        try:
+            payload = _admin_logic.execute_query_log_export(
+                store=store,
+                filters=filters,
+                export_format=export_format,
+                limit=limit,
+            )
+        except _admin_logic.AdminLogicHttpError as exc:
+            self._send_json(
+                exc.status_code,
+                {"detail": exc.detail, "server_time": _utc_now_iso()},
+            )
+            return
+        payload["server_time"] = _utc_now_iso()
+        self._send_json(200, payload)
+
+    def _handle_admin_query_log_compact(self, body: Dict[str, Any]) -> None:
+        """Brief: Handle POST /api/v1/admin/query_log/compact."""
+
+        if not self._require_auth():
+            return
+        if not self._enforce_admin_rate_limit(action="admin.query_log.compact"):
+            return
+        mode = str(body.get("mode", "vacuum") or "vacuum")
+        dry_run = bool(body.get("dry_run", True))
+        collector: Optional[StatsCollector] = getattr(self._server(), "stats", None)
+        store = getattr(collector, "_store", None) if collector is not None else None
+        try:
+            payload = _admin_logic.execute_query_log_compact(
+                store=store, mode=mode, dry_run=dry_run
+            )
+        except _admin_logic.AdminLogicHttpError as exc:
+            self._send_json(
+                exc.status_code,
+                {"detail": exc.detail, "server_time": _utc_now_iso()},
+            )
+            return
+        payload["server_time"] = _utc_now_iso()
+        self._send_json(200, payload)
+
+    def _handle_admin_rate_limit_hot_keys(self, params: Dict[str, list[str]]) -> None:
+        """Brief: Handle GET /api/v1/admin/rate_limit/hot_keys."""
+
+        if not self._require_auth():
+            return
+        if not self._enforce_admin_rate_limit(action="admin.rate_limit.hot_keys"):
+            return
+        plugin_name = self._get_query_param(params, "plugin")
+        limit = max(1, min(self._get_int_param(params, "limit", 20), 200))
+        try:
+            payload = _admin_logic.execute_rate_limit_hot_keys(
+                plugins=list(getattr(self._server(), "plugins", []) or []),
+                plugin_name=plugin_name,
+                limit=limit,
+            )
+        except _admin_logic.AdminLogicHttpError as exc:
+            self._send_json(
+                exc.status_code,
+                {"detail": exc.detail, "server_time": _utc_now_iso()},
+            )
+            return
+        payload["server_time"] = _utc_now_iso()
+        self._send_json(200, payload)
+
+    def _handle_admin_rate_limit_reset_counters(self, body: Dict[str, Any]) -> None:
+        """Brief: Handle POST /api/v1/admin/rate_limit/reset_counters."""
+
+        if not self._require_auth():
+            return
+        if not self._enforce_admin_rate_limit(
+            action="admin.rate_limit.reset_counters"
+        ):
+            return
+        plugin = body.get("plugin")
+        if plugin is not None and not isinstance(plugin, str):
+            self._send_json(
+                400,
+                {"detail": "plugin must be a string", "server_time": _utc_now_iso()},
+            )
+            return
+        include_global = bool(body.get("include_global", False))
+        try:
+            payload = _admin_logic.execute_rate_limit_reset_counters(
+                plugins=list(getattr(self._server(), "plugins", []) or []),
+                plugin_name=(plugin.strip() if isinstance(plugin, str) else None),
+                include_global=include_global,
+            )
+        except _admin_logic.AdminLogicHttpError as exc:
+            self._send_json(
+                exc.status_code,
+                {"detail": exc.detail, "server_time": _utc_now_iso()},
+            )
+            return
+        payload["server_time"] = _utc_now_iso()
+        self._send_json(200, payload)
+
+    def _handle_admin_version_compat(self) -> None:
+        """Brief: Handle GET /api/v1/admin/version/compat."""
+
+        if not self._require_auth():
+            return
+        if not self._enforce_admin_rate_limit(action="admin.version.compat"):
+            return
+        payload = _admin_logic.build_admin_version_compat_payload(
+            plugins=list(getattr(self._server(), "plugins", []) or []),
+            stats_collector=getattr(self._server(), "stats", None),
+        )
+        payload["server_time"] = _utc_now_iso()
+        self._send_json(200, payload)
+
+    def _handle_admin_diag_runtime_snapshot(self) -> None:
+        """Brief: Handle GET /api/v1/admin/diag/runtime-snapshot."""
+
+        if not self._require_auth():
+            return
+        if not self._enforce_admin_rate_limit(action="admin.diag.runtime_snapshot"):
+            return
+        payload = _admin_logic.build_admin_diag_runtime_snapshot(
+            cfg=getattr(self._server(), "config", {}) or {},
+            config_path=getattr(self._server(), "config_path", None),
+            runtime_state=self._admin_runtime_state(),
+            plugins=list(getattr(self._server(), "plugins", []) or []),
+            stats_collector=getattr(self._server(), "stats", None),
+        )
+        payload["server_time"] = _utc_now_iso()
+        self._send_json(200, payload)
+
     def _handle_query_log_aggregate(self, params: Dict[str, list[str]]) -> None:
         """Brief: Handle GET /api/v1/query_log/aggregate for the threaded fallback server.
 
@@ -1761,6 +2003,8 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
 
         if not self._require_auth():
             return
+        if not self._enforce_admin_rate_limit(action="admin.status"):
+            return
         payload = _admin_logic.build_admin_status_payload(
             cfg=getattr(self._server(), "config", {}) or {},
             config_path=getattr(self._server(), "config_path", None),
@@ -1776,6 +2020,8 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
 
         if not self._require_auth():
             return
+        if not self._enforce_admin_rate_limit(action="admin.capabilities"):
+            return
         payload = _admin_logic.build_admin_capabilities_payload(
             stats_collector=getattr(self._server(), "stats", None),
             plugins=list(getattr(self._server(), "plugins", []) or []),
@@ -1787,6 +2033,8 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         """Brief: Handle GET /api/v1/admin/audit."""
 
         if not self._require_auth():
+            return
+        if not self._enforce_admin_rate_limit(action="admin.audit"):
             return
         runtime_state = self._admin_runtime_state()
         list_fn = getattr(runtime_state, "list_audit_events", None)
@@ -1815,6 +2063,8 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
 
         if not self._require_auth():
             return
+        if not self._enforce_admin_rate_limit(action="admin.audit.clear"):
+            return
         runtime_state = self._admin_runtime_state()
         clear_fn = getattr(runtime_state, "clear_audit_events", None)
         removed = 0
@@ -1842,6 +2092,8 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         """Brief: Handle POST /api/v1/admin/config/verify."""
 
         if not self._require_auth():
+            return
+        if not self._enforce_admin_rate_limit(action="admin.config.verify"):
             return
         raw_yaml = body.get("raw_yaml")
         if raw_yaml is not None and not isinstance(raw_yaml, str):
@@ -1888,6 +2140,8 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         """Brief: Handle POST /api/v1/admin/query_log/clear."""
 
         if not self._require_auth():
+            return
+        if not self._enforce_admin_rate_limit(action="admin.query_log.clear"):
             return
         filters = body.get("filters")
         if filters is None:
@@ -1937,6 +2191,8 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
 
         if not self._require_auth():
             return
+        if not self._enforce_admin_rate_limit(action="admin.rate_limit.keys"):
+            return
         plugin_name = self._get_query_param(params, "plugin")
         page = max(1, self._get_int_param(params, "page", 1))
         page_size = max(1, min(self._get_int_param(params, "page_size", 100), 1000))
@@ -1968,6 +2224,8 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         """Brief: Handle POST /api/v1/admin/rate_limit/clear."""
 
         if not self._require_auth():
+            return
+        if not self._enforce_admin_rate_limit(action="admin.rate_limit.clear"):
             return
         plugin_name = body.get("plugin")
         if plugin_name is not None and not isinstance(plugin_name, str):
@@ -2028,6 +2286,11 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
 
         if not self._require_auth():
             return
+        action_norm = str(action or "").strip().lower()
+        if not self._enforce_admin_rate_limit(
+            action=f"admin.records.{action_norm or 'unknown'}"
+        ):
+            return
         plugin_name = body.get("plugin")
         if not isinstance(plugin_name, str) or not plugin_name.strip():
             self._send_json(
@@ -2036,7 +2299,6 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             )
             return
         target_norm = str(target or "").strip().lower()
-        action_norm = str(action or "").strip().lower()
         plugins = list(getattr(self._server(), "plugins", []) or [])
         try:
             if action_norm == "validate":
@@ -2052,6 +2314,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
                     target=target_norm,
                     plugin_name=plugin_name.strip(),
                     payload=body,
+                    runtime_state=self._admin_runtime_state(),
                 )
             elif action_norm == "delete":
                 payload = _admin_logic.execute_records_delete(
@@ -2059,6 +2322,21 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
                     target=target_norm,
                     plugin_name=plugin_name.strip(),
                     payload=body,
+                    runtime_state=self._admin_runtime_state(),
+                )
+            elif action_norm == "list":
+                payload = _admin_logic.execute_records_list(
+                    plugins=plugins,
+                    runtime_state=self._admin_runtime_state(),
+                    target=target_norm,
+                    plugin_name=plugin_name.strip(),
+                )
+            elif action_norm == "purge_expired":
+                payload = _admin_logic.execute_records_purge_expired(
+                    plugins=plugins,
+                    runtime_state=self._admin_runtime_state(),
+                    target=target_norm,
+                    plugin_name=plugin_name.strip(),
                 )
             else:
                 self._send_json(
@@ -2151,7 +2429,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         runtime_state: object | None = None
         try:
             runtime_state = _admin_logic.get_admin_runtime_state(self._server())
-        except Exception:
+        except Exception:  # pragma: nocover - defensive against foreign server state objects
             runtime_state = None
         set_restart = getattr(runtime_state, "set_restart_pending", None)
         if callable(set_restart):
@@ -2161,7 +2439,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
                     reason="threaded.restart",
                     signal_name="SIGHUP",
                 )
-            except Exception:
+            except Exception:  # pragma: nocover - best-effort restart metadata must not block signal scheduling
                 pass
         _admin_logic.add_admin_audit_event(
             runtime_state,
@@ -2188,6 +2466,40 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         """
 
         return _admin_logic.get_admin_runtime_state(self._server())
+
+    def _enforce_admin_rate_limit(self, *, action: str) -> bool:
+        """Brief: Enforce admin API request rate limiting for one action.
+
+        Inputs:
+          - action: Stable action identifier for the current endpoint.
+
+        Outputs:
+          - bool: True when request may proceed; False after sending 429.
+        """
+
+        service = _admin_rate_limit.get_admin_rate_limit_service(
+            state_obj=self._server(),
+            config=getattr(self._server(), "config", {}) or {},
+            plugins=list(getattr(self._server(), "plugins", []) or []),
+        )
+        decision = service.evaluate(
+            action=str(action),
+            client_ip=self._client_ip(),
+            authorization_header=self.headers.get("Authorization"),
+            api_key_header=self.headers.get("X-API-Key"),
+        )
+        if bool(decision.allowed):
+            return True
+        self._send_json(
+            429,
+            {
+                "detail": "admin API rate limit exceeded",
+                "retry_after_seconds": int(decision.retry_after_seconds),
+                "server_time": _utc_now_iso(),
+            },
+            headers=decision.to_headers(),
+        )
+        return False
 
     def _read_admin_json_body(self) -> Dict[str, Any] | None:
         """Brief: Parse bounded JSON body for admin action POST endpoints.
@@ -3385,6 +3697,13 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
                     owner=str(self._get_query_param(params, "owner", "") or ""),
                     qtype=self._get_query_param(params, "qtype"),
                 )
+            elif endpoint.startswith("zone_records/dns_update/zones/"):
+                zone = endpoint[len("zone_records/dns_update/zones/") :].strip()
+                payload = _admin_logic.build_plugin_zone_records_dns_update_zone_payload(
+                    plugins_list,
+                    plugin_name,
+                    zone=zone,
+                )
             elif endpoint == "upstream_router/evaluate":
                 payload = _admin_logic.build_plugin_upstream_evaluate_payload(
                     plugins_list,
@@ -3426,24 +3745,49 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         endpoint = urllib.parse.unquote(endpoint_part.strip("/"))
         if not plugin_name or not endpoint:
             return False
-
-        if endpoint not in {"etc_hosts/reload", "docker_hosts/reload"}:
-            return False
-
         if not self._require_auth():
             return True
 
         plugins_list = getattr(self._server(), "plugins", []) or []
-        plugin_kind = (
-            "etc_hosts" if endpoint.startswith("etc_hosts/") else "docker_hosts"
-        )
-
         try:
-            payload = _admin_logic.build_plugin_reload_payload(
-                plugins_list,
-                plugin_name,
-                plugin_kind=plugin_kind,
-            )
+            if endpoint in {"etc_hosts/reload", "docker_hosts/reload"}:
+                plugin_kind = (
+                    "etc_hosts"
+                    if endpoint.startswith("etc_hosts/")
+                    else "docker_hosts"
+                )
+                payload = _admin_logic.build_plugin_reload_payload(
+                    plugins_list,
+                    plugin_name,
+                    plugin_kind=plugin_kind,
+                )
+            elif endpoint == "zone_records/reload":
+                payload = _admin_logic.build_plugin_reload_payload(
+                    plugins_list,
+                    plugin_name,
+                    plugin_kind="zone_records",
+                )
+            elif endpoint == "zone_records/compact":
+                body = self._read_admin_json_body()
+                if body is None:
+                    return True
+                zone_raw = body.get("zone")
+                if zone_raw is not None and not isinstance(zone_raw, str):
+                    self._send_json(
+                        400,
+                        {
+                            "detail": "zone must be a string",
+                            "server_time": _utc_now_iso(),
+                        },
+                    )
+                    return True
+                payload = _admin_logic.build_plugin_zone_records_compact_payload(
+                    plugins_list,
+                    plugin_name,
+                    zone=(str(zone_raw) if isinstance(zone_raw, str) else None),
+                )
+            else:
+                return False
         except _admin_logic.AdminLogicHttpError as exc:
             self._send_json(
                 exc.status_code,
@@ -3736,6 +4080,16 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             self._handle_admin_capabilities()
         elif path == "/api/v1/admin/audit":
             self._handle_admin_audit(params)
+        elif path == "/api/v1/admin/restart/status":
+            self._handle_admin_restart_status()
+        elif path == "/api/v1/admin/tasks":
+            self._handle_admin_tasks(params)
+        elif path == "/api/v1/admin/rate_limit/hot_keys":
+            self._handle_admin_rate_limit_hot_keys(params)
+        elif path == "/api/v1/admin/version/compat":
+            self._handle_admin_version_compat()
+        elif path == "/api/v1/admin/diag/runtime-snapshot":
+            self._handle_admin_diag_runtime_snapshot()
         elif path == "/api/v1/admin/rate_limit/keys":
             self._handle_admin_rate_limit_keys(params)
         elif path == "/api/v1/upstream_status":
@@ -3805,16 +4159,41 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             if body is None:
                 return
             self._handle_admin_config_verify(body)
+        elif path == "/api/v1/admin/config/diff":
+            body = self._read_admin_json_body()
+            if body is None:
+                return
+            self._handle_admin_config_diff(body)
+        elif path == "/api/v1/admin/config/lint":
+            body = self._read_admin_json_body()
+            if body is None:
+                return
+            self._handle_admin_config_lint(body)
         elif path == "/api/v1/admin/query_log/clear":
             body = self._read_admin_json_body()
             if body is None:
                 return
             self._handle_admin_query_log_clear(body)
+        elif path == "/api/v1/admin/query_log/export":
+            body = self._read_admin_json_body()
+            if body is None:
+                return
+            self._handle_admin_query_log_export(body)
+        elif path == "/api/v1/admin/query_log/compact":
+            body = self._read_admin_json_body()
+            if body is None:
+                return
+            self._handle_admin_query_log_compact(body)
         elif path == "/api/v1/admin/rate_limit/clear":
             body = self._read_admin_json_body()
             if body is None:
                 return
             self._handle_admin_rate_limit_clear(body)
+        elif path == "/api/v1/admin/rate_limit/reset_counters":
+            body = self._read_admin_json_body()
+            if body is None:
+                return
+            self._handle_admin_rate_limit_reset_counters(body)
         elif path.startswith("/api/v1/admin/records/"):
             suffix = path[len("/api/v1/admin/records/") :]
             parts = [p for p in suffix.split("/") if p]

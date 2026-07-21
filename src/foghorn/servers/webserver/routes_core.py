@@ -33,6 +33,7 @@ from ...utils.config_diagram import (
     stale_diagram_warning,
 )
 from . import admin_logic as _admin_logic
+from . import admin_rate_limit as _admin_rate_limit
 from . import config_persistence as _config_persistence
 from .config_helpers import (
     _get_config_raw_json,
@@ -1364,6 +1365,42 @@ def _register_admin_routes(app: FastAPI, auth_dep: Any) -> None:
     def _runtime_state() -> object | None:
         return _admin_logic.get_admin_runtime_state(app.state)
 
+    def _enforce_admin_rate_limit(request: Request, *, action: str) -> None:
+        """Brief: Enforce admin API request rate limiting for one action.
+
+        Inputs:
+          - request: FastAPI request object.
+          - action: Stable action identifier for this endpoint.
+
+        Outputs:
+          - None when allowed; raises HTTPException(429) when blocked.
+        """
+
+        service = _admin_rate_limit.get_admin_rate_limit_service(
+            state_obj=app.state,
+            config=getattr(app.state, "config", {}) or {},
+            plugins=_get_plugins(),
+        )
+        client_ip = "unknown"
+        try:
+            if request.client is not None and request.client.host:
+                client_ip = str(request.client.host)
+        except Exception:  # pragma: nocover - defensive against non-standard request client objects
+            client_ip = "unknown"
+        decision = service.evaluate(
+            action=str(action),
+            client_ip=str(client_ip),
+            authorization_header=request.headers.get("authorization"),
+            api_key_header=request.headers.get("x-api-key"),
+        )
+        if bool(decision.allowed):
+            return
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="admin API rate limit exceeded",
+            headers=decision.to_headers(),
+        )
+
     async def _read_admin_json_body(request: Request) -> Dict[str, Any]:
         max_bytes = int(MAX_ADMIN_JSON_BODY_BYTES)
         length = maybe_parse_content_length(request.headers.get("content-length"))
@@ -1423,7 +1460,8 @@ def _register_admin_routes(app: FastAPI, auth_dep: Any) -> None:
         ) from exc
 
     @app.get("/api/v1/admin/status", dependencies=[Depends(auth_dep)])
-    async def admin_status() -> Dict[str, Any]:
+    async def admin_status(request: Request) -> Dict[str, Any]:
+        _enforce_admin_rate_limit(request, action="admin.status")
         payload = _admin_logic.build_admin_status_payload(
             cfg=getattr(app.state, "config", {}) or {},
             config_path=getattr(app.state, "config_path", None),
@@ -1435,7 +1473,8 @@ def _register_admin_routes(app: FastAPI, auth_dep: Any) -> None:
         return payload
 
     @app.get("/api/v1/admin/capabilities", dependencies=[Depends(auth_dep)])
-    async def admin_capabilities() -> Dict[str, Any]:
+    async def admin_capabilities(request: Request) -> Dict[str, Any]:
+        _enforce_admin_rate_limit(request, action="admin.capabilities")
         payload = _admin_logic.build_admin_capabilities_payload(
             stats_collector=getattr(app.state, "stats_collector", None),
             plugins=_get_plugins(),
@@ -1445,9 +1484,11 @@ def _register_admin_routes(app: FastAPI, auth_dep: Any) -> None:
 
     @app.get("/api/v1/admin/audit", dependencies=[Depends(auth_dep)])
     async def admin_audit(
+        request: Request,
         limit: int = 100,
         action: str | None = None,
     ) -> Dict[str, Any]:
+        _enforce_admin_rate_limit(request, action="admin.audit")
         runtime_state = _runtime_state()
         list_fn = getattr(runtime_state, "list_audit_events", None)
         items: list[Dict[str, Any]] = []
@@ -1466,7 +1507,8 @@ def _register_admin_routes(app: FastAPI, auth_dep: Any) -> None:
         }
 
     @app.post("/api/v1/admin/audit/clear", dependencies=[Depends(auth_dep)])
-    async def admin_audit_clear() -> Dict[str, Any]:
+    async def admin_audit_clear(request: Request) -> Dict[str, Any]:
+        _enforce_admin_rate_limit(request, action="admin.audit.clear")
         runtime_state = _runtime_state()
         clear_fn = getattr(runtime_state, "clear_audit_events", None)
         removed = 0
@@ -1485,6 +1527,7 @@ def _register_admin_routes(app: FastAPI, auth_dep: Any) -> None:
 
     @app.post("/api/v1/admin/config/verify", dependencies=[Depends(auth_dep)])
     async def admin_config_verify(request: Request) -> Dict[str, Any]:
+        _enforce_admin_rate_limit(request, action="admin.config.verify")
         body = await _read_admin_json_body(request)
         raw_yaml = body.get("raw_yaml")
         if raw_yaml is not None and not isinstance(raw_yaml, str):
@@ -1516,6 +1559,7 @@ def _register_admin_routes(app: FastAPI, auth_dep: Any) -> None:
 
     @app.post("/api/v1/admin/query_log/clear", dependencies=[Depends(auth_dep)])
     async def admin_query_log_clear(request: Request) -> Dict[str, Any]:
+        _enforce_admin_rate_limit(request, action="admin.query_log.clear")
         body = await _read_admin_json_body(request)
         filters = body.get("filters")
         if filters is None:
@@ -1547,11 +1591,13 @@ def _register_admin_routes(app: FastAPI, auth_dep: Any) -> None:
 
     @app.get("/api/v1/admin/rate_limit/keys", dependencies=[Depends(auth_dep)])
     async def admin_rate_limit_keys(
+        request: Request,
         plugin: str | None = None,
         page: int = 1,
         page_size: int = 100,
         search: str | None = None,
     ) -> Dict[str, Any]:
+        _enforce_admin_rate_limit(request, action="admin.rate_limit.keys")
         try:
             payload = _admin_logic.execute_rate_limit_keys_list(
                 plugins=_get_plugins(),
@@ -1572,6 +1618,7 @@ def _register_admin_routes(app: FastAPI, auth_dep: Any) -> None:
 
     @app.post("/api/v1/admin/rate_limit/clear", dependencies=[Depends(auth_dep)])
     async def admin_rate_limit_clear(request: Request) -> Dict[str, Any]:
+        _enforce_admin_rate_limit(request, action="admin.rate_limit.clear")
         body = await _read_admin_json_body(request)
         plugin_name = body.get("plugin")
         if plugin_name is not None and not isinstance(plugin_name, str):
@@ -1612,6 +1659,7 @@ def _register_admin_routes(app: FastAPI, auth_dep: Any) -> None:
         "/api/v1/admin/records/{target}/validate", dependencies=[Depends(auth_dep)]
     )
     async def admin_records_validate(target: str, request: Request) -> Dict[str, Any]:
+        _enforce_admin_rate_limit(request, action="admin.records.validate")
         body = await _read_admin_json_body(request)
         plugin_name = body.get("plugin")
         if not isinstance(plugin_name, str) or not plugin_name.strip():
@@ -1641,6 +1689,7 @@ def _register_admin_routes(app: FastAPI, auth_dep: Any) -> None:
 
     @app.post("/api/v1/admin/records/{target}/apply", dependencies=[Depends(auth_dep)])
     async def admin_records_apply(target: str, request: Request) -> Dict[str, Any]:
+        _enforce_admin_rate_limit(request, action="admin.records.apply")
         body = await _read_admin_json_body(request)
         plugin_name = body.get("plugin")
         if not isinstance(plugin_name, str) or not plugin_name.strip():
@@ -1652,6 +1701,7 @@ def _register_admin_routes(app: FastAPI, auth_dep: Any) -> None:
                 target=target_norm,
                 plugin_name=plugin_name.strip(),
                 payload=body,
+                runtime_state=_runtime_state(),
             )
         except _admin_logic.AdminLogicHttpError as exc:
             _raise_from_admin_error(
@@ -1671,6 +1721,7 @@ def _register_admin_routes(app: FastAPI, auth_dep: Any) -> None:
 
     @app.post("/api/v1/admin/records/{target}/delete", dependencies=[Depends(auth_dep)])
     async def admin_records_delete(target: str, request: Request) -> Dict[str, Any]:
+        _enforce_admin_rate_limit(request, action="admin.records.delete")
         body = await _read_admin_json_body(request)
         plugin_name = body.get("plugin")
         if not isinstance(plugin_name, str) or not plugin_name.strip():
@@ -1682,6 +1733,7 @@ def _register_admin_routes(app: FastAPI, auth_dep: Any) -> None:
                 target=target_norm,
                 plugin_name=plugin_name.strip(),
                 payload=body,
+                runtime_state=_runtime_state(),
             )
         except _admin_logic.AdminLogicHttpError as exc:
             _raise_from_admin_error(
@@ -1695,6 +1747,237 @@ def _register_admin_routes(app: FastAPI, auth_dep: Any) -> None:
             target=plugin_name.strip(),
             ok=True,
             details={"persist": bool(body.get("persist", False))},
+        )
+        payload["server_time"] = _utc_now_iso()
+        return payload
+
+    @app.get("/api/v1/admin/restart/status", dependencies=[Depends(auth_dep)])
+    async def admin_restart_status(request: Request) -> Dict[str, Any]:
+        _enforce_admin_rate_limit(request, action="admin.restart.status")
+        payload = _admin_logic.build_admin_restart_status_payload(
+            runtime_state=_runtime_state()
+        )
+        payload["server_time"] = _utc_now_iso()
+        return payload
+
+    @app.get("/api/v1/admin/tasks", dependencies=[Depends(auth_dep)])
+    async def admin_tasks(request: Request, limit: int = 50) -> Dict[str, Any]:
+        _enforce_admin_rate_limit(request, action="admin.tasks")
+        payload = _admin_logic.build_admin_tasks_payload(
+            runtime_state=_runtime_state(),
+            limit=max(1, min(int(limit), 500)),
+            task_type=None,
+            status=None,
+        )
+        payload["server_time"] = _utc_now_iso()
+        return payload
+
+    @app.post("/api/v1/admin/config/diff", dependencies=[Depends(auth_dep)])
+    async def admin_config_diff(request: Request) -> Dict[str, Any]:
+        _enforce_admin_rate_limit(request, action="admin.config.diff")
+        body = await _read_admin_json_body(request)
+        raw_yaml = body.get("raw_yaml")
+        if raw_yaml is not None and not isinstance(raw_yaml, str):
+            raise HTTPException(status_code=400, detail="raw_yaml must be a string")
+        try:
+            payload = _admin_logic.build_config_diff_payload(
+                raw_yaml=(str(raw_yaml) if isinstance(raw_yaml, str) else None),
+                config_path=getattr(app.state, "config_path", None),
+                current_cfg=getattr(app.state, "config", {}) or {},
+            )
+        except _admin_logic.AdminLogicHttpError as exc:
+            _raise_from_admin_error(exc, action="config.diff", target="config")
+            raise
+        payload["server_time"] = _utc_now_iso()
+        return payload
+
+    @app.post("/api/v1/admin/config/lint", dependencies=[Depends(auth_dep)])
+    async def admin_config_lint(request: Request) -> Dict[str, Any]:
+        _enforce_admin_rate_limit(request, action="admin.config.lint")
+        body = await _read_admin_json_body(request)
+        raw_yaml = body.get("raw_yaml")
+        if raw_yaml is not None and not isinstance(raw_yaml, str):
+            raise HTTPException(status_code=400, detail="raw_yaml must be a string")
+        try:
+            payload = _admin_logic.build_config_lint_payload(
+                raw_yaml=(str(raw_yaml) if isinstance(raw_yaml, str) else None),
+                config_path=getattr(app.state, "config_path", None),
+                current_cfg=getattr(app.state, "config", {}) or {},
+            )
+        except _admin_logic.AdminLogicHttpError as exc:
+            _raise_from_admin_error(exc, action="config.lint", target="config")
+            raise
+        payload["server_time"] = _utc_now_iso()
+        return payload
+
+    @app.post("/api/v1/admin/query_log/export", dependencies=[Depends(auth_dep)])
+    async def admin_query_log_export(request: Request) -> Dict[str, Any]:
+        _enforce_admin_rate_limit(request, action="admin.query_log.export")
+        body = await _read_admin_json_body(request)
+        filters = body.get("filters")
+        if filters is None:
+            filters = {}
+        if not isinstance(filters, dict):
+            raise HTTPException(status_code=400, detail="filters must be an object")
+        limit = int(body.get("limit", 5000) or 5000)
+        if limit <= 0:
+            raise HTTPException(status_code=400, detail="limit must be > 0")
+        export_format = str(body.get("format", "jsonl") or "jsonl")
+        try:
+            payload = _admin_logic.execute_query_log_export(
+                store=_get_store(),
+                filters=filters,
+                export_format=export_format,
+                limit=limit,
+            )
+        except _admin_logic.AdminLogicHttpError as exc:
+            _raise_from_admin_error(exc, action="query_log.export", target="query_log")
+            raise
+        payload["server_time"] = _utc_now_iso()
+        return payload
+
+    @app.post("/api/v1/admin/query_log/compact", dependencies=[Depends(auth_dep)])
+    async def admin_query_log_compact(request: Request) -> Dict[str, Any]:
+        _enforce_admin_rate_limit(request, action="admin.query_log.compact")
+        body = await _read_admin_json_body(request)
+        mode = str(body.get("mode", "vacuum") or "vacuum")
+        dry_run = bool(body.get("dry_run", True))
+        try:
+            payload = _admin_logic.execute_query_log_compact(
+                store=_get_store(),
+                mode=mode,
+                dry_run=dry_run,
+            )
+        except _admin_logic.AdminLogicHttpError as exc:
+            _raise_from_admin_error(
+                exc, action="query_log.compact", target="query_log"
+            )
+            raise
+        payload["server_time"] = _utc_now_iso()
+        return payload
+
+    @app.get("/api/v1/admin/rate_limit/hot_keys", dependencies=[Depends(auth_dep)])
+    async def admin_rate_limit_hot_keys(
+        request: Request,
+        plugin: str | None = None,
+        limit: int = 20,
+    ) -> Dict[str, Any]:
+        _enforce_admin_rate_limit(request, action="admin.rate_limit.hot_keys")
+        try:
+            payload = _admin_logic.execute_rate_limit_hot_keys(
+                plugins=_get_plugins(),
+                plugin_name=plugin,
+                limit=max(1, min(int(limit), 200)),
+            )
+        except _admin_logic.AdminLogicHttpError as exc:
+            _raise_from_admin_error(
+                exc,
+                action="rate_limit.hot_keys",
+                target=(str(plugin) if plugin else "all"),
+            )
+            raise
+        payload["server_time"] = _utc_now_iso()
+        return payload
+
+    @app.post(
+        "/api/v1/admin/rate_limit/reset_counters", dependencies=[Depends(auth_dep)]
+    )
+    async def admin_rate_limit_reset_counters(request: Request) -> Dict[str, Any]:
+        _enforce_admin_rate_limit(request, action="admin.rate_limit.reset_counters")
+        body = await _read_admin_json_body(request)
+        plugin = body.get("plugin")
+        if plugin is not None and not isinstance(plugin, str):
+            raise HTTPException(status_code=400, detail="plugin must be a string")
+        include_global = bool(body.get("include_global", False))
+        try:
+            payload = _admin_logic.execute_rate_limit_reset_counters(
+                plugins=_get_plugins(),
+                plugin_name=(plugin.strip() if isinstance(plugin, str) else None),
+                include_global=include_global,
+            )
+        except _admin_logic.AdminLogicHttpError as exc:
+            _raise_from_admin_error(
+                exc,
+                action="rate_limit.reset_counters",
+                target=(str(plugin) if isinstance(plugin, str) else "all"),
+            )
+            raise
+        payload["server_time"] = _utc_now_iso()
+        return payload
+
+    @app.post("/api/v1/admin/records/{target}/list", dependencies=[Depends(auth_dep)])
+    async def admin_records_list(target: str, request: Request) -> Dict[str, Any]:
+        _enforce_admin_rate_limit(request, action="admin.records.list")
+        body = await _read_admin_json_body(request)
+        plugin_name = body.get("plugin")
+        if not isinstance(plugin_name, str) or not plugin_name.strip():
+            raise HTTPException(status_code=400, detail="plugin is required")
+        target_norm = str(target or "").strip().lower()
+        try:
+            payload = _admin_logic.execute_records_list(
+                plugins=_get_plugins(),
+                runtime_state=_runtime_state(),
+                target=target_norm,
+                plugin_name=plugin_name.strip(),
+            )
+        except _admin_logic.AdminLogicHttpError as exc:
+            _raise_from_admin_error(
+                exc,
+                action=f"records.{target_norm}.list",
+                target=plugin_name.strip(),
+            )
+            raise
+        payload["server_time"] = _utc_now_iso()
+        return payload
+
+    @app.post(
+        "/api/v1/admin/records/{target}/purge_expired", dependencies=[Depends(auth_dep)]
+    )
+    async def admin_records_purge_expired(
+        target: str, request: Request
+    ) -> Dict[str, Any]:
+        _enforce_admin_rate_limit(request, action="admin.records.purge_expired")
+        body = await _read_admin_json_body(request)
+        plugin_name = body.get("plugin")
+        if not isinstance(plugin_name, str) or not plugin_name.strip():
+            raise HTTPException(status_code=400, detail="plugin is required")
+        target_norm = str(target or "").strip().lower()
+        try:
+            payload = _admin_logic.execute_records_purge_expired(
+                plugins=_get_plugins(),
+                runtime_state=_runtime_state(),
+                target=target_norm,
+                plugin_name=plugin_name.strip(),
+            )
+        except _admin_logic.AdminLogicHttpError as exc:
+            _raise_from_admin_error(
+                exc,
+                action=f"records.{target_norm}.purge_expired",
+                target=plugin_name.strip(),
+            )
+            raise
+        payload["server_time"] = _utc_now_iso()
+        return payload
+
+    @app.get("/api/v1/admin/version/compat", dependencies=[Depends(auth_dep)])
+    async def admin_version_compat(request: Request) -> Dict[str, Any]:
+        _enforce_admin_rate_limit(request, action="admin.version.compat")
+        payload = _admin_logic.build_admin_version_compat_payload(
+            plugins=_get_plugins(),
+            stats_collector=getattr(app.state, "stats_collector", None),
+        )
+        payload["server_time"] = _utc_now_iso()
+        return payload
+
+    @app.get("/api/v1/admin/diag/runtime-snapshot", dependencies=[Depends(auth_dep)])
+    async def admin_diag_runtime_snapshot(request: Request) -> Dict[str, Any]:
+        _enforce_admin_rate_limit(request, action="admin.diag.runtime_snapshot")
+        payload = _admin_logic.build_admin_diag_runtime_snapshot(
+            cfg=getattr(app.state, "config", {}) or {},
+            config_path=getattr(app.state, "config_path", None),
+            runtime_state=_runtime_state(),
+            plugins=_get_plugins(),
+            stats_collector=getattr(app.state, "stats_collector", None),
         )
         payload["server_time"] = _utc_now_iso()
         return payload
@@ -2150,6 +2433,24 @@ def _register_plugin_routes(app: FastAPI, auth_dep: Any) -> None:
             raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
         payload["server_time"] = _utc_now_iso()
         return _json_safe(payload)
+    @app.get(
+        "/api/v1/plugins/{plugin_name}/zone_records/dns_update/zones/{zone}",
+        dependencies=[Depends(auth_dep)],
+    )
+    async def get_zone_records_dns_update_zone_status(
+        plugin_name: str, zone: str
+    ) -> Dict[str, Any]:
+        plugins_list = getattr(app.state, "plugins", []) or []
+        try:
+            payload = _admin_logic.build_plugin_zone_records_dns_update_zone_payload(
+                plugins_list,
+                plugin_name,
+                zone=zone,
+            )
+        except _admin_logic.AdminLogicHttpError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+        payload["server_time"] = _utc_now_iso()
+        return _json_safe(payload)
 
     @app.get(
         "/api/v1/plugins/{plugin_name}/etc_hosts/lookup",
@@ -2267,6 +2568,53 @@ def _register_plugin_routes(app: FastAPI, auth_dep: Any) -> None:
         try:
             payload = _admin_logic.build_plugin_reload_payload(
                 plugins_list, plugin_name, plugin_kind="docker_hosts"
+            )
+        except _admin_logic.AdminLogicHttpError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+        payload["server_time"] = _utc_now_iso()
+        return _json_safe(payload)
+    @app.post(
+        "/api/v1/plugins/{plugin_name}/zone_records/reload",
+        dependencies=[Depends(auth_dep)],
+    )
+    async def post_zone_records_reload(plugin_name: str) -> Dict[str, Any]:
+        plugins_list = getattr(app.state, "plugins", []) or []
+        try:
+            payload = _admin_logic.build_plugin_reload_payload(
+                plugins_list, plugin_name, plugin_kind="zone_records"
+            )
+        except _admin_logic.AdminLogicHttpError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+        payload["server_time"] = _utc_now_iso()
+        return _json_safe(payload)
+
+    @app.post(
+        "/api/v1/plugins/{plugin_name}/zone_records/compact",
+        dependencies=[Depends(auth_dep)],
+    )
+    async def post_zone_records_compact(
+        plugin_name: str,
+        request: Request,
+    ) -> Dict[str, Any]:
+        try:
+            body_any = await request.json()
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="invalid JSON body") from exc
+        if not isinstance(body_any, dict):
+            raise HTTPException(
+                status_code=400, detail="request body must be a JSON object"
+            )
+        body = body_any
+        zone_raw = body.get("zone")
+        if zone_raw is not None and not isinstance(zone_raw, str):
+            raise HTTPException(status_code=400, detail="zone must be a string")
+
+        plugins_list = getattr(app.state, "plugins", []) or []
+        try:
+            payload = _admin_logic.build_plugin_zone_records_compact_payload(
+                plugins_list,
+                plugin_name,
+                zone=(str(zone_raw) if isinstance(zone_raw, str) else None),
             )
         except _admin_logic.AdminLogicHttpError as exc:
             raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc

@@ -145,6 +145,23 @@ def test_docs_and_openapi_endpoints_enabled() -> None:
     schema = resp_schema.json()
     paths = schema.get("paths") or {}
     assert "/api/v1/health" in paths
+    assert "/api/v1/admin/status" in paths
+    assert "/api/v1/admin/config/verify" in paths
+    assert "/api/v1/admin/config/diff" in paths
+    assert "/api/v1/admin/config/lint" in paths
+    assert "/api/v1/admin/query_log/clear" in paths
+    assert "/api/v1/admin/query_log/export" in paths
+    assert "/api/v1/admin/query_log/compact" in paths
+    assert "/api/v1/admin/rate_limit/clear" in paths
+    assert "/api/v1/admin/rate_limit/hot_keys" in paths
+    assert "/api/v1/admin/rate_limit/reset_counters" in paths
+    assert "/api/v1/admin/records/{target}/apply" in paths
+    assert "/api/v1/admin/records/{target}/list" in paths
+    assert "/api/v1/admin/records/{target}/purge_expired" in paths
+    assert "/api/v1/admin/restart/status" in paths
+    assert "/api/v1/admin/tasks" in paths
+    assert "/api/v1/admin/version/compat" in paths
+    assert "/api/v1/admin/diag/runtime-snapshot" in paths
     assert "/health" not in paths
 
 

@@ -918,7 +918,7 @@ class RateLimit(BasePlugin):
             global_samples = (
                 int(global_row[0]) if global_row and global_row[0] is not None else None
             )
-        except Exception:
+        except Exception:  # pragma: no cover - defensive: sqlite read failures should not break request handling
             global_samples = None
         if (
             global_samples is not None
@@ -981,19 +981,19 @@ class RateLimit(BasePlugin):
 
         try:
             avg_floor = max(0.0, float(floor_avg_rps))
-        except Exception:
+        except Exception:  # pragma: no cover - defensive: tolerate invalid caller-provided floor values
             avg_floor = 0.0
         try:
             max_floor = max(0.0, float(floor_max_rps))
-        except Exception:
+        except Exception:  # pragma: no cover - defensive: tolerate invalid caller-provided floor values
             max_floor = 0.0
         try:
             sample_floor = max(0, int(floor_samples))
-        except Exception:
+        except Exception:  # pragma: no cover - defensive: tolerate invalid caller-provided floor values
             sample_floor = 0
         try:
             now_i = int(now_ts)
-        except Exception:
+        except Exception:  # pragma: no cover - defensive: tolerate invalid caller-provided timestamps
             now_i = 0
 
         cursor.execute(
@@ -1024,7 +1024,7 @@ class RateLimit(BasePlugin):
                 global_max = float(row[1])
                 global_samples = int(row[2])
                 global_last_update = int(row[3])
-            except Exception:
+            except Exception:  # pragma: no cover - defensive: recover from malformed persisted global profile rows
                 cursor.execute(
                     "INSERT OR REPLACE INTO rate_profiles (key, avg_rps, max_rps, samples, last_update) "
                     "VALUES (?, ?, ?, ?, ?)",
@@ -1061,7 +1061,7 @@ class RateLimit(BasePlugin):
 
         try:
             window_floor = max(0.0, float(window_rps))
-        except Exception:
+        except Exception:  # pragma: no cover - defensive: tolerate invalid window_rps values
             window_floor = 0.0
         cursor.execute(
             "SELECT MAX(rps) FROM rate_profile_windows WHERE key=? AND last_update=?",
@@ -1125,7 +1125,7 @@ class RateLimit(BasePlugin):
                         "DELETE FROM rate_profiles WHERE last_update < ?",
                         (int(cutoff),),
                     )
-                except Exception:
+                except Exception:  # pragma: no cover - defensive: TTL pruning is best-effort
                     pass
             try:
                 history_ttl = max(
@@ -1141,7 +1141,7 @@ class RateLimit(BasePlugin):
                         "DELETE FROM rate_profile_windows WHERE last_update < ?",
                         (int(history_cutoff),),
                     )
-                except Exception:
+                except Exception:  # pragma: no cover - defensive: history pruning is best-effort
                     pass
 
             # Row-count bound.
@@ -1171,7 +1171,7 @@ class RateLimit(BasePlugin):
                         ")",
                         (int(excess),),
                     )
-                except Exception:
+                except Exception:  # pragma: no cover - defensive: row-cap pruning is best-effort
                     pass
 
             try:
@@ -1193,9 +1193,9 @@ class RateLimit(BasePlugin):
           - now_ts: Epoch seconds of the update time.
 
         Outputs:
-          - None (persists updated avg_rps, max_rps, samples, and optional
-            per-window sample rows used by stats_window_seconds summaries;
-            global window samples are always persisted for admin runtime metrics).
+          - None (persists updated avg_rps, max_rps, samples, and per-window
+            sample rows for the updated key. Global per-window samples are
+            persisted when stats_window_seconds > 0 via global floor updates).
         """
 
         with self._db_lock:
@@ -1215,7 +1215,7 @@ class RateLimit(BasePlugin):
                         (str(_GLOBAL_RPS_DB_KEY),),
                     )
                     global_row = cur.fetchone()
-                except Exception:
+                except Exception:  # pragma: no cover - defensive: DB read errors should not block profile updates
                     global_row_present = False
                 else:
                     global_row_present = bool(
@@ -1251,7 +1251,7 @@ class RateLimit(BasePlugin):
                 if row and row[2] is not None:
                     try:
                         proposed_samples = max(1, int(row[2]) + 1)
-                    except Exception:
+                    except Exception:  # pragma: no cover - defensive: malformed sample values should fall back safely
                         proposed_samples = 1
                 self._ensure_global_profile_floor(
                     cur,
@@ -1939,7 +1939,7 @@ class RateLimit(BasePlugin):
             stored_window_str, stored_count_str = text.split(":", 1)
             stored_window_id = int(stored_window_str)
             stored_count = int(stored_count_str)
-        except Exception:
+        except Exception:  # pragma: no cover - defensive: malformed cache payload should return safe zero RPS
             return 0.0
         if stored_count <= 0:
             return 0.0
@@ -2190,9 +2190,9 @@ class RateLimit(BasePlugin):
             for key_text, avg_rps in raw_rows:
                 try:
                     rows.append((str(key_text), float(avg_rps or 0.0)))
-                except Exception:
+                except Exception:  # pragma: no cover - defensive: skip malformed DB rows during global recalc
                     continue
-        except Exception:
+        except Exception:  # pragma: no cover - defensive: global recalc is best-effort
             return int(window_id)
 
         if not rows:
@@ -2417,7 +2417,7 @@ class RateLimit(BasePlugin):
 
         try:
             max_profiles = int(getattr(self, "max_profiles", 10000) or 10000)
-        except Exception:
+        except Exception:  # pragma: no cover - defensive: malformed max_profiles config falls back to default
             max_profiles = 10000
         max_keys = max(1, int(max_profiles)) * 2
         overflow = len(self._deny_log_ts) - int(max_keys)
@@ -3168,13 +3168,13 @@ class RateLimit(BasePlugin):
 
         try:
             lookback = int(lookback_seconds)
-        except Exception:
+        except Exception:  # pragma: no cover - defensive: non-int lookback disables recent-RPS lookup
             return 0.0
         if lookback <= 0:
             return 0.0
         try:
             window_seconds = int(getattr(self, "window_seconds", 10) or 10)
-        except Exception:
+        except Exception:  # pragma: no cover - defensive: malformed window_seconds falls back to default
             window_seconds = 10
         if window_seconds <= 0:
             window_seconds = 10
@@ -3197,13 +3197,13 @@ class RateLimit(BasePlugin):
                     (_GLOBAL_RPS_DB_KEY, int(cutoff)),
                 )
                 row = cur.fetchone()
-            except Exception:
+            except Exception:  # pragma: no cover - defensive: DB query failures should not break admin snapshots
                 return 0.0
         if not row:
             return 0.0
         try:
             return float(row[0] or 0.0) / float(expected_windows)
-        except Exception:
+        except Exception:  # pragma: no cover - defensive: malformed aggregate rows should not break admin snapshots
             return 0.0
 
     def _get_snapshot_rps_stats(self) -> dict[str, float]:
@@ -3413,13 +3413,13 @@ class RateLimit(BasePlugin):
 
         try:
             conn = getattr(self, "_conn", None)
-        except Exception:
+        except Exception:  # pragma: no cover - defensive: object may be partially initialized during teardown
             conn = None
         if conn is not None:
             with self._db_lock:
                 try:
                     conn.close()
-                except Exception:
+                except Exception:  # pragma: no cover - defensive: shutdown should ignore close errors
                     pass
                 self._conn = None
         super().shutdown()

@@ -1401,7 +1401,7 @@ def build_plugin_reload_payload(
     Inputs:
       - plugins: Iterable of plugin instances.
       - plugin_name: Target plugin instance name.
-      - plugin_kind: One of 'etc_hosts' or 'docker_hosts'.
+      - plugin_kind: One of 'etc_hosts', 'docker_hosts', or 'zone_records'.
 
     Outputs:
       - Dict with keys: plugin, action, data.
@@ -1415,6 +1415,8 @@ def build_plugin_reload_payload(
         reload_fn = getattr(target, "_load_hosts", None)
     elif plugin_kind == "docker_hosts":
         reload_fn = getattr(target, "_reload_from_docker", None)
+    elif plugin_kind == "zone_records":
+        reload_fn = getattr(target, "_reload_records_from_watchdog", None)
     else:
         raise AdminLogicHttpError(status_code=400, detail="unsupported plugin kind")
 
@@ -1437,6 +1439,157 @@ def build_plugin_reload_payload(
         "plugin": str(plugin_name),
         "action": "reload",
         "data": snapshot,
+    }
+
+
+def build_plugin_zone_records_compact_payload(
+    plugins: Iterable[object],
+    plugin_name: str,
+    *,
+    zone: str | None,
+) -> Dict[str, Any]:
+    """Brief: Compact ZoneRecords DNS UPDATE journals for one/all zones.
+
+    Inputs:
+      - plugins: Iterable of plugin instances.
+      - plugin_name: Target ZoneRecords plugin name.
+      - zone: Optional zone apex filter. When omitted, compacts all configured zones.
+
+    Outputs:
+      - Dict with keys: plugin, action, zone, result, summary.
+    """
+
+    target = find_plugin_instance_by_name(plugins, plugin_name)
+    if target is None:
+        raise AdminLogicHttpError(status_code=404, detail="plugin not found")
+
+    compact_fn = getattr(target, "compact_dns_update_journals", None)
+    if not callable(compact_fn):
+        raise AdminLogicHttpError(
+            status_code=409, detail="zone_records journal compaction is unavailable"
+        )
+
+    zone_text = str(zone or "").strip()
+    zone_norm: str | None = None
+    if zone_text:
+        zone_norm = dns_names.normalize_name(zone_text)
+        if not zone_norm:
+            raise AdminLogicHttpError(status_code=400, detail="invalid zone")
+
+    try:
+        result_raw = compact_fn(zone_apex=zone_norm)
+    except Exception as exc:
+        raise AdminLogicHttpError(
+            status_code=500, detail=f"zone_records compaction failed: {exc}"
+        ) from exc
+
+    result_map: Dict[str, bool] = {}
+    if isinstance(result_raw, dict):
+        for k, v in result_raw.items():
+            result_map[str(k)] = bool(v)
+
+    requested = len(result_map)
+    successful = sum(1 for ok in result_map.values() if bool(ok))
+    failed = max(0, int(requested - successful))
+
+    return {
+        "plugin": str(plugin_name),
+        "action": "compact_journals",
+        "zone": zone_norm,
+        "result": result_map,
+        "summary": {
+            "requested_zones": int(requested),
+            "successful": int(successful),
+            "failed": int(failed),
+        },
+    }
+
+
+def build_plugin_zone_records_dns_update_zone_payload(
+    plugins: Iterable[object],
+    plugin_name: str,
+    *,
+    zone: str,
+) -> Dict[str, Any]:
+    """Brief: Return DNS UPDATE status for one ZoneRecords zone.
+
+    Inputs:
+      - plugins: Iterable of plugin instances.
+      - plugin_name: Target ZoneRecords plugin name.
+      - zone: Zone apex name.
+
+    Outputs:
+      - Dict with keys: plugin, zone, dns_update.
+    """
+
+    target = find_plugin_instance_by_name(plugins, plugin_name)
+    if target is None:
+        raise AdminLogicHttpError(status_code=404, detail="plugin not found")
+
+    zone_norm = dns_names.normalize_name(zone)
+    if not zone_norm:
+        raise AdminLogicHttpError(status_code=400, detail="invalid zone")
+
+    dns_update_cfg = getattr(target, "_dns_update_config", None)
+    if not isinstance(dns_update_cfg, dict):
+        raise AdminLogicHttpError(status_code=409, detail="dns_update is disabled")
+    persistence_cfg = dns_update_cfg.get("persistence")
+    if not isinstance(persistence_cfg, dict) or not bool(
+        persistence_cfg.get("enabled", False)
+    ):
+        raise AdminLogicHttpError(status_code=409, detail="dns_update is disabled")
+
+    zones_raw = dns_update_cfg.get("zones")
+    configured_zones: set[str] = set()
+    if isinstance(zones_raw, list):
+        for item in zones_raw:
+            if not isinstance(item, dict):
+                continue
+            zone_name = dns_names.normalize_name(item.get("zone", ""))
+            if zone_name:
+                configured_zones.add(zone_name)
+    if zone_norm not in configured_zones:
+        raise AdminLogicHttpError(status_code=404, detail="zone not configured")
+
+    state_dir = getattr(target, "_dns_update_journal_state_dir", None)
+    if not state_dir:
+        raise AdminLogicHttpError(
+            status_code=409, detail="dns_update persistence state is unavailable"
+        )
+
+    last_seq = int(
+        getattr(target, "_dynamic_last_seq_by_zone", {}).get(zone_norm, 0) or 0
+    )
+    snapshot_seq: int | None = None
+    journal_bytes: int | None = None
+    try:
+        from ...plugins.resolve.zone_records.journal import load_manifest
+
+        manifest = load_manifest(zone_apex=zone_norm, base_dir=str(state_dir))
+        snapshot_seq = int(getattr(manifest, "snapshot_seq", 0) or 0)
+        journal_bytes = int(getattr(manifest, "journal_bytes", 0) or 0)
+    except Exception:
+        snapshot_seq = None
+        journal_bytes = None
+
+    return {
+        "plugin": str(plugin_name),
+        "zone": zone_norm,
+        "dns_update": {
+            "enabled": True,
+            "last_seq": int(last_seq),
+            "snapshot_seq": snapshot_seq,
+            "journal_bytes": journal_bytes,
+            "replay_entries": int(
+                getattr(target, "_dns_update_replay_entries", 0) or 0
+            ),
+            "compactions": int(
+                getattr(target, "_dns_update_compact_count", 0) or 0
+            ),
+            "rate_limit_hits": int(
+                getattr(target, "_dns_update_rate_limit_hits", 0) or 0
+            ),
+        },
     }
 
 
@@ -1496,7 +1649,7 @@ def get_admin_runtime_state(obj: object) -> object | None:
 
     try:
         state = getattr(obj, "admin_runtime", None)
-    except Exception:
+    except Exception:  # pragma: nocover - defensive getattr guard on foreign objects
         state = None
     return state
 
@@ -1529,7 +1682,7 @@ def add_admin_audit_event(
         return
     try:
         add_fn(action=action, target=target, ok=bool(ok), details=details or {})
-    except Exception:
+    except Exception:  # pragma: nocover - audit sink must never break admin actions
         return
 
 
@@ -1730,12 +1883,12 @@ def build_config_verify_payload(
             if fd is not None:
                 try:
                     os.close(fd)
-                except Exception:
+                except Exception:  # pragma: nocover - defensive cleanup after tempfile parse failure
                     pass
             if tmp_path:
                 try:
                     os.remove(tmp_path)
-                except Exception:
+                except Exception:  # pragma: nocover - defensive cleanup after tempfile parse failure
                     pass
     else:
         try:
@@ -1834,7 +1987,7 @@ def _find_plugins_by_class_name(
         try:
             if str(type(plugin).__name__) == str(class_name):
                 out.append(plugin)
-        except Exception:
+        except Exception:  # pragma: nocover - defensive against malformed plugin objects
             continue
     return out
 
@@ -2001,12 +2154,832 @@ def execute_records_validate(
     raise AdminLogicHttpError(status_code=400, detail="unknown records target")
 
 
+def _runtime_add_task(
+    runtime_state: object | None,
+    *,
+    task_type: str,
+    status: str,
+    details: Dict[str, Any] | None = None,
+) -> None:
+    """Brief: Best-effort append of an admin task/event record.
+
+    Inputs:
+      - runtime_state: Admin runtime state object.
+      - task_type: Task category identifier.
+      - status: Task status string.
+      - details: Optional compact task metadata.
+
+    Outputs:
+      - None.
+    """
+
+    if runtime_state is None:
+        return
+    add_fn = getattr(runtime_state, "add_task", None)
+    if not callable(add_fn):
+        return
+    try:
+        add_fn(task_type=str(task_type), status=str(status), details=details or {})
+    except Exception:  # pragma: nocover - best-effort task logging must not break admin actions
+        return
+
+
+def _build_temporary_record_tracking_key(
+    *,
+    target: str,
+    plugin_name: str,
+    payload: Dict[str, Any],
+) -> str:
+    """Brief: Build a stable temporary-record tracking key.
+
+    Inputs:
+      - target: Record target namespace.
+      - plugin_name: Target plugin instance name.
+      - payload: Apply/delete payload mapping.
+
+    Outputs:
+      - Stable key string.
+    """
+
+    target_text = str(target or "").strip().lower()
+    plugin_text = str(plugin_name or "").strip()
+    if target_text == "etc_hosts":
+        name_text = dns_names.normalize_name(str(payload.get("name", "")))
+        return f"{target_text}:{plugin_text}:{name_text}"
+    owner_text = dns_names.normalize_name(str(payload.get("owner", "")))
+    qtype_text = str(payload.get("qtype", "")).strip().upper()
+    value_text = str(payload.get("value", "")).strip()
+    return f"{target_text}:{plugin_text}:{owner_text}:{qtype_text}:{value_text}"
+
+
+def build_admin_restart_status_payload(
+    *,
+    runtime_state: object | None,
+) -> Dict[str, Any]:
+    """Brief: Build restart scheduling status payload.
+
+    Inputs:
+      - runtime_state: Optional admin runtime state object.
+
+    Outputs:
+      - Dict containing pending restart metadata.
+    """
+
+    pending = None
+    if runtime_state is not None:
+        get_fn = getattr(runtime_state, "get_restart_pending", None)
+        if callable(get_fn):
+            try:
+                raw = get_fn()
+                if isinstance(raw, dict):
+                    pending = dict(raw)
+            except Exception:
+                pending = None
+
+    if not isinstance(pending, dict):
+        return {
+            "status": "ok",
+            "pending": False,
+            "restart": None,
+        }
+
+    scheduled_at_ts = float(pending.get("scheduled_at_ts", 0.0) or 0.0)
+    expected_at_ts = float(pending.get("expected_at_ts", 0.0) or 0.0)
+    return {
+        "status": "ok",
+        "pending": bool(pending.get("scheduled", False)),
+        "restart": {
+            "signal": str(pending.get("signal", "SIGHUP")),
+            "delay_seconds": float(pending.get("delay_seconds", 0.0) or 0.0),
+            "reason": pending.get("reason"),
+            "scheduled_at_ts": scheduled_at_ts,
+            "scheduled_at": _ts_to_utc_iso(scheduled_at_ts) if scheduled_at_ts > 0.0 else None,
+            "expected_at_ts": expected_at_ts,
+            "expected_at": _ts_to_utc_iso(expected_at_ts) if expected_at_ts > 0.0 else None,
+        },
+    }
+
+
+def build_admin_tasks_payload(
+    *,
+    runtime_state: object | None,
+    limit: int,
+    task_type: str | None,
+    status: str | None,
+) -> Dict[str, Any]:
+    """Brief: Build payload listing recent admin task/event records.
+
+    Inputs:
+      - runtime_state: Optional admin runtime state object.
+      - limit: Maximum number of items requested.
+      - task_type: Optional task-type filter.
+      - status: Optional status filter.
+
+    Outputs:
+      - Dict containing task/event list.
+    """
+
+    items: List[Dict[str, Any]] = []
+    if runtime_state is not None:
+        list_fn = getattr(runtime_state, "list_tasks", None)
+        if callable(list_fn):
+            try:
+                raw = list_fn(limit=int(limit), task_type=task_type, status=status)
+                if isinstance(raw, list):
+                    items = [dict(it) for it in raw if isinstance(it, dict)]
+            except Exception:
+                items = []
+    for item in items:
+        created_at_ts = float(item.get("created_at_ts", 0.0) or 0.0)
+        item["created_at"] = _ts_to_utc_iso(created_at_ts) if created_at_ts > 0.0 else None
+    return {"status": "ok", "items": items, "count": len(items)}
+
+
+def build_admin_version_compat_payload(
+    *,
+    plugins: Iterable[object],
+    stats_collector: object | None,
+) -> Dict[str, Any]:
+    """Brief: Build feature compatibility payload by plugin class and runtime support.
+
+    Inputs:
+      - plugins: Loaded plugin instances.
+      - stats_collector: Optional stats collector.
+
+    Outputs:
+      - Dict with plugin capability matrix and query-log support details.
+    """
+
+    items: List[Dict[str, Any]] = []
+    for plugin in plugins or []:
+        plugin_name = str(getattr(plugin, "name", type(plugin).__name__) or type(plugin).__name__)
+        class_name = str(type(plugin).__name__)
+        item: Dict[str, Any] = {
+            "plugin": plugin_name,
+            "class_name": class_name,
+            "capabilities": {
+                "records_validate": bool(callable(getattr(plugin, "admin_validate_record_mutation", None))),
+                "records_apply": bool(callable(getattr(plugin, "admin_apply_record_mutation", None))),
+                "records_delete": bool(callable(getattr(plugin, "admin_delete_record_mutation", None))),
+                "rate_limit_list_keys": bool(callable(getattr(plugin, "admin_list_profile_keys", None))),
+                "rate_limit_clear": bool(callable(getattr(plugin, "admin_clear_profiles", None))),
+            },
+        }
+        items.append(item)
+
+    store = _get_store_from_collector(stats_collector) if stats_collector is not None else None
+    query_log: Dict[str, Any] = {"enabled": bool(store is not None), "clear_supported": False}
+    if store is not None:
+        supports_clear_fn = getattr(store, "supports_query_log_clear", None)
+        if callable(supports_clear_fn):
+            try:
+                query_log["clear_supported"] = bool(supports_clear_fn())
+            except Exception:
+                query_log["clear_supported"] = False
+
+    return {
+        "status": "ok",
+        "api_surface_version": "admin-v2",
+        "query_log": query_log,
+        "plugins": items,
+    }
+
+
+def build_config_diff_payload(
+    *,
+    raw_yaml: str | None,
+    config_path: str | None,
+    current_cfg: Dict[str, Any] | None,
+) -> Dict[str, Any]:
+    """Brief: Build a structured config diff summary without applying changes.
+
+    Inputs:
+      - raw_yaml: Optional YAML text to compare against runtime config.
+      - config_path: Active on-disk config path.
+      - current_cfg: Current runtime config mapping.
+
+    Outputs:
+      - Dict containing changed flag, analyze_config_change output, and path diffs.
+    """
+
+    import os
+    import tempfile
+    from foghorn import runtime_config as _runtime_config
+
+    cfg_path_text = str(config_path or "").strip()
+    if not cfg_path_text and raw_yaml is None:
+        raise AdminLogicHttpError(status_code=500, detail="config_path not configured")
+
+    desired_cfg: Dict[str, Any]
+    path_used = os.path.abspath(cfg_path_text) if cfg_path_text else None
+    if isinstance(raw_yaml, str):
+        fd: int | None = None
+        tmp_path: str | None = None
+        try:
+            fd, tmp_path = tempfile.mkstemp(prefix="foghorn-admin-diff-", suffix=".yaml")
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                fd = None
+                f.write(raw_yaml)
+            desired_cfg = _runtime_config.load_config_from_disk(config_path=str(tmp_path))
+            path_used = str(tmp_path)
+        except Exception as exc:
+            raise AdminLogicHttpError(
+                status_code=400, detail=f"failed to parse/validate config: {exc}"
+            ) from exc
+        finally:
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except Exception:
+                    pass
+            if tmp_path:
+                try:
+                    os.remove(tmp_path)
+                except Exception:
+                    pass
+    else:
+        try:
+            desired_cfg = _runtime_config.load_config_from_disk(config_path=str(cfg_path_text))
+        except Exception as exc:
+            raise AdminLogicHttpError(
+                status_code=400, detail=f"failed to parse/validate config: {exc}"
+            ) from exc
+
+    current = current_cfg if isinstance(current_cfg, dict) else {}
+    analysis = _runtime_config.analyze_config_change(desired_cfg, current_cfg=current)
+
+    def _flatten_paths(obj: Any, prefix: str = "") -> Dict[str, str]:
+        out: Dict[str, str] = {}
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                key = str(k)
+                p = f"{prefix}.{key}" if prefix else key
+                out.update(_flatten_paths(v, p))
+            if not obj and prefix:
+                out[prefix] = "{}"
+            return out
+        if isinstance(obj, list):
+            if prefix:
+                out[prefix] = f"[len={len(obj)}]"
+            return out
+        if prefix:
+            out[prefix] = repr(obj)
+        return out
+
+    current_flat = _flatten_paths(current)
+    desired_flat = _flatten_paths(desired_cfg)
+    current_paths = set(current_flat.keys())
+    desired_paths = set(desired_flat.keys())
+    added = sorted(desired_paths - current_paths)
+    removed = sorted(current_paths - desired_paths)
+    modified = sorted(
+        p for p in (current_paths & desired_paths) if current_flat.get(p) != desired_flat.get(p)
+    )
+
+    return {
+        "status": "ok",
+        "path": path_used,
+        "changed": bool(analysis.get("changed", False)),
+        "analysis": dict(analysis or {}),
+        "diff": {
+            "added_paths": added,
+            "removed_paths": removed,
+            "modified_paths": modified,
+            "added_count": len(added),
+            "removed_count": len(removed),
+            "modified_count": len(modified),
+        },
+    }
+
+
+def build_config_lint_payload(
+    *,
+    raw_yaml: str | None,
+    config_path: str | None,
+    current_cfg: Dict[str, Any] | None,
+) -> Dict[str, Any]:
+    """Brief: Build non-fatal lint advisories for config changes.
+
+    Inputs:
+      - raw_yaml: Optional YAML text to lint.
+      - config_path: Active on-disk config path.
+      - current_cfg: Current runtime config mapping.
+
+    Outputs:
+      - Dict containing lint issues and summary fields.
+    """
+
+    diff_payload = build_config_diff_payload(
+        raw_yaml=raw_yaml,
+        config_path=config_path,
+        current_cfg=current_cfg,
+    )
+    analysis = diff_payload.get("analysis", {}) if isinstance(diff_payload.get("analysis"), dict) else {}
+    diff_obj = diff_payload.get("diff", {}) if isinstance(diff_payload.get("diff"), dict) else {}
+    issues: List[Dict[str, Any]] = []
+
+    if not bool(diff_payload.get("changed", False)):
+        issues.append(
+            {
+                "level": "info",
+                "rule_id": "no_changes",
+                "path": "",
+                "message": "No effective config changes detected.",
+            }
+        )
+    if bool(analysis.get("restart_required", False)):
+        issues.append(
+            {
+                "level": "warning",
+                "rule_id": "restart_required",
+                "path": "",
+                "message": "Changes require restart for full effect.",
+            }
+        )
+    if bool(analysis.get("reload_required", False)) and not bool(analysis.get("restart_required", False)):
+        issues.append(
+            {
+                "level": "info",
+                "rule_id": "reload_recommended",
+                "path": "",
+                "message": "Changes are reloadable without restart.",
+            }
+        )
+    modified_count = int(diff_obj.get("modified_count", 0) or 0)
+    if modified_count > 50:
+        issues.append(
+            {
+                "level": "warning",
+                "rule_id": "large_change_set",
+                "path": "",
+                "message": f"Large change set detected ({modified_count} modified paths).",
+            }
+        )
+
+    return {
+        "status": "ok",
+        "path": diff_payload.get("path"),
+        "changed": bool(diff_payload.get("changed", False)),
+        "issues": issues,
+        "analysis": analysis,
+        "diff_summary": {
+            "added_count": int(diff_obj.get("added_count", 0) or 0),
+            "removed_count": int(diff_obj.get("removed_count", 0) or 0),
+            "modified_count": modified_count,
+        },
+    }
+
+
+def execute_query_log_export(
+    *,
+    store: object | None,
+    filters: Dict[str, Any],
+    export_format: str,
+    limit: int,
+) -> Dict[str, Any]:
+    """Brief: Export query-log rows via existing select_query_log pagination.
+
+    Inputs:
+      - store: Query-log store object.
+      - filters: Filter mapping (client_ip/qtype/qname/rcode/status/source/ede_code/start_ts/end_ts).
+      - export_format: One of jsonl/csv.
+      - limit: Maximum rows to export.
+
+    Outputs:
+      - Dict containing export rows and text payload.
+    """
+
+    if store is None or not callable(getattr(store, "select_query_log", None)):
+        raise AdminLogicHttpError(status_code=404, detail="query_log store unavailable")
+
+    fmt = str(export_format or "jsonl").strip().lower()
+    if fmt not in {"jsonl", "csv"}:
+        raise AdminLogicHttpError(status_code=400, detail="format must be jsonl or csv")
+    max_rows = max(1, min(int(limit or 1000), 100000))
+    page_size = min(1000, max_rows)
+    page = 1
+    rows: List[Dict[str, Any]] = []
+
+    while len(rows) < max_rows:
+        try:
+            payload = store.select_query_log(
+                client_ip=filters.get("client_ip"),
+                qtype=filters.get("qtype"),
+                qname=filters.get("qname"),
+                rcode=filters.get("rcode"),
+                status=filters.get("status"),
+                source=filters.get("source"),
+                ede_code=filters.get("ede_code"),
+                start_ts=filters.get("start_ts"),
+                end_ts=filters.get("end_ts"),
+                page=page,
+                page_size=page_size,
+            )
+        except Exception as exc:
+            raise AdminLogicHttpError(status_code=500, detail=f"query_log export failed: {exc}") from exc
+
+        items = payload.get("items") if isinstance(payload, dict) else None
+        if not isinstance(items, list) or not items:
+            break
+        for item in items:
+            if isinstance(item, dict):
+                rows.append(dict(item))
+            if len(rows) >= max_rows:
+                break
+        if len(items) < page_size:
+            break
+        page += 1
+
+    if fmt == "jsonl":
+        lines = [json.dumps(row, sort_keys=True, default=str) for row in rows]
+        return {
+            "status": "ok",
+            "format": "jsonl",
+            "count": len(rows),
+            "truncated": len(rows) >= max_rows,
+            "content_type": "application/x-ndjson",
+            "data": "\n".join(lines),
+        }
+
+    csv_columns = ["id", "ts", "timestamp", "client_ip", "qname", "qtype", "rcode", "status", "upstream_id", "error", "first"]
+    csv_lines = [",".join(csv_columns)]
+    for row in rows:
+        values = []
+        for col in csv_columns:
+            raw = row.get(col)
+            text = str(raw) if raw is not None else ""
+            text = text.replace('"', '""')
+            if "," in text or "\n" in text or '"' in text:
+                text = f'"{text}"'
+            values.append(text)
+        csv_lines.append(",".join(values))
+    return {
+        "status": "ok",
+        "format": "csv",
+        "count": len(rows),
+        "truncated": len(rows) >= max_rows,
+        "content_type": "text/csv",
+        "data": "\n".join(csv_lines),
+    }
+
+
+def execute_query_log_compact(
+    *,
+    store: object | None,
+    mode: str,
+    dry_run: bool,
+) -> Dict[str, Any]:
+    """Brief: Run query-log backend maintenance operations.
+
+    Inputs:
+      - store: Query-log store object.
+      - mode: One of vacuum/optimize/prune_only.
+      - dry_run: Whether to report only without mutating.
+
+    Outputs:
+      - Dict containing maintenance outcome.
+    """
+
+    if store is None:
+        raise AdminLogicHttpError(status_code=404, detail="query_log store unavailable")
+    mode_text = str(mode or "vacuum").strip().lower()
+    if mode_text not in {"vacuum", "optimize", "prune_only"}:
+        raise AdminLogicHttpError(status_code=400, detail="mode must be vacuum, optimize, or prune_only")
+
+    if str(type(store).__name__) != "StatsSQLiteStore":
+        raise AdminLogicHttpError(status_code=400, detail="query_log compact is supported only for sqlite backend")
+
+    conn = getattr(store, "_conn", None)
+    if conn is None:
+        raise AdminLogicHttpError(status_code=500, detail="sqlite backend connection unavailable")
+    lock = getattr(store, "_lock", None)
+    if lock is None:
+        raise AdminLogicHttpError(status_code=500, detail="sqlite backend lock unavailable")
+
+    def _count_rows() -> int:
+        cur = conn.execute("SELECT COUNT(1) FROM query_log")
+        row = cur.fetchone()
+        return int(row[0] or 0) if row else 0
+
+    with lock:
+        try:
+            if bool(getattr(store, "_batch_writes", False)):
+                flush_fn = getattr(store, "_flush_locked", None)
+                if callable(flush_fn):
+                    flush_fn()
+            before_rows = _count_rows()
+            if dry_run:
+                return {"status": "ok", "mode": mode_text, "dry_run": True, "before_rows": before_rows, "after_rows": before_rows}
+            if mode_text == "vacuum":
+                conn.execute("VACUUM")
+            elif mode_text == "optimize":
+                conn.execute("PRAGMA optimize")
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            after_rows = _count_rows()
+            return {"status": "ok", "mode": mode_text, "dry_run": False, "before_rows": before_rows, "after_rows": after_rows}
+        except Exception as exc:
+            raise AdminLogicHttpError(status_code=500, detail=f"query_log compact failed: {exc}") from exc
+
+
+def execute_rate_limit_hot_keys(
+    *,
+    plugins: Iterable[object],
+    plugin_name: str | None,
+    limit: int,
+) -> Dict[str, Any]:
+    """Brief: Return current/highest RPS keys from RateLimit plugin state.
+
+    Inputs:
+      - plugins: Loaded plugin instances.
+      - plugin_name: Optional plugin instance filter.
+      - limit: Maximum rows.
+
+    Outputs:
+      - Dict with per-plugin hot-key rows.
+    """
+
+    targets = _find_plugins_by_class_name(plugins, "RateLimit")
+    if plugin_name is not None and str(plugin_name).strip():
+        n = str(plugin_name).strip()
+        targets = [p for p in targets if str(getattr(p, "name", "")) == n]
+    if not targets:
+        raise AdminLogicHttpError(status_code=404, detail="rate-limit plugin not found")
+
+    lim = max(1, min(int(limit or 50), 1000))
+    out_items: List[Dict[str, Any]] = []
+    for plugin in targets:
+        snapshot_fn = getattr(plugin, "_get_current_window_rps_snapshot", None)
+        rps_rows: Dict[str, float] = {}
+        if callable(snapshot_fn):
+            try:
+                raw = snapshot_fn(limit=int(lim * 4))
+                if isinstance(raw, dict):
+                    rps_rows = {str(k): float(v or 0.0) for k, v in raw.items()}
+            except Exception:
+                rps_rows = {}
+
+        profile_meta: Dict[str, Dict[str, Any]] = {}
+        db_lock = getattr(plugin, "_db_lock", None)
+        conn = getattr(plugin, "_conn", None)
+        if db_lock is not None and conn is not None:
+            try:
+                with db_lock:
+                    cur = conn.cursor()
+                    cur.execute(
+                        "SELECT key, avg_rps, max_rps, samples, last_update FROM rate_profiles WHERE key != ?",
+                        ("global",),
+                    )
+                    for key, avg_rps, max_rps, samples, last_update in list(cur.fetchall() or []):
+                        profile_meta[str(key)] = {
+                            "avg_rps": float(avg_rps or 0.0),
+                            "max_rps": float(max_rps or 0.0),
+                            "samples": int(samples or 0),
+                            "last_update": int(last_update or 0),
+                        }
+            except Exception:
+                profile_meta = {}
+
+        combined_keys = set(rps_rows.keys()) | set(profile_meta.keys())
+        rows: List[Dict[str, Any]] = []
+        for key_text in combined_keys:
+            meta = profile_meta.get(key_text, {})
+            last_update_ts = int(meta.get("last_update", 0) or 0)
+            rows.append(
+                {
+                    "key": str(key_text),
+                    "current_rps": float(rps_rows.get(key_text, 0.0)),
+                    "avg_rps": float(meta.get("avg_rps", 0.0) or 0.0),
+                    "max_rps": float(meta.get("max_rps", 0.0) or 0.0),
+                    "samples": int(meta.get("samples", 0) or 0),
+                    "last_seen_ts": last_update_ts,
+                    "last_seen": _ts_to_utc_iso(float(last_update_ts)) if last_update_ts > 0 else None,
+                    "denies": 0,
+                }
+            )
+        rows.sort(key=lambda r: (float(r.get("current_rps", 0.0)), float(r.get("avg_rps", 0.0))), reverse=True)
+        out_items.append({"plugin": str(getattr(plugin, "name", "RateLimit")), "items": rows[:lim]})
+
+    return {"status": "ok", "items": out_items}
+
+
+def execute_rate_limit_reset_counters(
+    *,
+    plugins: Iterable[object],
+    plugin_name: str | None,
+) -> Dict[str, Any]:
+    """Brief: Reset in-memory RateLimit counters while preserving persisted profiles.
+
+    Inputs:
+      - plugins: Loaded plugin instances.
+      - plugin_name: Optional plugin instance name filter.
+
+    Outputs:
+      - Dict with per-plugin reset summary.
+    """
+
+    targets = _find_plugins_by_class_name(plugins, "RateLimit")
+    if plugin_name is not None and str(plugin_name).strip():
+        n = str(plugin_name).strip()
+        targets = [p for p in targets if str(getattr(p, "name", "")) == n]
+    if not targets:
+        raise AdminLogicHttpError(status_code=404, detail="rate-limit plugin not found")
+
+    out_items: List[Dict[str, Any]] = []
+    for plugin in targets:
+        active_count = 0
+        active_lock = getattr(plugin, "_active_window_lock", None)
+        active_map = getattr(plugin, "_active_window_counts", None)
+        if active_lock is not None and isinstance(active_map, dict):
+            with active_lock:
+                active_count = len(active_map)
+                active_map.clear()
+                setattr(plugin, "_active_window_id", None)
+
+        for attr in ["_deny_episode_count", "_burst_exceeded_count", "_below_threshold_count"]:
+            m = getattr(plugin, attr, None)
+            if isinstance(m, dict):
+                m.clear()
+
+        out_items.append(
+            {
+                "plugin": str(getattr(plugin, "name", "RateLimit")),
+                "active_window_keys_cleared": int(active_count),
+            }
+        )
+    return {"status": "ok", "items": out_items}
+
+
+def execute_records_list(
+    *,
+    runtime_state: object | None,
+    target: str,
+    plugin_name: str,
+    include_expired: bool = True,
+    limit: int = 500,
+) -> Dict[str, Any]:
+    """Brief: List tracked temporary records for one plugin/target.
+
+    Inputs:
+      - runtime_state: Optional admin runtime state.
+      - target: Record target namespace.
+      - plugin_name: Plugin instance name.
+      - include_expired: Whether expired items are included.
+      - limit: Maximum rows.
+
+    Outputs:
+      - Dict with temporary-record rows.
+    """
+
+    if runtime_state is None:
+        return {"status": "ok", "items": [], "count": 0}
+    list_fn = getattr(runtime_state, "list_temporary_records", None)
+    if not callable(list_fn):
+        return {"status": "ok", "items": [], "count": 0}
+    try:
+        raw = list_fn(
+            target=str(target),
+            plugin=str(plugin_name),
+            include_expired=bool(include_expired),
+            limit=int(limit),
+        )
+    except Exception as exc:
+        raise AdminLogicHttpError(status_code=500, detail=f"failed to list temporary records: {exc}") from exc
+    items = [dict(it) for it in raw if isinstance(it, dict)] if isinstance(raw, list) else []
+    for item in items:
+        expires_at_ts = float(item.get("expires_at_ts", 0.0) or 0.0)
+        created_at_ts = float(item.get("created_at_ts", 0.0) or 0.0)
+        updated_at_ts = float(item.get("updated_at_ts", 0.0) or 0.0)
+        item["expires_at"] = _ts_to_utc_iso(expires_at_ts) if expires_at_ts > 0.0 else None
+        item["created_at"] = _ts_to_utc_iso(created_at_ts) if created_at_ts > 0.0 else None
+        item["updated_at"] = _ts_to_utc_iso(updated_at_ts) if updated_at_ts > 0.0 else None
+    return {"status": "ok", "items": items, "count": len(items)}
+
+
+def execute_records_purge_expired(
+    *,
+    runtime_state: object | None,
+    plugins: Iterable[object],
+    target: str,
+    plugin_name: str,
+) -> Dict[str, Any]:
+    """Brief: Purge expired tracked temporary records and delete plugin entries.
+
+    Inputs:
+      - runtime_state: Optional admin runtime state.
+      - plugins: Loaded plugin instances.
+      - target: Record target namespace.
+      - plugin_name: Plugin instance name.
+
+    Outputs:
+      - Dict summarizing removed/failed items.
+    """
+
+    if runtime_state is None:
+        return {"status": "ok", "removed": 0, "failed": 0, "items": []}
+    purge_fn = getattr(runtime_state, "purge_expired_temporary_records", None)
+    if not callable(purge_fn):
+        return {"status": "ok", "removed": 0, "failed": 0, "items": []}
+
+    plugin = find_plugin_instance_by_name(plugins, plugin_name)
+    if plugin is None:
+        raise AdminLogicHttpError(status_code=404, detail="plugin not found")
+
+    try:
+        raw_items = purge_fn()
+    except Exception as exc:
+        raise AdminLogicHttpError(status_code=500, detail=f"failed to purge expired records: {exc}") from exc
+    candidates = [dict(it) for it in raw_items if isinstance(it, dict)]
+    candidates = [it for it in candidates if str(it.get("target", "")) == str(target) and str(it.get("plugin", "")) == str(plugin_name)]
+
+    removed = 0
+    failed = 0
+    out_items: List[Dict[str, Any]] = []
+    for item in candidates:
+        payload = item.get("payload", {}) if isinstance(item.get("payload"), dict) else {}
+        try:
+            if str(target) == "etc_hosts":
+                delete_fn = getattr(plugin, "admin_delete_record_mutation", None)
+                if not callable(delete_fn):
+                    raise ValueError("etc_hosts delete unsupported")
+                delete_fn(
+                    name=str(payload.get("name", "")),
+                    persist=False,
+                    file_path=None,
+                )
+            else:
+                delete_fn = getattr(plugin, "admin_delete_record_mutation", None)
+                if not callable(delete_fn):
+                    raise ValueError("zone_records delete unsupported")
+                delete_fn(
+                    owner=str(payload.get("owner", "")),
+                    qtype=payload.get("qtype"),
+                    value=payload.get("value"),
+                    persist=False,
+                    file_path=None,
+                )
+            removed += 1
+            out_items.append({"key": item.get("key"), "status": "removed"})
+        except Exception as exc:
+            failed += 1
+            out_items.append({"key": item.get("key"), "status": "failed", "detail": str(exc)})
+    return {"status": "ok", "removed": int(removed), "failed": int(failed), "items": out_items}
+
+
+def build_admin_diag_runtime_snapshot(
+    *,
+    cfg: Dict[str, Any],
+    config_path: str | None,
+    stats_collector: object | None,
+    plugins: Iterable[object],
+    runtime_state: object | None,
+) -> Dict[str, Any]:
+    """Brief: Build compact diagnostics payload for runtime triage.
+
+    Inputs:
+      - cfg: Current runtime config mapping.
+      - config_path: Active config path.
+      - stats_collector: Optional stats collector.
+      - plugins: Loaded plugins.
+      - runtime_state: Optional admin runtime state.
+
+    Outputs:
+      - Dict with compact status/capabilities/restart/task summaries.
+    """
+
+    status_payload = build_admin_status_payload(
+        cfg=cfg,
+        config_path=config_path,
+        stats_collector=stats_collector,
+        plugins=plugins,
+        admin_runtime_state=runtime_state,
+    )
+    capabilities_payload = build_admin_capabilities_payload(
+        stats_collector=stats_collector,
+        plugins=plugins,
+    )
+    restart_payload = build_admin_restart_status_payload(runtime_state=runtime_state)
+    tasks_payload = build_admin_tasks_payload(
+        runtime_state=runtime_state,
+        limit=20,
+        task_type=None,
+        status=None,
+    )
+    return {
+        "status": "ok",
+        "status_overview": status_payload,
+        "capabilities": capabilities_payload,
+        "restart": restart_payload,
+        "tasks": tasks_payload.get("items", []),
+    }
+
+
 def execute_records_apply(
     *,
     plugins: Iterable[object],
     target: str,
     plugin_name: str,
     payload: Dict[str, Any],
+    runtime_state: object | None = None,
 ) -> Dict[str, Any]:
     """Brief: Apply etc_hosts/zone_records mutation request.
 
@@ -2024,6 +2997,7 @@ def execute_records_apply(
     if plugin is None:
         raise AdminLogicHttpError(status_code=404, detail="plugin not found")
     persist = bool(payload.get("persist", False))
+    ttl_seconds = int(payload.get("ttl", 300) or 300)
     file_path = payload.get("file_path")
     if target == "etc_hosts":
         fn = getattr(plugin, "admin_apply_record_mutation", None)
@@ -2040,7 +3014,35 @@ def execute_records_apply(
             )
         except Exception as exc:
             raise AdminLogicHttpError(status_code=400, detail=str(exc)) from exc
-        return {"status": "ok", "target": target, "plugin": plugin_name, "result": out}
+        result_payload = {"status": "ok", "target": target, "plugin": plugin_name, "result": out}
+        if runtime_state is not None:
+            key_text = _build_temporary_record_tracking_key(
+                target=target,
+                plugin_name=plugin_name,
+                payload=payload,
+            )
+            if persist:
+                remove_fn = getattr(runtime_state, "remove_temporary_record", None)
+                if callable(remove_fn):
+                    try:
+                        remove_fn(key=key_text)
+                    except Exception:
+                        pass
+            else:
+                upsert_fn = getattr(runtime_state, "upsert_temporary_record", None)
+                if callable(upsert_fn):
+                    try:
+                        upsert_fn(
+                            key=key_text,
+                            target=str(target),
+                            plugin=str(plugin_name),
+                            payload={"name": str(payload.get("name", ""))},
+                            ttl_seconds=int(ttl_seconds),
+                            persist=False,
+                        )
+                    except Exception:
+                        pass
+        return result_payload
     if target == "zone_records":
         fn = getattr(plugin, "admin_apply_record_mutation", None)
         if not callable(fn):
@@ -2058,7 +3060,39 @@ def execute_records_apply(
             )
         except Exception as exc:
             raise AdminLogicHttpError(status_code=400, detail=str(exc)) from exc
-        return {"status": "ok", "target": target, "plugin": plugin_name, "result": out}
+        result_payload = {"status": "ok", "target": target, "plugin": plugin_name, "result": out}
+        if runtime_state is not None:
+            key_text = _build_temporary_record_tracking_key(
+                target=target,
+                plugin_name=plugin_name,
+                payload=payload,
+            )
+            if persist:
+                remove_fn = getattr(runtime_state, "remove_temporary_record", None)
+                if callable(remove_fn):
+                    try:
+                        remove_fn(key=key_text)
+                    except Exception:
+                        pass
+            else:
+                upsert_fn = getattr(runtime_state, "upsert_temporary_record", None)
+                if callable(upsert_fn):
+                    try:
+                        upsert_fn(
+                            key=key_text,
+                            target=str(target),
+                            plugin=str(plugin_name),
+                            payload={
+                                "owner": str(payload.get("owner", "")),
+                                "qtype": payload.get("qtype"),
+                                "value": str(payload.get("value", "")),
+                            },
+                            ttl_seconds=int(ttl_seconds),
+                            persist=False,
+                        )
+                    except Exception:
+                        pass
+        return result_payload
     raise AdminLogicHttpError(status_code=400, detail="unknown records target")
 
 
@@ -2068,6 +3102,7 @@ def execute_records_delete(
     target: str,
     plugin_name: str,
     payload: Dict[str, Any],
+    runtime_state: object | None = None,
 ) -> Dict[str, Any]:
     """Brief: Delete etc_hosts/zone_records mutation target entries.
 
@@ -2100,7 +3135,20 @@ def execute_records_delete(
             )
         except Exception as exc:
             raise AdminLogicHttpError(status_code=400, detail=str(exc)) from exc
-        return {"status": "ok", "target": target, "plugin": plugin_name, "result": out}
+        result_payload = {"status": "ok", "target": target, "plugin": plugin_name, "result": out}
+        if runtime_state is not None:
+            key_text = _build_temporary_record_tracking_key(
+                target=target,
+                plugin_name=plugin_name,
+                payload=payload,
+            )
+            remove_fn = getattr(runtime_state, "remove_temporary_record", None)
+            if callable(remove_fn):
+                try:
+                    remove_fn(key=key_text)
+                except Exception:
+                    pass
+        return result_payload
     if target == "zone_records":
         fn = getattr(plugin, "admin_delete_record_mutation", None)
         if not callable(fn):
@@ -2117,5 +3165,47 @@ def execute_records_delete(
             )
         except Exception as exc:
             raise AdminLogicHttpError(status_code=400, detail=str(exc)) from exc
-        return {"status": "ok", "target": target, "plugin": plugin_name, "result": out}
+        result_payload = {"status": "ok", "target": target, "plugin": plugin_name, "result": out}
+        if runtime_state is not None:
+            remove_fn = getattr(runtime_state, "remove_temporary_record", None)
+            list_fn = getattr(runtime_state, "list_temporary_records", None)
+            if callable(remove_fn):
+                if str(payload.get("qtype", "")).strip() or str(payload.get("value", "")).strip():
+                    key_text = _build_temporary_record_tracking_key(
+                        target=target,
+                        plugin_name=plugin_name,
+                        payload=payload,
+                    )
+                    try:
+                        remove_fn(key=key_text)
+                    except Exception:
+                        pass
+                elif callable(list_fn):
+                    try:
+                        raw_items = list_fn(
+                            target=str(target),
+                            plugin=str(plugin_name),
+                            include_expired=True,
+                            limit=5000,
+                        )
+                    except Exception:
+                        raw_items = []
+                    owner_norm = dns_names.normalize_name(str(payload.get("owner", "")))
+                    if isinstance(raw_items, list):
+                        for item in raw_items:
+                            if not isinstance(item, dict):
+                                continue
+                            payload_map = item.get("payload", {})
+                            if not isinstance(payload_map, dict):
+                                continue
+                            if dns_names.normalize_name(str(payload_map.get("owner", ""))) != owner_norm:
+                                continue
+                            key_text = str(item.get("key", "")).strip()
+                            if not key_text:
+                                continue
+                            try:
+                                remove_fn(key=key_text)
+                            except Exception:
+                                continue
+        return result_payload
     raise AdminLogicHttpError(status_code=400, detail="unknown records target")

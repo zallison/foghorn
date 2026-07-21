@@ -641,12 +641,32 @@ def test_threaded_plugin_api_expansion_routes(
     )
     monkeypatch.setattr(
         th_mod._admin_logic,
+        "build_plugin_zone_records_dns_update_zone_payload",
+        lambda _plugins, plugin_name, zone: {
+            "plugin": plugin_name,
+            "zone": zone,
+            "dns_update": {"enabled": True, "last_seq": 0},
+        },
+    )
+    monkeypatch.setattr(
+        th_mod._admin_logic,
         "build_plugin_reload_payload",
         lambda _plugins, plugin_name, plugin_kind: {
             "plugin": plugin_name,
             "action": "reload",
             "kind": plugin_kind,
             "data": {"ok": True},
+        },
+    )
+    monkeypatch.setattr(
+        th_mod._admin_logic,
+        "build_plugin_zone_records_compact_payload",
+        lambda _plugins, plugin_name, zone: {
+            "plugin": plugin_name,
+            "action": "compact_journals",
+            "zone": zone,
+            "result": {"example.com": True},
+            "summary": {"requested_zones": 1, "successful": 1, "failed": 0},
         },
     )
     monkeypatch.setattr(
@@ -668,8 +688,14 @@ def test_threaded_plugin_api_expansion_routes(
         ("GET", "/api/v1/plugins/demo/mdns/services?status=up&type=_http._tcp"),
         ("GET", "/api/v1/plugins/demo/rate_limit/profiles?limit=10&sort=-samples"),
         ("GET", "/api/v1/plugins/demo/zone_records/lookup?owner=example.com&qtype=A"),
+        ("GET", "/api/v1/plugins/demo/zone_records/dns_update/zones/example.com"),
         ("POST", "/api/v1/plugins/demo/etc_hosts/reload"),
         ("POST", "/api/v1/plugins/demo/docker_hosts/reload"),
+        (
+            "POST",
+            "/api/v1/plugins/demo/zone_records/compact",
+        ),
+        ("POST", "/api/v1/plugins/demo/zone_records/reload"),
         ("GET", "/api/v1/plugins/demo/upstream_router/evaluate?qname=www.example.com"),
     ]
 
@@ -679,6 +705,29 @@ def test_threaded_plugin_api_expansion_routes(
         payload = json.loads(body.decode("utf-8"))
         assert payload.get("plugin") == "demo"
         assert "server_time" in payload
+
+
+def test_threaded_plugin_zone_records_compact_invalid_json_returns_400() -> None:
+    """Brief: Threaded compact endpoint returns 400 for invalid JSON bodies.
+
+    Inputs:
+      - POST body that is not valid JSON.
+
+    Outputs:
+      - HTTP 400 with invalid JSON detail and no handler crash.
+    """
+
+    cfg = {"webserver": {"auth": {"mode": "none"}}}
+    status_code, _headers, body = _one_shot_http_request(
+        method="POST",
+        path="/api/v1/plugins/demo/zone_records/compact",
+        config=cfg,
+        headers={"Content-Type": "application/json"},
+        body=b"{",
+    )
+    assert status_code == 400
+    payload = json.loads(body.decode("utf-8"))
+    assert payload.get("detail") == "invalid JSON body"
 
 
 def test_threaded_plugin_pages_and_ratelimit_require_auth_in_token_mode() -> None:
@@ -717,6 +766,58 @@ def test_threaded_plugin_pages_and_ratelimit_require_auth_in_token_mode() -> Non
             headers={"Authorization": "Bearer secret-token"},
         )
         assert st_auth == 200
+
+
+def test_threaded_admin_route_enforces_rate_limit_with_plugin_backend() -> None:
+    """Brief: Threaded admin endpoint returns 429 when plugin backend denies request.
+
+    Inputs:
+      - Config with admin_rate_limit enabled and backend=plugin.
+      - Fake RateLimit plugin exposing check_admin_rate_limit() deny response.
+
+    Outputs:
+      - /api/v1/admin/status returns HTTP 429 and Retry-After header.
+    """
+
+    class RateLimit:
+        name = "rl"
+
+        def check_admin_rate_limit(
+            self,
+            *,
+            key: str,
+            now_ts: float,
+        ) -> dict[str, object]:
+            _ = key, now_ts
+            return {
+                "allowed": False,
+                "limit": 1,
+                "remaining": 0,
+                "retry_after_seconds": 5,
+                "backend": "plugin-hook",
+            }
+
+    cfg = {
+        "server": {
+            "http": {
+                "auth": {"mode": "none"},
+                "admin_rate_limit": {
+                    "enabled": True,
+                    "backend": "plugin",
+                },
+            }
+        }
+    }
+    status_code, headers, body = _one_shot_http_request(
+        method="GET",
+        path="/api/v1/admin/status",
+        config=cfg,
+        plugins=[RateLimit()],
+    )
+    assert status_code == 429
+    assert "retry-after" in headers
+    payload = json.loads(body.decode("utf-8"))
+    assert payload.get("detail") == "admin API rate limit exceeded"
 
 
 def test_threaded_config_schema_paths_match() -> None:

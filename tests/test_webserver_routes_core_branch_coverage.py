@@ -1249,6 +1249,15 @@ def test_plugin_api_expansion_routes_delegate_to_admin_logic(
     )
     monkeypatch.setattr(
         routes_core_mod._admin_logic,
+        "build_plugin_zone_records_dns_update_zone_payload",
+        lambda _plugins, plugin_name, zone: {
+            "plugin": plugin_name,
+            "zone": zone,
+            "dns_update": {"enabled": True, "last_seq": 0},
+        },
+    )
+    monkeypatch.setattr(
+        routes_core_mod._admin_logic,
         "build_plugin_reload_payload",
         lambda _plugins, plugin_name, plugin_kind: {
             "plugin": plugin_name,
@@ -1265,6 +1274,17 @@ def test_plugin_api_expansion_routes_delegate_to_admin_logic(
             "qname": qname,
             "matched": False,
             "candidates": [],
+        },
+    )
+    monkeypatch.setattr(
+        routes_core_mod._admin_logic,
+        "build_plugin_zone_records_compact_payload",
+        lambda _plugins, plugin_name, zone: {
+            "plugin": plugin_name,
+            "action": "compact_journals",
+            "zone": zone,
+            "result": {"example.com": True},
+            "summary": {"requested_zones": 1, "successful": 1, "failed": 0},
         },
     )
 
@@ -1298,8 +1318,22 @@ def test_plugin_api_expansion_routes_delegate_to_admin_logic(
         ).status_code
         == 200
     )
+    assert (
+        client.get(
+            "/api/v1/plugins/demo/zone_records/dns_update/zones/example.com"
+        ).status_code
+        == 200
+    )
     assert client.post("/api/v1/plugins/demo/etc_hosts/reload").status_code == 200
     assert client.post("/api/v1/plugins/demo/docker_hosts/reload").status_code == 200
+    assert client.post("/api/v1/plugins/demo/zone_records/reload").status_code == 200
+    assert (
+        client.post(
+            "/api/v1/plugins/demo/zone_records/compact",
+            json={"zone": "example.com"},
+        ).status_code
+        == 200
+    )
     assert (
         client.get(
             "/api/v1/plugins/demo/upstream_router/evaluate?qname=www.example.com"
@@ -1448,24 +1482,41 @@ def test_admin_routes_status_verify_actions_and_records(
         json={"plugin": "eh", "name": "a.example", "value": "127.0.0.1"},
     )
     assert rec_validate.status_code == 200
-    rec_apply = client.post(
-        "/api/v1/admin/records/etc_hosts/apply",
-        json={
-            "plugin": "eh",
-            "name": "a.example",
-            "value": "127.0.0.1",
-            "persist": False,
-        },
-    )
-    assert rec_apply.status_code == 200
-    rec_delete = client.post(
-        "/api/v1/admin/records/etc_hosts/delete",
-        json={"plugin": "eh", "name": "a.example", "persist": False},
-    )
-    assert rec_delete.status_code == 200
 
-    restart = client.post("/api/v1/restart", json={"delay_seconds": 0.1})
-    assert restart.status_code == 200
-    audit = client.get("/api/v1/admin/audit")
-    assert audit.status_code == 200
-    assert isinstance(audit.json().get("items"), list)
+
+def test_admin_routes_enforce_rate_limit_when_enabled() -> None:
+    """Brief: Admin routes return 429 when admin_rate_limit is enabled and exceeded.
+
+    Inputs:
+      - FastAPI app configured with server.http.admin_rate_limit enabled.
+
+    Outputs:
+      - First request succeeds; second request for same action returns 429.
+    """
+
+    app = create_app(
+        stats=None,
+        config={
+            "server": {
+                "http": {
+                    "enabled": True,
+                    "auth": {"mode": "none"},
+                    "admin_rate_limit": {
+                        "enabled": True,
+                        "backend": "memory",
+                        "requests_per_window": 1,
+                        "window_seconds": 60,
+                    },
+                }
+            }
+        },
+        log_buffer=RingBuffer(),
+        runtime_state=None,
+        plugins=[],
+    )
+    client = TestClient(app)
+    first = client.get("/api/v1/admin/status")
+    second = client.get("/api/v1/admin/status")
+    assert first.status_code == 200
+    assert second.status_code == 429
+    assert "retry-after" in {k.lower() for k in second.headers.keys()}

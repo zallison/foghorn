@@ -640,6 +640,421 @@ Example response:
 ```
 
 ---
+## Admin actions (`/api/v1/admin/*`)
+Auth: protected when `server.http.auth.mode: token`
+
+Notes:
+- Admin actions are additionally subject to optional `server.http.admin_rate_limit` controls.
+- When admin rate limiting is active, responses include:
+  - `X-RateLimit-Limit`
+  - `X-RateLimit-Remaining`
+  - `X-RateLimit-Backend`
+  - `Retry-After` (only on HTTP 429)
+
+### GET `/api/v1/admin/status`
+Brief: runtime/admin status summary (capability and queue metadata).
+
+Inputs:
+- Query: none
+
+Example:
+```bash
+curl -sS \
+  -H "Authorization: Bearer $TOKEN" \
+  "$BASE_URL/api/v1/admin/status"
+```
+
+### GET `/api/v1/admin/capabilities`
+Brief: advertises whether optional admin actions are supported by active runtime/plugin backends.
+
+Inputs:
+- Query: none
+
+Example:
+```bash
+curl -sS \
+  -H "Authorization: Bearer $TOKEN" \
+  "$BASE_URL/api/v1/admin/capabilities"
+```
+
+### GET `/api/v1/admin/audit`
+Brief: list recent admin audit events.
+
+Inputs:
+- Query (optional):
+  - `limit` (int, default: `100`)
+  - `action` (string, example: `query_log.clear`)
+
+Example:
+```bash
+curl -sS \
+  -H "Authorization: Bearer $TOKEN" \
+  "$BASE_URL/api/v1/admin/audit?limit=50&action=query_log.clear"
+```
+
+### POST `/api/v1/admin/audit/clear`
+Brief: clear in-memory admin audit event history.
+
+Inputs:
+- Body: none
+
+Example:
+```bash
+curl -sS -X POST \
+  -H "Authorization: Bearer $TOKEN" \
+  "$BASE_URL/api/v1/admin/audit/clear"
+```
+
+### POST `/api/v1/admin/config/verify`
+Brief: validate configuration without applying reload/restart.
+
+Inputs:
+- JSON body (optional):
+  - `raw_yaml` (string): when provided, verify this YAML payload
+  - when omitted, verifies config loaded from the active config path
+
+Example:
+```bash
+curl -sS -X POST \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"raw_yaml":"server: {}"}' \
+  "$BASE_URL/api/v1/admin/config/verify"
+```
+
+### POST `/api/v1/admin/config/diff`
+Brief: compare proposed YAML (or active config file) to runtime config and return a structural diff summary.
+
+Inputs:
+- JSON body (optional):
+  - `raw_yaml` (string): config YAML to compare
+
+Example:
+```bash
+curl -sS -X POST \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"raw_yaml":"server: { http: { enabled: true } }"}' \
+  "$BASE_URL/api/v1/admin/config/diff"
+```
+
+### POST `/api/v1/admin/config/lint`
+Brief: run non-fatal config lint checks and return advisories.
+
+Inputs:
+- JSON body (optional):
+  - `raw_yaml` (string): config YAML to lint
+
+Example:
+```bash
+curl -sS -X POST \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"raw_yaml":"server: { http: { enabled: true } }"}' \
+  "$BASE_URL/api/v1/admin/config/lint"
+```
+
+### POST `/api/v1/admin/query_log/clear`
+Brief: clear query-log rows through backend clear capability (supports dry-run).
+
+Inputs:
+- JSON body (optional):
+  - `filters` (object): backend filter map (example keys: `qname`, `qtype`, `rcode`, `client_ip`, `status`, `source`, `ede_code`, `start`, `end`)
+  - `dry_run` (bool, default: `false`)
+
+Example:
+```bash
+curl -sS -X POST \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"filters":{"qname":"example.com"},"dry_run":true}' \
+  "$BASE_URL/api/v1/admin/query_log/clear"
+```
+
+Notes:
+- Returns HTTP 400 when the active query-log backend does not support clear.
+
+### POST `/api/v1/admin/query_log/export`
+Brief: export query-log rows as `jsonl` or `csv` text payload.
+
+Inputs:
+- JSON body (optional):
+  - `filters` (object): same filter shape as `query_log/clear`
+  - `format` (string, default: `jsonl`): `jsonl` or `csv`
+  - `limit` (int, default: `5000`, max: `100000`)
+
+Example:
+```bash
+curl -sS -X POST \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"filters":{"qname":"example.com"},"format":"jsonl","limit":1000}' \
+  "$BASE_URL/api/v1/admin/query_log/export"
+```
+
+### POST `/api/v1/admin/query_log/compact`
+Brief: perform query-log backend maintenance (`vacuum`, `optimize`, or `prune_only` mode).
+
+Inputs:
+- JSON body (optional):
+  - `mode` (string, default: `vacuum`): `vacuum`, `optimize`, or `prune_only`
+  - `dry_run` (bool, default: `true`)
+
+Example:
+```bash
+curl -sS -X POST \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"mode":"vacuum","dry_run":true}' \
+  "$BASE_URL/api/v1/admin/query_log/compact"
+```
+
+### GET `/api/v1/admin/rate_limit/keys`
+Brief: list known rate-limit profile keys with optional plugin filter and pagination.
+
+Inputs:
+- Query (optional):
+  - `plugin` (string, example: `rate`)
+  - `page` (int, default: `1`)
+  - `page_size` (int, default: `100`, max: `1000`)
+  - `search` (string)
+
+Example:
+```bash
+curl -sS \
+  -H "Authorization: Bearer $TOKEN" \
+  "$BASE_URL/api/v1/admin/rate_limit/keys?plugin=rate&page=1&page_size=100&search=192.0.2."
+```
+
+### POST `/api/v1/admin/rate_limit/clear`
+Brief: clear learned rate-limit profile/window data for one or more RateLimit plugin instances.
+
+Inputs:
+- JSON body (optional):
+  - `plugin` (string): target plugin instance name
+  - `key` (string): clear only this specific key
+  - `include_global` (bool, default: `false`): include global aggregate key when supported by plugin
+
+Example:
+```bash
+curl -sS -X POST \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"plugin":"rate","key":"192.0.2.10","include_global":false}' \
+  "$BASE_URL/api/v1/admin/rate_limit/clear"
+```
+
+### GET `/api/v1/admin/rate_limit/hot_keys`
+Brief: list hot rate-limit keys based on current request-rate snapshots.
+
+Inputs:
+- Query (optional):
+  - `plugin` (string): plugin instance filter
+  - `limit` (int, default: `20`, max: `200`)
+
+Example:
+```bash
+curl -sS \
+  -H "Authorization: Bearer $TOKEN" \
+  "$BASE_URL/api/v1/admin/rate_limit/hot_keys?plugin=rate&limit=20"
+```
+
+### POST `/api/v1/admin/rate_limit/reset_counters`
+Brief: reset in-memory rate-limit counters while preserving profile configuration.
+
+Inputs:
+- JSON body (optional):
+  - `plugin` (string): target plugin instance
+  - `include_global` (bool, default: `false`)
+
+Example:
+```bash
+curl -sS -X POST \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"plugin":"rate","include_global":false}' \
+  "$BASE_URL/api/v1/admin/rate_limit/reset_counters"
+```
+
+### GET `/api/v1/admin/restart/status`
+Brief: show whether a restart is currently scheduled and when it is expected.
+
+Inputs:
+- Query: none
+
+Example:
+```bash
+curl -sS \
+  -H "Authorization: Bearer $TOKEN" \
+  "$BASE_URL/api/v1/admin/restart/status"
+```
+
+### GET `/api/v1/admin/tasks`
+Brief: list recent admin task/event records tracked in runtime state.
+
+Inputs:
+- Query (optional):
+  - `limit` (int, default: `50`, max: `500`)
+  - `task_type` (string)
+  - `status` (string)
+
+Example:
+```bash
+curl -sS \
+  -H "Authorization: Bearer $TOKEN" \
+  "$BASE_URL/api/v1/admin/tasks?limit=50"
+```
+
+### GET `/api/v1/admin/version/compat`
+Brief: compatibility and capability matrix for loaded plugins and query-log backend support.
+
+Inputs:
+- Query: none
+
+Example:
+```bash
+curl -sS \
+  -H "Authorization: Bearer $TOKEN" \
+  "$BASE_URL/api/v1/admin/version/compat"
+```
+
+### GET `/api/v1/admin/diag/runtime-snapshot`
+Brief: compact runtime diagnostic snapshot combining status/capabilities/restart/tasks.
+
+Inputs:
+- Query: none
+
+Example:
+```bash
+curl -sS \
+  -H "Authorization: Bearer $TOKEN" \
+  "$BASE_URL/api/v1/admin/diag/runtime-snapshot"
+```
+
+### POST `/api/v1/admin/records/{target}/validate`
+Brief: validate record mutation payload for plugin-backed mutable records.
+
+Inputs:
+- Path (required):
+  - `target` (string): `etc_hosts` or `zone_records`
+- JSON body (required):
+  - Common:
+    - `plugin` (string): target plugin instance name
+  - `etc_hosts` target:
+    - `name` (string)
+    - `value` (string)
+  - `zone_records` target:
+    - `owner` (string)
+    - `qtype` (string or int)
+    - `value` (string)
+    - `ttl` (int, default: `300`)
+
+Example:
+```bash
+curl -sS -X POST \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"plugin":"zone","owner":"test.example","qtype":"A","value":"192.0.2.7","ttl":300}' \
+  "$BASE_URL/api/v1/admin/records/zone_records/validate"
+```
+
+### POST `/api/v1/admin/records/{target}/apply`
+Brief: apply record mutation to plugin runtime state, with optional persistence controls.
+
+Inputs:
+- Path (required):
+  - `target` (string): `etc_hosts` or `zone_records`
+- JSON body (required):
+  - Common:
+    - `plugin` (string)
+    - `persist` (bool, default: `false`)
+    - `file_path` (string, optional): explicit write target path when persistence is enabled and plugin allows it
+  - `etc_hosts` target:
+    - `name` (string)
+    - `value` (string)
+  - `zone_records` target:
+    - `owner` (string)
+    - `qtype` (string or int)
+    - `value` (string)
+    - `ttl` (int, default: `300`)
+
+Example:
+```bash
+curl -sS -X POST \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"plugin":"eh","name":"app.internal","value":"10.0.0.10","persist":false}' \
+  "$BASE_URL/api/v1/admin/records/etc_hosts/apply"
+```
+
+### POST `/api/v1/admin/records/{target}/delete`
+Brief: delete mutable records through plugin adapters, with optional persistence controls.
+
+Inputs:
+- Path (required):
+  - `target` (string): `etc_hosts` or `zone_records`
+- JSON body (required):
+  - Common:
+    - `plugin` (string)
+    - `persist` (bool, default: `false`)
+    - `file_path` (string, optional)
+  - `etc_hosts` target:
+    - `name` (string)
+  - `zone_records` target:
+    - `owner` (string)
+    - `qtype` (string or int, optional)
+    - `value` (string, optional)
+
+Example:
+```bash
+curl -sS -X POST \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"plugin":"eh","name":"app.internal","persist":false}' \
+  "$BASE_URL/api/v1/admin/records/etc_hosts/delete"
+```
+
+### POST `/api/v1/admin/records/{target}/list`
+Brief: list temporary record mutations currently tracked in runtime state for a plugin/target pair.
+
+Inputs:
+- Path (required):
+  - `target` (string): `etc_hosts` or `zone_records`
+- JSON body (required):
+  - `plugin` (string): target plugin instance name
+
+Notes:
+- Returns up to 500 records by default.
+- Includes expired tracked records; use `/purge_expired` to clean them up.
+
+Example:
+```bash
+curl -sS -X POST \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"plugin":"eh"}' \
+  "$BASE_URL/api/v1/admin/records/etc_hosts/list"
+```
+
+### POST `/api/v1/admin/records/{target}/purge_expired`
+Brief: purge expired temporary record mutations tracked in runtime state for a plugin/target pair.
+
+Inputs:
+- Path (required):
+  - `target` (string): `etc_hosts` or `zone_records`
+- JSON body (required):
+  - `plugin` (string): target plugin instance name
+
+Example:
+```bash
+curl -sS -X POST \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"plugin":"eh"}' \
+  "$BASE_URL/api/v1/admin/records/etc_hosts/purge_expired"
+```
+
+---
 
 ## Plugins / Resolve integration
 

@@ -19,6 +19,9 @@ from foghorn.servers.webserver.admin_logic import (
     AdminLogicHttpError,
     _get_store_from_collector,
     build_named_plugin_snapshot,
+    build_plugin_reload_payload,
+    build_plugin_zone_records_compact_payload,
+    build_plugin_zone_records_dns_update_zone_payload,
     build_query_log_aggregate_payload,
     build_query_log_payload,
     build_upstream_status_payload,
@@ -1076,3 +1079,125 @@ class TestBuildNamedPluginSnapshot:
             "snapshot error" in exc_info.value.detail
             or "Failing" in exc_info.value.detail
         )
+
+
+class TestZoneRecordsAdminHelpers:
+    """Tests for ZoneRecords-specific admin logic helpers."""
+
+    def test_reload_payload_supports_zone_records_kind(self) -> None:
+        """Brief: build_plugin_reload_payload supports zone_records plugin kind."""
+
+        class _Plugin:
+            name = "zr"
+
+            def __init__(self) -> None:
+                self.reloaded = False
+
+            def _reload_records_from_watchdog(self) -> None:
+                self.reloaded = True
+
+            def get_http_snapshot(self) -> dict[str, object]:
+                return {"ok": True, "reloaded": self.reloaded}
+
+        plugin = _Plugin()
+        payload = build_plugin_reload_payload(
+            [plugin], "zr", plugin_kind="zone_records"
+        )
+        assert payload["plugin"] == "zr"
+        assert payload["action"] == "reload"
+        assert payload["data"]["reloaded"] is True
+
+    def test_compact_payload_with_zone_filter(self) -> None:
+        """Brief: compact helper returns normalized result and summary counts."""
+
+        class _Plugin:
+            name = "zr"
+
+            def compact_dns_update_journals(
+                self, zone_apex: str | None = None
+            ) -> dict[str, bool]:
+                assert zone_apex == "example.com"
+                return {"example.com": True}
+
+        payload = build_plugin_zone_records_compact_payload(
+            [_Plugin()], "zr", zone="example.com."
+        )
+        assert payload["plugin"] == "zr"
+        assert payload["action"] == "compact_journals"
+        assert payload["zone"] == "example.com"
+        assert payload["result"] == {"example.com": True}
+        assert payload["summary"]["requested_zones"] == 1
+        assert payload["summary"]["successful"] == 1
+        assert payload["summary"]["failed"] == 0
+
+    def test_compact_payload_accepts_empty_zone_as_all(self) -> None:
+        """Brief: compact helper treats empty zone input as compact-all."""
+
+        class _Plugin:
+            name = "zr"
+
+            def compact_dns_update_journals(
+                self, zone_apex: str | None = None
+            ) -> dict[str, bool]:
+                return {}
+
+        payload = build_plugin_zone_records_compact_payload([_Plugin()], "zr", zone=" ")
+        assert payload["zone"] is None
+
+    def test_zone_status_payload_success(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Brief: zone status helper returns per-zone DNS update state payload."""
+
+        class _Manifest:
+            snapshot_seq = 9
+            journal_bytes = 1234
+
+        class _Plugin:
+            name = "zr"
+            _dns_update_config = {
+                "persistence": {"enabled": True},
+                "zones": [{"zone": "example.com"}],
+            }
+            _dns_update_journal_state_dir = "/tmp/state"
+            _dynamic_last_seq_by_zone = {"example.com": 7}
+            _dns_update_replay_entries = 10
+            _dns_update_compact_count = 2
+            _dns_update_rate_limit_hits = 1
+
+        from foghorn.plugins.resolve.zone_records import journal as journal_mod
+
+        monkeypatch.setattr(
+            journal_mod,
+            "load_manifest",
+            lambda zone_apex, base_dir: _Manifest(),
+        )
+        payload = build_plugin_zone_records_dns_update_zone_payload(
+            [_Plugin()],
+            "zr",
+            zone="example.com.",
+        )
+        assert payload["plugin"] == "zr"
+        assert payload["zone"] == "example.com"
+        dns_update = payload["dns_update"]
+        assert dns_update["enabled"] is True
+        assert dns_update["last_seq"] == 7
+        assert dns_update["snapshot_seq"] == 9
+        assert dns_update["journal_bytes"] == 1234
+
+    def test_zone_status_payload_raises_when_zone_not_configured(self) -> None:
+        """Brief: zone status helper returns 404 for unconfigured zone."""
+
+        class _Plugin:
+            name = "zr"
+            _dns_update_config = {
+                "persistence": {"enabled": True},
+                "zones": [{"zone": "example.com"}],
+            }
+            _dns_update_journal_state_dir = "/tmp/state"
+
+        with pytest.raises(AdminLogicHttpError) as exc_info:
+            build_plugin_zone_records_dns_update_zone_payload(
+                [_Plugin()],
+                "zr",
+                zone="missing.example.com",
+            )
+        assert exc_info.value.status_code == 404
