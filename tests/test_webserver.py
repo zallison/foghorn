@@ -16,7 +16,9 @@ from __future__ import annotations
 
 import json
 import logging
+import sqlite3
 import threading
+from pathlib import Path
 
 import pytest
 import yaml
@@ -235,6 +237,59 @@ def test_disable_api_removes_core_endpoints_from_openapi() -> None:
     schema = client.get("/openapi.json").json()
     paths = schema.get("paths") or {}
     assert "/api/v1/health" not in paths
+
+
+def test_api_request_audit_logs_redacted_api_calls_to_sqlite(tmp_path: Path) -> None:
+    """Brief: FastAPI middleware logs API calls with sensitive values redacted.
+
+    Inputs:
+      - tmp_path: Pytest temporary directory fixture.
+
+    Outputs:
+      - None; asserts one redacted row in api_request_audit.
+    """
+
+    db_path = tmp_path / "api-audit-fastapi.sqlite3"
+    cfg = {
+        "server": {
+            "http": {
+                "enabled": True,
+                "api_request_audit": {
+                    "enabled": True,
+                    "db_path": str(db_path),
+                },
+            }
+        },
+        "listen": {"udp": {"enabled": False}},
+        "resolver": {"mode": "recursive"},
+    }
+    app = create_app(stats=None, config=cfg, log_buffer=RingBuffer())
+    client = TestClient(app)
+
+    resp = client.get(
+        "/api/v1/health?token=supersecret&name=ok",
+        headers={"Authorization": "Bearer abc-123"},
+    )
+    assert resp.status_code == 200
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        row = conn.execute(
+            "SELECT path, query_json, headers_json, status_code FROM api_request_audit ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert row is not None
+    path, query_json, headers_json, status_code = row
+    assert path == "/api/v1/health"
+    assert int(status_code) == 200
+
+    query_obj = json.loads(str(query_json))
+    headers_obj = json.loads(str(headers_json))
+    assert str(query_obj["token"]).startswith("[REDACTED:sha256:")
+    assert query_obj["name"] == "ok"
+    assert str(headers_obj["authorization"]).startswith("[REDACTED:sha256:")
 
 
 def test_about_endpoint_includes_version_and_github_url() -> None:
