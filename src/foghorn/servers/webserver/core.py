@@ -77,6 +77,7 @@ from .logging_utils import (
     install_uvicorn_2xx_suppression,
 )
 from .admin_state import AdminRuntimeState
+from .api_request_audit import ApiRequestAuditLogger
 from .meta_helpers import (
     _GITHUB_URL,
     FOGHORN_VERSION,
@@ -252,6 +253,9 @@ def create_app(
     # DockerHosts UI helpers) can look up instances by their configured name.
     app.state.plugins = list(plugins or [])
     app.state.admin_runtime = AdminRuntimeState()
+    app.state.api_request_audit_logger = ApiRequestAuditLogger.from_web_cfg(
+        web_cfg, config_path=config_path
+    )
 
     # Best-effort: register the webserver as enabled. The thread/handle liveness
     # is tracked by foghorn.main when runtime_state is provided.
@@ -282,6 +286,71 @@ def create_app(
         _register_query_log_routes(app, auth_dep)
         _register_admin_routes(app, auth_dep)
         _register_plugin_routes(app, auth_dep)
+
+    @app.middleware("http")
+    async def _api_request_audit_middleware(request: Request, call_next):
+        """Brief: Persist redacted API request audit rows into append-only SQLite.
+
+        Inputs:
+          - request: FastAPI request object.
+          - call_next: Downstream request dispatcher.
+
+        Outputs:
+          - Response from downstream handler.
+        """
+
+        audit_logger = getattr(app.state, "api_request_audit_logger", None)
+        if not isinstance(audit_logger, ApiRequestAuditLogger) or not audit_logger.enabled:
+            return await call_next(request)
+
+        started_ts = time.time()
+        status_code: int | None = None
+        error_text: str | None = None
+        body_obj: Any | None = None
+
+        method = str(getattr(request, "method", "") or "")
+        path = str(getattr(request.url, "path", "") or "")
+        query_obj = dict(request.query_params.multi_items())
+        headers_obj = {k: v for k, v in request.headers.items()}
+
+        if method in {"POST", "PUT", "PATCH"}:
+            try:
+                content_type = str(request.headers.get("content-type", "")).lower()
+                content_length_text = str(request.headers.get("content-length", "0") or "0")
+                content_length = int(content_length_text) if content_length_text.isdigit() else 0
+                max_body_bytes = 16_384
+                if "application/json" in content_type and content_length <= max_body_bytes:
+                    raw_body = await request.body()
+                    if raw_body:
+                        try:
+                            body_obj = json.loads(raw_body.decode("utf-8"))
+                        except Exception:
+                            body_obj = {"_non_json_body": True, "length": len(raw_body)}
+            except Exception:
+                body_obj = {"_unavailable": True}
+
+        try:
+            response = await call_next(request)
+            status_code = int(getattr(response, "status_code", 0) or 0)
+            return response
+        except Exception as exc:
+            status_code = 500
+            error_text = str(exc)
+            raise
+        finally:
+            duration_ms = float((time.time() - started_ts) * 1000.0)
+            client_ip = request.client.host if request.client else None
+            audit_logger.log_event(
+                method=method,
+                path=path,
+                query=query_obj,
+                headers=headers_obj,
+                body=body_obj,
+                status_code=status_code,
+                duration_ms=duration_ms,
+                client_ip=client_ip,
+                error_text=error_text,
+            )
 
     _register_static_routes(app, web_cfg, www_root, auth_dep)
 
