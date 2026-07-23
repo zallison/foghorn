@@ -21,6 +21,8 @@ from typing import TYPE_CHECKING, Any, Dict, Optional
 
 from ...stats import StatsCollector
 from .admin_state import AdminRuntimeState
+from .api_request_audit import ApiRequestAuditLogger
+from .config_helpers import _get_web_cfg
 from .logging_utils import RingBuffer
 from .runtime import RuntimeState
 from .threaded_handlers import _ThreadedAdminRequestHandler
@@ -196,6 +198,9 @@ class _AdminHTTPServer(http.server.ThreadingHTTPServer):
         # instances by name when serving plugin-specific pages or APIs.
         self.plugins = list(plugins or [])
         self.admin_runtime = AdminRuntimeState()
+        self.api_request_audit_logger = ApiRequestAuditLogger.from_web_cfg(
+            _get_web_cfg(config), config_path=config_path
+        )
 
         if runtime_state is not None:
             runtime_state.set_listener("webserver", enabled=True, thread=None)
