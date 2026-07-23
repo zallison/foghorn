@@ -1985,9 +1985,122 @@ def _register_admin_routes(app: FastAPI, auth_dep: Any) -> None:
 
 def _register_plugin_routes(app: FastAPI, auth_dep: Any) -> None:
     """Register plugin-related admin, cache, logs, and snapshot endpoints."""
+    def _config_flag_enabled(value: object) -> bool:
+        """Brief: Normalize config flag values to booleans.
+
+        Inputs:
+          - value: Any scalar-like config value.
+
+        Outputs:
+          - bool: True for truthy values such as true/1/yes/on.
+        """
+
+        if isinstance(value, bool):
+            return bool(value)
+        if isinstance(value, (int, float)):
+            return bool(value)
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+        return False
+
+    def _plugin_api_disabled_names() -> set[str]:
+        """Brief: Return plugin instance names where disable_api is true.
+
+        Inputs:
+          - None (reads app.state.config and app.state.plugins).
+
+        Outputs:
+          - set[str]: Plugin names whose API endpoints should be hidden.
+        """
+
+        cfg = getattr(app.state, "config", None) or {}
+        entries = cfg.get("plugins")
+        if not isinstance(entries, list):
+            return set()
+
+        loaded_plugins = list(getattr(app.state, "plugins", []) or [])
+        disabled: set[str] = set()
+        loaded_idx = 0
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+
+            entry_cfg = entry.get("config")
+            cfg_enabled_obj: object | None = None
+            disable_api_obj: object | None = None
+            if isinstance(entry_cfg, dict):
+                cfg_enabled_obj = entry_cfg.get("enabled")
+                disable_api_obj = entry_cfg.get("disable_api")
+
+            enabled_obj = (
+                cfg_enabled_obj if cfg_enabled_obj is not None else entry.get("enabled")
+            )
+            if enabled_obj is not None and not _config_flag_enabled(enabled_obj):
+                continue
+
+            if disable_api_obj is None:
+                disable_api_obj = entry.get("disable_api")
+
+            resolved_name = ""
+            if loaded_idx < len(loaded_plugins):
+                try:
+                    resolved_name = str(
+                        getattr(loaded_plugins[loaded_idx], "name", "") or ""
+                    ).strip()
+                except Exception:
+                    resolved_name = ""
+                loaded_idx += 1
+
+            explicit_name = str(entry.get("name") or entry.get("id") or "").strip()
+            plugin_name = resolved_name or explicit_name
+            if plugin_name and _config_flag_enabled(disable_api_obj):
+                disabled.add(plugin_name)
+
+        return disabled
+
+    def _assert_plugin_api_enabled(plugin_name: str) -> None:
+        """Brief: Raise HTTP 404 when a plugin API is disabled by config.
+
+        Inputs:
+          - plugin_name: Target plugin instance name.
+
+        Outputs:
+          - None. Raises HTTPException for disabled plugins.
+        """
+
+        if str(plugin_name or "").strip() in _plugin_api_disabled_names():
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"plugin API disabled for '{plugin_name}'",
+            )
+
+    def _filter_plugins_for_api(plugins_list: list[object]) -> list[object]:
+        """Brief: Exclude plugins whose per-instance API is disabled.
+
+        Inputs:
+          - plugins_list: Loaded plugin instances.
+
+        Outputs:
+          - list[object]: Filtered plugin instances.
+        """
+
+        disabled = _plugin_api_disabled_names()
+        if not disabled:
+            return list(plugins_list or [])
+
+        filtered: list[object] = []
+        for plugin in plugins_list or []:
+            try:
+                name = str(getattr(plugin, "name", "") or "").strip()
+            except Exception:
+                name = ""
+            if name and name in disabled:
+                continue
+            filtered.append(plugin)
+        return filtered
 
     def _collect_admin_pages_for_response() -> list[dict[str, Any]]:
-        plugins_list = getattr(app.state, "plugins", []) or []
+        plugins_list = _filter_plugins_for_api(getattr(app.state, "plugins", []) or [])
         return _admin_logic.collect_admin_pages_for_response(plugins_list)
 
     def _flag_int(value: int | None) -> bool:
@@ -2095,11 +2208,13 @@ def _register_plugin_routes(app: FastAPI, auth_dep: Any) -> None:
           - dict if found, else None.
         """
 
-        plugins_list = getattr(app.state, "plugins", []) or []
+        _assert_plugin_api_enabled(plugin_name)
+        plugins_list = _filter_plugins_for_api(getattr(app.state, "plugins", []) or [])
         return _admin_logic.find_admin_page_detail(plugins_list, plugin_name, page_slug)
 
     def _collect_plugin_ui_descriptors() -> list[dict[str, Any]]:
-        plugins_list = list(getattr(app.state, "plugins", []) or [])
+        plugins_list = _filter_plugins_for_api(getattr(app.state, "plugins", []) or [])
+        disabled = _plugin_api_disabled_names()
 
         # Optionally include the global DNS cache plugin when it exposes admin UI.
         try:
@@ -2115,7 +2230,9 @@ def _register_plugin_routes(app: FastAPI, auth_dep: Any) -> None:
             except Exception:
                 get_desc = None
             if callable(get_desc):
-                plugins_list.append(cache)
+                cache_name = str(getattr(cache, "name", "") or "").strip()
+                if not cache_name or cache_name not in disabled:
+                    plugins_list.append(cache)
 
         return _admin_logic.collect_plugin_ui_descriptors(plugins_list)
 
@@ -2278,7 +2395,8 @@ def _register_plugin_routes(app: FastAPI, auth_dep: Any) -> None:
           - A table payload compatible with admin_logic.build_table_page_payload.
         """
 
-        plugins_list = getattr(app.state, "plugins", []) or []
+        _assert_plugin_api_enabled(plugin_name)
+        plugins_list = _filter_plugins_for_api(getattr(app.state, "plugins", []) or [])
         target = _admin_logic.find_plugin_instance_by_name(plugins_list, plugin_name)
         if target is None or not hasattr(target, "get_http_snapshot"):
             raise HTTPException(
@@ -2347,6 +2465,7 @@ def _register_plugin_routes(app: FastAPI, auth_dep: Any) -> None:
     async def get_plugin_page_detail(
         plugin_name: str, page_slug: str
     ) -> Dict[str, Any]:
+        _assert_plugin_api_enabled(plugin_name)
         detail = _find_admin_page_detail(plugin_name, page_slug)
         if detail is None:
             raise HTTPException(
@@ -2376,7 +2495,8 @@ def _register_plugin_routes(app: FastAPI, auth_dep: Any) -> None:
           - Dict containing server_time, plugin, and data keys.
         """
 
-        plugins_list = getattr(app.state, "plugins", []) or []
+        _assert_plugin_api_enabled(plugin_name)
+        plugins_list = _filter_plugins_for_api(getattr(app.state, "plugins", []) or [])
         try:
             snap = _admin_logic.build_plugin_snapshot_payload(plugins_list, plugin_name)
         except _admin_logic.AdminLogicHttpError as exc:
@@ -2424,7 +2544,8 @@ def _register_plugin_routes(app: FastAPI, auth_dep: Any) -> None:
         dependencies=[Depends(auth_dep)],
     )
     async def get_access_control_rules(plugin_name: str) -> Dict[str, Any]:
-        plugins_list = getattr(app.state, "plugins", []) or []
+        _assert_plugin_api_enabled(plugin_name)
+        plugins_list = _filter_plugins_for_api(getattr(app.state, "plugins", []) or [])
         try:
             payload = _admin_logic.build_plugin_access_control_rules_payload(
                 plugins_list, plugin_name
@@ -2440,7 +2561,8 @@ def _register_plugin_routes(app: FastAPI, auth_dep: Any) -> None:
     async def get_zone_records_dns_update_zone_status(
         plugin_name: str, zone: str
     ) -> Dict[str, Any]:
-        plugins_list = getattr(app.state, "plugins", []) or []
+        _assert_plugin_api_enabled(plugin_name)
+        plugins_list = _filter_plugins_for_api(getattr(app.state, "plugins", []) or [])
         try:
             payload = _admin_logic.build_plugin_zone_records_dns_update_zone_payload(
                 plugins_list,
@@ -2459,7 +2581,8 @@ def _register_plugin_routes(app: FastAPI, auth_dep: Any) -> None:
     async def get_etc_hosts_lookup(
         plugin_name: str, name: str | None = None
     ) -> Dict[str, Any]:
-        plugins_list = getattr(app.state, "plugins", []) or []
+        _assert_plugin_api_enabled(plugin_name)
+        plugins_list = _filter_plugins_for_api(getattr(app.state, "plugins", []) or [])
         try:
             payload = _admin_logic.build_plugin_etc_hosts_lookup_payload(
                 plugins_list, plugin_name, name=str(name or "")
@@ -2476,7 +2599,8 @@ def _register_plugin_routes(app: FastAPI, auth_dep: Any) -> None:
     async def get_docker_container_by_name(
         plugin_name: str, name: str
     ) -> Dict[str, Any]:
-        plugins_list = getattr(app.state, "plugins", []) or []
+        _assert_plugin_api_enabled(plugin_name)
+        plugins_list = _filter_plugins_for_api(getattr(app.state, "plugins", []) or [])
         try:
             payload = _admin_logic.build_plugin_docker_container_payload(
                 plugins_list, plugin_name, name=name
@@ -2494,7 +2618,8 @@ def _register_plugin_routes(app: FastAPI, auth_dep: Any) -> None:
         status_text: str | None = Query(None, alias="status"),
         service_type: str | None = Query(None, alias="type"),
     ) -> Dict[str, Any]:
-        plugins_list = getattr(app.state, "plugins", []) or []
+        _assert_plugin_api_enabled(plugin_name)
+        plugins_list = _filter_plugins_for_api(getattr(app.state, "plugins", []) or [])
         try:
             payload = _admin_logic.build_plugin_mdns_services_payload(
                 plugins_list,
@@ -2514,7 +2639,8 @@ def _register_plugin_routes(app: FastAPI, auth_dep: Any) -> None:
     async def get_rate_limit_profiles(
         plugin_name: str, limit: int | None = None, sort: str | None = None
     ) -> Dict[str, Any]:
-        plugins_list = getattr(app.state, "plugins", []) or []
+        _assert_plugin_api_enabled(plugin_name)
+        plugins_list = _filter_plugins_for_api(getattr(app.state, "plugins", []) or [])
         try:
             payload = _admin_logic.build_plugin_rate_limit_profiles_payload(
                 plugins_list, plugin_name, limit=limit, sort=sort
@@ -2531,7 +2657,8 @@ def _register_plugin_routes(app: FastAPI, auth_dep: Any) -> None:
     async def get_zone_records_lookup(
         plugin_name: str, owner: str | None = None, qtype: str | None = None
     ) -> Dict[str, Any]:
-        plugins_list = getattr(app.state, "plugins", []) or []
+        _assert_plugin_api_enabled(plugin_name)
+        plugins_list = _filter_plugins_for_api(getattr(app.state, "plugins", []) or [])
         try:
             payload = _admin_logic.build_plugin_zone_records_lookup_payload(
                 plugins_list,
@@ -2549,7 +2676,8 @@ def _register_plugin_routes(app: FastAPI, auth_dep: Any) -> None:
         dependencies=[Depends(auth_dep)],
     )
     async def post_etc_hosts_reload(plugin_name: str) -> Dict[str, Any]:
-        plugins_list = getattr(app.state, "plugins", []) or []
+        _assert_plugin_api_enabled(plugin_name)
+        plugins_list = _filter_plugins_for_api(getattr(app.state, "plugins", []) or [])
         try:
             payload = _admin_logic.build_plugin_reload_payload(
                 plugins_list, plugin_name, plugin_kind="etc_hosts"
@@ -2564,7 +2692,8 @@ def _register_plugin_routes(app: FastAPI, auth_dep: Any) -> None:
         dependencies=[Depends(auth_dep)],
     )
     async def post_docker_hosts_reload(plugin_name: str) -> Dict[str, Any]:
-        plugins_list = getattr(app.state, "plugins", []) or []
+        _assert_plugin_api_enabled(plugin_name)
+        plugins_list = _filter_plugins_for_api(getattr(app.state, "plugins", []) or [])
         try:
             payload = _admin_logic.build_plugin_reload_payload(
                 plugins_list, plugin_name, plugin_kind="docker_hosts"
@@ -2578,7 +2707,8 @@ def _register_plugin_routes(app: FastAPI, auth_dep: Any) -> None:
         dependencies=[Depends(auth_dep)],
     )
     async def post_zone_records_reload(plugin_name: str) -> Dict[str, Any]:
-        plugins_list = getattr(app.state, "plugins", []) or []
+        _assert_plugin_api_enabled(plugin_name)
+        plugins_list = _filter_plugins_for_api(getattr(app.state, "plugins", []) or [])
         try:
             payload = _admin_logic.build_plugin_reload_payload(
                 plugins_list, plugin_name, plugin_kind="zone_records"
@@ -2596,6 +2726,7 @@ def _register_plugin_routes(app: FastAPI, auth_dep: Any) -> None:
         plugin_name: str,
         request: Request,
     ) -> Dict[str, Any]:
+        _assert_plugin_api_enabled(plugin_name)
         try:
             body_any = await request.json()
         except Exception as exc:
@@ -2609,7 +2740,7 @@ def _register_plugin_routes(app: FastAPI, auth_dep: Any) -> None:
         if zone_raw is not None and not isinstance(zone_raw, str):
             raise HTTPException(status_code=400, detail="zone must be a string")
 
-        plugins_list = getattr(app.state, "plugins", []) or []
+        plugins_list = _filter_plugins_for_api(getattr(app.state, "plugins", []) or [])
         try:
             payload = _admin_logic.build_plugin_zone_records_compact_payload(
                 plugins_list,
@@ -2628,7 +2759,8 @@ def _register_plugin_routes(app: FastAPI, auth_dep: Any) -> None:
     async def get_upstream_router_evaluate(
         plugin_name: str, qname: str | None = None
     ) -> Dict[str, Any]:
-        plugins_list = getattr(app.state, "plugins", []) or []
+        _assert_plugin_api_enabled(plugin_name)
+        plugins_list = _filter_plugins_for_api(getattr(app.state, "plugins", []) or [])
         try:
             payload = _admin_logic.build_plugin_upstream_evaluate_payload(
                 plugins_list, plugin_name, qname=str(qname or "")
