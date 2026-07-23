@@ -44,7 +44,10 @@ routes_core_mod = importlib.import_module("foghorn.servers.webserver.routes_core
 
 
 def _create_test_app(
-    *, config_path: str | None = None, plugins: list[object] | None = None
+    *,
+    config_path: str | None = None,
+    plugins: list[object] | None = None,
+    config: dict[str, Any] | None = None,
 ):
     """Brief: Build a minimal FastAPI admin app for endpoint branch testing.
 
@@ -56,9 +59,13 @@ def _create_test_app(
       - FastAPI application instance from `create_app`.
     """
 
+    app_config: dict[str, Any] = {"webserver": {"enabled": True}}
+    if isinstance(config, dict):
+        app_config.update(config)
+
     return create_app(
         stats=None,
-        config={"webserver": {"enabled": True}},
+        config=app_config,
         log_buffer=RingBuffer(),
         config_path=config_path,
         runtime_state=None,
@@ -1340,6 +1347,80 @@ def test_plugin_api_expansion_routes_delegate_to_admin_logic(
         ).status_code
         == 200
     )
+
+
+def test_plugin_api_disable_api_hides_routes_and_plugin_listings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Brief: plugins[].config.disable_api hides plugin API routes and list entries.
+
+    Inputs:
+      - monkeypatch fixtures providing synthetic plugin snapshot payloads.
+
+    Outputs:
+      - Disabled plugin endpoints return 404 and list endpoints exclude it.
+    """
+
+    class _UiPlugin:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def get_http_snapshot(self) -> dict[str, Any]:
+            return {"ok": True}
+
+        def get_admin_ui_descriptor(self) -> dict[str, Any]:
+            return {
+                "name": self.name,
+                "title": "Demo Plugin",
+                "kind": "resolve",
+                "order": 10,
+            }
+
+        def get_admin_pages(self) -> list[dict[str, Any]]:
+            return [
+                {
+                    "slug": "overview",
+                    "title": "Overview",
+                    "description": "demo",
+                    "layout": "one_column",
+                }
+            ]
+
+    monkeypatch.setattr(
+        routes_core_mod._admin_logic,
+        "build_plugin_snapshot_payload",
+        lambda _plugins, plugin_name: {"plugin": plugin_name, "data": {"ok": True}},
+    )
+
+    app = _create_test_app(
+        plugins=[_UiPlugin("demo"), _UiPlugin("other")],
+        config={
+            "plugins": [
+                {"name": "demo", "type": "dummy", "config": {"disable_api": True}},
+                {"name": "other", "type": "dummy", "config": {}},
+            ]
+        },
+    )
+    client = TestClient(app)
+
+    disabled_resp = client.get("/api/v1/plugins/demo/snapshot")
+    assert disabled_resp.status_code == 404
+    assert "plugin API disabled" in disabled_resp.text
+
+    enabled_resp = client.get("/api/v1/plugins/other/snapshot")
+    assert enabled_resp.status_code == 200
+
+    pages_resp = client.get("/api/v1/plugin_pages")
+    assert pages_resp.status_code == 200
+    pages = pages_resp.json().get("pages") or []
+    assert all(item.get("plugin") != "demo" for item in pages)
+
+    ui_resp = client.get("/api/v1/plugins/ui")
+    assert ui_resp.status_code == 200
+    items = ui_resp.json().get("items") or []
+    names = {str(item.get("name") or "") for item in items}
+    assert "demo" not in names
+    assert "other" in names
 
 
 def test_admin_routes_status_verify_actions_and_records(

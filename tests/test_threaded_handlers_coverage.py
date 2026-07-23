@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import sqlite3
 import threading
 from pathlib import Path
 from typing import Any, Dict, Mapping
@@ -1375,6 +1376,135 @@ def test_threaded_plugins_ui_descriptors_includes_global_cache(
     assert st == 200
     items = json.loads(b.decode("utf-8")).get("items") or []
     assert any(item.get("name") == "global-cache" for item in items)
+
+
+def test_threaded_plugin_disable_api_hides_routes_and_list_entries() -> None:
+    """Brief: plugins[].config.disable_api blocks plugin API routes in threaded mode.
+
+    Inputs:
+      - In-memory plugin instances and matching config plugin entries.
+
+    Outputs:
+      - Disabled plugin routes return 404 and plugin UI/page listings omit it.
+    """
+
+    class _UiPlugin:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def get_http_snapshot(self) -> Dict[str, Any]:
+            return {"ok": True}
+
+        def get_admin_ui_descriptor(self) -> Dict[str, Any]:
+            return {
+                "name": self.name,
+                "title": "Demo Plugin",
+                "kind": "resolve",
+                "order": 10,
+            }
+
+        def get_admin_pages(self) -> list[AdminPageSpec]:
+            return [AdminPageSpec(slug="overview", title="Overview")]
+
+    cfg = {
+        "webserver": {"auth": {"mode": "none"}},
+        "plugins": [
+            {"name": "demo", "type": "dummy", "config": {"disable_api": True}},
+            {"name": "other", "type": "dummy", "config": {}},
+        ],
+    }
+    plugins = [_UiPlugin("demo"), _UiPlugin("other")]
+
+    st1, _h1, b1 = _one_shot_http_request(
+        method="GET",
+        path="/api/v1/plugins/demo/snapshot",
+        config=cfg,
+        plugins=plugins,
+    )
+    assert st1 == 404
+    assert "plugin API disabled" in b1.decode("utf-8")
+
+    st2, _h2, b2 = _one_shot_http_request(
+        method="GET",
+        path="/api/v1/plugins/other/snapshot",
+        config=cfg,
+        plugins=plugins,
+    )
+    assert st2 == 200
+    assert json.loads(b2.decode("utf-8")).get("plugin") == "other"
+
+    st3, _h3, b3 = _one_shot_http_request(
+        method="GET",
+        path="/api/v1/plugin_pages",
+        config=cfg,
+        plugins=plugins,
+    )
+    assert st3 == 200
+    pages = json.loads(b3.decode("utf-8")).get("pages") or []
+    assert all(page.get("plugin") != "demo" for page in pages)
+
+    st4, _h4, b4 = _one_shot_http_request(
+        method="GET",
+        path="/api/v1/plugins/ui",
+        config=cfg,
+        plugins=plugins,
+    )
+    assert st4 == 200
+    names = {str(item.get("name") or "") for item in json.loads(b4.decode("utf-8")).get("items") or []}
+    assert "demo" not in names
+    assert "other" in names
+
+def test_threaded_api_request_audit_logs_redacted_api_calls_to_sqlite(
+    tmp_path: Path,
+) -> None:
+    """Brief: Threaded handler logs API calls with sensitive data redacted.
+
+    Inputs:
+      - tmp_path: Pytest temporary directory fixture.
+
+    Outputs:
+      - None; asserts persisted row contains redacted query/header values.
+    """
+
+    db_path = tmp_path / "api-audit-threaded.sqlite3"
+    cfg = {
+        "server": {
+            "http": {
+                "auth": {"mode": "none"},
+                "api_request_audit": {
+                    "enabled": True,
+                    "db_path": str(db_path),
+                },
+            }
+        }
+    }
+
+    status, _headers, _body = _one_shot_http_request(
+        method="GET",
+        path="/api/v1/health?token=supersecret&name=ok",
+        config=cfg,
+        headers={"Authorization": "Bearer abc-123"},
+    )
+    assert status == 200
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        row = conn.execute(
+            "SELECT path, query_json, headers_json, status_code FROM api_request_audit ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert row is not None
+    path, query_json, headers_json, status_code = row
+    assert path == "/api/v1/health"
+    assert int(status_code) == 200
+
+    query_obj = json.loads(str(query_json))
+    headers_obj = json.loads(str(headers_json))
+    assert str(query_obj["token"]).startswith("[REDACTED:sha256:")
+    assert query_obj["name"] == "ok"
+    assert str(headers_obj["Authorization"]).startswith("[REDACTED:sha256:")
 
 
 def test_threaded_plugin_table_additional_branches() -> None:
