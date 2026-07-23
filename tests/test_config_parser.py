@@ -742,6 +742,39 @@ def test_load_plugins_enabled_and_priority_propagation_and_cache_error(
     # Cache instance should be injected into plugin config.
     assert "cache" in init_cfg
 
+def test_load_plugins_disable_api_is_passed_to_plugin(
+    monkeypatch,
+) -> None:
+    """Brief: load_plugins preserves disable_api in plugin config constructor kwargs.
+
+    Inputs:
+      - monkeypatch: Pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts disable_api is available to plugin constructors.
+    """
+
+    monkeypatch.setattr(cp, "discover_plugins", lambda: {})
+    monkeypatch.setattr(cp, "get_plugin_class", lambda ident, reg=None: DummyPlugin)
+
+    DummyPlugin.last_init = None
+    plugins = cp.load_plugins(
+        [
+            {
+                "type": "dummy",
+                "name": "dummy1",
+                "config": {
+                    "disable_api": True,
+                    "comment": "test metadata field",
+                },
+            }
+        ]
+    )
+    assert len(plugins) == 1
+    init_cfg = DummyPlugin.last_init or {}
+    assert init_cfg.get("name") == "dummy1"
+    assert init_cfg.get("disable_api") is True
+
 
 def test_load_plugins_hooks_priority_shorthands_and_precedence(monkeypatch) -> None:
     """Brief: load_plugins supports hooks-based priority shorthands.
