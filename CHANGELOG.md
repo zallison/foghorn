@@ -5,6 +5,8 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 ### Added
+- Added an append-only API request audit logger (`src/foghorn/servers/webserver/api_request_audit.py`) that writes redacted request metadata to SQLite, including schema guards that reject UPDATE/DELETE mutations.
+- Added `server.http.api_request_audit` / `webserver.api_request_audit` configuration support to control API audit logging enablement and database path selection.
 - Config schema/parsing now supports URL-form upstream endpoint entries via a new `upstream_url` schema definition, including DoH URL handling and endpoint-list normalization for primary and backup upstreams.
 - RateLimit config now includes `deny_delay` (seconds) to optionally pause before deny responses are emitted.
 - Admin web API now includes generic plugin snapshots at `/api/v1/plugins/{plugin_name}/snapshot` plus expanded plugin endpoints for access-control rules, etc-hosts lookup/reload, docker container lookup/reload, mDNS service filtering, rate-limit profile listing, zone-record lookup, and upstream-router evaluation.
@@ -13,6 +15,9 @@ All notable changes to this project will be documented in this file.
 - Added backend capability hooks for query-log clear operations (`supports_query_log_clear` / `clear_query_log`) and implemented filter-aware clear/dry-run behavior for SQLite, MySQL/MariaDB, PostgreSQL, and MongoDB query-log stores.
 
 ### Changed
+- FastAPI and threaded admin web paths now persist API request audit events (method/path/query/headers/body/status/duration/client IP) with sensitive values redacted.
+- Plugin route exposure now honors per-plugin `config.disable_api` metadata so disabled plugin APIs return 404 and are hidden from plugin UI/page listings.
+- Plugin config parsing now preserves `disable_api` in plugin constructor config while still enforcing route/UI exposure controls at the web layer.
 - FastAPI and threaded fallback plugin routing now share expanded admin payload helpers, improving route-surface parity while preserving compatibility aliases for existing plugin snapshot paths.
 - DockerHosts warning emission is now key-based and time-throttled to suppress repeated noisy warning bursts while still reporting suppressed counts.
 - AXFR TSIG config handling now prefers nested `server.axfr.tsig.keys` and `server.axfr.tsig.key_sources` while preserving legacy `server.axfr.tsig_keys` compatibility in runtime parsing and effective-config output.
@@ -22,6 +27,9 @@ All notable changes to this project will be documented in this file.
 - Admin plugin/cache paged tables now retain active search text, sort selection, page size, and enabled filters across auto-refresh cycles, preventing view resets while monitoring mDNS and other plugin pages.
 
 ### Tests
+- Added `tests/servers/test_api_request_audit.py` coverage for redaction behavior and append-only trigger enforcement.
+- Added FastAPI and threaded integration tests to verify API request audit row insertion and sensitive field redaction.
+- Added regression coverage for per-plugin `disable_api` handling in config parsing, FastAPI plugin routes, and threaded handlers.
 - Added/expanded coverage for URL-form upstream schema generation and config normalization/validation paths.
 - Added DockerHosts regression coverage for warning-throttling behavior and updated RateLimit tests for the new `deny_delay` option.
 - Added FastAPI and threaded webserver coverage for expanded plugin API routes, snapshot alias compatibility, and shared admin-logic delegation.
