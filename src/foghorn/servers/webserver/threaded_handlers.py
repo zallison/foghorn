@@ -53,6 +53,7 @@ from .http_helpers import (
     _schedule_process_signal,
     resolve_www_root,
 )
+from .api_request_audit import ApiRequestAuditLogger
 from .logging_utils import RingBuffer
 from .meta_helpers import FOGHORN_VERSION, _get_about_payload
 from .rate_limit_helpers import _collect_rate_limit_stats
@@ -94,6 +95,57 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         return self.server  # type: ignore[return-value]
 
     # ---------- Helpers ----------
+    def send_response(self, code: int, message: str | None = None) -> None:
+        """Brief: Capture last response code for API audit logging.
+
+        Inputs:
+          - code: HTTP response code.
+          - message: Optional reason phrase.
+
+        Outputs:
+          - None.
+        """
+
+        self._last_status_code = int(code)
+        super().send_response(code, message)
+        if bool(getattr(self, "_api_audit_logged", False)):
+            return
+        started_ts_obj = getattr(self, "_api_audit_started_ts", None)
+        started_ts = float(started_ts_obj) if isinstance(started_ts_obj, (int, float)) else None
+        duration_ms = (
+            float((time.time() - started_ts) * 1000.0)
+            if started_ts is not None
+            else 0.0
+        )
+        path = str(getattr(self, "_api_audit_path", "") or "")
+        params = getattr(self, "_api_audit_params", {})
+        if not isinstance(params, dict):
+            params = {}
+        self._log_api_audit_event(
+            method=str(getattr(self, "command", "") or ""),
+            path=path,
+            params=params,
+            duration_ms=duration_ms,
+            error_text=None,
+        )
+        self._api_audit_logged = True
+
+    def _begin_api_audit_context(self, *, path: str, params: Dict[str, list[str]]) -> None:
+        """Brief: Initialize per-request context for send_response audit logging.
+
+        Inputs:
+          - path: Request path.
+          - params: Parsed query parameter mapping.
+
+        Outputs:
+          - None.
+        """
+
+        self._api_audit_logged = False
+        self._api_audit_started_ts = float(time.time())
+        self._api_audit_path = str(path or "")
+        self._api_audit_params = dict(params or {})
+        self._last_admin_json_body = None
 
     def _client_ip(
         self,
@@ -2517,9 +2569,11 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
                 f"request body too large (max {int(MAX_ADMIN_JSON_BODY_BYTES):,} bytes)"
             ),
         )
+        self._last_admin_json_body = None
         if raw_body is None:
             return None
         if not raw_body:
+            self._last_admin_json_body = {}
             return {}
         try:
             body = json.loads(raw_body.decode("utf-8") or "{}")
@@ -2541,6 +2595,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
                 },
             )
             return None
+        self._last_admin_json_body = dict(body)
         return body
 
     def _save_config_to_disk(self, *, body: Dict[str, Any]) -> Dict[str, Any]:
@@ -3078,6 +3133,169 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         cfg = getattr(self._server(), "config", None)
         return resolve_www_root(cfg)
 
+    def _config_flag_enabled(self, value: object) -> bool:
+        """Brief: Normalize config flag values to booleans.
+
+        Inputs:
+          - value: Any scalar-like config value.
+
+        Outputs:
+          - bool: True for truthy values such as true/1/yes/on.
+        """
+
+        if isinstance(value, bool):
+            return bool(value)
+        if isinstance(value, (int, float)):
+            return bool(value)
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+        return False
+
+    def _plugin_api_disabled_names(self) -> set[str]:
+        """Brief: Return plugin names where config.disable_api is enabled.
+
+        Inputs:
+          - None (reads server config and loaded plugins).
+
+        Outputs:
+          - set[str]: Plugin names whose API endpoints should be hidden.
+        """
+
+        cfg = getattr(self._server(), "config", None) or {}
+        entries = cfg.get("plugins")
+        if not isinstance(entries, list):
+            return set()
+
+        loaded_plugins = list(getattr(self._server(), "plugins", []) or [])
+        disabled: set[str] = set()
+        loaded_idx = 0
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+
+            entry_cfg = entry.get("config")
+            cfg_enabled_obj: object | None = None
+            disable_api_obj: object | None = None
+            if isinstance(entry_cfg, dict):
+                cfg_enabled_obj = entry_cfg.get("enabled")
+                disable_api_obj = entry_cfg.get("disable_api")
+
+            enabled_obj = (
+                cfg_enabled_obj if cfg_enabled_obj is not None else entry.get("enabled")
+            )
+            if enabled_obj is not None and not self._config_flag_enabled(enabled_obj):
+                continue
+
+            if disable_api_obj is None:
+                disable_api_obj = entry.get("disable_api")
+
+            resolved_name = ""
+            if loaded_idx < len(loaded_plugins):
+                try:
+                    resolved_name = str(
+                        getattr(loaded_plugins[loaded_idx], "name", "") or ""
+                    ).strip()
+                except Exception:
+                    resolved_name = ""
+                loaded_idx += 1
+
+            explicit_name = str(entry.get("name") or entry.get("id") or "").strip()
+            plugin_name = resolved_name or explicit_name
+            if plugin_name and self._config_flag_enabled(disable_api_obj):
+                disabled.add(plugin_name)
+
+        return disabled
+
+    def _is_plugin_api_disabled(self, plugin_name: str) -> bool:
+        """Brief: Return whether per-plugin API exposure is disabled.
+
+        Inputs:
+          - plugin_name: Plugin instance name.
+
+        Outputs:
+          - bool.
+        """
+
+        return str(plugin_name or "").strip() in self._plugin_api_disabled_names()
+
+    def _filter_plugins_for_api(self, plugins_list: list[object]) -> list[object]:
+        """Brief: Exclude plugins whose per-instance API is disabled.
+
+        Inputs:
+          - plugins_list: Loaded plugin instances.
+
+        Outputs:
+          - list[object]: Filtered plugin list.
+        """
+
+        disabled = self._plugin_api_disabled_names()
+        if not disabled:
+            return list(plugins_list or [])
+
+        filtered: list[object] = []
+        for plugin in plugins_list or []:
+            try:
+                name = str(getattr(plugin, "name", "") or "").strip()
+            except Exception:
+                name = ""
+            if name and name in disabled:
+                continue
+            filtered.append(plugin)
+        return filtered
+
+    def _log_api_audit_event(
+        self,
+        *,
+        method: str,
+        path: str,
+        params: Dict[str, list[str]],
+        duration_ms: float,
+        error_text: str | None = None,
+    ) -> None:
+        """Brief: Persist one threaded API request audit row when configured.
+
+        Inputs:
+          - method: HTTP method.
+          - path: Request path.
+          - params: Query-parameter mapping.
+          - duration_ms: Request duration in milliseconds.
+          - error_text: Optional exception text.
+
+        Outputs:
+          - None.
+        """
+
+        audit_logger = getattr(self._server(), "api_request_audit_logger", None)
+        if not isinstance(audit_logger, ApiRequestAuditLogger):
+            return
+        status_obj = getattr(self, "_last_status_code", None)
+        status_code = int(status_obj) if isinstance(status_obj, int) else None
+        body_obj = getattr(self, "_last_admin_json_body", None)
+        headers_obj = {k: v for k, v in self.headers.items()}
+        normalized_query: Dict[str, Any] = {}
+        for key, values in dict(params or {}).items():
+            if isinstance(values, list):
+                if not values:
+                    normalized_query[str(key)] = ""
+                else:
+                    normalized_query[str(key)] = str(values[-1])
+            elif values is None:
+                normalized_query[str(key)] = ""
+            else:
+                normalized_query[str(key)] = str(values)
+
+        audit_logger.log_event(
+            method=method,
+            path=path,
+            query=normalized_query,
+            headers=headers_obj,
+            body=body_obj,
+            status_code=status_code,
+            duration_ms=float(duration_ms),
+            client_ip=self._client_ip(),
+            error_text=error_text,
+        )
+
     def _try_serve_www(
         self, path: str
     ) -> (
@@ -3163,7 +3381,9 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         if not self._require_auth():
             return
 
-        plugins_list = getattr(self._server(), "plugins", []) or []
+        plugins_list = self._filter_plugins_for_api(
+            getattr(self._server(), "plugins", []) or []
+        )
         pages = _admin_logic.collect_admin_pages_for_response(plugins_list)
 
         self._send_json(
@@ -3186,7 +3406,10 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
 
         if not self._require_auth():
             return
-        plugins_list = list(getattr(self._server(), "plugins", []) or [])
+        plugins_list = self._filter_plugins_for_api(
+            getattr(self._server(), "plugins", []) or []
+        )
+        disabled = self._plugin_api_disabled_names()
 
         # Also surface the global DNS cache plugin when it exposes admin UI.
         try:
@@ -3202,7 +3425,9 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             except Exception:
                 get_desc = None
             if callable(get_desc):
-                plugins_list.append(cache)
+                cache_name = str(getattr(cache, "name", "") or "").strip()
+                if not cache_name or cache_name not in disabled:
+                    plugins_list.append(cache)
 
         items = _admin_logic.collect_plugin_ui_descriptors(plugins_list)
         self._send_json(
@@ -3475,8 +3700,19 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
                 {"detail": "plugin table not found", "server_time": _utc_now_iso()},
             )
             return
+        if self._is_plugin_api_disabled(plugin_name):
+            self._send_json(
+                404,
+                {
+                    "detail": f"plugin API disabled for '{plugin_name}'",
+                    "server_time": _utc_now_iso(),
+                },
+            )
+            return
 
-        plugins_list = getattr(self._server(), "plugins", []) or []
+        plugins_list = self._filter_plugins_for_api(
+            getattr(self._server(), "plugins", []) or []
+        )
         target = _admin_logic.find_plugin_instance_by_name(plugins_list, plugin_name)
         if target is None or not hasattr(target, "get_http_snapshot"):
             self._send_json(
@@ -3573,8 +3809,19 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             )
             return
         plugin_name, page_slug = parts[0], parts[1]
+        if self._is_plugin_api_disabled(plugin_name):
+            self._send_json(
+                404,
+                {
+                    "detail": f"plugin API disabled for '{plugin_name}'",
+                    "server_time": _utc_now_iso(),
+                },
+            )
+            return
 
-        plugins_list = getattr(self._server(), "plugins", []) or []
+        plugins_list = self._filter_plugins_for_api(
+            getattr(self._server(), "plugins", []) or []
+        )
         detail = _admin_logic.find_admin_page_detail(
             plugins_list, plugin_name, page_slug
         )
@@ -3623,8 +3870,19 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
 
         if not self._require_auth():
             return True
+        if self._is_plugin_api_disabled(plugin_name):
+            self._send_json(
+                404,
+                {
+                    "detail": f"plugin API disabled for '{plugin_name}'",
+                    "server_time": _utc_now_iso(),
+                },
+            )
+            return True
 
-        plugins_list = getattr(self._server(), "plugins", []) or []
+        plugins_list = self._filter_plugins_for_api(
+            getattr(self._server(), "plugins", []) or []
+        )
 
         def _send_snapshot() -> None:
             try:
@@ -3747,8 +4005,19 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             return False
         if not self._require_auth():
             return True
+        if self._is_plugin_api_disabled(plugin_name):
+            self._send_json(
+                404,
+                {
+                    "detail": f"plugin API disabled for '{plugin_name}'",
+                    "server_time": _utc_now_iso(),
+                },
+            )
+            return True
 
-        plugins_list = getattr(self._server(), "plugins", []) or []
+        plugins_list = self._filter_plugins_for_api(
+            getattr(self._server(), "plugins", []) or []
+        )
         try:
             if endpoint in {"etc_hosts/reload", "docker_hosts/reload"}:
                 plugin_kind = (
@@ -3816,7 +4085,18 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         suffix = "/docker_hosts"
         raw_segment = path[len(prefix) : -len(suffix)]
         plugin_name = raw_segment.strip("/")
-        plugins_list = getattr(self._server(), "plugins", []) or []
+        if self._is_plugin_api_disabled(plugin_name):
+            self._send_json(
+                404,
+                {
+                    "detail": f"plugin API disabled for '{plugin_name}'",
+                    "server_time": _utc_now_iso(),
+                },
+            )
+            return
+        plugins_list = self._filter_plugins_for_api(
+            getattr(self._server(), "plugins", []) or []
+        )
         try:
             snap = _admin_logic.build_named_plugin_snapshot(
                 plugins_list, plugin_name, label="DockerHosts"
@@ -3853,7 +4133,18 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         suffix = "/mdns"
         raw_segment = path[len(prefix) : -len(suffix)]
         plugin_name = raw_segment.strip("/")
-        plugins_list = getattr(self._server(), "plugins", []) or []
+        if self._is_plugin_api_disabled(plugin_name):
+            self._send_json(
+                404,
+                {
+                    "detail": f"plugin API disabled for '{plugin_name}'",
+                    "server_time": _utc_now_iso(),
+                },
+            )
+            return
+        plugins_list = self._filter_plugins_for_api(
+            getattr(self._server(), "plugins", []) or []
+        )
         try:
             snap = _admin_logic.build_named_plugin_snapshot(
                 plugins_list, plugin_name, label="MdnsBridge"
@@ -3890,7 +4181,18 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         suffix = "/etc_hosts"
         raw_segment = path[len(prefix) : -len(suffix)]
         plugin_name = raw_segment.strip("/")
-        plugins_list = getattr(self._server(), "plugins", []) or []
+        if self._is_plugin_api_disabled(plugin_name):
+            self._send_json(
+                404,
+                {
+                    "detail": f"plugin API disabled for '{plugin_name}'",
+                    "server_time": _utc_now_iso(),
+                },
+            )
+            return
+        plugins_list = self._filter_plugins_for_api(
+            getattr(self._server(), "plugins", []) or []
+        )
         try:
             snap = _admin_logic.build_named_plugin_snapshot(
                 plugins_list, plugin_name, label="EtcHosts"
@@ -3927,7 +4229,18 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         suffix = "/access_control"
         raw_segment = path[len(prefix) : -len(suffix)]
         plugin_name = raw_segment.strip("/")
-        plugins_list = getattr(self._server(), "plugins", []) or []
+        if self._is_plugin_api_disabled(plugin_name):
+            self._send_json(
+                404,
+                {
+                    "detail": f"plugin API disabled for '{plugin_name}'",
+                    "server_time": _utc_now_iso(),
+                },
+            )
+            return
+        plugins_list = self._filter_plugins_for_api(
+            getattr(self._server(), "plugins", []) or []
+        )
         try:
             snap = _admin_logic.build_named_plugin_snapshot(
                 plugins_list, plugin_name, label="AccessControl"
@@ -3964,7 +4277,18 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         suffix = "/rate_limit"
         raw_segment = path[len(prefix) : -len(suffix)]
         plugin_name = raw_segment.strip("/")
-        plugins_list = getattr(self._server(), "plugins", []) or []
+        if self._is_plugin_api_disabled(plugin_name):
+            self._send_json(
+                404,
+                {
+                    "detail": f"plugin API disabled for '{plugin_name}'",
+                    "server_time": _utc_now_iso(),
+                },
+            )
+            return
+        plugins_list = self._filter_plugins_for_api(
+            getattr(self._server(), "plugins", []) or []
+        )
         try:
             snap = _admin_logic.build_named_plugin_snapshot(
                 plugins_list, plugin_name, label="RateLimit"
@@ -3999,6 +4323,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
         params = urllib.parse.parse_qs(parsed.query)
+        self._begin_api_audit_context(path=path, params=params)
 
         web_cfg = self._web_cfg()
         enable_api = bool(web_cfg.get("enable_api", True))
@@ -4142,6 +4467,8 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
 
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
+        params = urllib.parse.parse_qs(parsed.query)
+        self._begin_api_audit_context(path=path, params=params)
 
         web_cfg = self._web_cfg()
         enable_api = bool(web_cfg.get("enable_api", True))
@@ -4253,6 +4580,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
                     },
                 )
                 return
+            self._last_admin_json_body = dict(body)
             if path in {"/config/save", "/api/v1/config/save"}:
                 self._handle_config_save(body)
             elif path in {"/config/save_and_reload", "/api/v1/config/save_and_reload"}:
