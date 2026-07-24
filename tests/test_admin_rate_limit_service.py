@@ -12,18 +12,18 @@ from __future__ import annotations
 from foghorn.servers.webserver import admin_rate_limit as rl
 
 
-def test_parse_admin_rate_limit_settings_defaults_disabled() -> None:
-    """Brief: Parser defaults to disabled settings when config is missing.
+def test_parse_admin_rate_limit_settings_defaults_enabled() -> None:
+    """Brief: Parser defaults to enabled settings when config is missing.
 
     Inputs:
       - Empty config mapping.
 
     Outputs:
-      - Parsed settings with enabled=False and safe defaults.
+      - Parsed settings with enabled=True and safe defaults.
     """
 
     settings = rl.parse_admin_rate_limit_settings({})
-    assert settings.enabled is False
+    assert settings.enabled is True
     assert settings.backend == "plugin"
     assert settings.requests_per_window == 60
     assert settings.window_seconds == 60

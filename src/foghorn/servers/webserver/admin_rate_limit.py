@@ -380,7 +380,7 @@ def parse_admin_rate_limit_settings(config: Dict[str, Any] | None) -> AdminRateL
     web_cfg = _get_web_cfg(config)
     admin_cfg_obj = web_cfg.get("admin_rate_limit")
     admin_cfg = admin_cfg_obj if isinstance(admin_cfg_obj, dict) else {}
-    enabled = bool(admin_cfg.get("enabled", False))
+    enabled = bool(admin_cfg.get("enabled", True))
     backend = str(admin_cfg.get("backend", "plugin") or "plugin").strip().lower()
     if backend not in {"plugin", "memory"}:
         backend = "plugin"
