@@ -46,6 +46,9 @@ _SENSITIVE_HEADER_NAMES = {
     "cookie",
     "set-cookie",
 }
+_DEFAULT_AUDIT_RETENTION_MAX_RECORDS = 100_000
+_DEFAULT_AUDIT_RETENTION_MAX_DB_BYTES = 128 * 1024 * 1024
+_DEFAULT_AUDIT_RETENTION_PRUNE_EVERY_N_INSERTS = 100
 
 
 def is_api_request_path(path: str) -> bool:
@@ -212,6 +215,10 @@ class ApiRequestAuditLogger:
 
     enabled: bool
     db_path: Path | None = None
+    retention_max_records: int | None = None
+    retention_max_age_seconds: float | None = None
+    retention_max_db_bytes: int | None = None
+    retention_prune_every_n_inserts: int = 100
 
     def __post_init__(self) -> None:
         """Brief: Initialize lock and schema state.
@@ -249,10 +256,64 @@ class ApiRequestAuditLogger:
             return cls(enabled=False, db_path=None)
 
         db_path = _resolve_db_path(web_cfg, config_path)
-        return cls(enabled=True, db_path=db_path)
+        retention_max_records: int | None = int(_DEFAULT_AUDIT_RETENTION_MAX_RECORDS)
+        retention_max_age_seconds: float | None = None
+        retention_max_db_bytes: int | None = int(_DEFAULT_AUDIT_RETENTION_MAX_DB_BYTES)
+        retention_prune_every_n_inserts = int(
+            _DEFAULT_AUDIT_RETENTION_PRUNE_EVERY_N_INSERTS
+        )
+
+        if isinstance(audit_cfg, dict):
+            raw_max_records = audit_cfg.get("retention_max_records")
+            if raw_max_records is not None:
+                try:
+                    parsed = int(raw_max_records)
+                    if parsed > 0:
+                        retention_max_records = parsed
+                    else:
+                        retention_max_records = None
+                except Exception:
+                    pass
+
+            raw_max_age_seconds = audit_cfg.get("retention_max_age_seconds")
+            if raw_max_age_seconds is not None:
+                try:
+                    parsed_age = float(raw_max_age_seconds)
+                    if parsed_age > 0:
+                        retention_max_age_seconds = parsed_age
+                except Exception:
+                    retention_max_age_seconds = None
+
+            raw_max_db_bytes = audit_cfg.get("retention_max_db_bytes")
+            if raw_max_db_bytes is not None:
+                try:
+                    parsed_bytes = int(raw_max_db_bytes)
+                    if parsed_bytes > 0:
+                        retention_max_db_bytes = parsed_bytes
+                    else:
+                        retention_max_db_bytes = None
+                except Exception:
+                    pass
+
+            raw_prune_every = audit_cfg.get("retention_prune_every_n_inserts")
+            if raw_prune_every is not None:
+                try:
+                    retention_prune_every_n_inserts = max(1, int(raw_prune_every))
+                except Exception:
+                    retention_prune_every_n_inserts = int(
+                        _DEFAULT_AUDIT_RETENTION_PRUNE_EVERY_N_INSERTS
+                    )
+        return cls(
+            enabled=True,
+            db_path=db_path,
+            retention_max_records=retention_max_records,
+            retention_max_age_seconds=retention_max_age_seconds,
+            retention_max_db_bytes=retention_max_db_bytes,
+            retention_prune_every_n_inserts=int(retention_prune_every_n_inserts),
+        )
 
     def _ensure_schema(self, conn: sqlite3.Connection) -> None:
-        """Brief: Create append-only audit table/triggers when needed.
+        """Brief: Create/upgrade audit schema and append-only controls.
 
         Inputs:
           - conn: Open SQLite connection.
@@ -292,8 +353,53 @@ class ApiRequestAuditLogger:
         )
         conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS api_request_audit_control (
+              key TEXT PRIMARY KEY,
+              value INTEGER NOT NULL,
+              created_at TEXT
+            )
+            """
+        )
+        control_cols = {
+            str(row[1])
+            for row in conn.execute(
+                "PRAGMA table_info(api_request_audit_control)"
+            ).fetchall()
+            if isinstance(row, tuple) and len(row) > 1
+        }
+        if "created_at" not in control_cols:
+            conn.execute(
+                "ALTER TABLE api_request_audit_control ADD COLUMN created_at TEXT"
+            )
+        control_created_at = _iso_utc_now()
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO api_request_audit_control(
+              key,
+              value,
+              created_at
+            )
+            VALUES('allow_delete', 0, ?)
+            """,
+            (control_created_at,),
+        )
+        conn.execute(
+            """
+            UPDATE api_request_audit_control
+            SET
+              created_at = COALESCE(created_at, ?)
+            WHERE key = 'allow_delete'
+            """,
+            (control_created_at,),
+        )
+        conn.execute(
+            """
             CREATE TRIGGER IF NOT EXISTS api_request_audit_no_delete
             BEFORE DELETE ON api_request_audit
+            WHEN COALESCE(
+              (SELECT value FROM api_request_audit_control WHERE key = 'allow_delete' LIMIT 1),
+              0
+            ) != 1
             BEGIN
               SELECT RAISE(ABORT, 'api_request_audit is append-only');
             END
@@ -306,6 +412,145 @@ class ApiRequestAuditLogger:
             """
         )
         self._schema_ready = True
+
+    def _retention_enabled(self) -> bool:
+        """Brief: Return whether any retention policy is active.
+
+        Inputs:
+          - None.
+
+        Outputs:
+          - bool.
+        """
+
+        return bool(
+            (self.retention_max_records is not None)
+            or (self.retention_max_age_seconds is not None)
+            or (self.retention_max_db_bytes is not None)
+        )
+
+    def _audit_db_size_bytes(self) -> int:
+        """Brief: Return total bytes of SQLite db + wal/shm sidecar files.
+
+        Inputs:
+          - None.
+
+        Outputs:
+          - int size in bytes.
+        """
+
+        if self.db_path is None:
+            return 0
+        total = 0
+        for suffix in ("", "-wal", "-shm"):
+            p = Path(str(self.db_path) + suffix)
+            try:
+                total += int(p.stat().st_size)
+            except Exception:
+                continue
+        return int(total)
+
+    def _set_allow_delete_for_prune(
+        self, conn: sqlite3.Connection, *, enabled: bool
+    ) -> None:
+        """Brief: Toggle internal retention prune delete gate for current connection.
+
+        Inputs:
+          - conn: Open sqlite connection.
+          - enabled: Whether internal prune deletes should be allowed.
+
+        Outputs:
+          - None.
+        """
+
+        conn.execute(
+            "UPDATE api_request_audit_control SET value = ? WHERE key = 'allow_delete'",
+            (1 if bool(enabled) else 0,),
+        )
+
+    def _apply_retention_prune(
+        self, conn: sqlite3.Connection, *, now_ts: float
+    ) -> None:
+        """Brief: Apply retention pruning for age/row-count and best-effort db size.
+
+        Inputs:
+          - conn: Open sqlite connection.
+          - now_ts: Current epoch timestamp.
+
+        Outputs:
+          - None.
+        """
+
+        if not self._retention_enabled():
+            return
+
+        self._set_allow_delete_for_prune(conn, enabled=True)
+        try:
+            if self.retention_max_age_seconds is not None:
+                cutoff = float(now_ts) - float(self.retention_max_age_seconds)
+                conn.execute(
+                    "DELETE FROM api_request_audit WHERE created_at_ts < ?",
+                    (float(cutoff),),
+                )
+
+            if self.retention_max_records is not None:
+                max_rows = max(1, int(self.retention_max_records))
+                row_count = int(
+                    conn.execute("SELECT COUNT(*) FROM api_request_audit").fetchone()[0]
+                )
+                excess = row_count - max_rows
+                if excess > 0:
+                    conn.execute(
+                        """
+                        DELETE FROM api_request_audit
+                        WHERE id IN (
+                          SELECT id
+                          FROM api_request_audit
+                          ORDER BY id ASC
+                          LIMIT ?
+                        )
+                        """,
+                        (int(excess),),
+                    )
+
+            if self.retention_max_db_bytes is not None:
+                # Best effort: first flush WAL pages, then trim oldest rows if
+                # size remains above bound. This may not reclaim bytes
+                # immediately on all sqlite modes/filesystems.
+                try:
+                    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                except Exception:
+                    pass
+                max_bytes = int(self.retention_max_db_bytes)
+                if max_bytes > 0:
+                    while self._audit_db_size_bytes() > max_bytes:
+                        oldest = conn.execute(
+                            """
+                            SELECT id
+                            FROM api_request_audit
+                            ORDER BY id ASC
+                            LIMIT 512
+                            """
+                        ).fetchall()
+                        if not oldest:
+                            break
+                        conn.execute(
+                            """
+                            DELETE FROM api_request_audit
+                            WHERE id IN (
+                              SELECT id
+                              FROM api_request_audit
+                              ORDER BY id ASC
+                              LIMIT 512
+                            )
+                            """
+                        )
+                        try:
+                            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                        except Exception:
+                            pass
+        finally:
+            self._set_allow_delete_for_prune(conn, enabled=False)
 
     def log_event(
         self,
@@ -363,6 +608,24 @@ class ApiRequestAuditLogger:
                 try:
                     conn.execute("PRAGMA journal_mode=WAL")
                     self._ensure_schema(conn)
+                    now_ts = float(created_at_ts)
+                    if self._retention_enabled():
+                        if self.retention_max_db_bytes is not None and int(
+                            self.retention_max_db_bytes
+                        ) > 0:
+                            if self._audit_db_size_bytes() >= int(
+                                self.retention_max_db_bytes
+                            ):
+                                self._apply_retention_prune(conn, now_ts=now_ts)
+                                if self._audit_db_size_bytes() >= int(
+                                    self.retention_max_db_bytes
+                                ):
+                                    logger.warning(
+                                        "Skipping API audit event because DB size is at cap (%d bytes)",
+                                        int(self.retention_max_db_bytes),
+                                    )
+                                    conn.commit()
+                                    return
                     conn.execute(
                         """
                         INSERT INTO api_request_audit (
@@ -401,6 +664,16 @@ class ApiRequestAuditLogger:
                             (str(error_text) if error_text else None),
                         ),
                     )
+                    if (
+                        self._retention_enabled()
+                        and int(self.retention_prune_every_n_inserts) > 0
+                    ):
+                        insert_count = int(getattr(self, "_insert_counter", 0) or 0) + 1
+                        self._insert_counter = insert_count
+                        if (
+                            insert_count % int(self.retention_prune_every_n_inserts)
+                        ) == 0:
+                            self._apply_retention_prune(conn, now_ts=now_ts)
                     conn.commit()
                 finally:
                     conn.close()
