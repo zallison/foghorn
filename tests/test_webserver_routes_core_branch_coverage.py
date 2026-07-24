@@ -17,6 +17,7 @@ import importlib
 import os
 import signal
 import types
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -59,7 +60,10 @@ def _create_test_app(
       - FastAPI application instance from `create_app`.
     """
 
-    app_config: dict[str, Any] = {"webserver": {"enabled": True}}
+    app_config: dict[str, Any] = {
+        "webserver": {"enabled": True, "auth": {"mode": "none"}},
+        "server": {"http": {"enabled": True, "auth": {"mode": "none"}}},
+    }
     if isinstance(config, dict):
         app_config.update(config)
 
@@ -1088,6 +1092,7 @@ def test_plugin_table_branches_and_hash_filtering() -> None:
     class _ExplodingPlugin:
         def __init__(self, name: str) -> None:
             self.name = name
+            self.request_created_at = datetime.now(timezone.utc).isoformat()
 
         def get_admin_ui_descriptor(self) -> dict[str, Any]:
             return {

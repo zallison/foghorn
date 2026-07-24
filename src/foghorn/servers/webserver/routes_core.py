@@ -21,7 +21,12 @@ from fastapi import (
 )
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from ...config.config_schema import get_default_schema_path
-from ...security_limits import MAX_ADMIN_JSON_BODY_BYTES, maybe_parse_content_length
+from ...security_limits import (
+    MAX_ADMIN_JSON_BODY_BYTES,
+    RequestBodyTooLargeError,
+    maybe_parse_content_length,
+    read_async_body_with_limit,
+)
 
 from ...stats import StatsCollector
 from ...utils.config_diagram import (
@@ -1409,12 +1414,16 @@ def _register_admin_routes(app: FastAPI, auth_dep: Any) -> None:
                 status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
                 detail=f"request body too large (max {max_bytes:,} bytes)",
             )
-        raw = await request.body()
-        if len(raw) > max_bytes:
+        try:
+            raw = await read_async_body_with_limit(
+                request.stream(),
+                max_bytes=max_bytes,
+            )
+        except RequestBodyTooLargeError as exc:
             raise HTTPException(
                 status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
                 detail=f"request body too large (max {max_bytes:,} bytes)",
-            )
+            ) from exc
         if not raw:
             return {}
         try:

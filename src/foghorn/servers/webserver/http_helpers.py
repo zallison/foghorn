@@ -123,6 +123,7 @@ def _evaluate_web_auth(
     *,
     authorization_header: str | None,
     api_key_header: str | None,
+    default_mode: str = "none",
 ) -> tuple[bool, int | None, str | None, Dict[str, str] | None]:
     """Brief: Evaluate configured web auth for a single request.
 
@@ -130,6 +131,7 @@ def _evaluate_web_auth(
       - web_cfg: webserver config dict from YAML (or {}).
       - authorization_header: Raw Authorization header value.
       - api_key_header: Raw X-API-Key header value.
+      - default_mode: Fallback auth mode when webserver.auth.mode is unset.
 
     Outputs:
       - Tuple of:
@@ -145,7 +147,7 @@ def _evaluate_web_auth(
     """
 
     auth_cfg = (web_cfg.get("auth") or {}) if isinstance(web_cfg, dict) else {}
-    mode = str(auth_cfg.get("mode", "none")).strip().lower()
+    mode = str(auth_cfg.get("mode", default_mode)).strip().lower()
     if mode in {"", "none"}:
         return True, None, None, None
     if mode != "token":
@@ -166,7 +168,7 @@ def _evaluate_web_auth(
     return True, None, None, None
 
 
-def _build_auth_dependency(web_cfg: Dict[str, Any]):
+def _build_auth_dependency(web_cfg: Dict[str, Any], *, default_mode: str = "none"):
     """Build a FastAPI dependency enforcing optional admin auth.
 
     Inputs:
@@ -186,6 +188,7 @@ def _build_auth_dependency(web_cfg: Dict[str, Any]):
             web_cfg,
             authorization_header=request.headers.get("authorization"),
             api_key_header=request.headers.get("x-api-key"),
+            default_mode=str(default_mode or "none"),
         )
         if authorized:
             return None

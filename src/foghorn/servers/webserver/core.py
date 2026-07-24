@@ -122,6 +122,11 @@ _SYSTEM_INFO_CACHE_TTL_SECONDS = _stats_helpers._SYSTEM_INFO_CACHE_TTL_SECONDS
 from ...plugins.resolve.base import AdminPageSpec
 from ...stats import StatsCollector, StatsSnapshot, get_process_uptime_seconds
 from ..udp_server import DNSUDPHandler
+from ...security_limits import (
+    RequestBodyTooLargeError,
+    maybe_parse_content_length,
+    read_async_body_with_limit,
+)
 from .routes_core import (
     _register_admin_routes,
     _register_config_routes,
@@ -277,6 +282,7 @@ def create_app(
         )
 
     auth_dep = _build_auth_dependency(web_cfg)
+    admin_auth_dep = _build_auth_dependency(web_cfg, default_mode="token")
 
     # Register route groups via helper functions to keep create_app concise.
     if enable_api:
@@ -284,7 +290,7 @@ def create_app(
         _register_stats_routes(app, auth_dep, FOGHORN_VERSION)
         _register_config_routes(app, auth_dep)
         _register_query_log_routes(app, auth_dep)
-        _register_admin_routes(app, auth_dep)
+        _register_admin_routes(app, admin_auth_dep)
         _register_plugin_routes(app, auth_dep)
 
     @app.middleware("http")
@@ -316,16 +322,37 @@ def create_app(
         if method in {"POST", "PUT", "PATCH"}:
             try:
                 content_type = str(request.headers.get("content-type", "")).lower()
-                content_length_text = str(request.headers.get("content-length", "0") or "0")
-                content_length = int(content_length_text) if content_length_text.isdigit() else 0
+                content_length = maybe_parse_content_length(
+                    request.headers.get("content-length")
+                )
                 max_body_bytes = 16_384
-                if "application/json" in content_type and content_length <= max_body_bytes:
-                    raw_body = await request.body()
-                    if raw_body:
+                if "application/json" in content_type:
+                    if content_length > max_body_bytes:
+                        body_obj = {
+                            "_omitted_too_large": True,
+                            "max_bytes": int(max_body_bytes),
+                        }
+                    else:
                         try:
-                            body_obj = json.loads(raw_body.decode("utf-8"))
-                        except Exception:
-                            body_obj = {"_non_json_body": True, "length": len(raw_body)}
+                            raw_body = await read_async_body_with_limit(
+                                request.stream(),
+                                max_bytes=max_body_bytes,
+                            )
+                            setattr(request, "_body", raw_body)
+                        except RequestBodyTooLargeError:
+                            body_obj = {
+                                "_omitted_too_large": True,
+                                "max_bytes": int(max_body_bytes),
+                            }
+                        else:
+                            if raw_body:
+                                try:
+                                    body_obj = json.loads(raw_body.decode("utf-8"))
+                                except Exception:
+                                    body_obj = {
+                                        "_non_json_body": True,
+                                        "length": len(raw_body),
+                                    }
             except Exception:
                 body_obj = {"_unavailable": True}
 
