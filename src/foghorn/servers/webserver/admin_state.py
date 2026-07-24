@@ -25,6 +25,8 @@ class AdminRuntimeState:
           * last config verification payload
           * restart scheduling metadata
           * bounded admin action audit events
+          * temporary-record tracking metadata
+          * bounded admin task/event history
     """
 
     audit_max_entries: int = 500
@@ -279,7 +281,11 @@ class AdminRuntimeState:
         lim = max(1, min(int(limit or 500), 5000))
         now_ts = float(time.time())
         with self._lock:
-            items = [dict(v) for v in self._temporary_records.values() if isinstance(v, dict)]
+            items = [
+                dict(v)
+                for v in self._temporary_records.values()
+                if isinstance(v, dict)  # pragma: nocover - defensive guard for unexpected state corruption
+            ]
         out: List[Dict[str, Any]] = []
         for item in items:
             if target_text and str(item.get("target", "")) != target_text:
@@ -311,7 +317,7 @@ class AdminRuntimeState:
             keys = list(self._temporary_records.keys())
             for key in keys:
                 item = self._temporary_records.get(key)
-                if not isinstance(item, dict):
+                if not isinstance(item, dict):  # pragma: nocover - defensive guard for unexpected state corruption
                     continue
                 expires_at_ts = float(item.get("expires_at_ts", 0.0) or 0.0)
                 if expires_at_ts <= 0.0 or expires_at_ts > now_f:
