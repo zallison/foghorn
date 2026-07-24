@@ -1020,6 +1020,44 @@ class BaseStatsStore:
         return value
 
     @staticmethod
+    def _normalize_retention_prune_cadence_defaults(
+        *,
+        retention_max_records: int | None,
+        retention_max_bytes: int | None,
+        retention_prune_interval_seconds: float | None,
+        retention_prune_every_n_inserts: int | None,
+    ) -> tuple[float | None, int | None]:
+        """Brief: Apply shared default prune cadence rules for retention policies.
+
+        Inputs:
+          - retention_max_records: Normalized max-records retention limit.
+          - retention_max_bytes: Normalized max-bytes retention limit.
+          - retention_prune_interval_seconds: Normalized prune interval seconds.
+          - retention_prune_every_n_inserts: Normalized prune cadence by inserts.
+
+        Outputs:
+          - tuple[float | None, int | None]: Effective
+            (retention_prune_interval_seconds, retention_prune_every_n_inserts)
+            after shared defaulting rules are applied.
+
+        Notes:
+          - When record/byte retention is enabled without an explicit prune
+            interval or insert cadence, defaults cadence to
+            DEFAULT_RETENTION_PRUNE_EVERY_N_INSERTS to avoid expensive prune
+            checks on every single insert.
+        """
+
+        effective_interval = retention_prune_interval_seconds
+        effective_every_n = retention_prune_every_n_inserts
+        if (
+            effective_interval is None
+            and effective_every_n is None
+            and (retention_max_records is not None or retention_max_bytes is not None)
+        ):
+            effective_every_n = BaseStatsStore.DEFAULT_RETENTION_PRUNE_EVERY_N_INSERTS
+        return effective_interval, effective_every_n
+
+    @staticmethod
     def _normalize_retention_days(raw: object) -> float | None:
         """Brief: Normalize a day-based retention setting.
 
@@ -1088,6 +1126,7 @@ class BaseStatsStore:
             return None
         return value
 
+    DEFAULT_RETENTION_PRUNE_EVERY_N_INSERTS = 256
     @staticmethod
     def _normalize_retention_prune_every_n_inserts(raw: object) -> int | None:
         """Brief: Normalize a retention prune cadence in inserted rows.

@@ -133,25 +133,20 @@ class JsonLogging(BaseStatsStore):
                 retention_prune_interval_seconds
             )
         )
-        configured_prune_every_n_inserts = (
+        normalized_prune_every_n_inserts = (
             BaseStatsStore._normalize_retention_prune_every_n_inserts(
                 retention_prune_every_n_inserts
             )
         )
-        self._query_log_retention_prune_every_n_inserts = (
-            configured_prune_every_n_inserts
+        (
+            self._query_log_retention_prune_interval_seconds,
+            self._query_log_retention_prune_every_n_inserts,
+        ) = BaseStatsStore._normalize_retention_prune_cadence_defaults(
+            retention_max_records=self._query_log_retention_max_records,
+            retention_max_bytes=self._query_log_retention_max_bytes,
+            retention_prune_interval_seconds=self._query_log_retention_prune_interval_seconds,
+            retention_prune_every_n_inserts=normalized_prune_every_n_inserts,
         )
-        if (
-            self._query_log_retention_prune_every_n_inserts is None
-            and self._query_log_retention_prune_interval_seconds is None
-            and (
-                self._query_log_retention_max_records is not None
-                or self._query_log_retention_max_bytes is not None
-            )
-        ):
-            # JSON compaction rewrites file contents; avoid doing it on every
-            # insert by default when users configure record/byte retention.
-            self._query_log_retention_prune_every_n_inserts = 256
         self._query_log_retention_seen_inserts = 0
         self._query_log_retention_last_prune_ts = 0.0
 
