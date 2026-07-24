@@ -1,16 +1,117 @@
 import http.server
+import inspect
 import json
 import logging
 import ssl
 import threading
 import urllib.parse
 from typing import Any, Callable, Optional
+from foghorn.security_limits import (
+    RequestBodyTooLargeError,
+    read_async_body_with_limit,
+)
 
 from . import doh_logic as _logic
 
 logger = logging.getLogger("foghorn.doh_api")
 
 _DNS_CT = "application/dns-message"
+
+
+def _get_soft_nofile_limit() -> int | None:
+    """Brief: Return process soft nofile limit when available.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - int | None: Positive RLIMIT_NOFILE soft limit, otherwise None.
+    """
+
+    try:
+        import resource
+
+        soft_limit, _hard_limit = resource.getrlimit(resource.RLIMIT_NOFILE)
+        if soft_limit in (None, resource.RLIM_INFINITY):
+            return None
+        soft_i = int(soft_limit)
+        if soft_i <= 0:
+            return None
+        return soft_i
+    except Exception:
+        return None
+
+
+def _derive_doh_uvicorn_limit_concurrency() -> int:
+    """Brief: Derive a conservative uvicorn concurrency cap for DoH server.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - int: Positive concurrency cap.
+    """
+
+    soft_nofile = _get_soft_nofile_limit()
+    if soft_nofile is None:
+        return 256
+    return max(64, min(1024, int(soft_nofile) // 2))
+
+
+def _build_doh_uvicorn_config(
+    *,
+    uvicorn_module: Any,
+    app: Any,
+    host: str,
+    port: int,
+    ssl_cert: str | None,
+    ssl_key: str | None,
+) -> Any:
+    """Brief: Build uvicorn.Config for DoH with transport hardening knobs.
+
+    Inputs:
+      - uvicorn_module: Imported uvicorn module exposing Config.
+      - app: FastAPI app instance.
+      - host: Listen host.
+      - port: Listen port.
+      - ssl_cert: Optional TLS cert path.
+      - ssl_key: Optional TLS key path.
+
+    Outputs:
+      - uvicorn.Config instance.
+    """
+
+    config_kwargs: dict[str, Any] = {
+        "app": app,
+        "host": host,
+        "port": port,
+        "log_level": "warning",
+        "ssl_certfile": ssl_cert,
+        "ssl_keyfile": ssl_key,
+    }
+    try:
+        params = inspect.signature(uvicorn_module.Config).parameters
+    except Exception:
+        params = {}
+
+    limit_concurrency = _derive_doh_uvicorn_limit_concurrency()
+    backlog = max(64, min(2048, int(limit_concurrency)))
+
+    if "limit_concurrency" in params:
+        config_kwargs["limit_concurrency"] = int(limit_concurrency)
+    if "backlog" in params:
+        config_kwargs["backlog"] = int(backlog)
+    if "timeout_keep_alive" in params:
+        config_kwargs["timeout_keep_alive"] = 5
+
+    logger.info(
+        "DoH uvicorn limits: limit_concurrency=%s backlog=%s timeout_keep_alive=%s soft_nofile=%s",
+        config_kwargs.get("limit_concurrency", "default"),
+        config_kwargs.get("backlog", "default"),
+        config_kwargs.get("timeout_keep_alive", "default"),
+        _get_soft_nofile_limit(),
+    )
+    return uvicorn_module.Config(**config_kwargs)
 
 
 def _b64url_decode_nopad(s: str) -> bytes:
@@ -136,7 +237,13 @@ def create_doh_app(
             # Invalid content-length; treat as bad request.
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST)
 
-        body = await request.body()
+        try:
+            body = await read_async_body_with_limit(
+                request.stream(),
+                max_bytes=int(MAX_DOH_DNS_MESSAGE_BYTES),
+            )
+        except RequestBodyTooLargeError:
+            raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE)
         if len(body) > int(MAX_DOH_DNS_MESSAGE_BYTES):
             raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE)
         client_ip = request.client.host if request.client else "0.0.0.0"
@@ -725,13 +832,13 @@ def start_doh_server(
     ssl_cert = cert_file or None
     ssl_key = key_file or None
 
-    config = uvicorn.Config(
-        app,
+    config = _build_doh_uvicorn_config(
+        uvicorn_module=uvicorn,
+        app=app,
         host=host,
         port=port,
-        log_level="warning",
-        ssl_certfile=ssl_cert,
-        ssl_keyfile=ssl_key,
+        ssl_cert=ssl_cert,
+        ssl_key=ssl_key,
     )
     server = uvicorn.Server(config)
 

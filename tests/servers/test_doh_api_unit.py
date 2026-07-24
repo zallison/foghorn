@@ -169,6 +169,37 @@ def test_doh_post_oversized_body_returns_413() -> None:
     assert resp.status_code == 413
 
 
+def test_doh_post_uses_streaming_reader_not_request_body(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Brief: DoH POST must not call Request.body() while parsing dns-message payloads.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts /dns-query POST still succeeds when Request.body() is disabled.
+    """
+
+    from starlette.requests import Request as StarletteRequest
+
+    async def _boom_body(_self) -> bytes:  # pragma: no cover - invoked on regressions
+        raise AssertionError("request.body() should not be called in DoH POST parser")
+
+    monkeypatch.setattr(StarletteRequest, "body", _boom_body)
+
+    app = doh_api.create_doh_app(lambda q, ip: b"\x90\x91")
+    client = TestClient(app)
+
+    resp = client.post(
+        "/dns-query",
+        data=b"\x01\x02query",
+        headers={"Content-Type": "application/dns-message"},
+    )
+    assert resp.status_code == 200
+    assert resp.content == b"\x90\x91"
+
+
 def test_threaded_client_ip_fallback_to_default() -> None:
     """Brief: _ThreadedDoHRequestHandler._client_ip falls back to 0.0.0.0.
 
@@ -810,3 +841,53 @@ def test_start_doh_server_disables_threaded_fallback(
     )
 
     assert handle is None
+
+
+def test_build_doh_uvicorn_config_applies_hardening_defaults() -> None:
+    """Brief: DoH uvicorn config builder sets explicit concurrency/backlog/keepalive.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts hardening fields are present and sane.
+    """
+
+    class DummyConfig:
+        def __init__(
+            self,
+            app: Any,
+            host: str,
+            port: int,
+            log_level: str,
+            ssl_certfile: str | None = None,
+            ssl_keyfile: str | None = None,
+            limit_concurrency: int | None = None,
+            backlog: int | None = None,
+            timeout_keep_alive: int | None = None,
+        ) -> None:
+            self.kwargs = {
+                "app": app,
+                "host": host,
+                "port": port,
+                "log_level": log_level,
+                "ssl_certfile": ssl_certfile,
+                "ssl_keyfile": ssl_keyfile,
+                "limit_concurrency": limit_concurrency,
+                "backlog": backlog,
+                "timeout_keep_alive": timeout_keep_alive,
+            }
+
+    dummy_uvicorn = type("DummyUvicorn", (), {"Config": DummyConfig})
+    built = doh_api._build_doh_uvicorn_config(
+        uvicorn_module=dummy_uvicorn,
+        app=object(),
+        host="127.0.0.1",
+        port=8053,
+        ssl_cert=None,
+        ssl_key=None,
+    )
+    assert isinstance(built, DummyConfig)
+    assert int(built.kwargs["limit_concurrency"] or 0) >= 64
+    assert int(built.kwargs["backlog"] or 0) >= 64
+    assert int(built.kwargs["timeout_keep_alive"] or 0) == 5
