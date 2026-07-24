@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import ipaddress
 import math
-from typing import Optional
+from typing import AsyncIterable, Optional
 
 # DNS-over-TCP maximum message size.
 #
@@ -44,6 +44,63 @@ MAX_QUERY_LOG_AGG_BUCKETS: int = 20000
 MAX_QUERY_LOG_AGG_GROUPED_RESULTS: int = 50000
 # Maximum JSON body size accepted by admin config/restart POST endpoints.
 MAX_ADMIN_JSON_BODY_BYTES: int = 5_000_000
+
+
+class RequestBodyTooLargeError(ValueError):
+    """Brief: Raised when an async request body stream exceeds a configured byte limit.
+
+    Inputs:
+      - max_bytes: Configured maximum allowed bytes.
+      - actual_bytes: Number of bytes observed when the limit was exceeded.
+
+    Outputs:
+      - Exception instance carrying max/actual byte counts.
+    """
+
+    def __init__(self, *, max_bytes: int, actual_bytes: int) -> None:
+        self.max_bytes = int(max_bytes)
+        self.actual_bytes = int(actual_bytes)
+        super().__init__(
+            f"request body too large (max {self.max_bytes:,} bytes, saw {self.actual_bytes:,})"
+        )
+
+
+async def read_async_body_with_limit(
+    chunks: AsyncIterable[bytes],
+    *,
+    max_bytes: int,
+) -> bytes:
+    """Brief: Read request body chunks while enforcing a strict in-memory byte ceiling.
+
+    Inputs:
+      - chunks: Async iterable yielding request body chunks as bytes.
+      - max_bytes: Maximum number of bytes allowed to be buffered.
+
+    Outputs:
+      - bytes body content when total size is within max_bytes.
+
+    Example:
+      >>> async def _chunks():
+      ...     yield b'a'
+      ...     yield b'b'
+      >>> data = await read_async_body_with_limit(_chunks(), max_bytes=8)
+      >>> data
+      b'ab'
+    """
+
+    max_i = int(max_bytes)
+    if max_i < 0:
+        max_i = 0
+    total = 0
+    parts: list[bytes] = []
+    async for chunk in chunks:
+        if not chunk:
+            continue
+        total += len(chunk)
+        if total > max_i:
+            raise RequestBodyTooLargeError(max_bytes=max_i, actual_bytes=total)
+        parts.append(bytes(chunk))
+    return b"".join(parts)
 
 
 def is_loopback_host(host: str) -> bool:
