@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+from foghorn.plugins.querylog.base import BaseStatsStore
 from foghorn.plugins.querylog.json_logging import JsonLogging
 from foghorn.stats import FOGHORN_VERSION
 
@@ -248,6 +249,30 @@ def test_json_logging_invalid_max_logging_queue_falls_back_to_default(
     )
 
     assert backend._max_logging_queue == 16384  # type: ignore[attr-defined]
+def test_json_logging_retention_default_prune_cadence_is_consistent(
+    tmp_path: Path,
+) -> None:
+    """Brief: JsonLogging applies shared default prune cadence for record/byte retention.
+
+    Inputs:
+        tmp_path: pytest-provided temporary directory path.
+
+    Outputs:
+        None; asserts default prune cadence parity with other querylog backends.
+    """
+
+    log_file = tmp_path / 'queries.jsonl'
+    backend = JsonLogging(
+        file_path=str(log_file),
+        async_logging=False,
+        retention_max_records=10,
+    )
+
+    assert backend._query_log_retention_prune_interval_seconds is None  # type: ignore[attr-defined]
+    assert backend._query_log_retention_prune_every_n_inserts == int(  # type: ignore[attr-defined]
+        BaseStatsStore.DEFAULT_RETENTION_PRUNE_EVERY_N_INSERTS
+    )
+    backend.close()
 
 
 def test_json_logging_retention_max_records(tmp_path: Path) -> None:

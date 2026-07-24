@@ -393,6 +393,23 @@ def test_constructor_builds_connection_kwargs(fake_mongo_driver) -> None:  # typ
     # URI should be the first positional argument.
     assert client._args[0] == "mongodb://example/"
     assert client.kwargs["tls"] is True
+def test_retention_default_prune_cadence_is_consistent(
+    fake_mongo_driver,
+) -> None:  # type: ignore[no-untyped-def]
+    """Brief: Mongo backend applies shared default prune cadence for record/byte retention.
+
+    Inputs:
+      - fake_mongo_driver: fixture installing fake driver.
+
+    Outputs:
+      - None; asserts default prune cadence parity with other querylog backends.
+    """
+
+    backend = _make_backend(fake_mongo_driver, retention_max_records=10)
+    assert backend._query_log_retention_prune_interval_seconds is None  # type: ignore[attr-defined]
+    assert backend._query_log_retention_prune_every_n_inserts == int(  # type: ignore[attr-defined]
+        BaseStatsStore.DEFAULT_RETENTION_PRUNE_EVERY_N_INSERTS
+    )
 
 
 def test_health_check_true_and_false(fake_mongo_driver, monkeypatch) -> None:  # type: ignore[no-untyped-def]

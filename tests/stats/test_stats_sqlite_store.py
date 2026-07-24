@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from foghorn.plugins.querylog.base import BaseStatsStore
+
 from foghorn.plugins.querylog.sqlite import (
     SqliteStatsStore,
     _is_subdomain,
@@ -41,6 +43,22 @@ def test_health_check_true_and_false(monkeypatch) -> None:
 
     store._conn = BoomConn()  # type: ignore[assignment]
     assert store.health_check() is False
+
+def test_sqlite_retention_default_prune_cadence_is_consistent() -> None:
+    """Brief: SQLite applies shared default prune cadence for record/byte retention.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts default prune cadence parity with other querylog backends.
+    """
+
+    store = SqliteStatsStore(':memory:', retention_max_records=10)
+    assert store._query_log_retention_prune_interval_seconds is None  # type: ignore[attr-defined]
+    assert store._query_log_retention_prune_every_n_inserts == int(  # type: ignore[attr-defined]
+        BaseStatsStore.DEFAULT_RETENTION_PRUNE_EVERY_N_INSERTS
+    )
 
 
 def test_select_query_log_normalizes_params_and_handles_empty(monkeypatch) -> None:
@@ -799,7 +817,11 @@ def test_sqlite_backend_query_log_retention_max_records() -> None:
       - None; asserts retention_max_records trims older query_log rows.
     """
 
-    backend = SqliteStatsStore(":memory:", retention_max_records=2)
+    backend = SqliteStatsStore(
+        ":memory:",
+        retention_max_records=2,
+        retention_prune_every_n_inserts=1,
+    )
 
     backend._insert_query_log(
         ts=1.0,
@@ -856,7 +878,11 @@ def test_sqlite_backend_query_log_retention_max_bytes() -> None:
       - None; asserts retention_max_bytes keeps only the newest row at cap.
     """
 
-    backend = SqliteStatsStore(":memory:", retention_max_bytes=10_000_000)
+    backend = SqliteStatsStore(
+        ":memory:",
+        retention_max_bytes=10_000_000,
+        retention_prune_every_n_inserts=1,
+    )
 
     backend._insert_query_log(
         ts=1.0,
@@ -1034,6 +1060,7 @@ def test_sqlite_backend_query_log_retention_days_and_max_records(monkeypatch) ->
         ":memory:",
         retention_days=4.0,
         retention_max_records=2,
+        retention_prune_every_n_inserts=1,
     )
     backend._insert_query_log(
         ts=now_ts - (10.0 * 86400.0),
@@ -1428,6 +1455,7 @@ def test_sqlite_backend_retention_prune_flushes_pending_batch_writes() -> None:
         batch_writes=True,
         batch_time_sec=3600.0,
         retention_max_records=1,
+        retention_prune_every_n_inserts=1,
     )
     backend._insert_query_log(
         ts=1.0,

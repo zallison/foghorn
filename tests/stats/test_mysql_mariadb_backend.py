@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import pytest
 
+from foghorn.plugins.querylog.base import BaseStatsStore
 from foghorn.plugins.querylog.mysql_mariadb import (
     MySqlStatsStore,
     _driver_order_from_config,
@@ -332,6 +333,23 @@ def test_constructor_defaults_to_async_logging(fake_mysql_driver) -> None:  # ty
         connect_kwargs={"ssl": True},
     )
     assert backend._async_logging is True
+def test_retention_default_prune_cadence_is_consistent(
+    fake_mysql_driver,
+) -> None:  # type: ignore[no-untyped-def]
+    """Brief: MySQL backend applies shared default prune cadence for record/byte retention.
+
+    Inputs:
+      - fake_mysql_driver: fixture installing fake driver.
+
+    Outputs:
+      - None; asserts default prune cadence parity with other querylog backends.
+    """
+
+    backend = _make_backend(retention_max_records=10)
+    assert backend._query_log_retention_prune_interval_seconds is None  # type: ignore[attr-defined]
+    assert backend._query_log_retention_prune_every_n_inserts == int(  # type: ignore[attr-defined]
+        BaseStatsStore.DEFAULT_RETENTION_PRUNE_EVERY_N_INSERTS
+    )
 
 
 def test_driver_defaults_to_mariadb_when_available(
