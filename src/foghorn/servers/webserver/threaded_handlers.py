@@ -597,10 +597,18 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         Inputs: none
         Outputs: bool indicating whether the request is authorized.
         """
+        parsed_path = ""
+        try:
+            parsed_path = str(urllib.parse.urlparse(getattr(self, "path", "")).path or "")
+        except Exception:
+            parsed_path = ""
+        default_mode = "token" if parsed_path.startswith("/api/v1/admin") else "none"
+
         authorized, status_code, detail, headers = _evaluate_web_auth(
             self._web_cfg(),
             authorization_header=self.headers.get("Authorization"),
             api_key_header=self.headers.get("X-API-Key"),
+            default_mode=default_mode,
         )
         if authorized:
             return True

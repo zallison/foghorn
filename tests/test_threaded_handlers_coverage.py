@@ -18,6 +18,7 @@ import http.client
 import json
 import sqlite3
 import threading
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Mapping
 
@@ -731,6 +732,88 @@ def test_threaded_plugin_zone_records_compact_invalid_json_returns_400() -> None
     assert payload.get("detail") == "invalid JSON body"
 
 
+def test_threaded_admin_records_action_branch_paths(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Brief: Directly exercise _handle_admin_records_action branch paths.
+
+    Inputs:
+      - monkeypatch fixture and synthetic handler/server state.
+
+    Outputs:
+      - Verifies 400/404/error/success branches plus audit detail handling.
+    """
+
+    import types
+
+    from foghorn.servers.webserver import threaded_handlers as th_mod
+
+    h = web_mod._ThreadedAdminRequestHandler.__new__(
+        web_mod._ThreadedAdminRequestHandler
+    )
+    h.server = types.SimpleNamespace(plugins=["plugin-a"])
+    h.headers = {}
+    monkeypatch.setattr(h, "_require_auth", lambda: True)
+    monkeypatch.setattr(h, "_enforce_admin_rate_limit", lambda **kwargs: True)
+    monkeypatch.setattr(h, "_admin_runtime_state", lambda: "runtime-state")
+
+    sent: list[tuple[int, dict[str, Any]]] = []
+    audits: list[dict[str, Any]] = []
+
+    monkeypatch.setattr(
+        h,
+        "_send_json",
+        lambda code, payload, headers=None: sent.append((int(code), dict(payload))),
+    )
+    monkeypatch.setattr(
+        h,
+        "_admin_audit",
+        lambda **kwargs: audits.append(dict(kwargs)),
+    )
+
+    h._handle_admin_records_action(target="etc_hosts", action="apply", body={})
+    assert sent[-1][0] == 400
+    assert sent[-1][1]["detail"] == "plugin is required"
+
+    h._handle_admin_records_action(
+        target="etc_hosts",
+        action="mystery",
+        body={"plugin": "demo"},
+    )
+    assert sent[-1][0] == 404
+    assert sent[-1][1]["detail"] == "not found"
+
+    monkeypatch.setattr(
+        th_mod._admin_logic,
+        "execute_records_apply",
+        lambda **kwargs: {"status": "ok", "kwargs": kwargs},
+    )
+    h._handle_admin_records_action(
+        target="etc_hosts",
+        action="apply",
+        body={"plugin": "demo", "persist": True},
+    )
+    assert sent[-1][0] == 200
+    assert audits[-1]["ok"] is True
+    assert audits[-1]["details"]["persist"] is True
+
+    monkeypatch.setattr(
+        th_mod._admin_logic,
+        "execute_records_delete",
+        lambda **kwargs: (_ for _ in ()).throw(
+            th_mod._admin_logic.AdminLogicHttpError(409, "conflict")
+        ),
+    )
+    h._handle_admin_records_action(
+        target="zone_records",
+        action="delete",
+        body={"plugin": "demo"},
+    )
+    assert sent[-1][0] == 409
+    assert sent[-1][1]["detail"] == "conflict"
+    assert audits[-1]["ok"] is False
+
+
 def test_threaded_plugin_pages_and_ratelimit_require_auth_in_token_mode() -> None:
     """Brief: Threaded /api/v1/plugin_pages and /api/v1/ratelimit enforce token auth.
 
@@ -767,6 +850,27 @@ def test_threaded_plugin_pages_and_ratelimit_require_auth_in_token_mode() -> Non
             headers={"Authorization": "Bearer secret-token"},
         )
         assert st_auth == 200
+
+
+def test_threaded_admin_status_requires_auth_by_default_when_mode_unset() -> None:
+    """Brief: Threaded admin status endpoint fails closed when auth.mode is unset.
+
+    Inputs:
+      - Webserver config without explicit auth settings.
+
+    Outputs:
+      - /api/v1/admin/status returns 500 token-not-configured error.
+    """
+
+    cfg = {"webserver": {"enabled": True}}
+    status_code, _headers, body = _one_shot_http_request(
+        method="GET",
+        path="/api/v1/admin/status",
+        config=cfg,
+    )
+    assert status_code == 500
+    payload = json.loads(body.decode("utf-8"))
+    assert payload.get("detail") == "webserver.auth.token not configured"
 
 
 def test_threaded_admin_route_enforces_rate_limit_with_plugin_backend() -> None:
@@ -1547,6 +1651,9 @@ def test_threaded_plugin_table_additional_branches() -> None:
             }
 
     class _ExplodingPlugin(_TablePlugin):
+        def __init__(self, name: str) -> None:
+            super().__init__(name)
+            self.request_created_at = datetime.now(timezone.utc).isoformat()
         def get_http_snapshot(self) -> Dict[str, Any]:
             raise RuntimeError("snapshot-fail")
 
