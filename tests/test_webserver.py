@@ -292,6 +292,96 @@ def test_api_request_audit_logs_redacted_api_calls_to_sqlite(tmp_path: Path) -> 
     assert str(headers_obj["authorization"]).startswith("[REDACTED:sha256:")
 
 
+def test_admin_json_parser_uses_streaming_reader_not_request_body(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Brief: Admin JSON routes must parse request bodies without Request.body().
+
+    Inputs:
+      - monkeypatch: Pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts endpoint still parses body and returns stable validation errors.
+    """
+
+    from starlette.requests import Request as StarletteRequest
+
+    async def _boom_body(_self):  # pragma: no cover - invoked on regressions
+        raise AssertionError("request.body() should not be called in admin parser")
+
+    monkeypatch.setattr(StarletteRequest, "body", _boom_body)
+
+    cfg = {
+        "webserver": {"enabled": True, "auth": {"mode": "none"}},
+        "listen": {"udp": {"enabled": False}},
+        "resolver": {"mode": "recursive"},
+    }
+    app = create_app(stats=None, config=cfg, log_buffer=RingBuffer())
+    client = TestClient(app)
+
+    resp = client.post(
+        "/api/v1/admin/rate_limit/clear",
+        json={"plugin": 123},
+    )
+    assert resp.status_code == 400
+    assert resp.json().get("detail") == "plugin must be a string"
+
+
+def test_api_request_audit_middleware_uses_streaming_reader_not_request_body(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Brief: API audit middleware must not call Request.body() for JSON requests.
+
+    Inputs:
+      - tmp_path: Pytest temporary directory fixture.
+      - monkeypatch: Pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts request is logged even when Request.body() is unavailable.
+    """
+
+    from starlette.requests import Request as StarletteRequest
+
+    async def _boom_body(_self):  # pragma: no cover - invoked on regressions
+        raise AssertionError("request.body() should not be called in audit middleware")
+
+    monkeypatch.setattr(StarletteRequest, "body", _boom_body)
+
+    db_path = tmp_path / "api-audit-middleware-streaming.sqlite3"
+    cfg = {
+        "server": {
+            "http": {
+                "enabled": True,
+                "api_request_audit": {
+                    "enabled": True,
+                    "db_path": str(db_path),
+                },
+            }
+        },
+        "listen": {"udp": {"enabled": False}},
+        "resolver": {"mode": "recursive"},
+    }
+    app = create_app(stats=None, config=cfg, log_buffer=RingBuffer())
+    client = TestClient(app)
+
+    resp = client.post("/health", json={"token": "abc"})
+    assert resp.status_code == 405
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        row = conn.execute(
+            "SELECT method, path, status_code FROM api_request_audit ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert row is not None
+    assert str(row[0]) == "POST"
+    assert str(row[1]) == "/health"
+    assert int(row[2]) == 405
+
+
 def test_about_endpoint_includes_version_and_github_url() -> None:
     """Brief: /api/v1/about returns version/build info plus github_url.
 
@@ -2515,6 +2605,26 @@ def test_token_auth_500_when_token_missing() -> None:
     client = TestClient(app)
 
     resp = client.get("/stats")
+    assert resp.status_code == 500
+    body = resp.json()
+    assert body["detail"] == "webserver.auth.token not configured"
+
+
+def test_admin_api_auth_enforced_by_default_when_mode_unset() -> None:
+    """Brief: Admin routes require auth by default even when auth.mode is unset.
+
+    Inputs:
+      - server.http enabled config without auth.mode/token.
+
+    Outputs:
+      - /api/v1/admin/status returns 500 with token-not-configured detail.
+    """
+
+    cfg = {"server": {"http": {"enabled": True}}}
+    app = create_app(stats=None, config=cfg, log_buffer=RingBuffer())
+    client = TestClient(app)
+
+    resp = client.get("/api/v1/admin/status")
     assert resp.status_code == 500
     body = resp.json()
     assert body["detail"] == "webserver.auth.token not configured"
