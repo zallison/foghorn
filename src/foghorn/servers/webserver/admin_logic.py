@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import math
 import time
+import json
 from dataclasses import dataclass
 from datetime import datetime
 from functools import cmp_to_key
@@ -124,7 +125,7 @@ def build_query_log_payload(
       - ede_code: Optional filter for result.ede_code in query-log rows.
       - start_ts/end_ts: Optional unix timestamps in seconds (UTC).
       - page: 1-indexed page number.
-      - page_size: page size (already clamped).
+      - page_size: Requested page size passed through to the store.
 
     Outputs:
       - Dict with keys: total, page, page_size, total_pages, items.
@@ -627,7 +628,7 @@ def build_upstream_status_payload(
             "max_concurrent": max_concurrent,
             "items": items,
         }
-    except Exception:
+    except Exception:  # pragma: nocover - runtime snapshot import/state can be unavailable in minimal test environments
         # Best-effort fallback when runtime snapshot is unavailable.
         return {"strategy": "failover", "max_concurrent": 1, "items": []}
 
@@ -1844,7 +1845,7 @@ def build_config_verify_payload(
       - current_cfg: Current effective runtime config.
 
     Outputs:
-      - Dict containing verify status, analyze_config_change output, and errors.
+      - Dict containing verify status, source path, and analyze_config_change output.
     """
 
     from foghorn import runtime_config as _runtime_config
@@ -2390,12 +2391,12 @@ def build_config_diff_payload(
             if fd is not None:
                 try:
                     os.close(fd)
-                except Exception:
+                except Exception:  # pragma: nocover - defensive cleanup after tempfile parse failure
                     pass
             if tmp_path:
                 try:
                     os.remove(tmp_path)
-                except Exception:
+                except Exception:  # pragma: nocover - defensive cleanup after tempfile parse failure
                     pass
     else:
         try:
@@ -2659,7 +2660,7 @@ def execute_query_log_compact(
     def _count_rows() -> int:
         cur = conn.execute("SELECT COUNT(1) FROM query_log")
         row = cur.fetchone()
-        return int(row[0] or 0) if row else 0
+        return int(row[0] or 0) if row else 0  # pragma: nocover - COUNT(1) in sqlite returns a row unless cursor/driver is corrupted
 
     with lock:
         try:
@@ -2988,6 +2989,7 @@ def execute_records_apply(
       - target: One of 'etc_hosts' or 'zone_records'.
       - plugin_name: Target plugin instance name.
       - payload: Request payload.
+      - runtime_state: Optional runtime-state object used for temporary-record tracking.
 
     Outputs:
       - Dict with apply result.
@@ -3026,7 +3028,7 @@ def execute_records_apply(
                 if callable(remove_fn):
                     try:
                         remove_fn(key=key_text)
-                    except Exception:
+                    except Exception:  # pragma: nocover - best-effort state cleanup must not fail request
                         pass
             else:
                 upsert_fn = getattr(runtime_state, "upsert_temporary_record", None)
@@ -3040,7 +3042,7 @@ def execute_records_apply(
                             ttl_seconds=int(ttl_seconds),
                             persist=False,
                         )
-                    except Exception:
+                    except Exception:  # pragma: nocover - best-effort state tracking must not fail request
                         pass
         return result_payload
     if target == "zone_records":
@@ -3072,7 +3074,7 @@ def execute_records_apply(
                 if callable(remove_fn):
                     try:
                         remove_fn(key=key_text)
-                    except Exception:
+                    except Exception:  # pragma: nocover - best-effort state cleanup must not fail request
                         pass
             else:
                 upsert_fn = getattr(runtime_state, "upsert_temporary_record", None)
@@ -3090,7 +3092,7 @@ def execute_records_apply(
                             ttl_seconds=int(ttl_seconds),
                             persist=False,
                         )
-                    except Exception:
+                    except Exception:  # pragma: nocover - best-effort state tracking must not fail request
                         pass
         return result_payload
     raise AdminLogicHttpError(status_code=400, detail="unknown records target")
@@ -3111,6 +3113,7 @@ def execute_records_delete(
       - target: One of 'etc_hosts' or 'zone_records'.
       - plugin_name: Target plugin instance name.
       - payload: Request payload.
+      - runtime_state: Optional runtime-state object used for temporary-record cleanup.
 
     Outputs:
       - Dict with delete result.
@@ -3146,7 +3149,7 @@ def execute_records_delete(
             if callable(remove_fn):
                 try:
                     remove_fn(key=key_text)
-                except Exception:
+                except Exception:  # pragma: nocover - best-effort state cleanup must not fail request
                     pass
         return result_payload
     if target == "zone_records":
@@ -3178,7 +3181,7 @@ def execute_records_delete(
                     )
                     try:
                         remove_fn(key=key_text)
-                    except Exception:
+                    except Exception:  # pragma: nocover - best-effort state cleanup must not fail request
                         pass
                 elif callable(list_fn):
                     try:
@@ -3188,7 +3191,7 @@ def execute_records_delete(
                             include_expired=True,
                             limit=5000,
                         )
-                    except Exception:
+                    except Exception:  # pragma: nocover - best-effort listing fallback
                         raw_items = []
                     owner_norm = dns_names.normalize_name(str(payload.get("owner", "")))
                     if isinstance(raw_items, list):
@@ -3205,7 +3208,7 @@ def execute_records_delete(
                                 continue
                             try:
                                 remove_fn(key=key_text)
-                            except Exception:
+                            except Exception:  # pragma: nocover - best-effort per-key cleanup
                                 continue
         return result_payload
     raise AdminLogicHttpError(status_code=400, detail="unknown records target")
