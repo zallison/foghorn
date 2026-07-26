@@ -147,6 +147,7 @@ def test_api_request_audit_from_web_cfg_parses_retention_options(
     assert logger.retention_max_db_bytes == 99999
     assert logger.retention_prune_every_n_inserts == 7
 
+
 def test_api_request_audit_from_web_cfg_applies_default_retention_guardrails() -> None:
     """Brief: from_web_cfg applies bounded retention defaults when unset.
 
@@ -163,6 +164,25 @@ def test_api_request_audit_from_web_cfg_applies_default_retention_guardrails() -
     assert logger.retention_max_db_bytes == int(_DEFAULT_AUDIT_RETENTION_MAX_DB_BYTES)
     assert logger.retention_prune_every_n_inserts == int(
         _DEFAULT_AUDIT_RETENTION_PRUNE_EVERY_N_INSERTS
+    )
+
+
+def test_api_request_audit_from_web_cfg_warns_on_implicit_defaults(caplog) -> None:
+    """Brief: from_web_cfg warns when db path/retention are left implicit.
+
+    Inputs:
+      - caplog fixture.
+
+    Outputs:
+      - None; asserts warning about implicit audit defaults is logged.
+    """
+
+    with caplog.at_level("WARNING", logger="foghorn.webserver"):
+        _ = ApiRequestAuditLogger.from_web_cfg({"api_request_audit": {"enabled": True}})
+
+    assert any(
+        "API request audit is enabled with implicit defaults" in rec.getMessage()
+        for rec in caplog.records
     )
 
 
@@ -272,7 +292,9 @@ def test_api_request_audit_table_is_append_only(tmp_path: Path) -> None:
     conn = sqlite3.connect(str(db_path))
     try:
         try:
-            conn.execute("UPDATE api_request_audit SET path = '/api/v1/hacked' WHERE id = 1")
+            conn.execute(
+                "UPDATE api_request_audit SET path = '/api/v1/hacked' WHERE id = 1"
+            )
             assert False, "UPDATE unexpectedly succeeded"
         except sqlite3.DatabaseError as exc:
             assert "append-only" in str(exc)
