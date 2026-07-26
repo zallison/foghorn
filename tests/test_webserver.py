@@ -3469,6 +3469,245 @@ def test_start_webserver_warns_when_public_host_without_auth(
     )
 
 
+def test_start_webserver_warns_for_public_plaintext_admin_bind(
+    monkeypatch, caplog
+) -> None:
+    """Brief: start_webserver warns when admin webserver is public and plaintext.
+
+    Inputs:
+      - Config with host 0.0.0.0 and token auth.
+
+    Outputs:
+      - Warning log mentions plaintext HTTP exposure on non-loopback bind.
+    """
+
+    import sys
+    import types
+
+    class DummyConfig:
+        def __init__(self, app, host, port, log_level):  # noqa: ANN001, ANN002
+            self.app = app
+            self.host = host
+            self.port = port
+            self.log_level = log_level
+
+    class DummyServer:
+        def __init__(self, config):  # noqa: ANN001
+            self.config = config
+
+        def run(self) -> None:
+            return None
+
+    monkeypatch.setitem(
+        sys.modules,
+        "uvicorn",
+        types.SimpleNamespace(Config=DummyConfig, Server=DummyServer),
+    )
+
+    cfg = {
+        "server": {
+            "http": {
+                "enabled": True,
+                "host": "0.0.0.0",
+                "port": 0,
+                "auth": {"mode": "token", "token": "abc123"},
+                "enable_schema": False,
+                "enable_docs": False,
+            }
+        }
+    }
+
+    with caplog.at_level("WARNING", logger="foghorn.webserver"):
+        handle = start_webserver(stats=None, config=cfg, log_buffer=RingBuffer())
+
+    assert isinstance(handle, WebServerHandle)
+    assert any(
+        "bound to 0.0.0.0 over plaintext HTTP" in rec.getMessage()
+        for rec in caplog.records
+    )
+
+
+def test_start_webserver_warns_for_public_openapi_and_docs_exposure(
+    monkeypatch, caplog
+) -> None:
+    """Brief: start_webserver warns when OpenAPI/docs are enabled on public bind.
+
+    Inputs:
+      - Config with host 0.0.0.0, enable_schema=true, enable_docs=true.
+
+    Outputs:
+      - Warning logs for OpenAPI schema and Swagger docs exposure.
+    """
+
+    import sys
+    import types
+
+    class DummyConfig:
+        def __init__(self, app, host, port, log_level):  # noqa: ANN001, ANN002
+            self.app = app
+            self.host = host
+            self.port = port
+            self.log_level = log_level
+
+    class DummyServer:
+        def __init__(self, config):  # noqa: ANN001
+            self.config = config
+
+        def run(self) -> None:
+            return None
+
+    monkeypatch.setitem(
+        sys.modules,
+        "uvicorn",
+        types.SimpleNamespace(Config=DummyConfig, Server=DummyServer),
+    )
+
+    cfg = {
+        "server": {
+            "http": {
+                "enabled": True,
+                "host": "0.0.0.0",
+                "port": 0,
+                "auth": {"mode": "token", "token": "abc123"},
+                "enable_api": True,
+                "enable_schema": True,
+                "enable_docs": True,
+            }
+        }
+    }
+
+    with caplog.at_level("WARNING", logger="foghorn.webserver"):
+        handle = start_webserver(stats=None, config=cfg, log_buffer=RingBuffer())
+
+    assert isinstance(handle, WebServerHandle)
+    assert any(
+        "OpenAPI schema is exposed on a non-loopback admin bind" in rec.getMessage()
+        for rec in caplog.records
+    )
+    assert any(
+        "Swagger docs are exposed on a non-loopback admin bind" in rec.getMessage()
+        for rec in caplog.records
+    )
+
+
+def test_start_webserver_warns_for_permissive_public_cors(monkeypatch, caplog) -> None:
+    """Brief: start_webserver warns on wildcard/credentialed CORS for public bind.
+
+    Inputs:
+      - Config with non-loopback host and permissive CORS settings.
+
+    Outputs:
+      - Warning log mentions permissive CORS exposure.
+    """
+
+    import sys
+    import types
+
+    class DummyConfig:
+        def __init__(self, app, host, port, log_level):  # noqa: ANN001, ANN002
+            self.app = app
+            self.host = host
+            self.port = port
+            self.log_level = log_level
+
+    class DummyServer:
+        def __init__(self, config):  # noqa: ANN001
+            self.config = config
+
+        def run(self) -> None:
+            return None
+
+    monkeypatch.setitem(
+        sys.modules,
+        "uvicorn",
+        types.SimpleNamespace(Config=DummyConfig, Server=DummyServer),
+    )
+
+    cfg = {
+        "server": {
+            "http": {
+                "enabled": True,
+                "host": "0.0.0.0",
+                "port": 0,
+                "auth": {"mode": "token", "token": "abc123"},
+                "cors": {
+                    "enabled": True,
+                    "allowlist": ["*"],
+                    "allow_credentials": True,
+                },
+                "enable_schema": False,
+                "enable_docs": False,
+            }
+        }
+    }
+
+    with caplog.at_level("WARNING", logger="foghorn.webserver"):
+        handle = start_webserver(stats=None, config=cfg, log_buffer=RingBuffer())
+
+    assert isinstance(handle, WebServerHandle)
+    assert any(
+        "CORS is permissive on a non-loopback admin bind" in rec.getMessage()
+        for rec in caplog.records
+    )
+
+
+def test_start_webserver_warns_for_public_threaded_fallback(
+    monkeypatch, caplog
+) -> None:
+    """Brief: start_webserver warns when threaded fallback serves public bind.
+
+    Inputs:
+      - Config with non-loopback host and asyncio disabled.
+
+    Outputs:
+      - Warning log mentions non-loopback threaded fallback.
+    """
+
+    import foghorn.servers.webserver.core as web_core
+
+    class DummyThread:
+        def is_alive(self) -> bool:
+            return True
+
+        def join(self, timeout: float) -> None:  # noqa: ARG002
+            return None
+
+    def fake_threaded(  # noqa: ANN001, ANN201
+        stats, config, log_buffer, config_path=None
+    ):
+        return WebServerHandle(DummyThread())
+
+    monkeypatch.setattr(
+        web_core,
+        "_start_admin_server_threaded",
+        fake_threaded,
+        raising=True,
+    )
+
+    cfg = {
+        "foghorn": {"use_asyncio": False},
+        "server": {
+            "http": {
+                "enabled": True,
+                "host": "0.0.0.0",
+                "port": 0,
+                "auth": {"mode": "token", "token": "abc123"},
+                "enable_schema": False,
+                "enable_docs": False,
+            }
+        },
+    }
+
+    with caplog.at_level("WARNING", logger="foghorn.webserver"):
+        handle = start_webserver(stats=None, config=cfg, log_buffer=RingBuffer())
+
+    assert isinstance(handle, WebServerHandle)
+    assert any(
+        "threaded fallback is serving on a non-loopback host" in rec.getMessage()
+        for rec in caplog.records
+    )
+
+
 def test_split_yaml_value_and_comment_with_and_without_comment() -> None:
     """Brief: _split_yaml_value_and_comment must split value and inline comment.
 
