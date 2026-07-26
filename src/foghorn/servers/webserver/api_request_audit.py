@@ -303,6 +303,24 @@ class ApiRequestAuditLogger:
                     retention_prune_every_n_inserts = int(
                         _DEFAULT_AUDIT_RETENTION_PRUNE_EVERY_N_INSERTS
                     )
+        explicit_db_path = isinstance(audit_cfg, dict) and bool(
+            str(audit_cfg.get("db_path") or "").strip()
+        )
+        explicit_retention_cfg = bool(
+            isinstance(audit_cfg, dict)
+            and (
+                audit_cfg.get("retention_max_records") is not None
+                or audit_cfg.get("retention_max_age_seconds") is not None
+                or audit_cfg.get("retention_max_db_bytes") is not None
+                or audit_cfg.get("retention_prune_every_n_inserts") is not None
+            )
+        )
+        if not explicit_db_path or not explicit_retention_cfg:
+            logger.warning(
+                "API request audit is enabled with implicit defaults (db_path=%s retention_configured=%s); consider explicitly setting api_request_audit.db_path and retention limits",
+                "set" if explicit_db_path else "default",
+                explicit_retention_cfg,
+            )
         return cls(
             enabled=True,
             db_path=db_path,
@@ -610,9 +628,10 @@ class ApiRequestAuditLogger:
                     self._ensure_schema(conn)
                     now_ts = float(created_at_ts)
                     if self._retention_enabled():
-                        if self.retention_max_db_bytes is not None and int(
-                            self.retention_max_db_bytes
-                        ) > 0:
+                        if (
+                            self.retention_max_db_bytes is not None
+                            and int(self.retention_max_db_bytes) > 0
+                        ):
                             if self._audit_db_size_bytes() >= int(
                                 self.retention_max_db_bytes
                             ):
@@ -655,11 +674,7 @@ class ApiRequestAuditLogger:
                                 else None
                             ),
                             (int(status_code) if status_code is not None else None),
-                            (
-                                float(duration_ms)
-                                if duration_ms is not None
-                                else None
-                            ),
+                            (float(duration_ms) if duration_ms is not None else None),
                             str(client_ip or ""),
                             (str(error_text) if error_text else None),
                         ),
@@ -679,4 +694,3 @@ class ApiRequestAuditLogger:
                     conn.close()
         except Exception as exc:
             logger.warning("Failed to persist API audit event: %s", exc)
-
