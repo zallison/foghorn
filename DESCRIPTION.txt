@@ -56,4 +56,4 @@ Docker
 
 License
 -------
-MIT (see LICENSE.txt in the source distribution).
+GNU General Public License v3.0 (GPL-3.0) (see LICENSE.txt in the source distribution).
