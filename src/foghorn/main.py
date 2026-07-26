@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from hashlib import sha256
+import ipaddress
 import logging
 import os
 import platform
@@ -657,6 +658,16 @@ def main(argv: List[str] | None = None) -> int:
     axfr_message_max_bytes = max(512, min(65535, int(axfr_message_max_bytes)))
     axfr_require_tsig = bool(axfr_cfg.get("require_tsig", False))
     axfr_tsig_keys = resolve_axfr_tsig_keys(axfr_cfg)
+
+    _log_startup_security_warnings(
+        logger=logger,
+        cfg=cfg,
+        resolver_mode=resolver_mode,
+        upstreams=upstreams,
+        doh_cfg=doh_cfg,
+        axfr_enabled=axfr_enabled,
+        axfr_allow_clients=axfr_allow_clients,
+    )
 
     # When performing local DNSSEC validation (including local_extended), point
     # the validator's internal resolver at the configured upstream hosts so that
@@ -1723,6 +1734,114 @@ def _log_startup_banner(logger: logging.Logger, *, config_path: str) -> None:
         logger.info("  git_sha=%s", git_sha)
 
 
+def _is_non_loopback_bind_host(host: object) -> bool:
+    """Brief: Return True when a bind host is not loopback-local.
+
+    Inputs:
+      - host: Host/IP value from listener configuration.
+
+    Outputs:
+      - bool: True when host is a non-loopback bind target.
+    """
+
+    host_text = str(host or "").strip().lower()
+    if host_text in {"localhost", "127.0.0.1", "::1"}:
+        return False
+    try:
+        return not ipaddress.ip_address(host_text).is_loopback
+    except ValueError:
+        # Non-IP hostnames are treated as non-loopback for conservative
+        # startup security warnings.
+        return True
+
+
+def _log_startup_security_warnings(
+    *,
+    logger: logging.Logger,
+    cfg: dict,
+    resolver_mode: str,
+    upstreams: list,
+    doh_cfg: dict,
+    axfr_enabled: bool,
+    axfr_allow_clients: list[str],
+) -> None:
+    """Brief: Emit startup warnings for risky security-sensitive config choices.
+
+    Inputs:
+      - logger: Startup logger for warning messages.
+      - cfg: Parsed root configuration mapping.
+      - resolver_mode: Effective resolver mode.
+      - upstreams: Normalized forward upstream entries.
+      - doh_cfg: Normalized DoH listener configuration.
+      - axfr_enabled: Whether AXFR/IXFR serving is enabled.
+      - axfr_allow_clients: Configured AXFR client allowlist entries.
+
+    Outputs:
+      - None.
+    """
+
+    if bool(doh_cfg.get("enabled", False)):
+        doh_host = str(doh_cfg.get("host", "127.0.0.1"))
+        doh_cert_file = doh_cfg.get("cert_file")
+        doh_key_file = doh_cfg.get("key_file")
+        has_doh_tls = bool(str(doh_cert_file or "").strip()) and bool(
+            str(doh_key_file or "").strip()
+        )
+        if _is_non_loopback_bind_host(doh_host) and not has_doh_tls:
+            logger.warning(
+                "DoH listener is enabled on non-loopback host %s without TLS cert_file/key_file; use TLS or bind DoH to loopback behind a reverse proxy",
+                doh_host,
+            )
+
+    if axfr_enabled:
+        normalized_allowlist = [
+            str(x).strip().lower() for x in (axfr_allow_clients or [])
+        ]
+        if not normalized_allowlist:
+            logger.warning(
+                "AXFR/IXFR is enabled without server.axfr.allow_clients; configure a client allowlist to avoid zone data exposure",
+            )
+        elif any(x in {"0.0.0.0/0", "::/0", "*", "any"} for x in normalized_allowlist):
+            logger.warning(
+                "AXFR/IXFR allowlist is overly broad (%s); restrict server.axfr.allow_clients to trusted sources",
+                normalized_allowlist,
+            )
+
+    if resolver_mode == "forward":
+        for upstream in upstreams or []:
+            if not isinstance(upstream, dict):
+                continue
+            transport = str(upstream.get("transport", "") or "").strip().lower()
+            if transport != "dot":
+                continue
+            tls_cfg = upstream.get("tls")
+            if not isinstance(tls_cfg, dict):
+                continue
+            if tls_cfg.get("verify") is False:
+                logger.warning(
+                    "DoT upstream %s:%s has tls.verify=false; this weakens TLS authentication and is not recommended",
+                    upstream.get("host"),
+                    upstream.get("port"),
+                )
+
+    plugins_cfg = cfg.get("plugins")
+    if isinstance(plugins_cfg, list):
+        for idx, entry in enumerate(plugins_cfg):
+            if not isinstance(entry, dict):
+                continue
+            plugin_type = str(entry.get("type", "") or "").strip().lower()
+            if plugin_type not in {"acl", "access_control"}:
+                continue
+            plugin_cfg = entry.get("config")
+            if not isinstance(plugin_cfg, dict):
+                continue
+            if str(plugin_cfg.get("default", "") or "").strip().lower() == "allow":
+                logger.warning(
+                    "ACL plugin at plugins[%d] uses default=allow; prefer default=deny with explicit allow rules",
+                    idx,
+                )
+
+
 def _build_effective_persistence_cfg(
     *,
     cfg: dict,
@@ -1968,6 +2087,29 @@ def _initialize_statistics_subsystem(
                     "Starting Statistics backend %s",
                     stats_persistence_store.__class__.__name__,
                 )
+                retention_cfg = logging_cfg.get("query_log_retention")
+                retention_max_records = logging_cfg.get(
+                    "query_log_retention_max_records"
+                )
+                retention_days = logging_cfg.get("query_log_retention_days")
+                retention_max_bytes = logging_cfg.get("query_log_retention_max_bytes")
+                has_retention_limit = bool(
+                    (
+                        isinstance(retention_cfg, dict)
+                        and (
+                            retention_cfg.get("max_records") is not None
+                            or retention_cfg.get("days") is not None
+                            or retention_cfg.get("max_bytes") is not None
+                        )
+                    )
+                    or retention_max_records is not None
+                    or retention_days is not None
+                    or retention_max_bytes is not None
+                )
+                if not has_retention_limit:
+                    logger.warning(
+                        "Statistics persistence is enabled without query_log retention limits; configure logging.query_log_retention to avoid unbounded growth"
+                    )
 
                 # Optionally rebuild counts from the query_log when requested or
                 # when counts are empty but query_log has rows. When
@@ -2300,6 +2442,9 @@ def _configure_dnssec_validation_resolver(
                 configure_dnssec_resolver as _configure_dnssec_resolver,
             )
         except Exception as exc:
+            logger.warning(
+                "DNSSEC local validation requested but dependencies are unavailable; install dnspython+cryptography or switch dnssec.validation to upstream_ad"
+            )
             logger.error(
                 "DNSSEC validation is enabled (dnssec.mode=validate, dnssec.validation=%s) "
                 "but required dependencies are missing (%s). Install dnspython+cryptography or disable DNSSEC validation.",
