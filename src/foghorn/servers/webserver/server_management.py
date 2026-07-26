@@ -9,6 +9,7 @@ This module contains server startup and management functions including:
 from __future__ import annotations
 
 import http.server
+import ipaddress
 import inspect
 import logging
 import os
@@ -33,6 +34,27 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger("foghorn.webserver")
+
+
+def _is_loopback_bind_host(host: str) -> bool:
+    """Brief: Return whether an admin bind host is loopback-local.
+
+    Inputs:
+      - host: Listener host string from server.http.host.
+
+    Outputs:
+      - bool: True when host is loopback-only (localhost/127.0.0.0/8/::1).
+    """
+
+    normalized = str(host or "").strip().lower()
+    if normalized in {"localhost", "127.0.0.1", "::1"}:
+        return True
+    try:
+        return ipaddress.ip_address(normalized).is_loopback
+    except ValueError:
+        # Non-IP hosts are treated as non-loopback to keep security warnings
+        # conservative for named interfaces or DNS hostnames.
+        return False
 
 
 def _get_soft_nofile_limit() -> int | None:
@@ -330,6 +352,70 @@ def start_webserver(
         return None
 
     allow_threaded_fallback = bool(web_cfg.get("allow_threaded_fallback", True))
+    host = str(web_cfg.get("host", "127.0.0.1"))
+    port = int(web_cfg.get("port", 5380))
+
+    # Warn when the API is enabled without effective authentication.
+    auth_cfg = web_cfg.get("auth") or {}
+    auth_mode = str(auth_cfg.get("mode", "none")).strip().lower()
+    auth_token = auth_cfg.get("token")
+    api_enabled = bool(web_cfg.get("enable_api", True))
+    api_auth_missing = auth_mode in {"", "none"} or (
+        auth_mode == "token" and not str(auth_token or "").strip()
+    )
+    bind_is_loopback = _is_loopback_bind_host(host)
+    schema_enabled = bool(web_cfg.get("enable_schema", True))
+    docs_enabled = bool(web_cfg.get("enable_docs", True))
+    cors_cfg = web_cfg.get("cors") if isinstance(web_cfg, dict) else None
+    if not isinstance(cors_cfg, dict):
+        cors_cfg = {}
+    cors_enabled = bool(cors_cfg.get("enabled", False))
+    cors_allowlist = cors_cfg.get("allowlist")
+    if isinstance(cors_allowlist, str):
+        cors_allowlist_values = [cors_allowlist]
+    elif isinstance(cors_allowlist, list):
+        cors_allowlist_values = [str(v) for v in cors_allowlist]
+    else:
+        cors_allowlist_values = []
+    cors_has_wildcard = "*" in cors_allowlist_values
+    cors_allow_credentials = bool(cors_cfg.get("allow_credentials", False))
+    if api_enabled and api_auth_missing:
+        logger.warning(
+            "Foghorn API is enabled but authentication is not configured; "
+            "set server.http.auth.mode=token and server.http.auth.token to protect admin endpoints"
+        )
+    if not bind_is_loopback:
+        logger.warning(
+            "Foghorn admin webserver is bound to %s over plaintext HTTP; use a TLS-terminating reverse proxy or restrict server.http.host to loopback",
+            host,
+        )
+
+    if not bind_is_loopback and schema_enabled and api_enabled:
+        logger.warning(
+            "Foghorn OpenAPI schema is exposed on a non-loopback admin bind; disable server.http.enable_schema unless needed",
+        )
+
+    if not bind_is_loopback and docs_enabled and schema_enabled and api_enabled:
+        logger.warning(
+            "Foghorn Swagger docs are exposed on a non-loopback admin bind; disable server.http.enable_docs unless needed",
+        )
+    if (
+        not bind_is_loopback
+        and cors_enabled
+        and (cors_has_wildcard or cors_allow_credentials)
+    ):
+        logger.warning(
+            "Foghorn CORS is permissive on a non-loopback admin bind (allowlist=%s allow_credentials=%s); restrict origins for production",
+            cors_allowlist_values or ["*"],
+            cors_allow_credentials,
+        )
+
+    # Warn if unauthenticated and binding to all interfaces.
+    if auth_mode == "none" and host in ("0.0.0.0", "::"):
+        logger.warning(
+            "Foghorn webserver is bound to %s without authentication; consider using auth.mode or restricting host",
+            host,
+        )
 
     # Best-effort: generate a config diagram PNG for the active config when
     # possible. This is intentionally non-fatal (e.g., dot missing).
@@ -443,6 +529,11 @@ def start_webserver(
         logger.warning(
             "Starting admin webserver using threaded stdlib HTTP fallback. This mode lacks full DoS/DDoS hardening and is not recommended for production."
         )
+        if not bind_is_loopback:
+            logger.warning(
+                "Admin webserver threaded fallback is serving on a non-loopback host (%s); use uvicorn/FastAPI or restrict bind host",
+                host,
+            )
         handle = _call_threaded(
             stats_obj=stats,
             cfg_obj=config,
@@ -468,6 +559,11 @@ def start_webserver(
             "webserver.enabled=true but uvicorn is not available (%s); starting threaded stdlib HTTP fallback (not recommended for production)",
             exc,
         )
+        if not bind_is_loopback:
+            logger.warning(
+                "Admin webserver threaded fallback is serving on a non-loopback host (%s); use uvicorn/FastAPI or restrict bind host",
+                host,
+            )
         handle = _call_threaded(
             stats_obj=stats,
             cfg_obj=config,
@@ -479,18 +575,6 @@ def start_webserver(
         if runtime_state is not None and handle is not None:
             runtime_state.set_listener("webserver", enabled=True, thread=handle)
         return handle
-
-    host = str(web_cfg.get("host", "127.0.0.1"))
-    port = int(web_cfg.get("port", 5380))
-
-    # Warn if unauthenticated and binding to all interfaces
-    auth_cfg = web_cfg.get("auth") or {}
-    mode = str(auth_cfg.get("mode", "none")).lower()
-    if mode == "none" and host in ("0.0.0.0", "::"):
-        logger.warning(
-            "Foghorn webserver is bound to %s without authentication; consider using auth.mode or restricting host",
-            host,
-        )
 
     # Import create_app lazily to avoid circular dependency
     from .core import create_app
