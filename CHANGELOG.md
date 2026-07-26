@@ -27,6 +27,11 @@ All notable changes to this project will be documented in this file.
 - DoH server startup now builds uvicorn settings through shared limit-derivation helpers, improving consistency of concurrency/backlog/body-safety defaults in `src/foghorn/servers/doh_api.py`.
 - FastAPI and threaded admin/web handlers now use shared bounded-body parsing with explicit 413 handling, reducing oversized-request risk and improving parity across implementations.
 - Query-log backend retention cadence defaults are now normalized consistently across JSON, SQLite, MySQL/MariaDB, PostgreSQL, and MongoDB stores when retention caps are enabled without explicit prune cadence.
+- Startup now emits focused security warnings for risky listener/upstream/plugin settings, including non-loopback DoH without TLS, unrestricted AXFR/IXFR allowlists, DoT upstreams with `tls.verify=false`, and ACL plugins configured with `default=allow`.
+- Statistics subsystem startup now warns when persistence is enabled without explicit query-log retention limits.
+- DNSSEC local validation now emits a clearer startup warning when required dependencies are missing before returning the existing fatal validation error.
+- Admin webserver startup now warns for non-loopback plaintext binds, public OpenAPI/Swagger exposure, permissive public CORS settings, and non-loopback threaded fallback usage.
+- API request audit startup now warns when enabled with implicit defaults for `db_path` or retention configuration.
 ### Fixed
 - RateLimit webserver stats now resolve runtime reader callbacks by `db_path` using exact, absolute, and normalized suffix matching, preventing missed current-window/profile metrics when configured paths and plugin runtime paths differ.
 - Admin plugin/cache paged tables now retain active search text, sort selection, page size, and enabled filters across auto-refresh cycles, preventing view resets while monitoring mDNS and other plugin pages.
@@ -43,6 +48,9 @@ All notable changes to this project will be documented in this file.
 - Added and expanded regression tests for bounded async request-body reads and DoH/webserver oversized-body handling paths (`tests/servers/test_doh_api_unit.py`, `tests/test_webserver.py`, `tests/test_webserver_routes_core_branch_coverage.py`).
 - Added branch and behavior coverage for API request audit retention defaults/pruning and control-row persistence (`tests/servers/test_api_request_audit.py`).
 - Added retention-cadence normalization coverage across query-log backends (`tests/stats/test_json_logging_backend.py`, `tests/stats/test_mongodb_backend.py`, `tests/stats/test_mysql_mariadb_backend.py`, `tests/stats/test_postgresql_backend.py`, `tests/stats/test_stats_sqlite_store.py`).
+- Added startup warning regression coverage for `foghorn.main` security-warning helper paths, DNSSEC missing-dependency warning logging, and statistics retention warning logging (`tests/test_main_security_warnings.py`).
+- Added webserver startup warning regression coverage for public plaintext admin binds, public OpenAPI/docs exposure, permissive public CORS, and public threaded fallback warnings (`tests/test_webserver.py`).
+- Added API audit startup warning coverage for implicit `api_request_audit` defaults (`tests/servers/test_api_request_audit.py`).
 
 ## 0.7.1
 ### Added
