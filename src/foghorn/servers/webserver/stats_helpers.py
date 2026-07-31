@@ -28,6 +28,16 @@ _STATS_SNAPSHOT_CACHE_TTL_SECONDS = 5.0
 _STATS_SNAPSHOT_CACHE_LOCK = threading.Lock()
 # Map id(StatsCollector) -> (StatsSnapshot, timestamp)
 _last_stats_snapshots: Dict[int, tuple[StatsSnapshot, float]] = {}
+_SIMPLE_STATS_TABLE_IDS = {
+    "top_clients",
+    "top_domains",
+    "top_subdomains",
+    "cache_hit_domains",
+    "cache_miss_domains",
+    "cache_hit_subdomains",
+    "cache_miss_subdomains",
+}
+_GROUPED_STATS_TABLE_IDS = {"qtype_qnames", "rcode_domains", "rcode_subdomains"}
 
 
 def _utc_now_iso() -> str:
@@ -254,6 +264,64 @@ def _get_stats_snapshot_cached(collector: StatsCollector, reset: bool) -> StatsS
     with _STATS_SNAPSHOT_CACHE_LOCK:
         _last_stats_snapshots[collector_id] = (snap, time.time())
     return snap
+
+
+def _pairs_to_named_count_rows(pairs: object) -> list[dict[str, object]]:
+    """Brief: Convert [(name, count)]-style pairs into table row mappings.
+
+    Inputs:
+      - pairs: Candidate list of sequence values.
+
+    Outputs:
+      - list[dict[str, object]] with ``name`` and integer ``count`` fields.
+    """
+
+    out: list[dict[str, object]] = []
+    if not isinstance(pairs, list):
+        return out
+    for item in pairs:
+        if not isinstance(item, (list, tuple)) or len(item) < 2:
+            continue
+        name, count = item[0], item[1]
+        try:
+            count_i = int(count)
+        except Exception:
+            continue
+        out.append({"name": str(name), "count": count_i})
+    return out
+
+
+def resolve_stats_table_rows(
+    snap: StatsSnapshot,
+    *,
+    table_id: str,
+    group_key: str | None,
+) -> tuple[list[dict[str, object]], str | None]:
+    """Brief: Resolve rows for stats table routes from a StatsSnapshot.
+
+    Inputs:
+      - snap: Source stats snapshot.
+      - table_id: Requested table identifier.
+      - group_key: Optional group key required by grouped table ids.
+
+    Outputs:
+      - Tuple of ``(rows, error_code)`` where error_code is one of:
+        - None: success
+        - ``missing_group_key``: grouped table requested without group key
+        - ``unknown_table``: unsupported table identifier
+    """
+
+    tid = str(table_id or "").strip()
+    if tid in _SIMPLE_STATS_TABLE_IDS:
+        return _pairs_to_named_count_rows(getattr(snap, tid, None)), None
+    if tid in _GROUPED_STATS_TABLE_IDS:
+        if not group_key:
+            return [], "missing_group_key"
+        mapping = getattr(snap, tid, None)
+        if not isinstance(mapping, dict):
+            return [], None
+        return _pairs_to_named_count_rows(mapping.get(str(group_key))), None
+    return [], "unknown_table"
 
 
 def get_system_info() -> Dict[str, Any]:
