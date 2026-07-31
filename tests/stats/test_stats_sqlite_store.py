@@ -12,12 +12,10 @@ from __future__ import annotations
 from typing import Any
 
 from foghorn.plugins.querylog.base import BaseStatsStore
+from foghorn.plugins.querylog.common import is_subdomain
+from foghorn.plugins.querylog.common import normalize_domain
 
-from foghorn.plugins.querylog.sqlite import (
-    SqliteStatsStore,
-    _is_subdomain,
-    _normalize_domain,
-)
+from foghorn.plugins.querylog.sqlite import SqliteStatsStore
 from foghorn.stats import StatsSQLiteStore
 
 
@@ -44,6 +42,7 @@ def test_health_check_true_and_false(monkeypatch) -> None:
     store._conn = BoomConn()  # type: ignore[assignment]
     assert store.health_check() is False
 
+
 def test_sqlite_retention_default_prune_cadence_is_consistent() -> None:
     """Brief: SQLite applies shared default prune cadence for record/byte retention.
 
@@ -54,10 +53,13 @@ def test_sqlite_retention_default_prune_cadence_is_consistent() -> None:
       - None; asserts default prune cadence parity with other querylog backends.
     """
 
-    store = SqliteStatsStore(':memory:', retention_max_records=10)
+    store = SqliteStatsStore(":memory:", retention_max_records=10)
     assert store._query_log_retention_prune_interval_seconds is None  # type: ignore[attr-defined]
-    assert store._query_log_retention_prune_every_n_inserts == int(  # type: ignore[attr-defined]
-        BaseStatsStore.DEFAULT_RETENTION_PRUNE_EVERY_N_INSERTS
+    assert (
+        store._query_log_retention_prune_every_n_inserts
+        == int(  # type: ignore[attr-defined]
+            BaseStatsStore.DEFAULT_RETENTION_PRUNE_EVERY_N_INSERTS
+        )
     )
 
 
@@ -359,7 +361,7 @@ def test_aggregate_query_log_counts_group_by_sparse() -> None:
 
 
 def test_sqlite_helpers_normalize_domain_and_is_subdomain() -> None:
-    """Brief: _normalize_domain and _is_subdomain mirror stats helper behavior.
+    """Brief: normalize_domain and is_subdomain mirror expected helper behavior.
 
     Inputs:
       - None.
@@ -368,20 +370,20 @@ def test_sqlite_helpers_normalize_domain_and_is_subdomain() -> None:
       - None; asserts normalisation and subdomain classification rules.
     """
 
-    assert _normalize_domain("Example.COM.") == "example.com"
-    assert _normalize_domain("") == ""
+    assert normalize_domain("Example.COM.") == "example.com"
+    assert normalize_domain("") == ""
 
     # Not subdomains: empty/one-label/two-label names.
-    assert _is_subdomain("") is False
-    assert _is_subdomain("example") is False
-    assert _is_subdomain("example.com") is False
+    assert is_subdomain("") is False
+    assert is_subdomain("example") is False
+    assert is_subdomain("example.com") is False
 
     # Generic three-label domain is a subdomain.
-    assert _is_subdomain("www.example.com") is True
+    assert is_subdomain("www.example.com") is True
 
     # co.uk-style public suffix: need at least four labels.
-    assert _is_subdomain("example.co.uk") is False
-    assert _is_subdomain("www.example.co.uk") is True
+    assert is_subdomain("example.co.uk") is False
+    assert is_subdomain("www.example.co.uk") is True
 
 
 def test_sqlite_backend_health_check_true_and_false() -> None:

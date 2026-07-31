@@ -15,15 +15,15 @@ import types
 from typing import Any, Dict, List, Optional, Tuple
 
 import pytest
+from foghorn.plugins.db_drivers import (
+    import_mysql_driver,
+    mysql_driver_order_from_config,
+    normalize_mysql_driver_fallbacks,
+    normalize_mysql_driver_name,
+)
 
 from foghorn.plugins.querylog.base import BaseStatsStore
-from foghorn.plugins.querylog.mysql_mariadb import (
-    MySqlStatsStore,
-    _driver_order_from_config,
-    _import_mysql_driver,
-    _normalize_driver_fallbacks,
-    _normalize_mysql_driver_name,
-)
+from foghorn.plugins.querylog.mysql_mariadb import MySqlStatsStore
 
 
 class _FakeCursor:
@@ -333,6 +333,8 @@ def test_constructor_defaults_to_async_logging(fake_mysql_driver) -> None:  # ty
         connect_kwargs={"ssl": True},
     )
     assert backend._async_logging is True
+
+
 def test_retention_default_prune_cadence_is_consistent(
     fake_mysql_driver,
 ) -> None:  # type: ignore[no-untyped-def]
@@ -347,8 +349,11 @@ def test_retention_default_prune_cadence_is_consistent(
 
     backend = _make_backend(retention_max_records=10)
     assert backend._query_log_retention_prune_interval_seconds is None  # type: ignore[attr-defined]
-    assert backend._query_log_retention_prune_every_n_inserts == int(  # type: ignore[attr-defined]
-        BaseStatsStore.DEFAULT_RETENTION_PRUNE_EVERY_N_INSERTS
+    assert (
+        backend._query_log_retention_prune_every_n_inserts
+        == int(  # type: ignore[attr-defined]
+            BaseStatsStore.DEFAULT_RETENTION_PRUNE_EVERY_N_INSERTS
+        )
     )
 
 
@@ -392,15 +397,15 @@ def test_driver_name_normalization_edges() -> None:
       - None; asserts canonicalization and validation errors.
     """
 
-    assert _normalize_mysql_driver_name(None) is None
-    assert _normalize_mysql_driver_name(" auto ") is None
-    assert _normalize_mysql_driver_name("maria_db") == "mariadb"
-    assert _normalize_mysql_driver_name("mysql.connector") == "mysql-connector-python"
-    assert _normalize_mysql_driver_name("connector") == "mysql-connector-python"
-    assert _normalize_mysql_driver_name(123) is None
+    assert normalize_mysql_driver_name(None) is None
+    assert normalize_mysql_driver_name(" auto ") is None
+    assert normalize_mysql_driver_name("maria_db") == "mariadb"
+    assert normalize_mysql_driver_name("mysql.connector") == "mysql-connector-python"
+    assert normalize_mysql_driver_name("connector") == "mysql-connector-python"
+    assert normalize_mysql_driver_name(123) is None
 
     with pytest.raises(ValueError):
-        _normalize_mysql_driver_name("unknown-driver")
+        normalize_mysql_driver_name("unknown-driver")
 
 
 def test_driver_fallback_normalization_edges() -> None:
@@ -413,15 +418,15 @@ def test_driver_fallback_normalization_edges() -> None:
       - None; asserts canonical fallback parsing behaviour.
     """
 
-    assert _normalize_driver_fallbacks(None) is None
-    assert _normalize_driver_fallbacks("auto") is None
-    assert _normalize_driver_fallbacks("none") == []
-    assert _normalize_driver_fallbacks("mysql") == ["mysql-connector-python"]
-    assert _normalize_driver_fallbacks(["mariadb", None, "mysql"]) == [
+    assert normalize_mysql_driver_fallbacks(None) is None
+    assert normalize_mysql_driver_fallbacks("auto") is None
+    assert normalize_mysql_driver_fallbacks("none") == []
+    assert normalize_mysql_driver_fallbacks("mysql") == ["mysql-connector-python"]
+    assert normalize_mysql_driver_fallbacks(["mariadb", None, "mysql"]) == [
         "mariadb",
         "mysql-connector-python",
     ]
-    assert _normalize_driver_fallbacks(42) is None
+    assert normalize_mysql_driver_fallbacks(42) is None
 
 
 def test_driver_order_computation_edges() -> None:
@@ -434,13 +439,13 @@ def test_driver_order_computation_edges() -> None:
       - None; asserts order for auto/default and explicit fallback policies.
     """
 
-    assert _driver_order_from_config() == ["mariadb", "mysql-connector-python"]
-    assert _driver_order_from_config(driver_fallback="none") == ["mariadb"]
-    assert _driver_order_from_config(driver="mysql") == [
+    assert mysql_driver_order_from_config() == ["mariadb", "mysql-connector-python"]
+    assert mysql_driver_order_from_config(driver_fallback="none") == ["mariadb"]
+    assert mysql_driver_order_from_config(driver="mysql") == [
         "mysql-connector-python",
         "mariadb",
     ]
-    assert _driver_order_from_config(
+    assert mysql_driver_order_from_config(
         driver="mysql",
         driver_fallback=["mysql", "mariadb", "mysql"],
     ) == ["mysql-connector-python", "mariadb"]
@@ -470,7 +475,11 @@ def test_import_driver_raises_when_none_available(
     monkeypatch.setattr(builtins, "__import__", fake_import)
 
     with pytest.raises(RuntimeError):
-        _import_mysql_driver(driver="auto", driver_fallback="none")
+        import_mysql_driver(
+            driver="auto",
+            driver_fallback="none",
+            consumer_name="MySqlStatsStore",
+        )
 
 
 def test_health_check_true_and_false(fake_mysql_driver, monkeypatch) -> None:  # type: ignore[no-untyped-def]

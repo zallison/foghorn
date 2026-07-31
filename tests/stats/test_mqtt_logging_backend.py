@@ -15,10 +15,10 @@ import logging
 from typing import Any
 
 import pytest
+from foghorn.plugins.db_drivers import import_mqtt_driver
 
 from foghorn.plugins.querylog.mqtt_logging import (
     MqttLogging,
-    _import_mqtt_driver,
 )
 
 
@@ -73,7 +73,7 @@ class _FakeMqttClient:
 
 
 class _FakeMqttModule:
-    """Brief: Wrapper exposing a Client attribute for _import_mqtt_driver().
+    """Brief: Wrapper exposing a Client attribute for import_mqtt_driver().
 
     Inputs:
       - None.
@@ -88,7 +88,7 @@ class _FakeMqttModule:
 def test_import_mqtt_driver_raises_runtime_error_when_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Brief: _import_mqtt_driver surfaces a clear RuntimeError when driver is absent.
+    """Brief: import_mqtt_driver surfaces a clear RuntimeError when driver is absent.
 
     Inputs:
       - monkeypatch fixture.
@@ -105,7 +105,7 @@ def test_import_mqtt_driver_raises_runtime_error_when_missing(
     )
 
     with pytest.raises(RuntimeError):
-        _import_mqtt_driver()
+        import_mqtt_driver()
 
 
 def test_mqtt_logging_backend_constructs_and_marks_healthy(
@@ -120,7 +120,7 @@ def test_mqtt_logging_backend_constructs_and_marks_healthy(
       - None; asserts connect/loop_start are invoked and health_check is True.
     """
 
-    # Patch the paho-style module used by _import_mqtt_driver.
+    # Patch the paho-style module used by import_mqtt_driver.
     monkeypatch.setitem(
         __import__("sys").modules, "paho.mqtt.client", _FakeMqttModule()
     )
