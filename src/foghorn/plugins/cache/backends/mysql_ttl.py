@@ -11,175 +11,13 @@ from foghorn.plugins.cache.safe_codec import (
     safe_deserialize,
     safe_serialize,
 )
+from foghorn.plugins.db_drivers import (
+    import_mysql_driver,
+)
 from foghorn.plugins.sql_safety import validate_sql_identifier, validate_sql_placeholder
 
 _logger = logging.getLogger(__name__)
 _MYSQL_NAMESPACE_MAX_LENGTH = 53
-
-
-def _normalize_mysql_driver_name(raw: object) -> str | None:
-    """Brief: Normalize a MySQL driver name from config.
-
-    Inputs:
-        raw: Candidate value (string-like) from config.
-
-    Outputs:
-        str | None: Canonical driver key ('mariadb' or 'mysql-connector-python'),
-        or None when raw is missing/empty/auto.
-    """
-
-    if raw is None:
-        return None
-    if not isinstance(raw, str):
-        return None
-
-    value = raw.strip().lower().replace("_", "-").replace(" ", "")
-    if not value or value in {"auto", "default"}:
-        return None
-
-    if value in {"mariadb", "maria-db"}:
-        return "mariadb"
-    if value in {
-        "mysql",
-        "mysql-connector-python",
-        "mysql.connector",
-        "mysql-connector",
-        "mysqlconnector",
-        "mysql-connector/py",
-        "connector",
-    }:
-        return "mysql-connector-python"
-
-    raise ValueError(
-        "mysql driver must be one of 'auto', 'mariadb', 'mysql', or 'mysql-connector-python'"
-    )
-
-
-def _normalize_driver_fallbacks(raw: object) -> list[str] | None:
-    """Brief: Normalize driver fallback configuration.
-
-    Inputs:
-        raw: Candidate fallback config from YAML (string or list of strings).
-
-    Outputs:
-        list[str] | None:
-          - None for default behavior (auto fallback)
-          - [] for explicit no-fallback (none)
-          - list of canonical driver keys
-    """
-
-    if raw is None:
-        return None
-
-    if isinstance(raw, str):
-        v = raw.strip().lower().replace("_", "-").replace(" ", "")
-        if not v or v in {"auto", "default"}:
-            return None
-        if v in {"none", "no", "false", "off"}:
-            return []
-        return [_normalize_mysql_driver_name(raw)]  # type: ignore[list-item]
-
-    if isinstance(raw, list):
-        out: list[str] = []
-        for item in raw:
-            if item is None:
-                continue
-            name = _normalize_mysql_driver_name(item)
-            if name is None:
-                continue
-            out.append(name)
-        return out
-
-    return None
-
-
-def _driver_order_from_config(
-    *,
-    driver: object = None,
-    driver_fallback: object = None,
-) -> list[str]:
-    """Brief: Compute the driver import order based on config.
-
-    Inputs:
-        driver: Preferred driver name ('auto'|'mariadb'|'mysql-connector-python').
-        driver_fallback: Fallback policy ('auto'|'none'|<driver>|[<driver>,...]).
-
-    Outputs:
-        list[str]: Ordered list of canonical driver keys to try.
-    """
-
-    preferred = _normalize_mysql_driver_name(driver)
-    fallbacks = _normalize_driver_fallbacks(driver_fallback)
-
-    # Default order: prefer mariadb, then mysql-connector-python.
-    default_order = ["mariadb", "mysql-connector-python"]
-
-    if preferred is None:
-        if fallbacks == []:
-            return [default_order[0]]
-        return default_order
-
-    if fallbacks is None:
-        fallbacks = [d for d in default_order if d != preferred]
-
-    order = [preferred] + list(fallbacks or [])
-
-    seen: set[str] = set()
-    out: list[str] = []
-    for item in order:
-        if item in seen:
-            continue
-        seen.add(item)
-        out.append(item)
-    return out
-
-
-def _import_mysql_driver(
-    *,
-    driver: object = None,
-    driver_fallback: object = None,
-) -> tuple[object, str]:
-    """Import and return a DB-API compatible MySQL/MariaDB driver module.
-
-    Inputs:
-        driver: Preferred driver name.
-        driver_fallback: Fallback policy.
-
-    Outputs:
-        Tuple of (driver_module, param_style):
-          - driver_module: DB-API like module exposing a ``connect`` callable.
-          - param_style: Either 'qmark' for ? placeholders or 'format' for %s.
-
-    Raises:
-        RuntimeError: When no supported MySQL/MariaDB driver is available.
-        ValueError: When driver/driver_fallback values are invalid.
-    """
-
-    order = _driver_order_from_config(driver=driver, driver_fallback=driver_fallback)
-
-    last_exc: Exception | None = None
-    for choice in order:
-        try:
-            if choice == "mariadb":
-                # pragma: disable E402
-                import mariadb as driver_mod  # type: ignore[import]
-
-                return driver_mod, "qmark"
-
-            if choice == "mysql-connector-python":
-                # pragma: disable E402
-                import mysql.connector as driver_mod  # type: ignore[import]
-
-                return driver_mod, "format"
-
-        except ImportError as exc:  # pragma: no cover - import-path dependent
-            last_exc = exc
-            continue
-
-    raise RuntimeError(
-        "No supported MySQL/MariaDB driver found; install either 'mariadb' or "
-        "'mysql-connector-python' to use MySQLTTLCache"
-    ) from last_exc
 
 
 def _stable_digest_for_key(key: Any) -> str:
@@ -269,8 +107,10 @@ class MySQLTTLCache:
           - None.
         """
 
-        driver, param_style = _import_mysql_driver(
-            driver=driver, driver_fallback=driver_fallback
+        driver, param_style = import_mysql_driver(
+            driver=driver,
+            driver_fallback=driver_fallback,
+            consumer_name="MySQLTTLCache",
         )
         self._param_style = param_style
         self._placeholder = validate_sql_placeholder(

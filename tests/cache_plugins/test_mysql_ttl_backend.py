@@ -16,6 +16,12 @@ from typing import Any, List, Optional, Tuple
 import pytest
 
 import foghorn.plugins.cache.backends.mysql_ttl as mysql_mod
+from foghorn.plugins.db_drivers import (
+    import_mysql_driver,
+    mysql_driver_order_from_config,
+    normalize_mysql_driver_fallbacks,
+    normalize_mysql_driver_name,
+)
 
 
 class FakeCursor:
@@ -87,7 +93,7 @@ def test_import_driver_prefers_mariadb_by_default(monkeypatch) -> None:
     monkeypatch.setitem(sys.modules, "mysql", mysql_pkg)
     monkeypatch.setitem(sys.modules, "mysql.connector", mysql_connector)
 
-    driver, param_style = mysql_mod._import_mysql_driver()
+    driver, param_style = import_mysql_driver(consumer_name="MySQLTTLCache")
     assert driver is mariadb_mod
     assert param_style == "qmark"
 
@@ -115,7 +121,7 @@ def test_import_driver_falls_back_to_mysql_connector(monkeypatch) -> None:
     monkeypatch.setitem(sys.modules, "mysql", mysql_pkg)
     monkeypatch.setitem(sys.modules, "mysql.connector", mysql_connector)
 
-    driver, param_style = mysql_mod._import_mysql_driver()
+    driver, param_style = import_mysql_driver(consumer_name="MySQLTTLCache")
     assert driver is mysql_connector
     assert param_style == "format"
 
@@ -133,8 +139,8 @@ def test_import_driver_explicit_mysql_connector_wins_over_mariadb(monkeypatch) -
     monkeypatch.setitem(sys.modules, "mysql", mysql_pkg)
     monkeypatch.setitem(sys.modules, "mysql.connector", mysql_connector)
 
-    driver, param_style = mysql_mod._import_mysql_driver(
-        driver="mysql-connector-python"
+    driver, param_style = import_mysql_driver(
+        driver="mysql-connector-python", consumer_name="MySQLTTLCache"
     )
     assert driver is mysql_connector
     assert param_style == "format"
@@ -153,7 +159,9 @@ def test_import_driver_explicit_mysql_alias_wins_over_mariadb(monkeypatch) -> No
     monkeypatch.setitem(sys.modules, "mysql", mysql_pkg)
     monkeypatch.setitem(sys.modules, "mysql.connector", mysql_connector)
 
-    driver, param_style = mysql_mod._import_mysql_driver(driver="mysql")
+    driver, param_style = import_mysql_driver(
+        driver="mysql", consumer_name="MySQLTTLCache"
+    )
     assert driver is mysql_connector
     assert param_style == "format"
 
@@ -179,7 +187,7 @@ def test_import_driver_raises_when_missing(monkeypatch) -> None:
     monkeypatch.setattr(builtins, "__import__", fake_import)
 
     with pytest.raises(RuntimeError):
-        mysql_mod._import_mysql_driver()
+        import_mysql_driver(consumer_name="MySQLTTLCache")
 
 
 def _init_cache_with_fake_conn(
@@ -205,7 +213,7 @@ def _init_cache_with_fake_conn(
     conn = FakeConn()
     driver = FakeDriver(conn)
     monkeypatch.setattr(
-        mysql_mod, "_import_mysql_driver", lambda **_: (driver, "format")
+        mysql_mod, "import_mysql_driver", lambda **_kwargs: (driver, "format")
     )
     cache = mysql_mod.MySQLTTLCache(
         host="h",
@@ -310,44 +318,38 @@ def test_close(monkeypatch) -> None:
 
 
 def test_normalize_mysql_driver_name_variants() -> None:
-    assert mysql_mod._normalize_mysql_driver_name(None) is None
-    assert mysql_mod._normalize_mysql_driver_name(1) is None
-    assert mysql_mod._normalize_mysql_driver_name(" auto ") is None
-    assert mysql_mod._normalize_mysql_driver_name("maria_db") == "mariadb"
-    assert (
-        mysql_mod._normalize_mysql_driver_name("mysql.connector")
-        == "mysql-connector-python"
-    )
-    assert (
-        mysql_mod._normalize_mysql_driver_name(" connector ")
-        == "mysql-connector-python"
-    )
+    assert normalize_mysql_driver_name(None) is None
+    assert normalize_mysql_driver_name(1) is None
+    assert normalize_mysql_driver_name(" auto ") is None
+    assert normalize_mysql_driver_name("maria_db") == "mariadb"
+    assert normalize_mysql_driver_name("mysql.connector") == "mysql-connector-python"
+    assert normalize_mysql_driver_name(" connector ") == "mysql-connector-python"
 
     with pytest.raises(ValueError):
-        mysql_mod._normalize_mysql_driver_name("postgres")
+        normalize_mysql_driver_name("postgres")
 
 
 def test_normalize_driver_fallbacks_variants() -> None:
-    assert mysql_mod._normalize_driver_fallbacks(None) is None
-    assert mysql_mod._normalize_driver_fallbacks("auto") is None
-    assert mysql_mod._normalize_driver_fallbacks("none") == []
-    assert mysql_mod._normalize_driver_fallbacks("mysql") == ["mysql-connector-python"]
-    assert mysql_mod._normalize_driver_fallbacks(["mariadb", None, "mysql"]) == [
+    assert normalize_mysql_driver_fallbacks(None) is None
+    assert normalize_mysql_driver_fallbacks("auto") is None
+    assert normalize_mysql_driver_fallbacks("none") == []
+    assert normalize_mysql_driver_fallbacks("mysql") == ["mysql-connector-python"]
+    assert normalize_mysql_driver_fallbacks(["mariadb", None, "mysql"]) == [
         "mariadb",
         "mysql-connector-python",
     ]
-    assert mysql_mod._normalize_driver_fallbacks(123) is None
+    assert normalize_mysql_driver_fallbacks(123) is None
 
 
 def test_driver_order_from_config_deduplicates_and_honors_none() -> None:
-    assert mysql_mod._driver_order_from_config() == [
+    assert mysql_driver_order_from_config() == [
         "mariadb",
         "mysql-connector-python",
     ]
-    assert mysql_mod._driver_order_from_config(
-        driver="mariadb", driver_fallback="none"
-    ) == ["mariadb"]
-    assert mysql_mod._driver_order_from_config(
+    assert mysql_driver_order_from_config(driver="mariadb", driver_fallback="none") == [
+        "mariadb"
+    ]
+    assert mysql_driver_order_from_config(
         driver="mysql",
         driver_fallback=["mysql", "mariadb", "mariadb"],
     ) == ["mysql-connector-python", "mariadb"]

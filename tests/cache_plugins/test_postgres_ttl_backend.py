@@ -16,6 +16,7 @@ from typing import Any, List, Optional, Tuple
 import pytest
 
 import foghorn.plugins.cache.backends.postgres_ttl as postgres_mod
+from foghorn.plugins.db_drivers import import_postgres_driver
 
 
 class FakeCursor:
@@ -78,7 +79,7 @@ def test_import_driver_prefers_psycopg(monkeypatch) -> None:
     psycopg_mod = types.ModuleType("psycopg")
     monkeypatch.setitem(__import__("sys").modules, "psycopg", psycopg_mod)
 
-    driver = postgres_mod._import_postgres_driver()
+    driver = import_postgres_driver(consumer_name="PostgresTTLCache")
     assert driver is psycopg_mod
 
 
@@ -97,7 +98,7 @@ def test_import_driver_falls_back_to_psycopg2(monkeypatch) -> None:
         return real_import(name, globals, locals, fromlist, level)
 
     monkeypatch.setattr(builtins, "__import__", fake_import)
-    driver = postgres_mod._import_postgres_driver()
+    driver = import_postgres_driver(consumer_name="PostgresTTLCache")
     assert driver is psycopg2_mod
 
 
@@ -115,7 +116,7 @@ def test_import_driver_raises_when_missing(monkeypatch) -> None:
     monkeypatch.setattr(builtins, "__import__", fake_import)
 
     with pytest.raises(RuntimeError, match="PostgreSQL driver"):
-        postgres_mod._import_postgres_driver()
+        import_postgres_driver(consumer_name="PostgresTTLCache")
 
 
 def _init_cache_with_fake_conn(
@@ -129,7 +130,11 @@ def _init_cache_with_fake_conn(
     """Helper to initialize cache with fake connection."""
     conn = FakeConn()
     driver = FakeDriver(conn)
-    monkeypatch.setattr(postgres_mod, "_import_postgres_driver", lambda: driver)
+    monkeypatch.setattr(
+        postgres_mod,
+        "import_postgres_driver",
+        lambda **_kwargs: driver,
+    )
     cache = postgres_mod.PostgresTTLCache(
         namespace=namespace,
         host="h",
@@ -166,12 +171,12 @@ def test_init_rejects_invalid_namespace_before_driver_import(monkeypatch) -> Non
     """Test invalid namespace fails fast before driver import."""
     called = False
 
-    def fake_driver_import():
+    def fake_driver_import(**_kwargs):
         nonlocal called
         called = True
         return FakeDriver(FakeConn())
 
-    monkeypatch.setattr(postgres_mod, "_import_postgres_driver", fake_driver_import)
+    monkeypatch.setattr(postgres_mod, "import_postgres_driver", fake_driver_import)
     with pytest.raises(ValueError, match="namespace must match"):
         postgres_mod.PostgresTTLCache(namespace="bad-name")
     assert called is False

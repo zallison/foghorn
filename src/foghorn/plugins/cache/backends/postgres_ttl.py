@@ -28,41 +28,12 @@ from foghorn.plugins.cache.safe_codec import (
     safe_deserialize,
     safe_serialize,
 )
+from foghorn.plugins.db_drivers import import_postgres_driver
 from foghorn.plugins.sql_safety import validate_sql_identifier
 
 logger = logging.getLogger(__name__)
 _POSTGRES_IDENTIFIER_MAX_LENGTH = 63
 _POSTGRES_NAMESPACE_MAX_LENGTH = 48
-
-
-def _import_postgres_driver():
-    """Import and return a DB-API compatible PostgreSQL driver module.
-
-    Inputs:
-        None.
-
-    Outputs:
-        DB-API like module exposing a ``connect`` callable.
-
-    Raises:
-        RuntimeError: When no supported PostgreSQL driver is available.
-    """
-
-    # Prefer modern psycopg (v3) when available, then fall back to psycopg2.
-    try:  # pragma: no cover - import-path dependent
-        import psycopg as driver  # type: ignore[import]
-
-        return driver
-    except Exception:  # pragma: no cover - environment specific
-        try:
-            import psycopg2 as driver  # type: ignore[import]
-
-            return driver
-        except Exception as exc:  # pragma: no cover - environment specific
-            raise RuntimeError(
-                "No supported PostgreSQL driver found; install either "
-                "'psycopg' or 'psycopg2' to use the PostgresTTLCache"
-            ) from exc
 
 
 def _stable_digest_for_key(key: Any) -> bytes:
@@ -156,7 +127,7 @@ class PostgresTTLCache:
         )
         self._lock = threading.RLock()
 
-        driver = _import_postgres_driver()
+        driver = import_postgres_driver(consumer_name="PostgresTTLCache")
 
         kwargs: Dict[str, Any] = {
             "host": host,
