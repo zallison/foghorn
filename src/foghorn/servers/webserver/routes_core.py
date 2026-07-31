@@ -20,7 +20,6 @@ from fastapi import (
     status,
 )
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
-from ...config.config_schema import get_default_schema_path
 from ...security_limits import (
     MAX_ADMIN_JSON_BODY_BYTES,
     RequestBodyTooLargeError,
@@ -30,26 +29,17 @@ from ...security_limits import (
 
 from ...stats import StatsCollector
 from ...utils.config_diagram import (
-    diagram_dark_png_candidate_paths_for_config,
-    diagram_dot_candidate_paths_for_config,
-    diagram_png_candidate_paths_for_config,
-    find_first_existing_path,
     generate_dot_text_from_config_path,
     stale_diagram_warning,
 )
 from . import admin_logic as _admin_logic
 from . import admin_rate_limit as _admin_rate_limit
 from . import config_persistence as _config_persistence
+from . import endpoint_services as _endpoint_services
 from .config_helpers import (
-    _get_config_raw_json,
-    _get_config_raw_text,
-    _get_redact_keys,
-    _get_sanitized_config_yaml_cached,
     _parse_utc_datetime,
-    sanitize_config,
 )
 from .http_helpers import _schedule_process_signal
-from .runtime import RuntimeState, evaluate_readiness
 from .stats_helpers import _utc_now_iso
 
 
@@ -67,15 +57,6 @@ def _json_safe(value: Any) -> Any:
     return web_core._json_safe(value)
 
 
-def _get_about_payload() -> Dict[str, Any]:
-    """Build the /about payload using the canonical helper from core."""
-
-    import importlib
-
-    web_core = importlib.import_module("foghorn.servers.webserver.core")
-    return web_core._get_about_payload()
-
-
 def _register_core_routes(app: FastAPI) -> None:
     """Register core health/about/ready endpoints on the FastAPI app."""
 
@@ -88,7 +69,7 @@ def _register_core_routes(app: FastAPI) -> None:
           - /health
         """
 
-        return {"status": "ok", "server_time": _utc_now_iso()}
+        return _endpoint_services.build_health_payload()
 
     @app.get("/api/v1/about")
     @app.get("/about", include_in_schema=False)
@@ -99,26 +80,17 @@ def _register_core_routes(app: FastAPI) -> None:
           - /about
         """
 
-        return _get_about_payload()
+        return _endpoint_services.build_about_payload()
 
     @app.get("/api/v1/ready")
     @app.get("/ready", include_in_schema=False)
     async def ready() -> JSONResponse:
-        state: RuntimeState | None = getattr(app.state, "runtime_state", None)
-        ready_ok, not_ready, details = evaluate_readiness(
+        status_code, payload = _endpoint_services.build_ready_result(
             stats=getattr(app.state, "stats_collector", None),
             config=getattr(app.state, "config", None),
-            runtime_state=state,
+            runtime_state=getattr(app.state, "runtime_state", None),
         )
-        payload = {
-            "server_time": _utc_now_iso(),
-            "ready": bool(ready_ok),
-            "not_ready": list(not_ready or []),
-            "details": details,
-        }
-        return JSONResponse(
-            content=_json_safe(payload), status_code=200 if ready_ok else 503
-        )
+        return JSONResponse(content=_json_safe(payload), status_code=int(status_code))
 
 
 def _register_config_routes(app: FastAPI, auth_dep: Any) -> None:
@@ -127,39 +99,34 @@ def _register_config_routes(app: FastAPI, auth_dep: Any) -> None:
     @app.get("/api/v1/config", dependencies=[Depends(auth_dep)])
     @app.get("/config", dependencies=[Depends(auth_dep)], include_in_schema=False)
     async def get_config() -> PlainTextResponse:
-        cfg = app.state.config or {}
-        redact_keys = _get_redact_keys(cfg)
-        cfg_path = getattr(app.state, "config_path", None)
-        body = _get_sanitized_config_yaml_cached(cfg, cfg_path, redact_keys)
+        _status_code, body = _endpoint_services.build_config_yaml_result(
+            config=getattr(app.state, "config", None),
+            config_path=getattr(app.state, "config_path", None),
+        )
         return PlainTextResponse(body, media_type="application/x-yaml")
 
     @app.get("/api/v1/config/raw", dependencies=[Depends(auth_dep)])
     @app.get("/config/raw", dependencies=[Depends(auth_dep)], include_in_schema=False)
     async def get_config_raw() -> PlainTextResponse:
-        cfg_path = getattr(app.state, "config_path", None)
-        if not cfg_path:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="config_path not configured",
+        status_code, raw_text, error_detail = (
+            _endpoint_services.build_config_raw_yaml_result(
+                config_path=getattr(app.state, "config_path", None),
             )
-        try:
-            raw_text = _get_config_raw_text(cfg_path)
-        except (
-            Exception
-        ) as exc:  # pragma: no cover - I/O errors are environment-specific
+        )
+        if error_detail is not None:
             raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"failed to read config from {cfg_path}: {exc}",
-            ) from exc
+                status_code=int(status_code),
+                detail=str(error_detail),
+            )
         return PlainTextResponse(raw_text, media_type="application/x-yaml")
 
     @app.get("/api/v1/config.json", dependencies=[Depends(auth_dep)])
     @app.get("/config.json", dependencies=[Depends(auth_dep)], include_in_schema=False)
     async def get_config_json() -> Dict[str, Any]:
-        cfg = app.state.config or {}
-        redact_keys = _get_redact_keys(cfg)
-        clean = sanitize_config(cfg, redact_keys=redact_keys)
-        return {"server_time": _utc_now_iso(), "config": clean}
+        _status_code, payload = _endpoint_services.build_config_json_result(
+            config=getattr(app.state, "config", None),
+        )
+        return payload
 
     @app.get("/api/v1/config/schema", dependencies=[Depends(auth_dep)])
     @app.get(
@@ -178,21 +145,15 @@ def _register_config_routes(app: FastAPI, auth_dep: Any) -> None:
               - schema: Parsed JSON Schema document.
         """
 
-        try:
-            schema_path = get_default_schema_path()
-            with schema_path.open("r", encoding="utf-8") as f:
-                schema = json.load(f)
-        except Exception as exc:  # pragma: no cover - environment-specific I/O
+        status_code, payload, error_detail = (
+            _endpoint_services.build_config_schema_result(include_path_in_error=False)
+        )
+        if error_detail is not None or payload is None:
             raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"failed to read config schema: {exc}",
-            ) from exc
-
-        return {
-            "server_time": _utc_now_iso(),
-            "schema_path": str(schema_path),
-            "schema": schema,
-        }
+                status_code=int(status_code),
+                detail=str(error_detail or "failed to read config schema"),
+            )
+        return payload
 
     @app.get("/api/v1/config/diagram.png", dependencies=[Depends(auth_dep)])
     @app.get(
@@ -214,88 +175,34 @@ def _register_config_routes(app: FastAPI, auth_dep: Any) -> None:
               - X-Foghorn-Warning (optional): staleness warning.
         """
 
-        cfg_path = getattr(app.state, "config_path", None)
-        if not cfg_path:
+        meta_only = bool(meta)
+        status_code, headers, png_path, error_detail, next_attempted_sig = (
+            _endpoint_services.build_config_diagram_png_result(
+                config_path=getattr(app.state, "config_path", None),
+                attempted_signature=getattr(
+                    app.state, "_config_diagram_build_attempt_sig", None
+                ),
+                candidate_paths_fn=(
+                    _endpoint_services.diagram_png_candidate_paths_for_config
+                ),
+                refresh_stale=True,
+                meta_only=meta_only,
+                stat_fn=os.stat,
+                stale_warning_fn=stale_diagram_warning,
+            )
+        )
+        if next_attempted_sig is not None:
+            setattr(app.state, "_config_diagram_build_attempt_sig", next_attempted_sig)
+        if error_detail is not None:
+            raise HTTPException(status_code=int(status_code), detail=str(error_detail))
+        if meta_only:
+            return PlainTextResponse("", media_type="text/plain", headers=headers)
+        if not png_path:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="config_path not configured",
+                detail="config diagram path unavailable",
             )
-
-        # Allow a best-effort on-demand build attempt, but only once per config
-        # signature for this process.
-        try:
-            st = os.stat(str(cfg_path))
-            cfg_sig = f"{cfg_path}:{int(st.st_mtime_ns)}:{int(st.st_size)}"
-        except Exception:
-            cfg_sig = str(cfg_path)
-
-        attempted_sig = getattr(app.state, "_config_diagram_build_attempt_sig", None)
-
-        png_file = find_first_existing_path(
-            diagram_png_candidate_paths_for_config(cfg_path)
-        )
-
-        # If missing and dot exists, attempt an on-demand build once.
-        if png_file is None and attempted_sig != cfg_sig:
-            from ...utils.config_diagram import (
-                _find_dot_cmd,
-                ensure_config_diagram_png,
-            )
-
-            if _find_dot_cmd() is not None:
-                setattr(app.state, "_config_diagram_build_attempt_sig", cfg_sig)
-                ensure_config_diagram_png(config_path=str(cfg_path))
-                png_file = find_first_existing_path(
-                    diagram_png_candidate_paths_for_config(cfg_path)
-                )
-
-        warn: str | None = None
-        if png_file is not None:
-            warn = stale_diagram_warning(
-                config_path=str(cfg_path), diagram_path=str(png_file)
-            )
-
-            # If stale and dot exists, try to refresh it in-place once.
-            if (
-                warn
-                and getattr(app.state, "_config_diagram_build_attempt_sig", None)
-                != cfg_sig
-            ):
-                from ...utils.config_diagram import (
-                    _find_dot_cmd,
-                    ensure_config_diagram_png,
-                )
-
-                if _find_dot_cmd() is not None:
-                    setattr(app.state, "_config_diagram_build_attempt_sig", cfg_sig)
-                    ok, _detail, refreshed = ensure_config_diagram_png(
-                        config_path=str(cfg_path)
-                    )
-                    if ok and refreshed:
-                        from pathlib import Path
-
-                        png_file = Path(str(refreshed))
-                        warn = stale_diagram_warning(
-                            config_path=str(cfg_path), diagram_path=str(png_file)
-                        )
-
-        headers: dict[str, str] = {
-            "X-Foghorn-Exists": "1" if png_file is not None else "0",
-        }
-
-        if warn:
-            headers["X-Foghorn-Warning"] = warn
-
-        if meta:
-            return PlainTextResponse("", media_type="text/plain", headers=headers)
-
-        if png_file is None:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="config diagram not found",
-            )
-
-        return FileResponse(str(png_file), media_type="image/png", headers=headers)
+        return FileResponse(str(png_path), media_type="image/png", headers=headers)
 
     @app.get("/api/v1/config/diagram-dark.png", dependencies=[Depends(auth_dep)])
     @app.get(
@@ -317,62 +224,34 @@ def _register_config_routes(app: FastAPI, auth_dep: Any) -> None:
               - X-Foghorn-Warning (optional): staleness warning.
         """
 
-        cfg_path = getattr(app.state, "config_path", None)
-        if not cfg_path:
+        meta_only = bool(meta)
+        status_code, headers, png_path, error_detail, next_attempted_sig = (
+            _endpoint_services.build_config_diagram_png_result(
+                config_path=getattr(app.state, "config_path", None),
+                attempted_signature=getattr(
+                    app.state, "_config_diagram_build_attempt_sig", None
+                ),
+                candidate_paths_fn=(
+                    _endpoint_services.diagram_dark_png_candidate_paths_for_config
+                ),
+                refresh_stale=False,
+                meta_only=meta_only,
+                stat_fn=os.stat,
+                stale_warning_fn=stale_diagram_warning,
+            )
+        )
+        if next_attempted_sig is not None:
+            setattr(app.state, "_config_diagram_build_attempt_sig", next_attempted_sig)
+        if error_detail is not None:
+            raise HTTPException(status_code=int(status_code), detail=str(error_detail))
+        if meta_only:
+            return PlainTextResponse("", media_type="text/plain", headers=headers)
+        if not png_path:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="config_path not configured",
+                detail="config diagram path unavailable",
             )
-
-        try:
-            st = os.stat(str(cfg_path))
-            cfg_sig = f"{cfg_path}:{int(st.st_mtime_ns)}:{int(st.st_size)}"
-        except Exception:
-            cfg_sig = str(cfg_path)
-
-        attempted_sig = getattr(app.state, "_config_diagram_build_attempt_sig", None)
-
-        png_file = find_first_existing_path(
-            diagram_dark_png_candidate_paths_for_config(cfg_path)
-        )
-
-        # If missing and dot exists, attempt an on-demand build once.
-        if png_file is None and attempted_sig != cfg_sig:
-            from ...utils.config_diagram import (
-                _find_dot_cmd,
-                ensure_config_diagram_png,
-            )
-
-            if _find_dot_cmd() is not None:
-                setattr(app.state, "_config_diagram_build_attempt_sig", cfg_sig)
-                ensure_config_diagram_png(config_path=str(cfg_path))
-                png_file = find_first_existing_path(
-                    diagram_dark_png_candidate_paths_for_config(cfg_path)
-                )
-
-        warn: str | None = None
-        if png_file is not None:
-            warn = stale_diagram_warning(
-                config_path=str(cfg_path), diagram_path=str(png_file)
-            )
-
-        headers: dict[str, str] = {
-            "X-Foghorn-Exists": "1" if png_file is not None else "0",
-        }
-
-        if warn:
-            headers["X-Foghorn-Warning"] = warn
-
-        if meta:
-            return PlainTextResponse("", media_type="text/plain", headers=headers)
-
-        if png_file is None:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="config diagram not found",
-            )
-
-        return FileResponse(str(png_file), media_type="image/png", headers=headers)
+        return FileResponse(str(png_path), media_type="image/png", headers=headers)
 
     @app.post("/api/v1/config/diagram.png", dependencies=[Depends(auth_dep)])
     @app.post(
@@ -477,58 +356,21 @@ def _register_config_routes(app: FastAPI, auth_dep: Any) -> None:
         include_in_schema=False,
     )
     async def get_config_diagram_dot(meta: int | None = None) -> PlainTextResponse:
-        cfg_path = getattr(app.state, "config_path", None)
-        if not cfg_path:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="config_path not configured",
+        status_code, headers, text, error_detail = (
+            _endpoint_services.build_config_diagram_dot_result(
+                config_path=getattr(app.state, "config_path", None),
+                meta_only=bool(meta),
+                stale_warning_fn=stale_diagram_warning,
+                generate_dot_text_fn=generate_dot_text_from_config_path,
             )
-
-        headers: dict[str, str] = {}
-
-        # If we have any on-disk diagram artifacts, surface staleness via headers.
-        png_file = find_first_existing_path(
-            diagram_png_candidate_paths_for_config(cfg_path)
         )
-        if png_file is not None:
-            warn_png = stale_diagram_warning(
-                config_path=str(cfg_path), diagram_path=str(png_file)
-            )
-            if warn_png:
-                headers["X-Foghorn-Warning"] = warn_png
-
-        dot_file = find_first_existing_path(
-            diagram_dot_candidate_paths_for_config(cfg_path)
+        if error_detail is not None:
+            raise HTTPException(status_code=int(status_code), detail=str(error_detail))
+        return PlainTextResponse(
+            str(text or ""),
+            media_type="text/plain",
+            headers=headers,
         )
-        if dot_file is not None:
-            warn_dot = stale_diagram_warning(
-                config_path=str(cfg_path), diagram_path=str(dot_file)
-            )
-            if warn_dot and "X-Foghorn-Warning" not in headers:
-                headers["X-Foghorn-Warning"] = warn_dot
-
-        if meta:
-            return PlainTextResponse("", media_type="text/plain", headers=headers)
-
-        if dot_file is not None:
-            try:
-                text = dot_file.read_text(encoding="utf-8")
-            except Exception as exc:  # pragma: no cover - environment dependent
-                raise HTTPException(
-                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail=f"failed to read config diagram from {dot_file}: {exc}",
-                ) from exc
-            return PlainTextResponse(text, media_type="text/plain", headers=headers)
-
-        try:
-            text = generate_dot_text_from_config_path(str(cfg_path))
-        except Exception as exc:  # pragma: no cover - environment dependent
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"failed to generate config diagram: {exc}",
-            ) from exc
-
-        return PlainTextResponse(text, media_type="text/plain", headers=headers)
 
     @app.get("/api/v1/config/raw.json", dependencies=[Depends(auth_dep)])
     @app.get(
@@ -537,27 +379,17 @@ def _register_config_routes(app: FastAPI, auth_dep: Any) -> None:
         include_in_schema=False,
     )
     async def get_config_raw_json() -> Dict[str, Any]:
-        cfg_path = getattr(app.state, "config_path", None)
-        if not cfg_path:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="config_path not configured",
+        status_code, payload, error_detail = (
+            _endpoint_services.build_config_raw_json_result(
+                config_path=getattr(app.state, "config_path", None),
             )
-        try:
-            raw = _get_config_raw_json(cfg_path)
-        except (
-            Exception
-        ) as exc:  # pragma: no cover - I/O errors are environment-specific
+        )
+        if error_detail is not None or payload is None:
             raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"failed to read config from {cfg_path}: {exc}",
-            ) from exc
-
-        return {
-            "server_time": _utc_now_iso(),
-            "config": raw["config"],
-            "raw_yaml": raw["raw_yaml"],
-        }
+                status_code=int(status_code),
+                detail=str(error_detail or "failed to read config"),
+            )
+        return payload
 
     def _schedule_restart(
         *, delay_seconds: float = 1.0, reason: str | None = None
@@ -1269,7 +1101,6 @@ def _register_query_log_routes(app: FastAPI, auth_dep: Any) -> None:
             page=int(page) if isinstance(page, int) else 1,
             page_size=ps,
         )
-        payload["server_time"] = _utc_now_iso()
         return payload
 
     @app.get("/api/v1/query_log/aggregate", dependencies=[Depends(auth_dep)])
@@ -1390,7 +1221,9 @@ def _register_admin_routes(app: FastAPI, auth_dep: Any) -> None:
         try:
             if request.client is not None and request.client.host:
                 client_ip = str(request.client.host)
-        except Exception:  # pragma: nocover - defensive against non-standard request client objects
+        except (
+            Exception
+        ):  # pragma: nocover - defensive against non-standard request client objects
             client_ip = "unknown"
         decision = service.evaluate(
             action=str(action),
@@ -1468,27 +1301,70 @@ def _register_admin_routes(app: FastAPI, auth_dep: Any) -> None:
             status_code=int(exc.status_code), detail=str(exc.detail)
         ) from exc
 
+    def _with_server_time(payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Brief: Attach server_time to a response payload.
+
+        Inputs:
+          - payload: Mutable response payload mapping.
+
+        Outputs:
+          - The same payload mapping, with server_time updated.
+        """
+
+        payload["server_time"] = _utc_now_iso()
+        return payload
+
+    def _optional_raw_yaml(body: Dict[str, Any]) -> str | None:
+        """Brief: Validate and normalize optional raw_yaml request field.
+
+        Inputs:
+          - body: Parsed request JSON object.
+
+        Outputs:
+          - raw_yaml string value when provided; otherwise None.
+        """
+
+        raw_yaml = body.get("raw_yaml")
+        if raw_yaml is not None and not isinstance(raw_yaml, str):
+            raise HTTPException(status_code=400, detail="raw_yaml must be a string")
+        return str(raw_yaml) if isinstance(raw_yaml, str) else None
+
+    def _required_plugin_name(body: Dict[str, Any]) -> str:
+        """Brief: Read required plugin name from request body.
+
+        Inputs:
+          - body: Parsed request JSON object.
+
+        Outputs:
+          - Trimmed plugin name.
+        """
+
+        plugin_name = body.get("plugin")
+        if not isinstance(plugin_name, str) or not plugin_name.strip():
+            raise HTTPException(status_code=400, detail="plugin is required")
+        return plugin_name.strip()
+
     @app.get("/api/v1/admin/status", dependencies=[Depends(auth_dep)])
     async def admin_status(request: Request) -> Dict[str, Any]:
         _enforce_admin_rate_limit(request, action="admin.status")
-        payload = _admin_logic.build_admin_status_payload(
-            cfg=getattr(app.state, "config", {}) or {},
+        _status_code, payload = _endpoint_services.build_admin_status_result(
+            config=getattr(app.state, "config", None),
             config_path=getattr(app.state, "config_path", None),
             stats_collector=getattr(app.state, "stats_collector", None),
             plugins=_get_plugins(),
             admin_runtime_state=_runtime_state(),
+            build_payload=_admin_logic.build_admin_status_payload,
         )
-        payload["server_time"] = _utc_now_iso()
         return payload
 
     @app.get("/api/v1/admin/capabilities", dependencies=[Depends(auth_dep)])
     async def admin_capabilities(request: Request) -> Dict[str, Any]:
         _enforce_admin_rate_limit(request, action="admin.capabilities")
-        payload = _admin_logic.build_admin_capabilities_payload(
+        _status_code, payload = _endpoint_services.build_admin_capabilities_result(
             stats_collector=getattr(app.state, "stats_collector", None),
             plugins=_get_plugins(),
+            build_payload=_admin_logic.build_admin_capabilities_payload,
         )
-        payload["server_time"] = _utc_now_iso()
         return payload
 
     @app.get("/api/v1/admin/audit", dependencies=[Depends(auth_dep)])
@@ -1538,12 +1414,10 @@ def _register_admin_routes(app: FastAPI, auth_dep: Any) -> None:
     async def admin_config_verify(request: Request) -> Dict[str, Any]:
         _enforce_admin_rate_limit(request, action="admin.config.verify")
         body = await _read_admin_json_body(request)
-        raw_yaml = body.get("raw_yaml")
-        if raw_yaml is not None and not isinstance(raw_yaml, str):
-            raise HTTPException(status_code=400, detail="raw_yaml must be a string")
+        raw_yaml = _optional_raw_yaml(body)
         try:
             payload = _admin_logic.build_config_verify_payload(
-                raw_yaml=(str(raw_yaml) if isinstance(raw_yaml, str) else None),
+                raw_yaml=raw_yaml,
                 config_path=getattr(app.state, "config_path", None),
                 current_cfg=getattr(app.state, "config", {}) or {},
             )
@@ -1563,8 +1437,7 @@ def _register_admin_routes(app: FastAPI, auth_dep: Any) -> None:
             ok=True,
             details={"path": payload.get("path")},
         )
-        payload["server_time"] = _utc_now_iso()
-        return payload
+        return _with_server_time(payload)
 
     @app.post("/api/v1/admin/query_log/clear", dependencies=[Depends(auth_dep)])
     async def admin_query_log_clear(request: Request) -> Dict[str, Any]:
@@ -1622,8 +1495,7 @@ def _register_admin_routes(app: FastAPI, auth_dep: Any) -> None:
                 target=(str(plugin) if plugin else "all"),
             )
             raise
-        payload["server_time"] = _utc_now_iso()
-        return payload
+        return _with_server_time(payload)
 
     @app.post("/api/v1/admin/rate_limit/clear", dependencies=[Depends(auth_dep)])
     async def admin_rate_limit_clear(request: Request) -> Dict[str, Any]:
@@ -1670,45 +1542,40 @@ def _register_admin_routes(app: FastAPI, auth_dep: Any) -> None:
     async def admin_records_validate(target: str, request: Request) -> Dict[str, Any]:
         _enforce_admin_rate_limit(request, action="admin.records.validate")
         body = await _read_admin_json_body(request)
-        plugin_name = body.get("plugin")
-        if not isinstance(plugin_name, str) or not plugin_name.strip():
-            raise HTTPException(status_code=400, detail="plugin is required")
+        plugin_name = _required_plugin_name(body)
         target_norm = str(target or "").strip().lower()
         try:
             payload = _admin_logic.execute_records_validate(
                 plugins=_get_plugins(),
                 target=target_norm,
-                plugin_name=plugin_name.strip(),
+                plugin_name=plugin_name,
                 payload=body,
             )
         except _admin_logic.AdminLogicHttpError as exc:
             _raise_from_admin_error(
                 exc,
                 action=f"records.{target_norm}.validate",
-                target=plugin_name.strip(),
+                target=plugin_name,
             )
             raise
         _audit(
             action=f"records.{target_norm}.validate",
-            target=plugin_name.strip(),
+            target=plugin_name,
             ok=True,
         )
-        payload["server_time"] = _utc_now_iso()
-        return payload
+        return _with_server_time(payload)
 
     @app.post("/api/v1/admin/records/{target}/apply", dependencies=[Depends(auth_dep)])
     async def admin_records_apply(target: str, request: Request) -> Dict[str, Any]:
         _enforce_admin_rate_limit(request, action="admin.records.apply")
         body = await _read_admin_json_body(request)
-        plugin_name = body.get("plugin")
-        if not isinstance(plugin_name, str) or not plugin_name.strip():
-            raise HTTPException(status_code=400, detail="plugin is required")
+        plugin_name = _required_plugin_name(body)
         target_norm = str(target or "").strip().lower()
         try:
             payload = _admin_logic.execute_records_apply(
                 plugins=_get_plugins(),
                 target=target_norm,
-                plugin_name=plugin_name.strip(),
+                plugin_name=plugin_name,
                 payload=body,
                 runtime_state=_runtime_state(),
             )
@@ -1716,31 +1583,28 @@ def _register_admin_routes(app: FastAPI, auth_dep: Any) -> None:
             _raise_from_admin_error(
                 exc,
                 action=f"records.{target_norm}.apply",
-                target=plugin_name.strip(),
+                target=plugin_name,
             )
             raise
         _audit(
             action=f"records.{target_norm}.apply",
-            target=plugin_name.strip(),
+            target=plugin_name,
             ok=True,
             details={"persist": bool(body.get("persist", False))},
         )
-        payload["server_time"] = _utc_now_iso()
-        return payload
+        return _with_server_time(payload)
 
     @app.post("/api/v1/admin/records/{target}/delete", dependencies=[Depends(auth_dep)])
     async def admin_records_delete(target: str, request: Request) -> Dict[str, Any]:
         _enforce_admin_rate_limit(request, action="admin.records.delete")
         body = await _read_admin_json_body(request)
-        plugin_name = body.get("plugin")
-        if not isinstance(plugin_name, str) or not plugin_name.strip():
-            raise HTTPException(status_code=400, detail="plugin is required")
+        plugin_name = _required_plugin_name(body)
         target_norm = str(target or "").strip().lower()
         try:
             payload = _admin_logic.execute_records_delete(
                 plugins=_get_plugins(),
                 target=target_norm,
-                plugin_name=plugin_name.strip(),
+                plugin_name=plugin_name,
                 payload=body,
                 runtime_state=_runtime_state(),
             )
@@ -1748,12 +1612,12 @@ def _register_admin_routes(app: FastAPI, auth_dep: Any) -> None:
             _raise_from_admin_error(
                 exc,
                 action=f"records.{target_norm}.delete",
-                target=plugin_name.strip(),
+                target=plugin_name,
             )
             raise
         _audit(
             action=f"records.{target_norm}.delete",
-            target=plugin_name.strip(),
+            target=plugin_name,
             ok=True,
             details={"persist": bool(body.get("persist", False))},
         )
@@ -1763,61 +1627,55 @@ def _register_admin_routes(app: FastAPI, auth_dep: Any) -> None:
     @app.get("/api/v1/admin/restart/status", dependencies=[Depends(auth_dep)])
     async def admin_restart_status(request: Request) -> Dict[str, Any]:
         _enforce_admin_rate_limit(request, action="admin.restart.status")
-        payload = _admin_logic.build_admin_restart_status_payload(
-            runtime_state=_runtime_state()
+        _status_code, payload = _endpoint_services.build_admin_restart_status_result(
+            runtime_state=_runtime_state(),
+            build_payload=_admin_logic.build_admin_restart_status_payload,
         )
-        payload["server_time"] = _utc_now_iso()
         return payload
 
     @app.get("/api/v1/admin/tasks", dependencies=[Depends(auth_dep)])
     async def admin_tasks(request: Request, limit: int = 50) -> Dict[str, Any]:
         _enforce_admin_rate_limit(request, action="admin.tasks")
-        payload = _admin_logic.build_admin_tasks_payload(
+        _status_code, payload = _endpoint_services.build_admin_tasks_result(
             runtime_state=_runtime_state(),
             limit=max(1, min(int(limit), 500)),
             task_type=None,
             status=None,
+            build_payload=_admin_logic.build_admin_tasks_payload,
         )
-        payload["server_time"] = _utc_now_iso()
         return payload
 
     @app.post("/api/v1/admin/config/diff", dependencies=[Depends(auth_dep)])
     async def admin_config_diff(request: Request) -> Dict[str, Any]:
         _enforce_admin_rate_limit(request, action="admin.config.diff")
         body = await _read_admin_json_body(request)
-        raw_yaml = body.get("raw_yaml")
-        if raw_yaml is not None and not isinstance(raw_yaml, str):
-            raise HTTPException(status_code=400, detail="raw_yaml must be a string")
+        raw_yaml = _optional_raw_yaml(body)
         try:
             payload = _admin_logic.build_config_diff_payload(
-                raw_yaml=(str(raw_yaml) if isinstance(raw_yaml, str) else None),
+                raw_yaml=raw_yaml,
                 config_path=getattr(app.state, "config_path", None),
                 current_cfg=getattr(app.state, "config", {}) or {},
             )
         except _admin_logic.AdminLogicHttpError as exc:
             _raise_from_admin_error(exc, action="config.diff", target="config")
             raise
-        payload["server_time"] = _utc_now_iso()
-        return payload
+        return _with_server_time(payload)
 
     @app.post("/api/v1/admin/config/lint", dependencies=[Depends(auth_dep)])
     async def admin_config_lint(request: Request) -> Dict[str, Any]:
         _enforce_admin_rate_limit(request, action="admin.config.lint")
         body = await _read_admin_json_body(request)
-        raw_yaml = body.get("raw_yaml")
-        if raw_yaml is not None and not isinstance(raw_yaml, str):
-            raise HTTPException(status_code=400, detail="raw_yaml must be a string")
+        raw_yaml = _optional_raw_yaml(body)
         try:
             payload = _admin_logic.build_config_lint_payload(
-                raw_yaml=(str(raw_yaml) if isinstance(raw_yaml, str) else None),
+                raw_yaml=raw_yaml,
                 config_path=getattr(app.state, "config_path", None),
                 current_cfg=getattr(app.state, "config", {}) or {},
             )
         except _admin_logic.AdminLogicHttpError as exc:
             _raise_from_admin_error(exc, action="config.lint", target="config")
             raise
-        payload["server_time"] = _utc_now_iso()
-        return payload
+        return _with_server_time(payload)
 
     @app.post("/api/v1/admin/query_log/export", dependencies=[Depends(auth_dep)])
     async def admin_query_log_export(request: Request) -> Dict[str, Any]:
@@ -1858,9 +1716,7 @@ def _register_admin_routes(app: FastAPI, auth_dep: Any) -> None:
                 dry_run=dry_run,
             )
         except _admin_logic.AdminLogicHttpError as exc:
-            _raise_from_admin_error(
-                exc, action="query_log.compact", target="query_log"
-            )
+            _raise_from_admin_error(exc, action="query_log.compact", target="query_log")
             raise
         payload["server_time"] = _utc_now_iso()
         return payload
@@ -1918,22 +1774,20 @@ def _register_admin_routes(app: FastAPI, auth_dep: Any) -> None:
     async def admin_records_list(target: str, request: Request) -> Dict[str, Any]:
         _enforce_admin_rate_limit(request, action="admin.records.list")
         body = await _read_admin_json_body(request)
-        plugin_name = body.get("plugin")
-        if not isinstance(plugin_name, str) or not plugin_name.strip():
-            raise HTTPException(status_code=400, detail="plugin is required")
+        plugin_name = _required_plugin_name(body)
         target_norm = str(target or "").strip().lower()
         try:
             payload = _admin_logic.execute_records_list(
                 plugins=_get_plugins(),
                 runtime_state=_runtime_state(),
                 target=target_norm,
-                plugin_name=plugin_name.strip(),
+                plugin_name=plugin_name,
             )
         except _admin_logic.AdminLogicHttpError as exc:
             _raise_from_admin_error(
                 exc,
                 action=f"records.{target_norm}.list",
-                target=plugin_name.strip(),
+                target=plugin_name,
             )
             raise
         payload["server_time"] = _utc_now_iso()
@@ -1947,22 +1801,20 @@ def _register_admin_routes(app: FastAPI, auth_dep: Any) -> None:
     ) -> Dict[str, Any]:
         _enforce_admin_rate_limit(request, action="admin.records.purge_expired")
         body = await _read_admin_json_body(request)
-        plugin_name = body.get("plugin")
-        if not isinstance(plugin_name, str) or not plugin_name.strip():
-            raise HTTPException(status_code=400, detail="plugin is required")
+        plugin_name = _required_plugin_name(body)
         target_norm = str(target or "").strip().lower()
         try:
             payload = _admin_logic.execute_records_purge_expired(
                 plugins=_get_plugins(),
                 runtime_state=_runtime_state(),
                 target=target_norm,
-                plugin_name=plugin_name.strip(),
+                plugin_name=plugin_name,
             )
         except _admin_logic.AdminLogicHttpError as exc:
             _raise_from_admin_error(
                 exc,
                 action=f"records.{target_norm}.purge_expired",
-                target=plugin_name.strip(),
+                target=plugin_name,
             )
             raise
         payload["server_time"] = _utc_now_iso()
@@ -1971,29 +1823,32 @@ def _register_admin_routes(app: FastAPI, auth_dep: Any) -> None:
     @app.get("/api/v1/admin/version/compat", dependencies=[Depends(auth_dep)])
     async def admin_version_compat(request: Request) -> Dict[str, Any]:
         _enforce_admin_rate_limit(request, action="admin.version.compat")
-        payload = _admin_logic.build_admin_version_compat_payload(
+        _status_code, payload = _endpoint_services.build_admin_version_compat_result(
             plugins=_get_plugins(),
             stats_collector=getattr(app.state, "stats_collector", None),
+            build_payload=_admin_logic.build_admin_version_compat_payload,
         )
-        payload["server_time"] = _utc_now_iso()
         return payload
 
     @app.get("/api/v1/admin/diag/runtime-snapshot", dependencies=[Depends(auth_dep)])
     async def admin_diag_runtime_snapshot(request: Request) -> Dict[str, Any]:
         _enforce_admin_rate_limit(request, action="admin.diag.runtime_snapshot")
-        payload = _admin_logic.build_admin_diag_runtime_snapshot(
-            cfg=getattr(app.state, "config", {}) or {},
-            config_path=getattr(app.state, "config_path", None),
-            runtime_state=_runtime_state(),
-            plugins=_get_plugins(),
-            stats_collector=getattr(app.state, "stats_collector", None),
+        _status_code, payload = (
+            _endpoint_services.build_admin_diag_runtime_snapshot_result(
+                config=getattr(app.state, "config", None),
+                config_path=getattr(app.state, "config_path", None),
+                runtime_state=_runtime_state(),
+                plugins=_get_plugins(),
+                stats_collector=getattr(app.state, "stats_collector", None),
+                build_payload=_admin_logic.build_admin_diag_runtime_snapshot,
+            )
         )
-        payload["server_time"] = _utc_now_iso()
         return payload
 
 
 def _register_plugin_routes(app: FastAPI, auth_dep: Any) -> None:
     """Register plugin-related admin, cache, logs, and snapshot endpoints."""
+
     def _config_flag_enabled(value: object) -> bool:
         """Brief: Normalize config flag values to booleans.
 
@@ -2490,9 +2345,11 @@ def _register_plugin_routes(app: FastAPI, auth_dep: Any) -> None:
     @app.get("/api/v1/logs", dependencies=[Depends(auth_dep)])
     @app.get("/logs", dependencies=[Depends(auth_dep)], include_in_schema=False)
     async def get_logs(limit: int = 100) -> Dict[str, Any]:
-        buf = app.state.log_buffer
-        entries = buf.snapshot(limit=max(0, int(limit)))
-        return {"server_time": _utc_now_iso(), "entries": entries}
+        _status_code, payload = _endpoint_services.build_logs_result(
+            log_buffer=getattr(app.state, "log_buffer", None),
+            limit=limit,
+        )
+        return payload
 
     def _plugin_snapshot_response(plugin_name: str) -> Dict[str, Any]:
         """Brief: Build the common JSON response shape for plugin snapshots.
@@ -2515,6 +2372,26 @@ def _register_plugin_routes(app: FastAPI, auth_dep: Any) -> None:
             "plugin": snap["plugin"],
             "data": _json_safe(snap["data"]),
         }
+
+    def _plugin_payload_response(plugin_name: str, builder: Any) -> Dict[str, Any]:
+        """Brief: Build standard plugin endpoint responses around admin_logic calls.
+
+        Inputs:
+          - plugin_name: Plugin instance name from the route.
+          - builder: Callable accepting filtered plugin list and plugin name.
+
+        Outputs:
+          - JSON-safe payload with ``server_time`` attached.
+        """
+
+        _assert_plugin_api_enabled(plugin_name)
+        plugins_list = _filter_plugins_for_api(getattr(app.state, "plugins", []) or [])
+        try:
+            payload = builder(plugins_list, plugin_name)
+        except _admin_logic.AdminLogicHttpError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+        payload["server_time"] = _utc_now_iso()
+        return _json_safe(payload)
 
     @app.get("/api/v1/plugins/{plugin_name}/snapshot", dependencies=[Depends(auth_dep)])
     async def get_plugin_snapshot(plugin_name: str) -> Dict[str, Any]:
@@ -2553,16 +2430,13 @@ def _register_plugin_routes(app: FastAPI, auth_dep: Any) -> None:
         dependencies=[Depends(auth_dep)],
     )
     async def get_access_control_rules(plugin_name: str) -> Dict[str, Any]:
-        _assert_plugin_api_enabled(plugin_name)
-        plugins_list = _filter_plugins_for_api(getattr(app.state, "plugins", []) or [])
-        try:
-            payload = _admin_logic.build_plugin_access_control_rules_payload(
-                plugins_list, plugin_name
-            )
-        except _admin_logic.AdminLogicHttpError as exc:
-            raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
-        payload["server_time"] = _utc_now_iso()
-        return _json_safe(payload)
+        return _plugin_payload_response(
+            plugin_name,
+            lambda plugins_list, name: _admin_logic.build_plugin_access_control_rules_payload(
+                plugins_list, name
+            ),
+        )
+
     @app.get(
         "/api/v1/plugins/{plugin_name}/zone_records/dns_update/zones/{zone}",
         dependencies=[Depends(auth_dep)],
@@ -2570,18 +2444,14 @@ def _register_plugin_routes(app: FastAPI, auth_dep: Any) -> None:
     async def get_zone_records_dns_update_zone_status(
         plugin_name: str, zone: str
     ) -> Dict[str, Any]:
-        _assert_plugin_api_enabled(plugin_name)
-        plugins_list = _filter_plugins_for_api(getattr(app.state, "plugins", []) or [])
-        try:
-            payload = _admin_logic.build_plugin_zone_records_dns_update_zone_payload(
+        return _plugin_payload_response(
+            plugin_name,
+            lambda plugins_list, name: _admin_logic.build_plugin_zone_records_dns_update_zone_payload(
                 plugins_list,
-                plugin_name,
+                name,
                 zone=zone,
-            )
-        except _admin_logic.AdminLogicHttpError as exc:
-            raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
-        payload["server_time"] = _utc_now_iso()
-        return _json_safe(payload)
+            ),
+        )
 
     @app.get(
         "/api/v1/plugins/{plugin_name}/etc_hosts/lookup",
@@ -2590,16 +2460,12 @@ def _register_plugin_routes(app: FastAPI, auth_dep: Any) -> None:
     async def get_etc_hosts_lookup(
         plugin_name: str, name: str | None = None
     ) -> Dict[str, Any]:
-        _assert_plugin_api_enabled(plugin_name)
-        plugins_list = _filter_plugins_for_api(getattr(app.state, "plugins", []) or [])
-        try:
-            payload = _admin_logic.build_plugin_etc_hosts_lookup_payload(
-                plugins_list, plugin_name, name=str(name or "")
-            )
-        except _admin_logic.AdminLogicHttpError as exc:
-            raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
-        payload["server_time"] = _utc_now_iso()
-        return _json_safe(payload)
+        return _plugin_payload_response(
+            plugin_name,
+            lambda plugins_list, plugin: _admin_logic.build_plugin_etc_hosts_lookup_payload(
+                plugins_list, plugin, name=str(name or "")
+            ),
+        )
 
     @app.get(
         "/api/v1/plugins/{plugin_name}/docker_hosts/containers/{name}",
@@ -2608,16 +2474,12 @@ def _register_plugin_routes(app: FastAPI, auth_dep: Any) -> None:
     async def get_docker_container_by_name(
         plugin_name: str, name: str
     ) -> Dict[str, Any]:
-        _assert_plugin_api_enabled(plugin_name)
-        plugins_list = _filter_plugins_for_api(getattr(app.state, "plugins", []) or [])
-        try:
-            payload = _admin_logic.build_plugin_docker_container_payload(
-                plugins_list, plugin_name, name=name
-            )
-        except _admin_logic.AdminLogicHttpError as exc:
-            raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
-        payload["server_time"] = _utc_now_iso()
-        return _json_safe(payload)
+        return _plugin_payload_response(
+            plugin_name,
+            lambda plugins_list, plugin: _admin_logic.build_plugin_docker_container_payload(
+                plugins_list, plugin, name=name
+            ),
+        )
 
     @app.get(
         "/api/v1/plugins/{plugin_name}/mdns/services", dependencies=[Depends(auth_dep)]
@@ -2627,19 +2489,15 @@ def _register_plugin_routes(app: FastAPI, auth_dep: Any) -> None:
         status_text: str | None = Query(None, alias="status"),
         service_type: str | None = Query(None, alias="type"),
     ) -> Dict[str, Any]:
-        _assert_plugin_api_enabled(plugin_name)
-        plugins_list = _filter_plugins_for_api(getattr(app.state, "plugins", []) or [])
-        try:
-            payload = _admin_logic.build_plugin_mdns_services_payload(
+        return _plugin_payload_response(
+            plugin_name,
+            lambda plugins_list, plugin: _admin_logic.build_plugin_mdns_services_payload(
                 plugins_list,
-                plugin_name,
+                plugin,
                 status=status_text,
                 service_type=service_type,
-            )
-        except _admin_logic.AdminLogicHttpError as exc:
-            raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
-        payload["server_time"] = _utc_now_iso()
-        return _json_safe(payload)
+            ),
+        )
 
     @app.get(
         "/api/v1/plugins/{plugin_name}/rate_limit/profiles",
@@ -2648,16 +2506,12 @@ def _register_plugin_routes(app: FastAPI, auth_dep: Any) -> None:
     async def get_rate_limit_profiles(
         plugin_name: str, limit: int | None = None, sort: str | None = None
     ) -> Dict[str, Any]:
-        _assert_plugin_api_enabled(plugin_name)
-        plugins_list = _filter_plugins_for_api(getattr(app.state, "plugins", []) or [])
-        try:
-            payload = _admin_logic.build_plugin_rate_limit_profiles_payload(
-                plugins_list, plugin_name, limit=limit, sort=sort
-            )
-        except _admin_logic.AdminLogicHttpError as exc:
-            raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
-        payload["server_time"] = _utc_now_iso()
-        return _json_safe(payload)
+        return _plugin_payload_response(
+            plugin_name,
+            lambda plugins_list, plugin: _admin_logic.build_plugin_rate_limit_profiles_payload(
+                plugins_list, plugin, limit=limit, sort=sort
+            ),
+        )
 
     @app.get(
         "/api/v1/plugins/{plugin_name}/zone_records/lookup",
@@ -2666,66 +2520,51 @@ def _register_plugin_routes(app: FastAPI, auth_dep: Any) -> None:
     async def get_zone_records_lookup(
         plugin_name: str, owner: str | None = None, qtype: str | None = None
     ) -> Dict[str, Any]:
-        _assert_plugin_api_enabled(plugin_name)
-        plugins_list = _filter_plugins_for_api(getattr(app.state, "plugins", []) or [])
-        try:
-            payload = _admin_logic.build_plugin_zone_records_lookup_payload(
+        return _plugin_payload_response(
+            plugin_name,
+            lambda plugins_list, plugin: _admin_logic.build_plugin_zone_records_lookup_payload(
                 plugins_list,
-                plugin_name,
+                plugin,
                 owner=str(owner or ""),
                 qtype=qtype,
-            )
-        except _admin_logic.AdminLogicHttpError as exc:
-            raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
-        payload["server_time"] = _utc_now_iso()
-        return _json_safe(payload)
+            ),
+        )
 
     @app.post(
         "/api/v1/plugins/{plugin_name}/etc_hosts/reload",
         dependencies=[Depends(auth_dep)],
     )
     async def post_etc_hosts_reload(plugin_name: str) -> Dict[str, Any]:
-        _assert_plugin_api_enabled(plugin_name)
-        plugins_list = _filter_plugins_for_api(getattr(app.state, "plugins", []) or [])
-        try:
-            payload = _admin_logic.build_plugin_reload_payload(
-                plugins_list, plugin_name, plugin_kind="etc_hosts"
-            )
-        except _admin_logic.AdminLogicHttpError as exc:
-            raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
-        payload["server_time"] = _utc_now_iso()
-        return _json_safe(payload)
+        return _plugin_payload_response(
+            plugin_name,
+            lambda plugins_list, plugin: _admin_logic.build_plugin_reload_payload(
+                plugins_list, plugin, plugin_kind="etc_hosts"
+            ),
+        )
 
     @app.post(
         "/api/v1/plugins/{plugin_name}/docker_hosts/reload",
         dependencies=[Depends(auth_dep)],
     )
     async def post_docker_hosts_reload(plugin_name: str) -> Dict[str, Any]:
-        _assert_plugin_api_enabled(plugin_name)
-        plugins_list = _filter_plugins_for_api(getattr(app.state, "plugins", []) or [])
-        try:
-            payload = _admin_logic.build_plugin_reload_payload(
-                plugins_list, plugin_name, plugin_kind="docker_hosts"
-            )
-        except _admin_logic.AdminLogicHttpError as exc:
-            raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
-        payload["server_time"] = _utc_now_iso()
-        return _json_safe(payload)
+        return _plugin_payload_response(
+            plugin_name,
+            lambda plugins_list, plugin: _admin_logic.build_plugin_reload_payload(
+                plugins_list, plugin, plugin_kind="docker_hosts"
+            ),
+        )
+
     @app.post(
         "/api/v1/plugins/{plugin_name}/zone_records/reload",
         dependencies=[Depends(auth_dep)],
     )
     async def post_zone_records_reload(plugin_name: str) -> Dict[str, Any]:
-        _assert_plugin_api_enabled(plugin_name)
-        plugins_list = _filter_plugins_for_api(getattr(app.state, "plugins", []) or [])
-        try:
-            payload = _admin_logic.build_plugin_reload_payload(
-                plugins_list, plugin_name, plugin_kind="zone_records"
-            )
-        except _admin_logic.AdminLogicHttpError as exc:
-            raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
-        payload["server_time"] = _utc_now_iso()
-        return _json_safe(payload)
+        return _plugin_payload_response(
+            plugin_name,
+            lambda plugins_list, plugin: _admin_logic.build_plugin_reload_payload(
+                plugins_list, plugin, plugin_kind="zone_records"
+            ),
+        )
 
     @app.post(
         "/api/v1/plugins/{plugin_name}/zone_records/compact",
@@ -2768,13 +2607,9 @@ def _register_plugin_routes(app: FastAPI, auth_dep: Any) -> None:
     async def get_upstream_router_evaluate(
         plugin_name: str, qname: str | None = None
     ) -> Dict[str, Any]:
-        _assert_plugin_api_enabled(plugin_name)
-        plugins_list = _filter_plugins_for_api(getattr(app.state, "plugins", []) or [])
-        try:
-            payload = _admin_logic.build_plugin_upstream_evaluate_payload(
-                plugins_list, plugin_name, qname=str(qname or "")
-            )
-        except _admin_logic.AdminLogicHttpError as exc:
-            raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
-        payload["server_time"] = _utc_now_iso()
-        return _json_safe(payload)
+        return _plugin_payload_response(
+            plugin_name,
+            lambda plugins_list, plugin: _admin_logic.build_plugin_upstream_evaluate_payload(
+                plugins_list, plugin, qname=str(qname or "")
+            ),
+        )
