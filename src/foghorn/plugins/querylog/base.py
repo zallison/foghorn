@@ -16,14 +16,15 @@ scripts) can remain backend-agnostic.
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 import queue
 import threading
 import time
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, Optional, Tuple
 
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class StatsStoreBackendConfig(BaseModel):
@@ -658,10 +659,170 @@ class BaseStatsStore:
 
         raise NotImplementedError("export_counts() must be implemented by a subclass")
 
+    def _flush_pending_writes_if_needed(self) -> None:
+        """Brief: Flush backend-local batched writes before read-consistent flows.
+
+        Inputs:
+          - None.
+
+        Outputs:
+          - None.
+
+        Notes:
+          - Default implementation is a no-op for backends without local write
+            batching.
+        """
+
+        return
+
+    def _clear_counts_for_rebuild(self) -> None:  # pragma: no cover - interface only
+        """Brief: Clear aggregate counters before a full rebuild.
+
+        Inputs:
+          - None.
+
+        Outputs:
+          - None.
+        """
+
+        raise NotImplementedError("_clear_counts_for_rebuild() must be implemented")
+
+    def _iter_query_log_for_rebuild(
+        self,
+    ) -> Iterable[Dict[str, Any]]:  # pragma: no cover - interface only
+        """Brief: Yield query-log rows used to recompute aggregate counters.
+
+        Inputs:
+          - None.
+
+        Outputs:
+          - Iterable[Dict[str, Any]] where each row may include:
+              client_ip, name, qtype, upstream_id, rcode, status, result_json.
+        """
+
+        raise NotImplementedError("_iter_query_log_for_rebuild() must be implemented")
+
+    def _rebuild_counts_from_rows(
+        self,
+        rows: Iterable[Dict[str, Any]],
+        *,
+        logger_obj: Optional[logging.Logger] = None,
+    ) -> None:
+        """Brief: Recompute aggregate counters from normalized query-log rows.
+
+        Inputs:
+          - rows: Iterable of query-log row mappings.
+          - logger_obj: Optional logger used for warnings/errors.
+
+        Outputs:
+          - None.
+        """
+
+        from .common import is_subdomain, normalize_domain
+
+        log = logger_obj or logging.getLogger(__name__)
+        try:
+            for row in rows:
+                client_ip = row.get("client_ip")
+                name = row.get("name")
+                qtype = row.get("qtype")
+                upstream_id = row.get("upstream_id")
+                rcode = row.get("rcode")
+                status = row.get("status")
+                result_json = row.get("result_json")
+
+                domain = normalize_domain(str(name or ""))
+                parts = domain.split(".") if domain else []
+                base = ".".join(parts[-2:]) if len(parts) >= 2 else domain
+
+                self.increment_count("totals", "total_queries", 1)
+
+                if status == "cache_hit":
+                    self.increment_count("totals", "cache_hits", 1)
+                elif status in ("deny_pre", "override_pre"):
+                    self.increment_count("totals", "cache_" + str(status), 1)
+                    self.increment_count("totals", "cache_null", 1)
+                else:
+                    self.increment_count("totals", "cache_misses", 1)
+
+                if base:
+                    if status == "cache_hit":
+                        self.increment_count("cache_hit_domains", base, 1)
+                    elif status not in ("deny_pre", "override_pre"):
+                        self.increment_count("cache_miss_domains", base, 1)
+
+                if domain and base and is_subdomain(domain):
+                    if status == "cache_hit":
+                        self.increment_count("cache_hit_subdomains", domain, 1)
+                    elif status not in ("deny_pre", "override_pre"):
+                        self.increment_count("cache_miss_subdomains", domain, 1)
+
+                if qtype:
+                    self.increment_count("qtypes", str(qtype), 1)
+
+                if client_ip:
+                    self.increment_count("clients", str(client_ip), 1)
+
+                if domain:
+                    if is_subdomain(domain):
+                        self.increment_count("sub_domains", domain, 1)
+                    if base:
+                        self.increment_count("domains", base, 1)
+
+                if domain and qtype:
+                    qkey = f"{qtype}|{domain}"
+                    self.increment_count("qtype_qnames", qkey, 1)
+
+                if rcode:
+                    self.increment_count("rcodes", str(rcode), 1)
+                    if base:
+                        rkey = f"{rcode}|{base}"
+                        self.increment_count("rcode_domains", rkey, 1)
+                    if domain and base and is_subdomain(domain):
+                        sub_rkey = f"{rcode}|{domain}"
+                        self.increment_count("rcode_subdomains", sub_rkey, 1)
+
+                if upstream_id:
+                    outcome = "success"
+                    if rcode != "NOERROR" or (
+                        status and status not in ("ok", "cache_hit")
+                    ):
+                        outcome = str(status or "error")
+
+                    rcode_key = str(rcode or "UNKNOWN")
+                    key = f"{upstream_id}|{outcome}|{rcode_key}"
+                    self.increment_count("upstreams", key, 1)
+
+                    if qtype:
+                        qt_key = f"{upstream_id}|{qtype}"
+                        self.increment_count("upstream_qtypes", qt_key, 1)
+
+                if result_json:
+                    try:
+                        payload = json.loads(str(result_json))
+                        dnssec_status = payload.get("dnssec_status")
+                    except Exception:
+                        dnssec_status = None
+
+                    if dnssec_status in {
+                        "dnssec_secure",
+                        "dnssec_zone_secure",
+                        "dnssec_unsigned",
+                        "dnssec_bogus",
+                        "dnssec_indeterminate",
+                    }:
+                        self.increment_count("totals", str(dnssec_status), 1)
+        except Exception as exc:
+            log.error(
+                "Error while rebuilding counts from query_log: %s",
+                exc,
+                exc_info=True,
+            )
+
     def rebuild_counts_from_query_log(
         self,
         logger_obj: Optional[logging.Logger] = None,
-    ) -> None:  # pragma: no cover - interface only
+    ) -> None:
         """Brief: Rebuild counts by aggregating over all rows in the query log.
 
         Inputs:
@@ -675,15 +836,22 @@ class BaseStatsStore:
             ensure a consistent view derived solely from the current query log.
         """
 
-        raise NotImplementedError(
-            "rebuild_counts_from_query_log() must be implemented by a subclass"
+        log = logger_obj or logging.getLogger(__name__)
+        log.warning(
+            "Rebuilding statistics counts from query_log; this may take a while"
         )
+
+        self._flush_pending_writes_if_needed()
+        self._clear_counts_for_rebuild()
+        rows = self._iter_query_log_for_rebuild()
+        self._rebuild_counts_from_rows(rows, logger_obj=log)
+        self._flush_pending_writes_if_needed()
 
     def rebuild_counts_if_needed(
         self,
         force_rebuild: bool = False,
         logger_obj: Optional[logging.Logger] = None,
-    ) -> None:  # pragma: no cover - interface only
+    ) -> None:
         """Brief: Conditionally rebuild counts based on backend state and flags.
 
         Inputs:
@@ -696,9 +864,30 @@ class BaseStatsStore:
           - None.
         """
 
-        raise NotImplementedError(
-            "rebuild_counts_if_needed() must be implemented by a subclass"
-        )
+        log = logger_obj or logging.getLogger(__name__)
+        has_counts = self.has_counts()
+        has_log = self.has_query_log()
+
+        if not has_log:
+            if force_rebuild:
+                log.warning(
+                    "Force rebuild requested but query_log is empty; skipping rebuild",
+                )
+            return
+
+        if has_counts and not force_rebuild:
+            return
+
+        if has_counts and force_rebuild:
+            log.warning(
+                "Force rebuild requested: discarding existing counts and rebuilding from query_log",
+            )
+        elif not has_counts:
+            log.warning(
+                "Counts store is empty but query_log has rows; rebuilding counts from query_log",
+            )
+
+        self.rebuild_counts_from_query_log(logger_obj=log)
 
     # ------------------------------------------------------------------
     # Query-log API: append-only DNS query log
@@ -997,6 +1186,164 @@ class BaseStatsStore:
         return start_f, end_f, interval_i
 
     @staticmethod
+    def _normalize_query_log_clear_filters(
+        raw_filters: Dict[str, Any],
+        *,
+        qname_normalizer: Callable[[str], str],
+    ) -> Dict[str, Any]:
+        """Brief: Normalize common clear_query_log filter inputs.
+
+        Inputs:
+          - raw_filters: Raw filter mapping from API/UI input.
+          - qname_normalizer: Callable used to normalize qname text.
+
+        Outputs:
+          - Dict[str, Any]: Normalized subset with optional keys:
+              before_ts, client_ip, qname, qtype, rcode, status.
+
+        Raises:
+          - ValueError: When before_ts is provided but not float-coercible.
+        """
+
+        normalized: Dict[str, Any] = {}
+
+        before_ts_raw = raw_filters.get("before_ts")
+        if before_ts_raw is not None and str(before_ts_raw).strip():
+            try:
+                normalized["before_ts"] = float(before_ts_raw)
+            except Exception as exc:
+                raise ValueError(f"invalid before_ts filter: {exc}") from exc
+
+        client_ip_raw = raw_filters.get("client_ip")
+        if client_ip_raw is not None:
+            client_ip = str(client_ip_raw).strip()
+            if client_ip:
+                normalized["client_ip"] = client_ip
+
+        qname_raw = raw_filters.get("qname")
+        if qname_raw is not None:
+            qname_text = str(qname_raw).strip()
+            if qname_text:
+                normalized["qname"] = qname_normalizer(qname_text)
+
+        qtype_raw = raw_filters.get("qtype")
+        if qtype_raw is not None:
+            qtype = str(qtype_raw).strip().upper()
+            if qtype:
+                normalized["qtype"] = qtype
+
+        rcode_raw = raw_filters.get("rcode")
+        if rcode_raw is not None:
+            rcode = str(rcode_raw).strip().upper()
+            if rcode:
+                normalized["rcode"] = rcode
+
+        status_raw = raw_filters.get("status")
+        if status_raw is not None:
+            status = str(status_raw).strip().lower()
+            if status:
+                normalized["status"] = status
+
+        return normalized
+
+    @staticmethod
+    def _normalize_query_log_select_args(
+        *,
+        client_ip: Optional[str],
+        qtype: Optional[str],
+        qname: Optional[str],
+        rcode: Optional[str],
+        status: Optional[str],
+        source: Optional[str],
+        ede_code: Optional[str],
+        start_ts: Optional[float],
+        end_ts: Optional[float],
+        page: object,
+        page_size: object,
+        qname_normalizer: Callable[[str], str],
+        clamp_non_positive_page_size_to_one: bool = False,
+    ) -> Dict[str, Any]:
+        """Brief: Normalize common select_query_log arguments.
+
+        Inputs:
+          - client_ip/qtype/qname/rcode/status/source/ede_code: Raw filter values.
+          - start_ts/end_ts: Optional float-like time bounds.
+          - page/page_size: Pagination arguments.
+          - qname_normalizer: Callable used to normalize qname text.
+          - clamp_non_positive_page_size_to_one: When True, preserves callers
+            that treat page_size <= 0 as 1.
+
+        Outputs:
+          - Dict[str, Any]: Normalized values and pagination metadata with keys:
+              page, page_size, client_ip, qtype, qname, rcode, status, source,
+              start_ts, end_ts, has_ede_code_filter, ede_code, ede_code_invalid.
+        """
+
+        page_i, page_size_i = BaseStatsStore._normalize_page_args(page, page_size)
+        if clamp_non_positive_page_size_to_one:
+            try:
+                if int(page_size) < 1:  # type: ignore[arg-type]
+                    page_size_i = 1
+            except (TypeError, ValueError):
+                pass
+
+        client_ip_s = str(client_ip).strip() if client_ip is not None else None
+        if client_ip_s == "":
+            client_ip_s = None
+
+        qtype_s = str(qtype).strip().upper() if qtype is not None else None
+        if qtype_s == "":
+            qtype_s = None
+
+        qname_s = None
+        if qname is not None:
+            qname_text = str(qname).strip()
+            if qname_text:
+                qname_s = qname_normalizer(qname_text)
+
+        rcode_s = str(rcode).strip().upper() if rcode is not None else None
+        if rcode_s == "":
+            rcode_s = None
+
+        status_s = str(status).strip().lower() if status is not None else None
+        if status_s == "":
+            status_s = None
+
+        source_s = str(source).strip().lower() if source is not None else None
+        if source_s == "":
+            source_s = None
+
+        start_ts_f = float(start_ts) if isinstance(start_ts, (int, float)) else None
+        end_ts_f = float(end_ts) if isinstance(end_ts, (int, float)) else None
+
+        has_ede_code_filter = ede_code is not None and str(ede_code).strip() != ""
+        ede_code_i: int | None = None
+        ede_code_invalid = False
+        if has_ede_code_filter:
+            try:
+                ede_code_i = int(str(ede_code).strip())
+                if ede_code_i < 0:
+                    ede_code_invalid = True
+            except Exception:
+                ede_code_invalid = True
+
+        return {
+            "page": page_i,
+            "page_size": page_size_i,
+            "client_ip": client_ip_s,
+            "qtype": qtype_s,
+            "qname": qname_s,
+            "rcode": rcode_s,
+            "status": status_s,
+            "source": source_s,
+            "start_ts": start_ts_f,
+            "end_ts": end_ts_f,
+            "has_ede_code_filter": bool(has_ede_code_filter),
+            "ede_code": ede_code_i,
+            "ede_code_invalid": bool(ede_code_invalid),
+        }
+
+    @staticmethod
     def _normalize_retention_max_records(raw: object) -> int | None:
         """Brief: Normalize a max-records retention setting.
 
@@ -1127,6 +1474,7 @@ class BaseStatsStore:
         return value
 
     DEFAULT_RETENTION_PRUNE_EVERY_N_INSERTS = 256
+
     @staticmethod
     def _normalize_retention_prune_every_n_inserts(raw: object) -> int | None:
         """Brief: Normalize a retention prune cadence in inserted rows.
