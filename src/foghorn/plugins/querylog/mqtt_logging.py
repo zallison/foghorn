@@ -24,43 +24,11 @@ import logging
 import socket
 import time
 from typing import Any, Dict, Optional
+from foghorn.plugins.db_drivers import import_mqtt_driver
 
 from .base import BaseStatsStore
 
 logger = logging.getLogger(__name__)
-
-
-def _import_mqtt_driver():
-    """Import and return a paho-mqtt style client module.
-
-    Inputs:
-        None.
-
-    Outputs:
-        Module exposing a Client class compatible with paho-mqtt.
-
-    Raises:
-        RuntimeError: When no supported MQTT driver is available.
-    """
-
-    # Honour any pre-injected paho-style client in sys.modules so that tests can
-    # provide a fake driver (for example, via monkeypatch.setitem). When present
-    # and not None, this takes precedence over importing the real package.
-    import sys
-
-    injected = sys.modules.get("paho.mqtt.client")
-    if injected is not None:
-        return injected
-
-    try:
-        import paho.mqtt.client as mqtt  # type: ignore[import]
-
-        return mqtt
-    except Exception as exc:  # pragma: no cover - environment specific
-        raise RuntimeError(
-            "No supported MQTT client library found; install 'paho-mqtt' to "
-            "use the MqttLogging"
-        ) from exc
 
 
 class MqttLogging(BaseStatsStore):
@@ -115,7 +83,7 @@ class MqttLogging(BaseStatsStore):
         retention_days: Optional[float] = None,
         **_: Any,
     ) -> None:
-        mqtt = _import_mqtt_driver()
+        mqtt = import_mqtt_driver()
         logger.warning("Log start published")
         self._host = host
         self._port = int(port)

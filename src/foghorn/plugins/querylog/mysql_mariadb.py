@@ -29,7 +29,9 @@ import threading
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from .base import BaseStatsStore
+from foghorn.plugins.db_drivers import (
+    import_mysql_driver,
+)
 from foghorn.plugins.sql_safety import (
     resolve_query_log_group_column,
     validate_sql_placeholder,
@@ -39,182 +41,10 @@ from foghorn.security_limits import (
     enforce_query_log_aggregate_bucket_limit,
 )
 from foghorn.utils import dns_names
-from .sqlite import _is_subdomain, _normalize_domain
+
+from .base import BaseStatsStore
 
 logger = logging.getLogger(__name__)
-
-
-def _normalize_mysql_driver_name(raw: object) -> str | None:
-    """Brief: Normalize a MySQL driver name from config.
-
-    Inputs:
-        raw: Candidate value (string-like) from config.
-
-    Outputs:
-        str | None: Canonical driver key:
-          - 'mariadb'
-          - 'mysql-connector-python'
-        Returns None when raw is missing/empty/auto.
-    """
-
-    if raw is None:
-        return None
-    if not isinstance(raw, str):
-        return None
-
-    value = raw.strip().lower().replace("_", "-").replace(" ", "")
-    if not value or value in {"auto", "default"}:
-        return None
-
-    # Accept a few common synonyms.
-    if value in {"mariadb", "maria-db"}:
-        return "mariadb"
-    if value in {
-        "mysql",
-        "mysql-connector-python",
-        "mysql.connector",
-        "mysql-connector",
-        "mysqlconnector",
-        "mysql-connector/py",
-        "connector",
-    }:
-        return "mysql-connector-python"
-
-    raise ValueError(
-        "mysql driver must be one of 'auto', 'mariadb', 'mysql', or 'mysql-connector-python'"
-    )
-
-
-def _normalize_driver_fallbacks(raw: object) -> list[str] | None:
-    """Brief: Normalize driver fallback configuration.
-
-    Inputs:
-        raw: Candidate fallback config from YAML (string or list of strings).
-
-    Outputs:
-        list[str] | None:
-          - None for default behavior (auto fallback)
-          - [] for explicit no-fallback (none)
-          - list of canonical driver keys
-    """
-
-    if raw is None:
-        return None
-
-    if isinstance(raw, str):
-        v = raw.strip().lower().replace("_", "-").replace(" ", "")
-        if not v or v in {"auto", "default"}:
-            return None
-        if v in {"none", "no", "false", "off"}:
-            return []
-        return [_normalize_mysql_driver_name(raw)]  # type: ignore[list-item]
-
-    if isinstance(raw, list):
-        out: list[str] = []
-        for item in raw:
-            if item is None:  # pragma: nocover - trivial null-list element skip
-                continue
-            name = _normalize_mysql_driver_name(item)
-            if name is None:
-                continue
-            out.append(name)
-        return out
-
-    return None
-
-
-def _driver_order_from_config(
-    *,
-    driver: object = None,
-    driver_fallback: object = None,
-) -> list[str]:
-    """Brief: Compute the driver import order based on config.
-
-    Inputs:
-        driver: Preferred driver name ('auto'|'mariadb'|'mysql-connector-python').
-        driver_fallback: Fallback policy ('auto'|'none'|<driver>|[<driver>,...]).
-
-    Outputs:
-        list[str]: Ordered list of canonical driver keys to try.
-    """
-
-    preferred = _normalize_mysql_driver_name(driver)
-    fallbacks = _normalize_driver_fallbacks(driver_fallback)
-
-    # Default order: prefer mariadb, then mysql-connector-python.
-    default_order = ["mariadb", "mysql-connector-python"]
-
-    if preferred is None:
-        # auto/default
-        if fallbacks == []:
-            return [default_order[0]]
-        return default_order
-
-    # Explicit preferred.
-    if fallbacks is None:
-        # Default fallback for an explicit preference is "the other driver".
-        fallbacks = [d for d in default_order if d != preferred]
-
-    # fallbacks may be [] to disable.
-    order = [preferred] + list(fallbacks or [])
-
-    # Deduplicate while preserving order.
-    seen: set[str] = set()
-    out: list[str] = []
-    for item in order:
-        if item in seen:  # pragma: nocover - trivial dedupe guard
-            continue
-        seen.add(item)
-        out.append(item)
-    return out
-
-
-def _import_mysql_driver(
-    *,
-    driver: object = None,
-    driver_fallback: object = None,
-) -> tuple[object, str]:
-    """Import and return a DB-API compatible MySQL/MariaDB driver module.
-
-    Inputs:
-        driver: Preferred driver name.
-        driver_fallback: Fallback policy.
-
-    Outputs:
-        (driver_module, placeholder):
-          - driver_module: DB-API like module exposing a ``connect`` callable.
-          - placeholder: Parameter placeholder string ('%s' or '?').
-
-    Raises:
-        RuntimeError: When no supported MySQL/MariaDB driver is available.
-        ValueError: When driver/driver_fallback values are invalid.
-    """
-
-    order = _driver_order_from_config(driver=driver, driver_fallback=driver_fallback)
-
-    last_exc: Exception | None = None
-    for choice in order:
-        try:
-            if choice == "mariadb":
-                # pragma: disable E402
-                import mariadb as driver_mod  # type: ignore[import]
-
-                return driver_mod, "?"  # DB-API qmark style
-
-            if choice == "mysql-connector-python":
-                # pragma: disable E402
-                import mysql.connector as driver_mod  # type: ignore[import]
-
-                return driver_mod, "%s"  # DB-API format style
-
-        except ImportError as exc:  # pragma: no cover - import-path dependent
-            last_exc = exc
-            continue
-
-    raise RuntimeError(
-        "No supported MySQL/MariaDB driver found; install either 'mariadb' or "
-        "'mysql-connector-python' to use the MySqlStatsStore"
-    ) from last_exc
 
 
 class MySqlStatsStore(BaseStatsStore):
@@ -296,8 +126,10 @@ class MySqlStatsStore(BaseStatsStore):
         Outputs:
             None.
         """
-        driver_mod, placeholder = _import_mysql_driver(
-            driver=driver, driver_fallback=driver_fallback
+        driver_mod, param_style = import_mysql_driver(
+            driver=driver,
+            driver_fallback=driver_fallback,
+            consumer_name="MySqlStatsStore",
         )
 
         kwargs: Dict[str, Any] = {
@@ -314,7 +146,7 @@ class MySqlStatsStore(BaseStatsStore):
 
         self._driver = driver_mod
         self._placeholder = validate_sql_placeholder(
-            placeholder,
+            "%s" if param_style == "format" else "?",
             allowed_placeholders={"%s", "?"},
         )
         self._conn = driver_mod.connect(**kwargs)
@@ -444,6 +276,18 @@ class MySqlStatsStore(BaseStatsStore):
             return
         with self._lock:
             self._flush_locked()
+
+    def _flush_pending_writes_if_needed(self) -> None:
+        """Flush batched SQL writes so subsequent reads are consistent.
+
+        Inputs:
+            None.
+
+        Outputs:
+            None.
+        """
+
+        self._flush_pending_writes()
 
     def _execute(
         self,
@@ -1048,65 +892,32 @@ class MySqlStatsStore(BaseStatsStore):
         """
 
         raw = dict(filters or {})
+        normalized = BaseStatsStore._normalize_query_log_clear_filters(
+            raw,
+            qname_normalizer=dns_names.normalize_name,
+        )
         where: List[str] = []
         params: List[Any] = []
-        normalized: Dict[str, Any] = {}
         ph = self._placeholder
-
-        before_ts_raw = raw.get("before_ts")
-        if before_ts_raw is not None and str(before_ts_raw).strip():
-            try:
-                before_ts = float(before_ts_raw)
-            except Exception as exc:
-                raise ValueError(f"invalid before_ts filter: {exc}") from exc
+        if "before_ts" in normalized:
             where.append(f"ts < {ph}")
-            params.append(float(before_ts))
-            normalized["before_ts"] = float(before_ts)
-
-        self._append_optional_text_filter(
-            raw,
-            "client_ip",
-            where=where,
-            params=params,
-            normalized=normalized,
-            clause=f"client_ip = {ph}",
-            normalizer=str,
-        )
-
-        qname_raw = raw.get("qname")
-        if qname_raw is not None and str(qname_raw).strip():
-            qname = dns_names.normalize_name(str(qname_raw))
+            params.append(float(normalized["before_ts"]))
+        if "client_ip" in normalized:
+            where.append(f"client_ip = {ph}")
+            params.append(normalized["client_ip"])
+        if "qname" in normalized:
+            qname = str(normalized["qname"])
             where.append(f"(name = {ph} OR name LIKE {ph})")
             params.extend([qname, f"%.{qname}"])
-            normalized["qname"] = qname
-
-        self._append_optional_text_filter(
-            raw,
-            "qtype",
-            where=where,
-            params=params,
-            normalized=normalized,
-            clause=f"qtype = {ph}",
-            normalizer=str.upper,
-        )
-        self._append_optional_text_filter(
-            raw,
-            "rcode",
-            where=where,
-            params=params,
-            normalized=normalized,
-            clause=f"rcode = {ph}",
-            normalizer=str.upper,
-        )
-        self._append_optional_text_filter(
-            raw,
-            "status",
-            where=where,
-            params=params,
-            normalized=normalized,
-            clause=f"LOWER(COALESCE(status, '')) = {ph}",
-            normalizer=str.lower,
-        )
+        if "qtype" in normalized:
+            where.append(f"qtype = {ph}")
+            params.append(normalized["qtype"])
+        if "rcode" in normalized:
+            where.append(f"rcode = {ph}")
+            params.append(normalized["rcode"])
+        if "status" in normalized:
+            where.append(f"LOWER(COALESCE(status, '')) = {ph}")
+            params.append(normalized["status"])
 
         where_sql = (" WHERE " + " AND ".join(where)) if where else ""
 
@@ -1169,67 +980,86 @@ class MySqlStatsStore(BaseStatsStore):
             Dictionary with total, page, page_size, total_pages, and items.
         """
 
-        page_i, page_size_i = BaseStatsStore._normalize_page_args(page, page_size)
+        normalized_args = BaseStatsStore._normalize_query_log_select_args(
+            client_ip=client_ip,
+            qtype=qtype,
+            qname=qname,
+            rcode=rcode,
+            status=status,
+            source=source,
+            ede_code=ede_code,
+            start_ts=start_ts,
+            end_ts=end_ts,
+            page=page,
+            page_size=page_size,
+            qname_normalizer=dns_names.normalize_name,
+        )
+        page_i = int(normalized_args["page"])
+        page_size_i = int(normalized_args["page_size"])
 
         where: List[str] = []
         params: List[Any] = []
+        client_ip_s = normalized_args["client_ip"]
+        qtype_s = normalized_args["qtype"]
+        qname_s = normalized_args["qname"]
+        rcode_s = normalized_args["rcode"]
+        status_s = normalized_args["status"]
+        source_s = normalized_args["source"]
+        start_ts_f = normalized_args["start_ts"]
+        end_ts_f = normalized_args["end_ts"]
+        ede_code_i = normalized_args["ede_code"]
+        ede_code_invalid = bool(normalized_args["ede_code_invalid"])
+        has_ede_code_filter = bool(normalized_args["has_ede_code_filter"])
 
-        if client_ip:
+        if client_ip_s:
             where.append(f"client_ip = {self._placeholder}")
-            params.append(client_ip.strip())
-        if qtype:
+            params.append(client_ip_s)
+        if qtype_s:
             where.append(f"qtype = {self._placeholder}")
-            params.append(qtype.strip().upper())
-        if qname:
+            params.append(qtype_s)
+        if qname_s:
             where.append(f"name = {self._placeholder}")
-            params.append(dns_names.normalize_name(qname))
-        if rcode:
+            params.append(qname_s)
+        if rcode_s:
             where.append(f"rcode = {self._placeholder}")
-            params.append(rcode.strip().upper())
-        if status:
+            params.append(rcode_s)
+        if status_s:
             where.append(f"LOWER(COALESCE(status, '')) = {self._placeholder}")
-            params.append(status.strip().lower())
-        if source:
-            source_s = source.strip().lower()
+            params.append(status_s)
+        if source_s:
             where.append(
                 f"(LOWER(result_json) LIKE {self._placeholder} OR LOWER(result_json) LIKE {self._placeholder})"
             )
             params.append(f'%"source":"{source_s}"%')
             params.append(f'%"source": "{source_s}"%')
-        if ede_code is not None and str(ede_code).strip():
-            ede_code_s = str(ede_code).strip()
-            try:
-                ede_code_i = int(ede_code_s)
-            except Exception:
+        if has_ede_code_filter:
+            if ede_code_invalid:
                 where.append("1 = 0")
             else:
-                if ede_code_i < 0:
-                    where.append("1 = 0")
-                else:
-                    ede_code_txt = str(ede_code_i)
-                    ph = self._placeholder
-                    where.append(
-                        "("
-                        f"LOWER(result_json) LIKE {ph} OR "
-                        f"LOWER(result_json) LIKE {ph} OR "
-                        f"LOWER(result_json) LIKE {ph} OR "
-                        f"LOWER(result_json) LIKE {ph} OR "
-                        f"LOWER(result_json) LIKE {ph} OR "
-                        f"LOWER(result_json) LIKE {ph}"
-                        ")"
-                    )
-                    params.append(f'%"ede_code":{ede_code_txt},%')
-                    params.append(f'%"ede_code":{ede_code_txt}' + "}%")
-                    params.append(f'%"ede_code": {ede_code_txt},%')
-                    params.append(f'%"ede_code": {ede_code_txt}' + "}%")
-                    params.append(f'%"ede_code":"{ede_code_txt}"%')
-                    params.append(f'%"ede_code": "{ede_code_txt}"%')
-        if isinstance(start_ts, (int, float)):
+                ede_code_txt = str(ede_code_i)
+                ph = self._placeholder
+                where.append(
+                    "("
+                    f"LOWER(result_json) LIKE {ph} OR "
+                    f"LOWER(result_json) LIKE {ph} OR "
+                    f"LOWER(result_json) LIKE {ph} OR "
+                    f"LOWER(result_json) LIKE {ph} OR "
+                    f"LOWER(result_json) LIKE {ph} OR "
+                    f"LOWER(result_json) LIKE {ph}"
+                    ")"
+                )
+                params.append(f'%"ede_code":{ede_code_txt},%')
+                params.append(f'%"ede_code":{ede_code_txt}' + "}%")
+                params.append(f'%"ede_code": {ede_code_txt},%')
+                params.append(f'%"ede_code": {ede_code_txt}' + "}%")
+                params.append(f'%"ede_code":"{ede_code_txt}"%')
+                params.append(f'%"ede_code": "{ede_code_txt}"%')
+        if start_ts_f is not None:
             where.append(f"ts >= {self._placeholder}")
-            params.append(float(start_ts))
-        if isinstance(end_ts, (int, float)):
+            params.append(start_ts_f)
+        if end_ts_f is not None:
             where.append(f"ts < {self._placeholder}")
-            params.append(float(end_ts))
+            params.append(end_ts_f)
 
         where_sql = " WHERE " + " AND ".join(where) if where else ""
 
@@ -1469,6 +1299,59 @@ class MySqlStatsStore(BaseStatsStore):
     # ------------------------------------------------------------------
     # Count rebuild helpers
     # ------------------------------------------------------------------
+    def _clear_counts_for_rebuild(self) -> None:
+        """Clear counts table before shared rebuild flow runs.
+
+        Inputs:
+            None.
+
+        Outputs:
+            None.
+        """
+
+        cur = self._conn.cursor()
+        cur.execute("DELETE FROM counts")
+        self._conn.commit()
+
+    def _iter_query_log_for_rebuild(self) -> List[Dict[str, Any]]:
+        """Return query-log rows consumed by shared BaseStatsStore rebuild logic.
+
+        Inputs:
+            None.
+
+        Outputs:
+            List of row mappings with count-rebuild fields.
+        """
+
+        cur = self._conn.cursor()
+        cur.execute(
+            "SELECT client_ip, name, qtype, upstream_id, rcode, status, error, result_json "
+            "FROM query_log"
+        )
+        rows: List[Dict[str, Any]] = []
+        for (
+            client_ip,
+            name,
+            qtype,
+            upstream_id,
+            rcode,
+            status,
+            _error,
+            result_json,
+        ) in cur:
+            rows.append(
+                {
+                    "client_ip": client_ip,
+                    "name": name,
+                    "qtype": qtype,
+                    "upstream_id": upstream_id,
+                    "rcode": rcode,
+                    "status": status,
+                    "result_json": result_json,
+                }
+            )
+        return rows
+
     def rebuild_counts_from_query_log(
         self,
         logger_obj: Optional[logging.Logger] = None,
@@ -1482,134 +1365,7 @@ class MySqlStatsStore(BaseStatsStore):
             None; counts table is cleared and recomputed from query_log.
         """
 
-        log = logger_obj or logger
-        self._flush_pending_writes()
-        conn = self._conn
-        cur = conn.cursor()
-
-        try:
-            cur.execute("DELETE FROM counts")
-            conn.commit()
-        except Exception as exc:  # pragma: no cover - defensive
-            log.error(
-                "Failed to clear counts table before rebuild: %s", exc, exc_info=True
-            )
-            return
-
-        # Re-aggregate from query_log using the same semantics as the SQLite
-        # backend so that counts and warm-load behaviour remain consistent.
-        try:
-            cur.execute(
-                "SELECT client_ip, name, qtype, upstream_id, rcode, status, error, result_json "
-                "FROM query_log"
-            )
-            for (
-                client_ip,
-                name,
-                qtype,
-                upstream_id,
-                rcode,
-                status,
-                error,
-                result_json,
-            ) in cur:
-                domain = _normalize_domain(name or "")
-                parts = domain.split(".") if domain else []
-                base = ".".join(parts[-2:]) if len(parts) >= 2 else domain
-
-                # Total queries
-                self.increment_count("totals", "total_queries", 1)
-
-                # Cache hits/misses/cache_null (best-effort approximation).
-                if status == "cache_hit":
-                    self.increment_count("totals", "cache_hits", 1)
-                elif status in ("deny_pre", "override_pre"):
-                    self.increment_count("totals", "cache_" + status, 1)
-                    self.increment_count("totals", "cache_null", 1)
-                else:
-                    self.increment_count("totals", "cache_misses", 1)
-
-                # Per-outcome cache-domain aggregates using base domains.
-                if base:
-                    if status == "cache_hit":
-                        self.increment_count("cache_hit_domains", base, 1)
-                    elif status not in ("deny_pre", "override_pre"):
-                        self.increment_count("cache_miss_domains", base, 1)
-
-                # Subdomain-only cache aggregates keyed by full qname.
-                if domain and base and _is_subdomain(domain):
-                    if status == "cache_hit":
-                        self.increment_count("cache_hit_subdomains", domain, 1)
-                    elif status not in ("deny_pre", "override_pre"):
-                        self.increment_count("cache_miss_subdomains", domain, 1)
-
-                # Qtype breakdown
-                if qtype:
-                    self.increment_count("qtypes", str(qtype), 1)
-
-                # Clients
-                if client_ip:
-                    self.increment_count("clients", str(client_ip), 1)
-
-                # Domains and subdomains: only treat names with at least three
-                # labels as subdomains for aggregation purposes.
-                if domain:
-                    if _is_subdomain(domain):
-                        self.increment_count("sub_domains", domain, 1)
-                    if base:
-                        self.increment_count("domains", base, 1)
-
-                # Per-qtype domain counters for all qtypes.
-                if domain and qtype:
-                    qkey = f"{qtype}|{domain}"
-                    self.increment_count("qtype_qnames", qkey, 1)
-
-                # Rcodes
-                if rcode:
-                    self.increment_count("rcodes", str(rcode), 1)
-                    if base:
-                        rkey = f"{rcode}|{base}"
-                        self.increment_count("rcode_domains", rkey, 1)
-                    if domain and base and _is_subdomain(domain):
-                        sub_rkey = f"{rcode}|{domain}"
-                        self.increment_count("rcode_subdomains", sub_rkey, 1)
-
-                # Upstreams
-                if upstream_id:
-                    outcome = "success"
-                    if rcode != "NOERROR" or (
-                        status and status not in ("ok", "cache_hit")
-                    ):
-                        outcome = str(status or "error")
-
-                    rcode_key = str(rcode or "UNKNOWN")
-                    key = f"{upstream_id}|{outcome}|{rcode_key}"
-                    self.increment_count("upstreams", key, 1)
-
-                    if qtype:
-                        qt_key = f"{upstream_id}|{qtype}"
-                        self.increment_count("upstream_qtypes", qt_key, 1)
-
-                # DNSSEC outcome (when present in result_json)
-                if result_json:
-                    try:
-                        payload = json.loads(result_json)
-                        dnssec_status = payload.get("dnssec_status")
-                    except Exception:
-                        dnssec_status = None
-
-                    if dnssec_status in {
-                        "dnssec_secure",
-                        "dnssec_zone_secure",
-                        "dnssec_unsigned",
-                        "dnssec_bogus",
-                        "dnssec_indeterminate",
-                    }:
-                        self.increment_count("totals", dnssec_status, 1)
-        except Exception as exc:  # pragma: no cover - defensive
-            log.error(
-                "Error while rebuilding counts from query_log: %s", exc, exc_info=True
-            )
+        super().rebuild_counts_from_query_log(logger_obj=logger_obj)
 
     def rebuild_counts_if_needed(
         self,
@@ -1626,27 +1382,6 @@ class MySqlStatsStore(BaseStatsStore):
             None.
         """
 
-        log = logger_obj or logger
-        has_counts = self.has_counts()
-        has_log = self.has_query_log()
-
-        if not has_log:
-            if force_rebuild:
-                log.warning(
-                    "Force rebuild requested but query_log is empty; skipping rebuild",
-                )
-            return
-
-        if has_counts and not force_rebuild:
-            return
-
-        if has_counts and force_rebuild:
-            log.warning(
-                "Force rebuild requested: discarding existing counts and rebuilding from query_log",
-            )
-        elif not has_counts:
-            log.warning(
-                "Counts table is empty but query_log has rows; rebuilding counts from query_log",
-            )
-
-        self.rebuild_counts_from_query_log(logger_obj=log)
+        super().rebuild_counts_if_needed(
+            force_rebuild=force_rebuild, logger_obj=logger_obj
+        )

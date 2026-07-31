@@ -26,39 +26,17 @@ import threading
 import time
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
+from foghorn.plugins.db_drivers import import_mongo_driver
+
 from foghorn.security_limits import (
     MAX_QUERY_LOG_AGG_GROUPED_RESULTS,
     enforce_query_log_aggregate_bucket_limit,
 )
 
 from .base import BaseStatsStore
-from .sqlite import _is_subdomain, _normalize_domain
+from .common import normalize_domain as _normalize_domain
 
 logger = logging.getLogger(__name__)
-
-
-def _import_mongo_driver():
-    """Import and return a MongoDB driver module exposing MongoClient.
-
-    Inputs:
-        None.
-
-    Outputs:
-        pymongo-like module exposing a ``MongoClient`` callable.
-
-    Raises:
-        RuntimeError: When no supported MongoDB driver is available.
-    """
-
-    try:  # pragma: no cover - import-path dependent
-        import pymongo  # type: ignore[import]
-
-        return pymongo
-    except Exception as exc:  # pragma: no cover - environment specific
-        raise RuntimeError(
-            "No supported MongoDB driver found; install 'pymongo' to use the "
-            "MongoStatsStore"
-        ) from exc
 
 
 class MongoStatsStore(BaseStatsStore):
@@ -118,7 +96,7 @@ class MongoStatsStore(BaseStatsStore):
         retention_native_ttl: bool = True,
         **_: Any,
     ) -> None:
-        mongo_mod = _import_mongo_driver()
+        mongo_mod = import_mongo_driver()
         connect_kwargs = dict(connect_kwargs or {})
 
         if uri:
@@ -250,6 +228,18 @@ class MongoStatsStore(BaseStatsStore):
             return
         with self._batch_lock:
             self._flush_pending_query_log_docs_locked()
+
+    def _flush_pending_writes_if_needed(self) -> None:
+        """Flush batched query-log documents so subsequent reads are consistent.
+
+        Inputs:
+            None.
+
+        Outputs:
+            None.
+        """
+
+        self._flush_pending_query_log_docs()
 
     def _maybe_flush_pending_query_log_docs_locked(self) -> None:
         """Flush buffered query-log docs when size/time thresholds are met.
@@ -727,62 +717,30 @@ class MongoStatsStore(BaseStatsStore):
         """
 
         raw = dict(filters or {})
-        filters = {}
-        normalized: Dict[str, Any] = {}
-
-        before_ts_raw = raw.get("before_ts")
-        if before_ts_raw is not None and str(before_ts_raw).strip():
-            try:
-                before_ts = float(before_ts_raw)
-            except Exception as exc:
-                raise ValueError(f"invalid before_ts filter: {exc}") from exc
-            filters["ts"] = {"$lt": float(before_ts)}
-            normalized["before_ts"] = float(before_ts)
-
-        self._append_optional_text_filter(
+        normalized = BaseStatsStore._normalize_query_log_clear_filters(
             raw,
-            "client_ip",
-            filters=filters,
-            normalized=normalized,
-            field="client_ip",
-            normalizer=str,
+            qname_normalizer=_normalize_domain,
         )
-
-        qname_raw = raw.get("qname")
-        if qname_raw is not None and str(qname_raw).strip():
-            qname = _normalize_domain(str(qname_raw))
+        filters = {}
+        if "before_ts" in normalized:
+            filters["ts"] = {"$lt": float(normalized["before_ts"])}
+        if "client_ip" in normalized:
+            filters["client_ip"] = normalized["client_ip"]
+        if "qname" in normalized:
+            qname = str(normalized["qname"])
             filters["name"] = {
                 "$regex": f"(^|\\.){re.escape(qname)}$",
                 "$options": "i",
             }
-            normalized["qname"] = qname
-
-        self._append_optional_text_filter(
-            raw,
-            "qtype",
-            filters=filters,
-            normalized=normalized,
-            field="qtype",
-            normalizer=str.upper,
-        )
-        self._append_optional_text_filter(
-            raw,
-            "rcode",
-            filters=filters,
-            normalized=normalized,
-            field="rcode",
-            normalizer=str.upper,
-        )
-        self._append_optional_text_filter(
-            raw,
-            "status",
-            filters=filters,
-            normalized=normalized,
-            field="status",
-            normalizer=str,
-            case_insensitive_exact=True,
-            normalized_value_normalizer=str.lower,
-        )
+        if "qtype" in normalized:
+            filters["qtype"] = normalized["qtype"]
+        if "rcode" in normalized:
+            filters["rcode"] = normalized["rcode"]
+        if "status" in normalized:
+            filters["status"] = {
+                "$regex": f"^{re.escape(str(normalized['status']))}$",
+                "$options": "i",
+            }
 
         self._flush_pending_query_log_docs()
         matched = int(self._query_log.count_documents(filters))
@@ -830,98 +788,118 @@ class MongoStatsStore(BaseStatsStore):
             Dictionary with total, page, page_size, total_pages, and items.
         """
 
-        page_i, page_size_i = BaseStatsStore._normalize_page_args(page, page_size)
+        normalized_args = BaseStatsStore._normalize_query_log_select_args(
+            client_ip=client_ip,
+            qtype=qtype,
+            qname=qname,
+            rcode=rcode,
+            status=status,
+            source=source,
+            ede_code=ede_code,
+            start_ts=start_ts,
+            end_ts=end_ts,
+            page=page,
+            page_size=page_size,
+            qname_normalizer=_normalize_domain,
+        )
+        page_i = int(normalized_args["page"])
+        page_size_i = int(normalized_args["page_size"])
 
         filters: Dict[str, Any] = {}
-        if client_ip:
-            filters["client_ip"] = client_ip.strip()
-        if qtype:
-            filters["qtype"] = qtype.strip().upper()
-        if qname:
-            filters["name"] = _normalize_domain(qname)
-        if rcode:
-            filters["rcode"] = rcode.strip().upper()
-        if status:
-            status_s = status.strip()
-            if status_s:
-                filters["status"] = {
-                    "$regex": f"^{re.escape(status_s)}$",
-                    "$options": "i",
-                }
+        client_ip_s = normalized_args["client_ip"]
+        qtype_s = normalized_args["qtype"]
+        qname_s = normalized_args["qname"]
+        rcode_s = normalized_args["rcode"]
+        status_s = normalized_args["status"]
+        status_raw = (
+            str(status).strip()
+            if status is not None
+            else (str(status_s).strip() if status_s is not None else "")
+        )
+        source_s = normalized_args["source"]
+        start_ts_f = normalized_args["start_ts"]
+        end_ts_f = normalized_args["end_ts"]
+        ede_code_i = normalized_args["ede_code"]
+        ede_code_invalid = bool(normalized_args["ede_code_invalid"])
+        has_ede_code_filter = bool(normalized_args["has_ede_code_filter"])
+        if client_ip_s:
+            filters["client_ip"] = client_ip_s
+        if qtype_s:
+            filters["qtype"] = qtype_s
+        if qname_s:
+            filters["name"] = qname_s
+        if rcode_s:
+            filters["rcode"] = rcode_s
+        if status_s:
+            pattern_value = status_raw if status_raw else str(status_s)
+            filters["status"] = {
+                "$regex": f"^{re.escape(pattern_value)}$",
+                "$options": "i",
+            }
         source_or: List[Dict[str, Any]] | None = None
-        if source:
-            source_s = source.strip().lower()
-            if source_s:
-                compact = re.escape(f'"source":"{source_s}"')
-                spaced = re.escape(f'"source": "{source_s}"')
-                source_or = [
-                    {"result_json": {"$regex": compact, "$options": "i"}},
-                    {"result_json": {"$regex": spaced, "$options": "i"}},
-                ]
+        if source_s:
+            compact = re.escape(f'"source":"{source_s}"')
+            spaced = re.escape(f'"source": "{source_s}"')
+            source_or = [
+                {"result_json": {"$regex": compact, "$options": "i"}},
+                {"result_json": {"$regex": spaced, "$options": "i"}},
+            ]
         ede_or: List[Dict[str, Any]] | None = None
-        if ede_code is not None and str(ede_code).strip():
-            ede_code_s = str(ede_code).strip()
-            try:
-                ede_code_i = int(ede_code_s)
-            except Exception:
+        if has_ede_code_filter:
+            if ede_code_invalid:
                 filters["_id"] = {"$exists": False}
             else:
-                if ede_code_i < 0:
-                    filters["_id"] = {"$exists": False}
-                else:
-                    ede_code_txt = str(ede_code_i)
-                    ede_or = [
-                        {
-                            "result_json": {
-                                "$regex": re.escape(f'"ede_code":{ede_code_txt},'),
-                                "$options": "i",
-                            }
-                        },
-                        {
-                            "result_json": {
-                                "$regex": re.escape(f'"ede_code":{ede_code_txt}' + "}"),
-                                "$options": "i",
-                            }
-                        },
-                        {
-                            "result_json": {
-                                "$regex": re.escape(f'"ede_code":"{ede_code_txt}"'),
-                                "$options": "i",
-                            }
-                        },
-                        {
-                            "result_json": {
-                                "$regex": re.escape(
-                                    f'"ede_code": {ede_code_txt}' + "}"
-                                ),
-                                "$options": "i",
-                            }
-                        },
-                        {
-                            "result_json": {
-                                "$regex": re.escape(f'"ede_code":"{ede_code_txt}"'),
-                                "$options": "i",
-                            }
-                        },
-                        {
-                            "result_json": {
-                                "$regex": re.escape(f'"ede_code": "{ede_code_txt}"'),
-                                "$options": "i",
-                            }
-                        },
-                    ]
+                ede_code_txt = str(ede_code_i)
+                ede_or = [
+                    {
+                        "result_json": {
+                            "$regex": re.escape(f'"ede_code":{ede_code_txt},'),
+                            "$options": "i",
+                        }
+                    },
+                    {
+                        "result_json": {
+                            "$regex": re.escape(f'"ede_code":{ede_code_txt}' + "}"),
+                            "$options": "i",
+                        }
+                    },
+                    {
+                        "result_json": {
+                            "$regex": re.escape(f'"ede_code":"{ede_code_txt}"'),
+                            "$options": "i",
+                        }
+                    },
+                    {
+                        "result_json": {
+                            "$regex": re.escape(f'"ede_code": {ede_code_txt}' + "}"),
+                            "$options": "i",
+                        }
+                    },
+                    {
+                        "result_json": {
+                            "$regex": re.escape(f'"ede_code":"{ede_code_txt}"'),
+                            "$options": "i",
+                        }
+                    },
+                    {
+                        "result_json": {
+                            "$regex": re.escape(f'"ede_code": "{ede_code_txt}"'),
+                            "$options": "i",
+                        }
+                    },
+                ]
         if source_or and ede_or:
             filters["$and"] = [{"$or": source_or}, {"$or": ede_or}]
         elif source_or:
             filters["$or"] = source_or
         elif ede_or:
             filters["$or"] = ede_or
-        if isinstance(start_ts, (int, float)) or isinstance(end_ts, (int, float)):
+        if start_ts_f is not None or end_ts_f is not None:
             ts_cond: Dict[str, Any] = {}
-            if isinstance(start_ts, (int, float)):
-                ts_cond["$gte"] = float(start_ts)
-            if isinstance(end_ts, (int, float)):
-                ts_cond["$lt"] = float(end_ts)
+            if start_ts_f is not None:
+                ts_cond["$gte"] = start_ts_f
+            if end_ts_f is not None:
+                ts_cond["$lt"] = end_ts_f
             filters["ts"] = ts_cond
         self._flush_pending_query_log_docs()
 
@@ -1200,6 +1178,58 @@ class MongoStatsStore(BaseStatsStore):
     # ------------------------------------------------------------------
     # Count rebuild helpers
     # ------------------------------------------------------------------
+    def _clear_counts_for_rebuild(self) -> None:
+        """Clear counts collection before shared rebuild flow runs.
+
+        Inputs:
+            None.
+
+        Outputs:
+            None.
+        """
+
+        self._counts.delete_many({})
+
+    def _iter_query_log_for_rebuild(self) -> List[Dict[str, Any]]:
+        """Return query-log rows consumed by shared BaseStatsStore rebuild logic.
+
+        Inputs:
+            None.
+
+        Outputs:
+            List of row mappings with count-rebuild fields.
+        """
+
+        rows: List[Dict[str, Any]] = []
+        cursor = self._query_log.find(
+            {},
+            {
+                "client_ip": 1,
+                "name": 1,
+                "qtype": 1,
+                "upstream_id": 1,
+                "rcode": 1,
+                "status": 1,
+                "error": 1,
+                "result_json": 1,
+            },
+        )
+        for doc in cursor:
+            if not isinstance(doc, dict):
+                continue
+            rows.append(
+                {
+                    "client_ip": doc.get("client_ip"),
+                    "name": doc.get("name"),
+                    "qtype": doc.get("qtype"),
+                    "upstream_id": doc.get("upstream_id"),
+                    "rcode": doc.get("rcode"),
+                    "status": doc.get("status"),
+                    "result_json": doc.get("result_json"),
+                }
+            )
+        return rows
+
     def rebuild_counts_from_query_log(
         self,
         logger_obj: Optional[logging.Logger] = None,
@@ -1213,139 +1243,7 @@ class MongoStatsStore(BaseStatsStore):
             None; counts collection is cleared and recomputed from query_log.
         """
 
-        log = logger_obj or logger
-        self._flush_pending_query_log_docs()
-
-        try:
-            self._counts.delete_many({})
-        except Exception as exc:  # pragma: no cover - defensive
-            log.error(
-                "Failed to clear counts collection before rebuild: %s",
-                exc,
-                exc_info=True,
-            )
-            return
-
-        try:
-            cursor = self._query_log.find(
-                {},
-                {
-                    "client_ip": 1,
-                    "name": 1,
-                    "qtype": 1,
-                    "upstream_id": 1,
-                    "rcode": 1,
-                    "status": 1,
-                    "error": 1,
-                    "result_json": 1,
-                },
-            )
-            for doc in cursor:
-                client_ip = doc.get("client_ip")
-                name = doc.get("name")
-                qtype = doc.get("qtype")
-                upstream_id = doc.get("upstream_id")
-                rcode = doc.get("rcode")
-                status = doc.get("status")
-                result_json = doc.get("result_json")
-
-                domain = _normalize_domain(name or "")
-                parts = domain.split(".") if domain else []
-                base = ".".join(parts[-2:]) if len(parts) >= 2 else domain
-
-                # Total queries
-                self.increment_count("totals", "total_queries", 1)
-
-                # Cache hits/misses/cache_null (best-effort approximation).
-                if status == "cache_hit":
-                    self.increment_count("totals", "cache_hits", 1)
-                elif status in ("deny_pre", "override_pre"):
-                    self.increment_count("totals", "cache_" + str(status), 1)
-                    self.increment_count("totals", "cache_null", 1)
-                else:
-                    self.increment_count("totals", "cache_misses", 1)
-
-                # Per-outcome cache-domain aggregates using base domains.
-                if base:
-                    if status == "cache_hit":
-                        self.increment_count("cache_hit_domains", base, 1)
-                    elif status not in ("deny_pre", "override_pre"):
-                        self.increment_count("cache_miss_domains", base, 1)
-
-                # Subdomain-only cache aggregates keyed by full qname.
-                if domain and base and _is_subdomain(domain):
-                    if status == "cache_hit":
-                        self.increment_count("cache_hit_subdomains", domain, 1)
-                    elif status not in ("deny_pre", "override_pre"):
-                        self.increment_count("cache_miss_subdomains", domain, 1)
-
-                # Qtype breakdown
-                if qtype:
-                    self.increment_count("qtypes", str(qtype), 1)
-
-                # Clients
-                if client_ip:
-                    self.increment_count("clients", str(client_ip), 1)
-
-                # Domains and subdomains: only treat names with at least three
-                # labels as subdomains for aggregation purposes.
-                if domain:
-                    if _is_subdomain(domain):
-                        self.increment_count("sub_domains", domain, 1)
-                    if base:
-                        self.increment_count("domains", base, 1)
-
-                # Per-qtype domain counters for all qtypes.
-                if domain and qtype:
-                    qkey = f"{qtype}|{domain}"
-                    self.increment_count("qtype_qnames", qkey, 1)
-
-                # Rcodes
-                if rcode:
-                    self.increment_count("rcodes", str(rcode), 1)
-                    if base:
-                        rkey = f"{rcode}|{base}"
-                        self.increment_count("rcode_domains", rkey, 1)
-                    if domain and base and _is_subdomain(domain):
-                        sub_rkey = f"{rcode}|{domain}"
-                        self.increment_count("rcode_subdomains", sub_rkey, 1)
-
-                # Upstreams
-                if upstream_id:
-                    outcome = "success"
-                    if rcode != "NOERROR" or (
-                        status and status not in ("ok", "cache_hit")
-                    ):
-                        outcome = str(status or "error")
-
-                    rcode_key = str(rcode or "UNKNOWN")
-                    key = f"{upstream_id}|{outcome}|{rcode_key}"
-                    self.increment_count("upstreams", key, 1)
-
-                    if qtype:
-                        qt_key = f"{upstream_id}|{qtype}"
-                        self.increment_count("upstream_qtypes", qt_key, 1)
-
-                # DNSSEC outcome (when present in result_json)
-                if result_json:
-                    try:
-                        payload = json.loads(result_json)
-                        dnssec_status = payload.get("dnssec_status")
-                    except Exception:
-                        dnssec_status = None
-
-                    if dnssec_status in {
-                        "dnssec_secure",
-                        "dnssec_zone_secure",
-                        "dnssec_unsigned",
-                        "dnssec_bogus",
-                        "dnssec_indeterminate",
-                    }:
-                        self.increment_count("totals", dnssec_status, 1)
-        except Exception as exc:  # pragma: no cover - defensive
-            log.error(
-                "Error while rebuilding counts from query_log: %s", exc, exc_info=True
-            )
+        super().rebuild_counts_from_query_log(logger_obj=logger_obj)
 
     def rebuild_counts_if_needed(
         self,
@@ -1362,27 +1260,6 @@ class MongoStatsStore(BaseStatsStore):
             None.
         """
 
-        log = logger_obj or logger
-        has_counts = self.has_counts()
-        has_log = self.has_query_log()
-
-        if not has_log:
-            if force_rebuild:
-                log.warning(
-                    "Force rebuild requested but query_log is empty; skipping rebuild",
-                )
-            return
-
-        if has_counts and not force_rebuild:
-            return
-
-        if has_counts and force_rebuild:
-            log.warning(
-                "Force rebuild requested: discarding existing counts and rebuilding from query_log",
-            )
-        elif not has_counts:
-            log.warning(
-                "Counts collection is empty but query_log has documents; rebuilding counts from query_log",
-            )
-
-        self.rebuild_counts_from_query_log(logger_obj=log)
+        super().rebuild_counts_if_needed(
+            force_rebuild=force_rebuild, logger_obj=logger_obj
+        )

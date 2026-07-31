@@ -27,6 +27,9 @@ import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from foghorn.plugins.querylog.base import BaseStatsStore
+from foghorn.plugins.querylog.common import (
+    normalize_domain as _normalize_domain,
+)
 from foghorn.plugins.sql_safety import resolve_query_log_group_column
 from foghorn.security_limits import (
     MAX_QUERY_LOG_AGG_GROUPED_RESULTS,
@@ -34,47 +37,6 @@ from foghorn.security_limits import (
 )
 
 logger = logging.getLogger(__name__)
-
-
-def _normalize_domain(domain: str) -> str:
-    """Normalize domain name for statistics tracking.
-
-    Inputs:
-        domain: Raw domain name string (may have trailing dot, mixed case).
-
-    Outputs:
-        Normalized lowercase domain without trailing dot.
-    """
-
-    from foghorn.utils import dns_names
-
-    return dns_names.normalize_name(domain)
-
-
-def _is_subdomain(domain: str) -> bool:
-    """Return True if the name should be treated as a subdomain.
-
-    Inputs:
-        domain: Raw or normalized domain name string.
-
-    Outputs:
-        Boolean indicating whether the normalized name should be counted as a
-        subdomain for statistics. See foghorn.stats._is_subdomain for the
-        detailed behavior this mirrors.
-    """
-
-    norm = _normalize_domain(domain or "")
-    if not norm:
-        return False
-
-    parts = norm.split(".")
-    if len(parts) < 3:
-        return False
-
-    if len(parts) >= 3 and parts[-2:] == ["co", "uk"]:
-        return len(parts) >= 4
-
-    return True
 
 
 class SqliteStatsStore(BaseStatsStore):
@@ -714,30 +676,34 @@ class SqliteStatsStore(BaseStatsStore):
             Dict[str, Any]: Pagination metadata and list of normalized row items.
         """
 
-        # Defensive normalization
-        try:
-            page_i = int(page)
-        except (TypeError, ValueError):
-            page_i = 1
-        if page_i < 1:
-            page_i = 1
-
-        try:
-            page_size_i = int(page_size)
-        except (TypeError, ValueError):
-            page_size_i = 100
-        if page_size_i < 1:
-            page_size_i = 1
-
-        client_ip_s = str(client_ip).strip() if client_ip is not None else None
-        qtype_s = str(qtype).strip().upper() if qtype is not None else None
-        rcode_s = str(rcode).strip().upper() if rcode is not None else None
-        status_s = str(status).strip().lower() if status is not None else None
-        source_s = str(source).strip().lower() if source is not None else None
-        ede_code_s = str(ede_code).strip() if ede_code is not None else None
-        qname_s = None
-        if qname is not None:
-            qname_s = _normalize_domain(qname)
+        normalized_args = BaseStatsStore._normalize_query_log_select_args(
+            client_ip=client_ip,
+            qtype=qtype,
+            qname=qname,
+            rcode=rcode,
+            status=status,
+            source=source,
+            ede_code=ede_code,
+            start_ts=start_ts,
+            end_ts=end_ts,
+            page=page,
+            page_size=page_size,
+            qname_normalizer=_normalize_domain,
+            clamp_non_positive_page_size_to_one=True,
+        )
+        page_i = int(normalized_args["page"])
+        page_size_i = int(normalized_args["page_size"])
+        client_ip_s = normalized_args["client_ip"]
+        qtype_s = normalized_args["qtype"]
+        rcode_s = normalized_args["rcode"]
+        status_s = normalized_args["status"]
+        source_s = normalized_args["source"]
+        qname_s = normalized_args["qname"]
+        start_ts_f = normalized_args["start_ts"]
+        end_ts_f = normalized_args["end_ts"]
+        ede_code_i = normalized_args["ede_code"]
+        ede_code_invalid = bool(normalized_args["ede_code_invalid"])
+        has_ede_code_filter = bool(normalized_args["has_ede_code_filter"])
 
         where: List[str] = []
         params: List[Any] = []
@@ -762,38 +728,33 @@ class SqliteStatsStore(BaseStatsStore):
             where.append("(LOWER(result_json) LIKE ? OR LOWER(result_json) LIKE ?)")
             params.append(f'%"source":"{source_s}"%')
             params.append(f'%"source": "{source_s}"%')
-        if ede_code_s:
-            try:
-                ede_code_i = int(ede_code_s)
-            except Exception:
+        if has_ede_code_filter:
+            if ede_code_invalid:
                 where.append("1 = 0")
             else:
-                if ede_code_i < 0:
-                    where.append("1 = 0")
-                else:
-                    ede_code_txt = str(ede_code_i)
-                    where.append(
-                        "("
-                        "LOWER(result_json) LIKE ? OR "
-                        "LOWER(result_json) LIKE ? OR "
-                        "LOWER(result_json) LIKE ? OR "
-                        "LOWER(result_json) LIKE ? OR "
-                        "LOWER(result_json) LIKE ? OR "
-                        "LOWER(result_json) LIKE ?"
-                        ")"
-                    )
-                    params.append(f'%"ede_code":{ede_code_txt},%')
-                    params.append(f'%"ede_code":{ede_code_txt}' + "}%")
-                    params.append(f'%"ede_code": {ede_code_txt},%')
-                    params.append(f'%"ede_code": {ede_code_txt}' + "}%")
-                    params.append(f'%"ede_code":"{ede_code_txt}"%')
-                    params.append(f'%"ede_code": "{ede_code_txt}"%')
-        if isinstance(start_ts, (int, float)):
+                ede_code_txt = str(ede_code_i)
+                where.append(
+                    "("
+                    "LOWER(result_json) LIKE ? OR "
+                    "LOWER(result_json) LIKE ? OR "
+                    "LOWER(result_json) LIKE ? OR "
+                    "LOWER(result_json) LIKE ? OR "
+                    "LOWER(result_json) LIKE ? OR "
+                    "LOWER(result_json) LIKE ?"
+                    ")"
+                )
+                params.append(f'%"ede_code":{ede_code_txt},%')
+                params.append(f'%"ede_code":{ede_code_txt}' + "}%")
+                params.append(f'%"ede_code": {ede_code_txt},%')
+                params.append(f'%"ede_code": {ede_code_txt}' + "}%")
+                params.append(f'%"ede_code":"{ede_code_txt}"%')
+                params.append(f'%"ede_code": "{ede_code_txt}"%')
+        if start_ts_f is not None:
             where.append("ts >= ?")
-            params.append(float(start_ts))
-        if isinstance(end_ts, (int, float)):
+            params.append(start_ts_f)
+        if end_ts_f is not None:
             where.append("ts < ?")
-            params.append(float(end_ts))
+            params.append(end_ts_f)
 
         where_sql = (" WHERE " + " AND ".join(where)) if where else ""
 
@@ -1103,6 +1064,71 @@ class SqliteStatsStore(BaseStatsStore):
     # ------------------------------------------------------------------
     # Rebuild and inspection helpers
     # ------------------------------------------------------------------
+    def _flush_pending_writes_if_needed(self) -> None:
+        """Flush batched SQLite writes so subsequent reads are consistent.
+
+        Inputs:
+            None.
+
+        Outputs:
+            None.
+        """
+
+        if self._batch_writes:
+            with self._lock:
+                self._flush_locked()
+
+    def _clear_counts_for_rebuild(self) -> None:
+        """Clear counts table before shared rebuild flow runs.
+
+        Inputs:
+            None.
+
+        Outputs:
+            None.
+        """
+
+        with self._conn:
+            self._conn.execute("DELETE FROM counts")
+
+    def _iter_query_log_for_rebuild(self) -> List[Dict[str, Any]]:
+        """Return query-log rows consumed by shared BaseStatsStore rebuild logic.
+
+        Inputs:
+            None.
+
+        Outputs:
+            List of row mappings with count-rebuild fields.
+        """
+
+        cur = self._conn.cursor()  # type: ignore[attr-defined]
+        cur.execute(
+            "SELECT client_ip, name, qtype, upstream_id, rcode, status, error, result_json FROM query_log"
+        )
+        rows: List[Dict[str, Any]] = []
+        for (
+            client_ip,
+            name,
+            qtype,
+            upstream_id,
+            rcode,
+            status,
+            _error,
+            result_json,
+        ) in cur:
+            rows.append(
+                {
+                    "client_ip": client_ip,
+                    "name": name,
+                    "qtype": qtype,
+                    "upstream_id": upstream_id,
+                    "rcode": rcode,
+                    "status": status,
+                    "result_json": result_json,
+                }
+            )
+        return rows
+
     def has_counts(self) -> bool:
         """Return True if the counts table contains at least one row."""
 
@@ -1233,64 +1259,31 @@ class SqliteStatsStore(BaseStatsStore):
         """
 
         raw = dict(filters or {})
+        normalized = BaseStatsStore._normalize_query_log_clear_filters(
+            raw,
+            qname_normalizer=_normalize_domain,
+        )
         where: List[str] = []
         params: List[Any] = []
-        normalized: Dict[str, Any] = {}
-
-        before_ts_raw = raw.get("before_ts")
-        if before_ts_raw is not None and str(before_ts_raw).strip():
-            try:
-                before_ts = float(before_ts_raw)
-            except Exception as exc:
-                raise ValueError(f"invalid before_ts filter: {exc}") from exc
+        if "before_ts" in normalized:
             where.append("ts < ?")
-            params.append(float(before_ts))
-            normalized["before_ts"] = float(before_ts)
-
-        self._append_optional_text_filter(
-            raw,
-            "client_ip",
-            where=where,
-            params=params,
-            normalized=normalized,
-            clause="client_ip = ?",
-            normalizer=str,
-        )
-
-        qname_raw = raw.get("qname")
-        if qname_raw is not None and str(qname_raw).strip():
-            qname = _normalize_domain(str(qname_raw))
+            params.append(float(normalized["before_ts"]))
+        if "client_ip" in normalized:
+            where.append("client_ip = ?")
+            params.append(normalized["client_ip"])
+        if "qname" in normalized:
+            qname = str(normalized["qname"])
             where.append("(name = ? OR name LIKE ?)")
             params.extend([qname, f"%.{qname}"])
-            normalized["qname"] = qname
-
-        self._append_optional_text_filter(
-            raw,
-            "qtype",
-            where=where,
-            params=params,
-            normalized=normalized,
-            clause="qtype = ?",
-            normalizer=str.upper,
-        )
-        self._append_optional_text_filter(
-            raw,
-            "rcode",
-            where=where,
-            params=params,
-            normalized=normalized,
-            clause="rcode = ?",
-            normalizer=str.upper,
-        )
-        self._append_optional_text_filter(
-            raw,
-            "status",
-            where=where,
-            params=params,
-            normalized=normalized,
-            clause="LOWER(COALESCE(status, '')) = ?",
-            normalizer=str.lower,
-        )
+        if "qtype" in normalized:
+            where.append("qtype = ?")
+            params.append(normalized["qtype"])
+        if "rcode" in normalized:
+            where.append("rcode = ?")
+            params.append(normalized["rcode"])
+        if "status" in normalized:
+            where.append("LOWER(COALESCE(status, '')) = ?")
+            params.append(normalized["status"])
 
         where_sql = (" WHERE " + " AND ".join(where)) if where else ""
 
@@ -1338,174 +1331,15 @@ class SqliteStatsStore(BaseStatsStore):
         Outputs:
             None.
         """
-
-        log = logger_obj or logger
-        log.warning(
-            "Rebuilding statistics counts from query_log; this may take a while"
-        )
-
-        if self._batch_writes:
-            with self._lock:  # pragma: no cover - batching lock path
-                self._flush_locked()
-
-        try:
-            with self._conn:  # type: ignore[attr-defined]
-                self._conn.execute("DELETE FROM counts")  # type: ignore[attr-defined]
-        except Exception as exc:  # pragma: no cover - defensive
-            log.error(
-                "Failed to clear counts table before rebuild: %s", exc, exc_info=True
-            )
-            return
-
-        try:
-            cur = self._conn.cursor()  # type: ignore[attr-defined]
-            cur.execute(
-                "SELECT client_ip, name, qtype, upstream_id, rcode, status, error, result_json FROM query_log"
-            )
-            for (
-                client_ip,
-                name,
-                qtype,
-                upstream_id,
-                rcode,
-                status,
-                error,
-                result_json,
-            ) in cur:
-                domain = _normalize_domain(name or "")
-                parts = domain.split(".") if domain else []
-                base = ".".join(parts[-2:]) if len(parts) >= 2 else domain
-
-                # Total queries
-                self.increment_count("totals", "total_queries", 1)
-
-                # Cache hits/misses/cache_null (best-effort approximation).
-                if status == "cache_hit":
-                    self.increment_count("totals", "cache_hits", 1)
-                elif status in ("deny_pre", "override_pre"):
-                    self.increment_count("totals", "cache_" + status, 1)
-                    self.increment_count("totals", "cache_null", 1)
-                else:
-                    self.increment_count("totals", "cache_misses", 1)
-
-                # Per-outcome cache-domain aggregates using base domains when
-                # available so that warm-loaded top lists align with the
-                # in-process StatsCollector tracking. Subdomain-oriented views
-                # retain the full qname for *_subdomains scopes.
-                if base:
-                    if status == "cache_hit":
-                        self.increment_count("cache_hit_domains", base, 1)
-                    elif status not in ("deny_pre", "override_pre"):
-                        self.increment_count("cache_miss_domains", base, 1)
-
-                # Subdomain-only cache aggregates keyed by full qname.
-                if domain and base and _is_subdomain(domain):
-                    if status == "cache_hit":
-                        self.increment_count("cache_hit_subdomains", domain, 1)
-                    elif status not in ("deny_pre", "override_pre"):
-                        self.increment_count("cache_miss_subdomains", domain, 1)
-
-                # Qtype breakdown
-                if qtype:
-                    self.increment_count("qtypes", str(qtype), 1)
-
-                # Clients
-                if client_ip:
-                    self.increment_count("clients", str(client_ip), 1)
-
-                # Domains and subdomains: only treat names with at least three
-                # labels as subdomains for aggregation purposes.
-                if domain:
-                    if _is_subdomain(domain):
-                        self.increment_count("sub_domains", domain, 1)
-                    if base:
-                        self.increment_count("domains", base, 1)
-
-                # Per-qtype domain counters for all qtypes.
-                if domain and qtype:
-                    qkey = f"{qtype}|{domain}"
-                    self.increment_count("qtype_qnames", qkey, 1)
-
-                # Rcodes
-                if rcode:
-                    self.increment_count("rcodes", str(rcode), 1)
-                    if base:
-                        rkey = f"{rcode}|{base}"
-                        self.increment_count("rcode_domains", rkey, 1)
-                    if domain and base and _is_subdomain(domain):
-                        sub_rkey = f"{rcode}|{domain}"
-                        self.increment_count("rcode_subdomains", sub_rkey, 1)
-
-                # Upstreams
-                if upstream_id:
-                    outcome = "success"
-                    if rcode != "NOERROR" or (
-                        status and status not in ("ok", "cache_hit")
-                    ):
-                        outcome = str(status or "error")
-
-                    rcode_key = str(rcode or "UNKNOWN")
-                    key = f"{upstream_id}|{outcome}|{rcode_key}"
-                    self.increment_count("upstreams", key, 1)
-
-                    if qtype:
-                        qt_key = f"{upstream_id}|{qtype}"
-                        self.increment_count("upstream_qtypes", qt_key, 1)
-
-                # DNSSEC outcome (when present in result_json)
-                if result_json:
-                    try:
-                        payload = json.loads(result_json)
-                        dnssec_status = payload.get("dnssec_status")
-                    except Exception:
-                        dnssec_status = None
-
-                    if dnssec_status in {
-                        "dnssec_secure",
-                        "dnssec_zone_secure",
-                        "dnssec_unsigned",
-                        "dnssec_bogus",
-                        "dnssec_indeterminate",
-                    }:
-                        self.increment_count("totals", dnssec_status, 1)
-
-            if self._batch_writes:
-                with self._lock:  # pragma: no cover - batching lock path
-                    self._flush_locked()
-        except Exception as exc:  # pragma: no cover - defensive
-            log.error(
-                "Error while rebuilding counts from query_log: %s", exc, exc_info=True
-            )
+        super().rebuild_counts_from_query_log(logger_obj=logger_obj)
 
     def rebuild_counts_if_needed(
         self, force_rebuild: bool = False, logger_obj: Optional[logging.Logger] = None
     ) -> None:
         """Conditionally rebuild counts table based on current DB state and flags."""
-
-        log = logger_obj or logger
-        has_counts = self.has_counts()
-        has_log = self.has_query_log()
-
-        if not has_log:
-            if force_rebuild:
-                log.warning(
-                    "Force rebuild requested but query_log is empty; skipping rebuild",
-                )
-            return
-
-        if has_counts and not force_rebuild:
-            return
-
-        if has_counts and force_rebuild:
-            log.warning(
-                "Force rebuild requested: discarding existing counts and rebuilding from query_log",
-            )
-        elif not has_counts:
-            log.warning(
-                "Counts table is empty but query_log has rows; rebuilding counts from query_log",
-            )
-
-        self.rebuild_counts_from_query_log(logger_obj=log)
+        super().rebuild_counts_if_needed(
+            force_rebuild=force_rebuild, logger_obj=logger_obj
+        )
 
     def close(self) -> None:
         """Close the underlying SQLite connection, flushing any pending writes."""

@@ -25,48 +25,18 @@ import math
 import threading
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
+
+from foghorn.plugins.db_drivers import import_postgres_driver
 from foghorn.plugins.sql_safety import resolve_query_log_group_column
 from foghorn.security_limits import (
     MAX_QUERY_LOG_AGG_GROUPED_RESULTS,
     enforce_query_log_aggregate_bucket_limit,
 )
-
 from foghorn.utils import dns_names
 
 from .base import BaseStatsStore
-from .sqlite import _is_subdomain, _normalize_domain
 
 logger = logging.getLogger(__name__)
-
-
-def _import_postgres_driver():
-    """Import and return a DB-API compatible PostgreSQL driver module.
-
-    Inputs:
-        None.
-
-    Outputs:
-        DB-API like module exposing a ``connect`` callable.
-
-    Raises:
-        RuntimeError: When no supported PostgreSQL driver is available.
-    """
-
-    # Prefer modern psycopg (v3) when available, then fall back to psycopg2.
-    try:  # pragma: no cover - import-path dependent
-        import psycopg as driver  # type: ignore[import]
-
-        return driver
-    except Exception:  # pragma: no cover - environment specific
-        try:
-            import psycopg2 as driver  # type: ignore[import]
-
-            return driver
-        except Exception as exc:  # pragma: no cover - environment specific
-            raise RuntimeError(
-                "No supported PostgreSQL driver found; install either "
-                "'psycopg' or 'psycopg2' to use the PostgresStatsStore"
-            ) from exc
 
 
 class PostgresStatsStore(BaseStatsStore):
@@ -124,7 +94,7 @@ class PostgresStatsStore(BaseStatsStore):
         retention_vacuum_interval_seconds: Optional[float] = None,
         **_: Any,
     ) -> None:
-        driver = _import_postgres_driver()
+        driver = import_postgres_driver(consumer_name="PostgresStatsStore")
 
         kwargs: Dict[str, Any] = {
             "host": host,
@@ -285,6 +255,18 @@ class PostgresStatsStore(BaseStatsStore):
             return
         with self._lock:
             self._flush_locked()
+
+    def _flush_pending_writes_if_needed(self) -> None:
+        """Flush batched SQL writes so subsequent reads are consistent.
+
+        Inputs:
+            None.
+
+        Outputs:
+            None.
+        """
+
+        self._flush_pending_writes()
 
     def _execute(
         self,
@@ -898,64 +880,32 @@ class PostgresStatsStore(BaseStatsStore):
         """
 
         raw = dict(filters or {})
+        normalized = BaseStatsStore._normalize_query_log_clear_filters(
+            raw,
+            qname_normalizer=dns_names.normalize_name,
+        )
         where: List[str] = []
         params: List[Any] = []
-        normalized: Dict[str, Any] = {}
 
-        before_ts_raw = raw.get("before_ts")
-        if before_ts_raw is not None and str(before_ts_raw).strip():
-            try:
-                before_ts = float(before_ts_raw)
-            except Exception as exc:
-                raise ValueError(f"invalid before_ts filter: {exc}") from exc
+        if "before_ts" in normalized:
             where.append("ts < %s")
-            params.append(float(before_ts))
-            normalized["before_ts"] = float(before_ts)
-
-        self._append_optional_text_filter(
-            raw,
-            "client_ip",
-            where=where,
-            params=params,
-            normalized=normalized,
-            clause="client_ip = %s",
-            normalizer=str,
-        )
-
-        qname_raw = raw.get("qname")
-        if qname_raw is not None and str(qname_raw).strip():
-            qname = dns_names.normalize_name(str(qname_raw))
+            params.append(float(normalized["before_ts"]))
+        if "client_ip" in normalized:
+            where.append("client_ip = %s")
+            params.append(normalized["client_ip"])
+        if "qname" in normalized:
+            qname = str(normalized["qname"])
             where.append("(name = %s OR name LIKE %s)")
             params.extend([qname, f"%.{qname}"])
-            normalized["qname"] = qname
-
-        self._append_optional_text_filter(
-            raw,
-            "qtype",
-            where=where,
-            params=params,
-            normalized=normalized,
-            clause="qtype = %s",
-            normalizer=str.upper,
-        )
-        self._append_optional_text_filter(
-            raw,
-            "rcode",
-            where=where,
-            params=params,
-            normalized=normalized,
-            clause="rcode = %s",
-            normalizer=str.upper,
-        )
-        self._append_optional_text_filter(
-            raw,
-            "status",
-            where=where,
-            params=params,
-            normalized=normalized,
-            clause="LOWER(COALESCE(status, '')) = %s",
-            normalizer=str.lower,
-        )
+        if "qtype" in normalized:
+            where.append("qtype = %s")
+            params.append(normalized["qtype"])
+        if "rcode" in normalized:
+            where.append("rcode = %s")
+            params.append(normalized["rcode"])
+        if "status" in normalized:
+            where.append("LOWER(COALESCE(status, '')) = %s")
+            params.append(normalized["status"])
 
         where_sql = (" WHERE " + " AND ".join(where)) if where else ""
 
@@ -1018,64 +968,83 @@ class PostgresStatsStore(BaseStatsStore):
             Dictionary with total, page, page_size, total_pages, and items.
         """
 
-        page_i, page_size_i = BaseStatsStore._normalize_page_args(page, page_size)
+        normalized_args = BaseStatsStore._normalize_query_log_select_args(
+            client_ip=client_ip,
+            qtype=qtype,
+            qname=qname,
+            rcode=rcode,
+            status=status,
+            source=source,
+            ede_code=ede_code,
+            start_ts=start_ts,
+            end_ts=end_ts,
+            page=page,
+            page_size=page_size,
+            qname_normalizer=dns_names.normalize_name,
+        )
+        page_i = int(normalized_args["page"])
+        page_size_i = int(normalized_args["page_size"])
 
         where: List[str] = []
         params: List[Any] = []
+        client_ip_s = normalized_args["client_ip"]
+        qtype_s = normalized_args["qtype"]
+        qname_s = normalized_args["qname"]
+        rcode_s = normalized_args["rcode"]
+        status_s = normalized_args["status"]
+        source_s = normalized_args["source"]
+        start_ts_f = normalized_args["start_ts"]
+        end_ts_f = normalized_args["end_ts"]
+        ede_code_i = normalized_args["ede_code"]
+        ede_code_invalid = bool(normalized_args["ede_code_invalid"])
+        has_ede_code_filter = bool(normalized_args["has_ede_code_filter"])
 
-        if client_ip:
+        if client_ip_s:
             where.append("client_ip = %s")
-            params.append(client_ip.strip())
-        if qtype:
+            params.append(client_ip_s)
+        if qtype_s:
             where.append("qtype = %s")
-            params.append(qtype.strip().upper())
-        if qname:
+            params.append(qtype_s)
+        if qname_s:
             where.append("name = %s")
-            params.append(dns_names.normalize_name(qname))
-        if rcode:
+            params.append(qname_s)
+        if rcode_s:
             where.append("rcode = %s")
-            params.append(rcode.strip().upper())
-        if status:
+            params.append(rcode_s)
+        if status_s:
             where.append("LOWER(COALESCE(status, '')) = %s")
-            params.append(status.strip().lower())
-        if source:
-            source_s = source.strip().lower()
+            params.append(status_s)
+        if source_s:
             where.append("(LOWER(result_json) LIKE %s OR LOWER(result_json) LIKE %s)")
             params.append(f'%"source":"{source_s}"%')
             params.append(f'%"source": "{source_s}"%')
-        if ede_code is not None and str(ede_code).strip():
-            ede_code_s = str(ede_code).strip()
-            try:
-                ede_code_i = int(ede_code_s)
-            except Exception:
+        if has_ede_code_filter:
+            if ede_code_invalid:
                 where.append("1 = 0")
             else:
-                if ede_code_i < 0:
-                    where.append("1 = 0")
-                else:
-                    ede_code_txt = str(ede_code_i)
-                    where.append(
-                        "("
-                        "LOWER(result_json) LIKE %s OR "
-                        "LOWER(result_json) LIKE %s OR "
-                        "LOWER(result_json) LIKE %s OR "
-                        "LOWER(result_json) LIKE %s OR "
-                        "LOWER(result_json) LIKE %s OR "
-                        "LOWER(result_json) LIKE %s"
-                        ")"
-                    )
-                    params.append(f'%"ede_code":{ede_code_txt},%')
-                    params.append(f'%"ede_code":{ede_code_txt}' + "}%")
-                    params.append(f'%"ede_code": {ede_code_txt},%')
-                    params.append(f'%"ede_code": {ede_code_txt}' + "}%")
-                    params.append(f'%"ede_code":"{ede_code_txt}"%')
-                    params.append(f'%"ede_code": "{ede_code_txt}"%')
-        if isinstance(start_ts, (int, float)):
+                ede_code_txt = str(ede_code_i)
+                where.append(
+                    "("
+                    "LOWER(result_json) LIKE %s OR "
+                    "LOWER(result_json) LIKE %s OR "
+                    "LOWER(result_json) LIKE %s OR "
+                    "LOWER(result_json) LIKE %s OR "
+                    "LOWER(result_json) LIKE %s OR "
+                    "LOWER(result_json) LIKE %s"
+                    ")"
+                )
+                params.append(f'%"ede_code":{ede_code_txt},%')
+                params.append(f'%"ede_code":{ede_code_txt}' + "}%")
+                params.append(f'%"ede_code": {ede_code_txt},%')
+                params.append(f'%"ede_code": {ede_code_txt}' + "}%")
+                params.append(f'%"ede_code":"{ede_code_txt}"%')
+                params.append(f'%"ede_code": "{ede_code_txt}"%')
+        if start_ts_f is not None:
             where.append("ts >= %s")
-            params.append(float(start_ts))
-        if isinstance(end_ts, (int, float)):
+            params.append(start_ts_f)
+        if end_ts_f is not None:
             where.append("ts < %s")
-            params.append(float(end_ts))
+            params.append(end_ts_f)
 
         where_sql = " WHERE " + " AND ".join(where) if where else ""
 
@@ -1306,6 +1275,59 @@ class PostgresStatsStore(BaseStatsStore):
     # ------------------------------------------------------------------
     # Count rebuild helpers
     # ------------------------------------------------------------------
+    def _clear_counts_for_rebuild(self) -> None:
+        """Clear counts table before shared rebuild flow runs.
+
+        Inputs:
+            None.
+
+        Outputs:
+            None.
+        """
+
+        cur = self._conn.cursor()
+        cur.execute("DELETE FROM counts")
+        self._conn.commit()
+
+    def _iter_query_log_for_rebuild(self) -> List[Dict[str, Any]]:
+        """Return query-log rows consumed by shared BaseStatsStore rebuild logic.
+
+        Inputs:
+            None.
+
+        Outputs:
+            List of row mappings with count-rebuild fields.
+        """
+
+        cur = self._conn.cursor()
+        cur.execute(
+            "SELECT client_ip, name, qtype, upstream_id, rcode, status, error, result_json "
+            "FROM query_log"
+        )
+        rows: List[Dict[str, Any]] = []
+        for (
+            client_ip,
+            name,
+            qtype,
+            upstream_id,
+            rcode,
+            status,
+            _error,
+            result_json,
+        ) in cur:
+            rows.append(
+                {
+                    "client_ip": client_ip,
+                    "name": name,
+                    "qtype": qtype,
+                    "upstream_id": upstream_id,
+                    "rcode": rcode,
+                    "status": status,
+                    "result_json": result_json,
+                }
+            )
+        return rows
+
     def rebuild_counts_from_query_log(
         self,
         logger_obj: Optional[logging.Logger] = None,
@@ -1319,136 +1341,7 @@ class PostgresStatsStore(BaseStatsStore):
             None; counts table is cleared and recomputed from query_log.
         """
 
-        log = logger_obj or logger
-        self._flush_pending_writes()
-        conn = self._conn
-        cur = conn.cursor()
-
-        try:
-            cur.execute("DELETE FROM counts")
-            conn.commit()
-        except Exception as exc:  # pragma: no cover - defensive
-            log.error(
-                "Failed to clear counts table before rebuild: %s", exc, exc_info=True
-            )
-            return
-
-        # Re-aggregate from query_log using the same semantics as the SQLite
-        # backend so that counts and warm-load behaviour remain consistent.
-        try:
-            cur.execute(
-                "SELECT client_ip, name, qtype, upstream_id, rcode, status, error, result_json "
-                "FROM query_log"
-            )
-            for (
-                client_ip,
-                name,
-                qtype,
-                upstream_id,
-                rcode,
-                status,
-                error,
-                result_json,
-            ) in cur:
-                domain = _normalize_domain(name or "")
-                parts = domain.split(".") if domain else []
-                base = ".".join(parts[-2:]) if len(parts) >= 2 else domain
-
-                # Total queries
-                self.increment_count("totals", "total_queries", 1)
-
-                # Cache hits/misses/cache_null (best-effort approximation).
-                if status == "cache_hit":
-                    self.increment_count("totals", "cache_hits", 1)
-                elif status in ("deny_pre", "override_pre"):
-                    self.increment_count("totals", "cache_" + status, 1)
-                    self.increment_count("totals", "cache_null", 1)
-                else:
-                    self.increment_count("totals", "cache_misses", 1)
-
-                # Per-outcome cache-domain aggregates using base domains.
-                if base:
-                    if status == "cache_hit":
-                        self.increment_count("cache_hit_domains", base, 1)
-                    elif status not in ("deny_pre", "override_pre"):
-                        self.increment_count("cache_miss_domains", base, 1)
-
-                # Subdomain-only cache aggregates keyed by full qname.
-                if domain and base and _is_subdomain(domain):
-                    if status == "cache_hit":
-                        self.increment_count("cache_hit_subdomains", domain, 1)
-                    elif status not in ("deny_pre", "override_pre"):
-                        self.increment_count("cache_miss_subdomains", domain, 1)
-
-                # Qtype breakdown
-                if qtype:
-                    self.increment_count("qtypes", str(qtype), 1)
-
-                # Clients
-                if client_ip:
-                    self.increment_count("clients", str(client_ip), 1)
-
-                # Domains and subdomains: only treat names with at least three
-                # labels as subdomains for aggregation purposes.
-                if domain:
-                    if _is_subdomain(domain):
-                        self.increment_count("sub_domains", domain, 1)
-                    if (
-                        base
-                    ):  # pragma: nocover - base is truthy whenever normalized domain is truthy
-                        self.increment_count("domains", base, 1)
-
-                # Per-qtype domain counters for all qtypes.
-                if domain and qtype:
-                    qkey = f"{qtype}|{domain}"
-                    self.increment_count("qtype_qnames", qkey, 1)
-
-                # Rcodes
-                if rcode:
-                    self.increment_count("rcodes", str(rcode), 1)
-                    if base:
-                        rkey = f"{rcode}|{base}"
-                        self.increment_count("rcode_domains", rkey, 1)
-                    if domain and base and _is_subdomain(domain):
-                        sub_rkey = f"{rcode}|{domain}"
-                        self.increment_count("rcode_subdomains", sub_rkey, 1)
-
-                # Upstreams
-                if upstream_id:
-                    outcome = "success"
-                    if rcode != "NOERROR" or (
-                        status and status not in ("ok", "cache_hit")
-                    ):
-                        outcome = str(status or "error")
-
-                    rcode_key = str(rcode or "UNKNOWN")
-                    key = f"{upstream_id}|{outcome}|{rcode_key}"
-                    self.increment_count("upstreams", key, 1)
-
-                    if qtype:
-                        qt_key = f"{upstream_id}|{qtype}"
-                        self.increment_count("upstream_qtypes", qt_key, 1)
-
-                # DNSSEC outcome (when present in result_json)
-                if result_json:
-                    try:
-                        payload = json.loads(result_json)
-                        dnssec_status = payload.get("dnssec_status")
-                    except Exception:
-                        dnssec_status = None
-
-                    if dnssec_status in {
-                        "dnssec_secure",
-                        "dnssec_zone_secure",
-                        "dnssec_unsigned",
-                        "dnssec_bogus",
-                        "dnssec_indeterminate",
-                    }:
-                        self.increment_count("totals", dnssec_status, 1)
-        except Exception as exc:  # pragma: no cover - defensive
-            log.error(
-                "Error while rebuilding counts from query_log: %s", exc, exc_info=True
-            )
+        super().rebuild_counts_from_query_log(logger_obj=logger_obj)
 
     def rebuild_counts_if_needed(
         self,
@@ -1465,29 +1358,6 @@ class PostgresStatsStore(BaseStatsStore):
             None.
         """
 
-        log = logger_obj or logger
-        has_counts = self.has_counts()
-        has_log = self.has_query_log()
-
-        if not has_log:
-            if force_rebuild:
-                log.warning(
-                    "Force rebuild requested but query_log is empty; skipping rebuild",
-                )
-            return
-
-        if has_counts and not force_rebuild:
-            return
-
-        if has_counts and force_rebuild:
-            log.warning(
-                "Force rebuild requested: discarding existing counts and rebuilding from query_log",
-            )
-        elif (
-            not has_counts
-        ):  # pragma: nocover - false arc is unreachable after prior has_counts return guard
-            log.warning(
-                "Counts table is empty but query_log has rows; rebuilding counts from query_log",
-            )
-
-        self.rebuild_counts_from_query_log(logger_obj=log)
+        super().rebuild_counts_if_needed(
+            force_rebuild=force_rebuild, logger_obj=logger_obj
+        )
