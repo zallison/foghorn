@@ -5,6 +5,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 ### Added
+- Added shared database driver helpers in `src/foghorn/plugins/db_drivers.py` for MQTT, MongoDB, PostgreSQL, and MySQL import/fallback selection used by cache and query-log backends.
+- Added shared query-log domain helpers in `src/foghorn/plugins/querylog/common.py` (`normalize_domain`, `is_subdomain`).
+- Added shared web endpoint service builders in `src/foghorn/servers/webserver/endpoint_services.py` for health/about/ready, stats/traffic/logs, admin actions, rate-limit, and config/diagram payloads.
+- Added stats table row resolution helpers in `src/foghorn/servers/webserver/stats_helpers.py` (`resolve_stats_table_rows`) for simple and grouped snapshot tables.
 - Added an append-only API request audit logger (`src/foghorn/servers/webserver/api_request_audit.py`) that writes redacted request metadata to SQLite, including schema guards that reject UPDATE/DELETE mutations.
 - Added `server.http.api_request_audit` / `webserver.api_request_audit` configuration support to control API audit logging enablement and database path selection.
 - Config schema/parsing now supports URL-form upstream endpoint entries via a new `upstream_url` schema definition, including DoH URL handling and endpoint-list normalization for primary and backup upstreams.
@@ -17,6 +21,10 @@ All notable changes to this project will be documented in this file.
 - Added retention controls and pruning machinery to API request audit storage (`src/foghorn/servers/webserver/api_request_audit.py`), including configurable max-record/max-bytes/prune-cadence behavior and control-row state tracking.
 
 ### Changed
+- MySQL and PostgreSQL TTL cache backends now use shared `db_drivers` helpers instead of backend-local driver import utilities.
+- Query-log count rebuild orchestration now lives in `BaseStatsStore`, with backends implementing flush/clear/iterate hooks and dropping duplicated rebuild loops.
+- SQLite, MySQL/MariaDB, PostgreSQL, MongoDB, and MQTT query-log backends now consume shared driver and domain helpers rather than private copies.
+- FastAPI core/stats routes and threaded admin handlers now delegate payload assembly to `endpoint_services`, improving parity and shrinking route/handler modules.
 - FastAPI and threaded admin web paths now persist API request audit events (method/path/query/headers/body/status/duration/client IP) with sensitive values redacted.
 - Plugin route exposure now honors per-plugin `config.disable_api` metadata so disabled plugin APIs return 404 and are hidden from plugin UI/page listings.
 - Plugin config parsing now preserves `disable_api` in plugin constructor config while still enforcing route/UI exposure controls at the web layer.
@@ -37,6 +45,7 @@ All notable changes to this project will be documented in this file.
 - Admin plugin/cache paged tables now retain active search text, sort selection, page size, and enabled filters across auto-refresh cycles, preventing view resets while monitoring mDNS and other plugin pages.
 
 ### Tests
+- Updated MySQL/PostgreSQL cache TTL backend tests and MQTT/MySQL/SQLite query-log backend tests to import shared `db_drivers` and `querylog.common` helpers.
 - Added `tests/servers/test_api_request_audit.py` coverage for redaction behavior and append-only trigger enforcement.
 - Added FastAPI and threaded integration tests to verify API request audit row insertion and sensitive field redaction.
 - Added regression coverage for per-plugin `disable_api` handling in config parsing, FastAPI plugin routes, and threaded handlers.
