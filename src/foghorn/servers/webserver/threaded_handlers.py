@@ -16,36 +16,24 @@ import shutil
 import signal
 import time
 import urllib.parse
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 
 # Forward declaration - _AdminHTTPServer is defined in server_management
-from typing import TYPE_CHECKING, Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, ClassVar, Dict, Optional
 
 import yaml
-from ...config.config_schema import get_default_schema_path
-from ...security_limits import MAX_ADMIN_JSON_BODY_BYTES, maybe_parse_content_length
 
-from ...stats import StatsCollector, StatsSnapshot, get_process_uptime_seconds
-from ...utils.config_diagram import (
-    diagram_dark_png_candidate_paths_for_config,
-    diagram_dot_candidate_paths_for_config,
-    diagram_png_candidate_paths_for_config,
-    find_first_existing_path,
-    generate_dot_text_from_config_path,
-    stale_diagram_warning,
-)
+from ...security_limits import MAX_ADMIN_JSON_BODY_BYTES, maybe_parse_content_length
+from ...stats import StatsCollector, StatsSnapshot
 from ..udp_server import DNSUDPHandler
 from . import admin_logic as _admin_logic
 from . import admin_rate_limit as _admin_rate_limit
 from . import config_persistence as _config_persistence
+from . import endpoint_services as _endpoint_services
+from .api_request_audit import ApiRequestAuditLogger
 from .config_helpers import (
-    _get_config_raw_json,
-    _get_config_raw_text,
-    _get_redact_keys,
-    _get_sanitized_config_yaml_cached,
     _get_web_cfg,
     _parse_utc_datetime,
-    sanitize_config,
 )
 from .http_helpers import (
     _evaluate_web_auth,
@@ -53,18 +41,12 @@ from .http_helpers import (
     _schedule_process_signal,
     resolve_www_root,
 )
-from .api_request_audit import ApiRequestAuditLogger
-from .logging_utils import RingBuffer
-from .meta_helpers import FOGHORN_VERSION, _get_about_payload
 from .rate_limit_helpers import _collect_rate_limit_stats
-from .runtime import evaluate_readiness
 from .stats_helpers import (
-    _build_stats_payload_from_snapshot,
-    _build_traffic_payload_from_snapshot,
     _get_stats_snapshot_cached,
-    _trim_top_fields,
     _utc_now_iso,
     get_system_info,
+    resolve_stats_table_rows,
 )
 
 if TYPE_CHECKING:
@@ -84,6 +66,60 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
       - Serves /health, /stats, /stats/reset, /traffic, /config, /logs,
         virtual / and /index.html, and static files from html/ when present.
     """
+
+    HTTP_GET_MAP_STATIC: ClassVar[dict[str, str]] = {
+        "/openapi.json": "_handle_openapi_json",
+        "/docs": "_handle_docs",
+        "/docs/oauth2-redirect": "_handle_docs_oauth2_redirect",
+        "/": "_handle_index",
+        "/index.html": "_handle_index",
+        "/health": "_handle_health",
+        "/api/v1/health": "_handle_health",
+        "/about": "_handle_about",
+        "/api/v1/about": "_handle_about",
+        "/ready": "_handle_ready",
+        "/api/v1/ready": "_handle_ready",
+        "/api/v1/cache": "_handle_cache_snapshot",
+        "/api/v1/plugin_pages": "_handle_plugin_pages_list",
+        "/api/v1/plugins/ui": "_handle_plugins_ui_descriptors",
+        "/api/v1/admin/status": "_handle_admin_status",
+        "/api/v1/admin/capabilities": "_handle_admin_capabilities",
+        "/api/v1/admin/restart/status": "_handle_admin_restart_status",
+        "/api/v1/admin/version/compat": "_handle_admin_version_compat",
+        "/api/v1/admin/diag/runtime-snapshot": "_handle_admin_diag_runtime_snapshot",
+        "/api/v1/upstream_status": "_handle_upstream_status",
+    }
+    HTTP_GET_MAP_PARAM: ClassVar[dict[str, str]] = {
+        "/stats": "_handle_stats",
+        "/api/v1/stats": "_handle_stats",
+        "/api/v1/admin/audit": "_handle_admin_audit",
+        "/api/v1/admin/tasks": "_handle_admin_tasks",
+        "/api/v1/admin/rate_limit/hot_keys": "_handle_admin_rate_limit_hot_keys",
+        "/api/v1/admin/rate_limit/keys": "_handle_admin_rate_limit_keys",
+    }
+    HTTP_POST_MAP_NO_BODY: ClassVar[dict[str, str]] = {
+        "/stats/reset": "_handle_stats_reset",
+        "/api/v1/stats/reset": "_handle_stats_reset",
+        "/api/v1/admin/audit/clear": "_handle_admin_audit_clear",
+        "/config/reload": "_handle_config_reload",
+        "/api/v1/config/reload": "_handle_config_reload",
+        "/reload": "_handle_config_reload",
+        "/api/v1/reload": "_handle_config_reload",
+        "/config/reload_reloadable": "_handle_config_reload_reloadable",
+        "/api/v1/config/reload_reloadable": "_handle_config_reload_reloadable",
+        "/reload_reloadable": "_handle_config_reload_reloadable",
+        "/api/v1/reload_reloadable": "_handle_config_reload_reloadable",
+    }
+    HTTP_POST_MAP_JSON_BODY: ClassVar[dict[str, str]] = {
+        "/api/v1/admin/config/verify": "_handle_admin_config_verify",
+        "/api/v1/admin/config/diff": "_handle_admin_config_diff",
+        "/api/v1/admin/config/lint": "_handle_admin_config_lint",
+        "/api/v1/admin/query_log/clear": "_handle_admin_query_log_clear",
+        "/api/v1/admin/query_log/export": "_handle_admin_query_log_export",
+        "/api/v1/admin/query_log/compact": "_handle_admin_query_log_compact",
+        "/api/v1/admin/rate_limit/clear": "_handle_admin_rate_limit_clear",
+        "/api/v1/admin/rate_limit/reset_counters": "_handle_admin_rate_limit_reset_counters",
+    }
 
     def _server(self) -> _AdminHTTPServer:
         """Brief: Return typed reference to the underlying HTTP server.
@@ -111,7 +147,9 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         if bool(getattr(self, "_api_audit_logged", False)):
             return
         started_ts_obj = getattr(self, "_api_audit_started_ts", None)
-        started_ts = float(started_ts_obj) if isinstance(started_ts_obj, (int, float)) else None
+        started_ts = (
+            float(started_ts_obj) if isinstance(started_ts_obj, (int, float)) else None
+        )
         duration_ms = (
             float((time.time() - started_ts) * 1000.0)
             if started_ts is not None
@@ -130,7 +168,9 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         )
         self._api_audit_logged = True
 
-    def _begin_api_audit_context(self, *, path: str, params: Dict[str, list[str]]) -> None:
+    def _begin_api_audit_context(
+        self, *, path: str, params: dict[str, list[str]]
+    ) -> None:
         """Brief: Initialize per-request context for send_response audit logging.
 
         Inputs:
@@ -163,7 +203,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
 
     def _web_cfg(
         self,
-    ) -> Dict[
+    ) -> dict[
         str, Any
     ]:  # pragma: no cover - thin helper mirrored by FastAPI config handling
         """Brief: Return webserver config subsection from global config.
@@ -203,11 +243,55 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "*")
 
+    def _send_bytes(
+        self,
+        status_code: int,
+        body: bytes,
+        *,
+        content_type: str,
+        headers: dict[str, str] | None = None,
+        body_kind: str = "response",
+    ) -> None:
+        """Brief: Send byte response payload with common HTTP headers.
+
+        Inputs:
+          - status_code: HTTP status code.
+          - body: Raw response bytes.
+          - content_type: Content-Type header value.
+          - headers: Optional mapping of extra HTTP headers to include.
+          - body_kind: Short label used in disconnect warning logs.
+
+        Outputs:
+          - None.
+        """
+
+        self.send_response(status_code)
+        self.send_header("Content-Type", str(content_type))
+        self.send_header("Connection", "close")
+        self.send_header("Content-Length", str(len(body)))
+        if headers:
+            for k, v in headers.items():
+                self.send_header(str(k), str(v))
+        self._apply_cors_headers()
+        self.end_headers()
+        try:
+            self.wfile.write(body)
+        except (
+            BrokenPipeError
+        ):  # pragma: no cover - requires simulating client disconnect
+            logger.warning(
+                "Client disconnected while sending %s for %s %s",
+                str(body_kind or "response"),
+                getattr(self, "command", "GET"),
+                getattr(self, "path", ""),
+            )
+            return
+
     def _send_json(
         self,
         status_code: int,
-        payload: Dict[str, Any],
-        headers: Dict[str, str] | None = None,
+        payload: dict[str, Any],
+        headers: dict[str, str] | None = None,
     ) -> None:  # pragma: no cover - low-level HTTP I/O helper
         """Brief: Send JSON response with appropriate headers.
 
@@ -222,32 +306,19 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
 
         safe_payload = _json_safe(payload)
         body = json.dumps(safe_payload).encode("utf-8")
-        self.send_response(status_code)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Connection", "close")
-        self.send_header("Content-Length", str(len(body)))
-        if headers:
-            for k, v in headers.items():
-                self.send_header(str(k), str(v))
-        self._apply_cors_headers()
-        self.end_headers()
-        try:
-            self.wfile.write(body)
-        except (
-            BrokenPipeError
-        ):  # pragma: no cover - requires simulating client disconnect
-            logger.warning(
-                "Client disconnected while sending JSON response for %s %s",
-                getattr(self, "command", "GET"),
-                getattr(self, "path", ""),
-            )
-            return
+        self._send_bytes(
+            status_code,
+            body,
+            content_type="application/json; charset=utf-8",
+            headers=headers,
+            body_kind="JSON response",
+        )
 
     def _send_text(
         self,
         status_code: int,
         text: str,
-        headers: Dict[str, str] | None = None,
+        headers: dict[str, str] | None = None,
     ) -> None:  # pragma: no cover - low-level HTTP I/O helper
         """Brief: Send plain-text response.
 
@@ -261,30 +332,17 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         """
 
         body = text.encode("utf-8")
-        self.send_response(status_code)
-        self.send_header("Content-Type", "text/plain; charset=utf-8")
-        self.send_header("Connection", "close")
-        self.send_header("Content-Length", str(len(body)))
-        if headers:
-            for k, v in headers.items():
-                self.send_header(str(k), str(v))
-        self._apply_cors_headers()
-        self.end_headers()
-        try:
-            self.wfile.write(body)
-        except (
-            BrokenPipeError
-        ):  # pragma: no cover - requires simulating client disconnect
-            logger.warning(
-                "Client disconnected while sending text response for %s %s",
-                getattr(self, "command", "GET"),
-                getattr(self, "path", ""),
-            )
-            return
+        self._send_bytes(
+            status_code,
+            body,
+            content_type="text/plain; charset=utf-8",
+            headers=headers,
+            body_kind="text response",
+        )
 
     def _get_query_param(
         self,
-        params: Dict[str, list[str]],
+        params: dict[str, list[str]],
         key: str,
         default: str | None = None,
     ) -> str | None:
@@ -313,7 +371,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
 
     def _get_int_param(
         self,
-        params: Dict[str, list[str]],
+        params: dict[str, list[str]],
         key: str,
         default: int,
     ) -> int:
@@ -338,7 +396,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
 
     def _get_bool_param(
         self,
-        params: Dict[str, list[str]],
+        params: dict[str, list[str]],
         key: str,
         default: bool = False,
     ) -> bool:
@@ -376,23 +434,12 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         """
 
         body = text.encode("utf-8")
-        self.send_response(status_code)
-        self.send_header("Content-Type", "application/x-yaml; charset=utf-8")
-        self.send_header("Connection", "close")
-        self.send_header("Content-Length", str(len(body)))
-        self._apply_cors_headers()
-        self.end_headers()
-        try:
-            self.wfile.write(body)
-        except (
-            BrokenPipeError
-        ):  # pragma: no cover - requires simulating client disconnect
-            logger.warning(
-                "Client disconnected while sending YAML response for %s %s",
-                getattr(self, "command", "GET"),
-                getattr(self, "path", ""),
-            )
-            return
+        self._send_bytes(
+            status_code,
+            body,
+            content_type="application/x-yaml; charset=utf-8",
+            body_kind="YAML response",
+        )
 
     def _send_html(
         self, status_code: int, html_body: str
@@ -407,23 +454,12 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         """
 
         body = html_body.encode("utf-8")
-        self.send_response(status_code)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.send_header("Connection", "close")
-        self.send_header("Content-Length", str(len(body)))
-        self._apply_cors_headers()
-        self.end_headers()
-        try:
-            self.wfile.write(body)
-        except (
-            BrokenPipeError
-        ):  # pragma: no cover - requires simulating client disconnect
-            logger.warning(
-                "Client disconnected while sending HTML response for %s %s",
-                getattr(self, "command", "GET"),
-                getattr(self, "path", ""),
-            )
-            return
+        self._send_bytes(
+            status_code,
+            body,
+            content_type="text/html; charset=utf-8",
+            body_kind="HTML response",
+        )
 
     def _read_request_body_limited(
         self, *, max_bytes: int, too_large_detail: str
@@ -464,7 +500,90 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             )
             return None
 
-    def _get_openapi_schema_cached(self) -> Dict[str, Any] | None:
+    def _resolve_config_path_or_send_error(self) -> Any | None:
+        """Brief: Return configured config_path or send a standard 500 JSON error.
+
+        Inputs:
+          - None.
+
+        Outputs:
+          - Config path object when configured.
+          - None when missing (after emitting the error response).
+        """
+
+        cfg_path = getattr(self._server(), "config_path", None)
+        if cfg_path:
+            return cfg_path
+        self._send_json(
+            500,
+            {"detail": "config_path not configured", "server_time": _utc_now_iso()},
+        )
+        return None
+
+    def _diagram_config_signature(self, cfg_path: Any) -> str:
+        """Brief: Build best-effort cache signature for config diagram freshness.
+
+        Inputs:
+          - cfg_path: Config path-like value.
+
+        Outputs:
+          - Stable signature string using mtime/size when available.
+        """
+
+        try:
+            st = os.stat(str(cfg_path))
+            return f"{cfg_path}:{int(st.st_mtime_ns)}:{int(st.st_size)}"
+        except Exception:
+            return str(cfg_path)
+
+    def _is_meta_only_param(self, params: dict[str, list[str]]) -> bool:
+        """Brief: Parse query parameter to detect metadata-only responses.
+
+        Inputs:
+          - params: Parsed query parameter mapping.
+
+        Outputs:
+          - True when meta parameter requests metadata-only mode.
+        """
+
+        try:
+            return bool(
+                params.get("meta")
+                and str(params.get("meta")[0]) not in {"", "0", "false"}
+            )
+        except Exception:
+            return False
+
+    def _send_diagram_png_bytes(self, data: bytes, headers: dict[str, str]) -> None:
+        """Brief: Send diagram PNG bytes with standard headers and disconnect logging.
+
+        Inputs:
+          - data: PNG file bytes.
+          - headers: Extra response headers to include.
+
+        Outputs:
+          - None.
+        """
+
+        self.send_response(200)
+        self.send_header("Content-Type", "image/png")
+        self.send_header("Connection", "close")
+        self.send_header("Content-Length", str(len(data)))
+        for k, v in headers.items():
+            self.send_header(str(k), str(v))
+        self._apply_cors_headers()
+        self.end_headers()
+        try:
+            self.wfile.write(data)
+        except BrokenPipeError:  # pragma: no cover - client disconnect
+            logger.warning(
+                "Client disconnected while sending diagram for %s %s",
+                getattr(self, "command", "GET"),
+                getattr(self, "path", ""),
+            )
+            return
+
+    def _get_openapi_schema_cached(self) -> dict[str, Any] | None:
         """Brief: Return OpenAPI schema for the admin API, caching it on the server.
 
         Inputs: none
@@ -501,7 +620,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             plugins=getattr(server, "plugins", None) or [],
         )
         schema = app.openapi()
-        setattr(server, "_openapi_schema_cache", schema)
+        server._openapi_schema_cache = schema
         return schema
 
     def _handle_openapi_json(self) -> None:
@@ -599,7 +718,9 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         """
         parsed_path = ""
         try:
-            parsed_path = str(urllib.parse.urlparse(getattr(self, "path", "")).path or "")
+            parsed_path = str(
+                urllib.parse.urlparse(getattr(self, "path", "")).path or ""
+            )
         except Exception:
             parsed_path = ""
         default_mode = "token" if parsed_path.startswith("/api/v1/admin") else "none"
@@ -632,7 +753,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         Outputs: None (sends JSON response).
         """
 
-        self._send_json(200, {"status": "ok", "server_time": _utc_now_iso()})
+        self._send_json(200, _endpoint_services.build_health_payload())
 
     def _handle_about(self) -> None:
         """Brief: Handle GET /about and /api/v1/about.
@@ -643,7 +764,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
           - None (sends JSON response with version/build info).
         """
 
-        self._send_json(200, _get_about_payload())
+        self._send_json(200, _endpoint_services.build_about_payload())
 
     def _handle_ready(self) -> None:
         """Brief: Handle GET /ready and /api/v1/ready.
@@ -654,23 +775,15 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
           - None (sends JSON response with 200 when ready, else 503).
         """
 
-        server = self._server()
-        state = getattr(server, "runtime_state", None)
-        ready_ok, not_ready, details = evaluate_readiness(
-            stats=getattr(server, "stats", None),
-            config=getattr(server, "config", None),
-            runtime_state=state,
+        status_code, payload = _endpoint_services.build_ready_result(
+            stats=getattr(self._server(), "stats", None),
+            config=getattr(self._server(), "config", None),
+            runtime_state=getattr(self._server(), "runtime_state", None),
         )
-        payload = {
-            "server_time": _utc_now_iso(),
-            "ready": ready_ok,
-            "not_ready": not_ready,
-            "details": details,
-        }
-        self._send_json(200 if ready_ok else 503, payload)
+        self._send_json(int(status_code), payload)
 
     def _handle_stats(
-        self, params: Dict[str, list[str]]
+        self, params: dict[str, list[str]]
     ) -> (
         None
     ):  # pragma: nocover - [threaded /stats mirrors FastAPI /stats tested via FastAPI]
@@ -684,67 +797,19 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
 
         if not self._require_auth():
             return
-
-        collector: Optional[StatsCollector] = getattr(self._server(), "stats", None)
-        if collector is None:
-            self._send_json(
-                200,
-                {"status": "disabled", "server_time": _utc_now_iso()},
-            )
-            return
-
-        reset_raw = params.get("reset", ["false"])[0]
-        reset = str(reset_raw).lower() in {"1", "true", "yes"}
-        top_raw = params.get("top", ["10"])[0]
-        try:
-            top = int(top_raw)
-        except (TypeError, ValueError):
-            top = 10
-        if top <= 0:
-            top = 10
-        snap: StatsSnapshot = _get_stats_snapshot_cached(collector, reset=reset)
-
         server = self._server()
-        hostname = getattr(server, "hostname", "unknown-host")
-        host_ip = getattr(server, "host_ip", "0.0.0.0")
-
-        meta: Dict[str, Any] = {
-            "timestamp": snap.created_at,
-            "server_time": _utc_now_iso(),
-            "hostname": hostname,
-            "ip": host_ip,
-            "version": FOGHORN_VERSION,
-            "uptime": get_process_uptime_seconds(),
-        }
-
-        payload = _build_stats_payload_from_snapshot(
-            snap,
-            meta=meta,
-            system_info=get_system_info(),
+        status_code, payload = _endpoint_services.build_stats_result(
+            collector=getattr(server, "stats", None),
+            reset=str(params.get("reset", ["false"])[0]).lower()
+            in {"1", "true", "yes"},
+            top=params.get("top", ["10"])[0],
+            get_system_info=get_system_info,
+            hostname=getattr(server, "hostname", None),
+            host_ip=getattr(server, "host_ip", None),
         )
-        payload["created_at"] = snap.created_at
+        self._send_json(int(status_code), payload)
 
-        limit = int(top) if isinstance(top, int) and top > 0 else 10
-        _trim_top_fields(
-            payload,
-            limit,
-            [
-                "top_clients",
-                "top_subdomains",
-                "top_domains",
-                "cache_hit_domains",
-                "cache_miss_domains",
-                "cache_hit_subdomains",
-                "cache_miss_subdomains",
-                "qtype_qnames",
-                "rcode_domains",
-                "rcode_subdomains",
-            ],
-        )
-
-        self._send_json(200, payload)
-
-    def _handle_stats_table(self, path: str, params: Dict[str, list[str]]) -> None:
+    def _handle_stats_table(self, path: str, params: dict[str, list[str]]) -> None:
         """Brief: Handle GET /api/v1/stats/table/{table_id}.
 
         Inputs:
@@ -758,7 +823,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         if not self._require_auth():
             return
 
-        collector: Optional[StatsCollector] = getattr(self._server(), "stats", None)
+        collector: StatsCollector | None = getattr(self._server(), "stats", None)
         if collector is None:
             self._send_json(
                 404,
@@ -778,52 +843,23 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
 
         snap: StatsSnapshot = _get_stats_snapshot_cached(collector, reset=False)
 
-        def _pairs_to_rows(pairs: object) -> list[dict[str, object]]:
-            out: list[dict[str, object]] = []
-            if not isinstance(pairs, list):
-                return out
-            for item in pairs:
-                if not isinstance(item, (list, tuple)) or len(item) < 2:
-                    continue
-                name, count = item[0], item[1]
-                try:
-                    count_i = int(count)
-                except Exception:
-                    continue
-                out.append({"name": str(name), "count": count_i})
-            return out
-
         group_key = self._get_query_param(params, "group_key")
         tid = str(table_id).strip()
-
-        rows: list[dict[str, object]]
-        if tid in {
-            "top_clients",
-            "top_domains",
-            "top_subdomains",
-            "cache_hit_domains",
-            "cache_miss_domains",
-            "cache_hit_subdomains",
-            "cache_miss_subdomains",
-        }:
-            pairs = getattr(snap, tid, None)
-            rows = _pairs_to_rows(pairs)
-        elif tid in {"qtype_qnames", "rcode_domains", "rcode_subdomains"}:
-            if not group_key:
-                self._send_json(
-                    400,
-                    {
-                        "detail": "group_key is required for grouped stats tables",
-                        "server_time": _utc_now_iso(),
-                    },
-                )
-                return
-            mapping = getattr(snap, tid, None)
-            if not isinstance(mapping, dict):
-                rows = []
-            else:
-                rows = _pairs_to_rows(mapping.get(str(group_key)))
-        else:
+        rows, error_code = resolve_stats_table_rows(
+            snap,
+            table_id=tid,
+            group_key=group_key,
+        )
+        if error_code == "missing_group_key":
+            self._send_json(
+                400,
+                {
+                    "detail": "group_key is required for grouped stats tables",
+                    "server_time": _utc_now_iso(),
+                },
+            )
+            return
+        if error_code == "unknown_table":
             self._send_json(
                 404,
                 {"detail": "unknown stats table", "server_time": _utc_now_iso()},
@@ -861,20 +897,14 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
 
         if not self._require_auth():
             return
-
-        collector: Optional[StatsCollector] = getattr(self._server(), "stats", None)
-        if collector is None:
-            self._send_json(
-                200,
-                {"status": "disabled", "server_time": _utc_now_iso()},
-            )
-            return
-        collector.snapshot(reset=True)
-        self._send_json(200, {"status": "ok", "server_time": _utc_now_iso()})
+        status_code, payload = _endpoint_services.build_stats_reset_result(
+            collector=getattr(self._server(), "stats", None)
+        )
+        self._send_json(int(status_code), payload)
 
     def _handle_traffic(
         self,
-        params: Dict[str, list[str]],
+        params: dict[str, list[str]],
     ) -> None:  # pragma: no cover - threaded /traffic mirrors FastAPI endpoint
         """Brief: Handle GET /traffic.
 
@@ -887,26 +917,14 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
 
         if not self._require_auth():
             return
-
-        collector: Optional[StatsCollector] = getattr(self._server(), "stats", None)
-        if collector is None:
-            self._send_json(
-                200,
-                {"status": "disabled", "server_time": _utc_now_iso()},
-            )
-            return
-
-        top_raw = params.get("top", ["10"])[0]
-        try:
-            top = int(top_raw)
-        except (TypeError, ValueError):
-            top = 10
-        if top <= 0:
-            top = 10
-
-        snap: StatsSnapshot = _get_stats_snapshot_cached(collector, reset=False)
-        payload = _build_traffic_payload_from_snapshot(snap, meta=None, top=top)
-        self._send_json(200, payload)
+        server = self._server()
+        status_code, payload = _endpoint_services.build_traffic_result(
+            collector=getattr(server, "stats", None),
+            top=params.get("top", ["10"])[0],
+            hostname=getattr(server, "hostname", None),
+            host_ip=getattr(server, "host_ip", None),
+        )
+        self._send_json(int(status_code), payload)
 
     #    @cached(cache=TTLCache(maxsize=1, ttl=2))
     def _handle_config(
@@ -920,11 +938,10 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
 
         if not self._require_auth():
             return
-
-        cfg = getattr(self._server(), "config", {}) or {}
-        redact_keys = _get_redact_keys(cfg)
-        cfg_path = getattr(self._server(), "config_path", None)
-        body = _get_sanitized_config_yaml_cached(cfg, cfg_path, redact_keys)
+        _status_code, body = _endpoint_services.build_config_yaml_result(
+            config=getattr(self._server(), "config", None),
+            config_path=getattr(self._server(), "config_path", None),
+        )
         self._send_yaml(200, body)
 
     #    @cached(cache=TTLCache(maxsize=1, ttl=2))
@@ -942,14 +959,10 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
 
         if not self._require_auth():
             return
-
-        cfg = getattr(self._server(), "config", {}) or {}
-        redact_keys = _get_redact_keys(cfg)
-        clean = sanitize_config(cfg, redact_keys=redact_keys)
-        self._send_json(
-            200,
-            {"server_time": _utc_now_iso(), "config": clean},
+        status_code, payload = _endpoint_services.build_config_json_result(
+            config=getattr(self._server(), "config", None),
         )
+        self._send_json(int(status_code), payload)
 
     #    @cached(cache=TTLCache(maxsize=1, ttl=2))
     def _handle_config_raw(
@@ -966,27 +979,18 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
 
         if not self._require_auth():
             return
-
-        cfg_path = getattr(self._server(), "config_path", None)
-        if not cfg_path:
+        status_code, raw_text, error_detail = (
+            _endpoint_services.build_config_raw_yaml_result(
+                config_path=getattr(self._server(), "config_path", None),
+            )
+        )
+        if error_detail is not None:
             self._send_json(
-                500,
-                {"detail": "config_path not configured", "server_time": _utc_now_iso()},
+                int(status_code),
+                {"detail": str(error_detail), "server_time": _utc_now_iso()},
             )
             return
-        try:
-            raw_text = _get_config_raw_text(cfg_path)
-        except Exception as exc:  # pragma: no cover - environment-specific
-            self._send_json(
-                500,
-                {
-                    "detail": f"failed to read config from {cfg_path}: {exc}",
-                    "server_time": _utc_now_iso(),
-                },
-            )
-            return
-
-        self._send_yaml(200, raw_text)
+        self._send_yaml(int(status_code), raw_text)
 
     #    @cached(cache=TTLCache(maxsize=1, ttl=2))
     def _handle_config_raw_json(
@@ -1003,34 +1007,21 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
 
         if not self._require_auth():
             return
-
-        cfg_path = getattr(self._server(), "config_path", None)
-        if not cfg_path:
-            self._send_json(
-                500,
-                {"detail": "config_path not configured", "server_time": _utc_now_iso()},
+        status_code, payload, error_detail = (
+            _endpoint_services.build_config_raw_json_result(
+                config_path=getattr(self._server(), "config_path", None),
             )
-            return
-        try:
-            raw = _get_config_raw_json(cfg_path)
-        except Exception as exc:  # pragma: no cover - environment-specific
+        )
+        if error_detail is not None or payload is None:
             self._send_json(
-                500,
+                int(status_code),
                 {
-                    "detail": f"failed to read config from {cfg_path}: {exc}",
+                    "detail": str(error_detail or "failed to read config"),
                     "server_time": _utc_now_iso(),
                 },
             )
             return
-
-        self._send_json(
-            200,
-            {
-                "server_time": _utc_now_iso(),
-                "config": raw["config"],
-                "raw_yaml": raw["raw_yaml"],
-            },
-        )
+        self._send_json(int(status_code), payload)
 
     def _handle_config_schema(
         self,
@@ -1046,33 +1037,80 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
 
         if not self._require_auth():
             return
-
-        schema_path_str = "<unknown>"
-        try:
-            schema_path = get_default_schema_path()
-            schema_path_str = str(schema_path)
-            with schema_path.open("r", encoding="utf-8") as f:
-                schema = json.load(f)
-        except Exception as exc:  # pragma: no cover - environment-specific I/O
+        status_code, payload, error_detail = (
+            _endpoint_services.build_config_schema_result(include_path_in_error=True)
+        )
+        if error_detail is not None or payload is None:
             self._send_json(
-                500,
+                int(status_code),
                 {
-                    "detail": f"failed to read config schema from {schema_path_str}: {exc}",
+                    "detail": str(error_detail or "failed to read config schema"),
                     "server_time": _utc_now_iso(),
                 },
             )
             return
+        self._send_json(int(status_code), payload)
 
-        self._send_json(
-            200,
-            {
-                "server_time": _utc_now_iso(),
-                "schema_path": schema_path_str,
-                "schema": schema,
-            },
+    def _handle_config_diagram_png_variant(
+        self,
+        *,
+        params: dict[str, list[str]],
+        candidate_paths_fn: Any,
+        refresh_stale: bool,
+    ) -> None:
+        """Brief: Serve a config diagram PNG variant with shared behavior.
+
+        Inputs:
+          - params: Query parameters mapping.
+          - candidate_paths_fn: Callable returning candidate PNG paths for config.
+          - refresh_stale: Whether to attempt stale-file refresh after warning.
+
+        Outputs:
+          - None (sends PNG or metadata/status response).
+        """
+
+        if not self._require_auth():
+            return
+        cfg_path = getattr(self._server(), "config_path", None)
+        if not cfg_path:
+            self._send_json(
+                500,
+                {"detail": "config_path not configured", "server_time": _utc_now_iso()},
+            )
+            return
+        meta_only = self._is_meta_only_param(params)
+        status_code, headers, png_path, error_detail, next_attempted_sig = (
+            _endpoint_services.build_config_diagram_png_result(
+                config_path=cfg_path,
+                attempted_signature=getattr(
+                    self._server(), "_config_diagram_build_attempt_sig", None
+                ),
+                candidate_paths_fn=candidate_paths_fn,
+                refresh_stale=refresh_stale,
+                meta_only=meta_only,
+            )
         )
+        if next_attempted_sig is not None:
+            self._server()._config_diagram_build_attempt_sig = next_attempted_sig
+        if meta_only:
+            self._send_text(200, "", headers=headers)
+            return
+        if error_detail is not None:
+            self._send_text(int(status_code), str(error_detail))
+            return
+        if not png_path:
+            self._send_text(500, "config diagram path unavailable")
+            return
 
-    def _handle_config_diagram_png(self, params: Dict[str, list[str]]) -> None:
+        try:
+            with open(str(png_path), "rb") as f:
+                data = f.read()
+        except Exception as exc:  # pragma: no cover - environment specific
+            self._send_text(500, f"failed to read diagram: {exc}")
+            return
+        self._send_diagram_png_bytes(data, headers)
+
+    def _handle_config_diagram_png(self, params: dict[str, list[str]]) -> None:
         """Brief: Handle GET /api/v1/config/diagram.png.
 
         Inputs:
@@ -1085,138 +1123,13 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
               - X-Foghorn-Warning (optional)
         """
 
-        if not self._require_auth():
-            return
-
-        cfg_path = getattr(self._server(), "config_path", None)
-        if not cfg_path:
-            self._send_json(
-                500,
-                {"detail": "config_path not configured", "server_time": _utc_now_iso()},
-            )
-            return
-
-        # Allow a best-effort on-demand build attempt, but only once per config
-        # signature for this process.
-        try:
-            st = os.stat(str(cfg_path))
-            cfg_sig = f"{cfg_path}:{int(st.st_mtime_ns)}:{int(st.st_size)}"
-        except Exception:
-            cfg_sig = str(cfg_path)
-
-        attempted_sig = getattr(
-            self._server(), "_config_diagram_build_attempt_sig", None
+        self._handle_config_diagram_png_variant(
+            params=params,
+            candidate_paths_fn=_endpoint_services.diagram_png_candidate_paths_for_config,
+            refresh_stale=True,
         )
 
-        png_file = find_first_existing_path(
-            diagram_png_candidate_paths_for_config(cfg_path)
-        )
-
-        # If missing and dot exists, attempt an on-demand build once.
-        if png_file is None and attempted_sig != cfg_sig:
-            try:
-                from ...utils.config_diagram import (
-                    _find_dot_cmd,
-                    ensure_config_diagram_png,
-                )
-
-                if _find_dot_cmd() is not None:
-                    setattr(
-                        self._server(), "_config_diagram_build_attempt_sig", cfg_sig
-                    )
-                    ensure_config_diagram_png(config_path=str(cfg_path))
-                    png_file = find_first_existing_path(
-                        diagram_png_candidate_paths_for_config(cfg_path)
-                    )
-            except Exception:
-                pass
-
-        warn: str | None = None
-        if png_file is not None:
-            warn = stale_diagram_warning(
-                config_path=str(cfg_path), diagram_path=str(png_file)
-            )
-
-            # If stale and dot exists, try to refresh the PNG in-place once.
-            if (
-                warn
-                and getattr(self._server(), "_config_diagram_build_attempt_sig", None)
-                != cfg_sig
-            ):
-                try:
-                    from ...utils.config_diagram import (
-                        _find_dot_cmd,
-                        ensure_config_diagram_png,
-                    )
-
-                    if _find_dot_cmd() is not None:
-                        setattr(
-                            self._server(), "_config_diagram_build_attempt_sig", cfg_sig
-                        )
-                        ok, _detail, refreshed = ensure_config_diagram_png(
-                            config_path=str(cfg_path)
-                        )
-                        if ok and refreshed:
-                            from pathlib import Path
-
-                            png_file = Path(str(refreshed))
-                            warn = stale_diagram_warning(
-                                config_path=str(cfg_path), diagram_path=str(png_file)
-                            )
-                except Exception:
-                    # Non-fatal: prefer serving the existing file.
-                    pass
-
-        headers: dict[str, str] = {
-            "X-Foghorn-Exists": "1" if png_file is not None else "0",
-        }
-
-        if warn:
-            headers["X-Foghorn-Warning"] = warn
-
-        meta_only = False
-        try:
-            meta_only = bool(
-                params.get("meta")
-                and str(params.get("meta")[0]) not in {"", "0", "false"}
-            )
-        except Exception:
-            meta_only = False
-
-        if meta_only:
-            self._send_text(200, "", headers=headers)
-            return
-
-        if png_file is None:
-            self._send_text(404, "config diagram not found")
-            return
-
-        try:
-            with open(str(png_file), "rb") as f:
-                data = f.read()
-        except Exception as exc:  # pragma: no cover - environment specific
-            self._send_text(500, f"failed to read diagram: {exc}")
-            return
-
-        self.send_response(200)
-        self.send_header("Content-Type", "image/png")
-        self.send_header("Connection", "close")
-        self.send_header("Content-Length", str(len(data)))
-        for k, v in headers.items():
-            self.send_header(str(k), str(v))
-        self._apply_cors_headers()
-        self.end_headers()
-        try:
-            self.wfile.write(data)
-        except BrokenPipeError:  # pragma: no cover - client disconnect
-            logger.warning(
-                "Client disconnected while sending diagram for %s %s",
-                getattr(self, "command", "GET"),
-                getattr(self, "path", ""),
-            )
-            return
-
-    def _handle_config_diagram_png_dark(self, params: Dict[str, list[str]]) -> None:
+    def _handle_config_diagram_png_dark(self, params: dict[str, list[str]]) -> None:
         """Brief: Handle GET /api/v1/config/diagram-dark.png.
 
         Inputs:
@@ -1229,104 +1142,13 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
               - X-Foghorn-Warning (optional)
         """
 
-        if not self._require_auth():
-            return
-
-        cfg_path = getattr(self._server(), "config_path", None)
-        if not cfg_path:
-            self._send_json(
-                500,
-                {"detail": "config_path not configured", "server_time": _utc_now_iso()},
-            )
-            return
-
-        # Allow a best-effort on-demand build attempt, but only once per config signature.
-        try:
-            st = os.stat(str(cfg_path))
-            cfg_sig = f"{cfg_path}:{int(st.st_mtime_ns)}:{int(st.st_size)}"
-        except Exception:
-            cfg_sig = str(cfg_path)
-
-        attempted_sig = getattr(
-            self._server(), "_config_diagram_build_attempt_sig", None
+        self._handle_config_diagram_png_variant(
+            params=params,
+            candidate_paths_fn=(
+                _endpoint_services.diagram_dark_png_candidate_paths_for_config
+            ),
+            refresh_stale=False,
         )
-
-        png_file = find_first_existing_path(
-            diagram_dark_png_candidate_paths_for_config(cfg_path)
-        )
-
-        # If missing and dot exists, attempt an on-demand build once.
-        if png_file is None and attempted_sig != cfg_sig:
-            try:
-                from ...utils.config_diagram import (
-                    _find_dot_cmd,
-                    ensure_config_diagram_png,
-                )
-
-                if _find_dot_cmd() is not None:
-                    setattr(
-                        self._server(), "_config_diagram_build_attempt_sig", cfg_sig
-                    )
-                    ensure_config_diagram_png(config_path=str(cfg_path))
-                    png_file = find_first_existing_path(
-                        diagram_dark_png_candidate_paths_for_config(cfg_path)
-                    )
-            except Exception:
-                pass
-
-        warn: str | None = None
-        if png_file is not None:
-            warn = stale_diagram_warning(
-                config_path=str(cfg_path), diagram_path=str(png_file)
-            )
-
-        headers: dict[str, str] = {
-            "X-Foghorn-Exists": "1" if png_file is not None else "0",
-        }
-        if warn:
-            headers["X-Foghorn-Warning"] = warn
-
-        meta_only = False
-        try:
-            meta_only = bool(
-                params.get("meta")
-                and str(params.get("meta")[0]) not in {"", "0", "false"}
-            )
-        except Exception:
-            meta_only = False
-
-        if meta_only:
-            self._send_text(200, "", headers=headers)
-            return
-
-        if png_file is None:
-            self._send_text(404, "config diagram not found")
-            return
-
-        try:
-            with open(str(png_file), "rb") as f:
-                data = f.read()
-        except Exception as exc:  # pragma: no cover
-            self._send_text(500, f"failed to read diagram: {exc}")
-            return
-
-        self.send_response(200)
-        self.send_header("Content-Type", "image/png")
-        self.send_header("Connection", "close")
-        self.send_header("Content-Length", str(len(data)))
-        for k, v in headers.items():
-            self.send_header(str(k), str(v))
-        self._apply_cors_headers()
-        self.end_headers()
-        try:
-            self.wfile.write(data)
-        except BrokenPipeError:  # pragma: no cover
-            logger.warning(
-                "Client disconnected while sending diagram for %s %s",
-                getattr(self, "command", "GET"),
-                getattr(self, "path", ""),
-            )
-            return
 
     def _parse_multipart_form_file(
         self, *, body: bytes, content_type: str, field_name: str = "file"
@@ -1413,12 +1235,8 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         if not self._require_auth():
             return
 
-        cfg_path = getattr(self._server(), "config_path", None)
+        cfg_path = self._resolve_config_path_or_send_error()
         if not cfg_path:
-            self._send_json(
-                500,
-                {"detail": "config_path not configured", "server_time": _utc_now_iso()},
-            )
             return
 
         max_bytes = 1_000_000
@@ -1511,7 +1329,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             },
         )
 
-    def _handle_config_diagram_dot(self, params: Dict[str, list[str]]) -> None:
+    def _handle_config_diagram_dot(self, params: dict[str, list[str]]) -> None:
         """Brief: Handle GET /api/v1/config/diagram.dot.
 
         Inputs:
@@ -1523,70 +1341,18 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
 
         if not self._require_auth():
             return
-
-        cfg_path = getattr(self._server(), "config_path", None)
-        if not cfg_path:
-            self._send_json(
-                500,
-                {"detail": "config_path not configured", "server_time": _utc_now_iso()},
+        status_code, headers, text, error_detail = (
+            _endpoint_services.build_config_diagram_dot_result(
+                config_path=getattr(self._server(), "config_path", None),
+                meta_only=self._is_meta_only_param(params),
             )
-            return
-
-        headers: dict[str, str] = {}
-
-        png_file = find_first_existing_path(
-            diagram_png_candidate_paths_for_config(cfg_path)
         )
-        if png_file is not None:
-            warn_png = stale_diagram_warning(
-                config_path=str(cfg_path), diagram_path=str(png_file)
-            )
-            if warn_png:
-                headers["X-Foghorn-Warning"] = warn_png
-
-        dot_file = find_first_existing_path(
-            diagram_dot_candidate_paths_for_config(cfg_path)
-        )
-        if dot_file is not None:
-            warn_dot = stale_diagram_warning(
-                config_path=str(cfg_path), diagram_path=str(dot_file)
-            )
-            if warn_dot and "X-Foghorn-Warning" not in headers:
-                headers["X-Foghorn-Warning"] = warn_dot
-
-        meta_only = False
-        try:
-            meta_only = bool(
-                params.get("meta")
-                and str(params.get("meta")[0]) not in {"", "0", "false"}
-            )
-        except Exception:
-            meta_only = False
-
-        if meta_only:
-            self._send_text(200, "", headers=headers)
+        if error_detail is not None:
+            self._send_text(int(status_code), str(error_detail))
             return
+        self._send_text(int(status_code), str(text or ""), headers=headers)
 
-        if dot_file is not None:
-            try:
-                text = dot_file.read_text(encoding="utf-8")
-            except Exception as exc:  # pragma: no cover - environment dependent
-                self._send_text(
-                    500, f"failed to read config diagram from {dot_file}: {exc}"
-                )
-                return
-            self._send_text(200, text, headers=headers)
-            return
-
-        try:
-            text = generate_dot_text_from_config_path(str(cfg_path))
-        except Exception as exc:  # pragma: no cover - environment dependent
-            self._send_text(500, f"failed to generate config diagram: {exc}")
-            return
-
-        self._send_text(200, text, headers=headers)
-
-    def _handle_query_log(self, params: Dict[str, list[str]]) -> None:
+    def _handle_query_log(self, params: dict[str, list[str]]) -> None:
         """Brief: Handle GET /api/v1/query_log for the threaded fallback server.
 
         Inputs:
@@ -1599,7 +1365,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         if not self._require_auth():
             return
 
-        collector: Optional[StatsCollector] = getattr(self._server(), "stats", None)
+        collector: StatsCollector | None = getattr(self._server(), "stats", None)
         store = getattr(collector, "_store", None) if collector is not None else None
         if store is None:
             self._send_json(
@@ -1633,8 +1399,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             page = int(page_raw)
         except Exception:
             page = 1
-        if page < 1:
-            page = 1
+        page = max(page, 1)
 
         try:
             ps = int(page_size_raw)
@@ -1642,8 +1407,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             ps = 100
         if ps <= 0:
             ps = 100
-        if ps > 1000:
-            ps = 1000
+        ps = min(ps, 1000)
 
         start_ts: float | None = None
         end_ts: float | None = None
@@ -1680,45 +1444,35 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             page=page,
             page_size=ps,
         )
-        payload["server_time"] = _utc_now_iso()
-        self._send_json(200, payload)
+        self._send_admin_payload(payload)
 
     def _handle_admin_restart_status(self) -> None:
         """Brief: Handle GET /api/v1/admin/restart/status."""
-
-        if not self._require_auth():
+        if not self._require_admin_action(action="admin.restart.status"):
             return
-        if not self._enforce_admin_rate_limit(action="admin.restart.status"):
-            return
-        payload = _admin_logic.build_admin_restart_status_payload(
-            runtime_state=self._admin_runtime_state()
+        status_code, payload = _endpoint_services.build_admin_restart_status_result(
+            runtime_state=self._admin_runtime_state(),
+            build_payload=_admin_logic.build_admin_restart_status_payload,
         )
-        payload["server_time"] = _utc_now_iso()
-        self._send_json(200, payload)
+        self._send_json(int(status_code), payload)
 
-    def _handle_admin_tasks(self, params: Dict[str, list[str]]) -> None:
+    def _handle_admin_tasks(self, params: dict[str, list[str]]) -> None:
         """Brief: Handle GET /api/v1/admin/tasks."""
-
-        if not self._require_auth():
-            return
-        if not self._enforce_admin_rate_limit(action="admin.tasks"):
+        if not self._require_admin_action(action="admin.tasks"):
             return
         limit = max(1, min(self._get_int_param(params, "limit", 50), 500))
-        payload = _admin_logic.build_admin_tasks_payload(
+        status_code, payload = _endpoint_services.build_admin_tasks_result(
             runtime_state=self._admin_runtime_state(),
             limit=limit,
             task_type=self._get_query_param(params, "task_type"),
             status=self._get_query_param(params, "status"),
+            build_payload=_admin_logic.build_admin_tasks_payload,
         )
-        payload["server_time"] = _utc_now_iso()
-        self._send_json(200, payload)
+        self._send_json(int(status_code), payload)
 
-    def _handle_admin_config_diff(self, body: Dict[str, Any]) -> None:
+    def _handle_admin_config_diff(self, body: dict[str, Any]) -> None:
         """Brief: Handle POST /api/v1/admin/config/diff."""
-
-        if not self._require_auth():
-            return
-        if not self._enforce_admin_rate_limit(action="admin.config.diff"):
+        if not self._require_admin_action(action="admin.config.diff"):
             return
         raw_yaml = body.get("raw_yaml")
         if raw_yaml is not None and not isinstance(raw_yaml, str):
@@ -1734,20 +1488,13 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
                 current_cfg=getattr(self._server(), "config", {}) or {},
             )
         except _admin_logic.AdminLogicHttpError as exc:
-            self._send_json(
-                exc.status_code,
-                {"detail": exc.detail, "server_time": _utc_now_iso()},
-            )
+            self._send_admin_logic_error(exc)
             return
-        payload["server_time"] = _utc_now_iso()
-        self._send_json(200, payload)
+        self._send_admin_payload(payload)
 
-    def _handle_admin_config_lint(self, body: Dict[str, Any]) -> None:
+    def _handle_admin_config_lint(self, body: dict[str, Any]) -> None:
         """Brief: Handle POST /api/v1/admin/config/lint."""
-
-        if not self._require_auth():
-            return
-        if not self._enforce_admin_rate_limit(action="admin.config.lint"):
+        if not self._require_admin_action(action="admin.config.lint"):
             return
         raw_yaml = body.get("raw_yaml")
         if raw_yaml is not None and not isinstance(raw_yaml, str):
@@ -1763,20 +1510,13 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
                 current_cfg=getattr(self._server(), "config", {}) or {},
             )
         except _admin_logic.AdminLogicHttpError as exc:
-            self._send_json(
-                exc.status_code,
-                {"detail": exc.detail, "server_time": _utc_now_iso()},
-            )
+            self._send_admin_logic_error(exc)
             return
-        payload["server_time"] = _utc_now_iso()
-        self._send_json(200, payload)
+        self._send_admin_payload(payload)
 
-    def _handle_admin_query_log_export(self, body: Dict[str, Any]) -> None:
+    def _handle_admin_query_log_export(self, body: dict[str, Any]) -> None:
         """Brief: Handle POST /api/v1/admin/query_log/export."""
-
-        if not self._require_auth():
-            return
-        if not self._enforce_admin_rate_limit(action="admin.query_log.export"):
+        if not self._require_admin_action(action="admin.query_log.export"):
             return
         filters = body.get("filters")
         if filters is None:
@@ -1795,7 +1535,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             )
             return
         export_format = str(body.get("format", "jsonl") or "jsonl")
-        collector: Optional[StatsCollector] = getattr(self._server(), "stats", None)
+        collector: StatsCollector | None = getattr(self._server(), "stats", None)
         store = getattr(collector, "_store", None) if collector is not None else None
         try:
             payload = _admin_logic.execute_query_log_export(
@@ -1813,16 +1553,13 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         payload["server_time"] = _utc_now_iso()
         self._send_json(200, payload)
 
-    def _handle_admin_query_log_compact(self, body: Dict[str, Any]) -> None:
+    def _handle_admin_query_log_compact(self, body: dict[str, Any]) -> None:
         """Brief: Handle POST /api/v1/admin/query_log/compact."""
-
-        if not self._require_auth():
-            return
-        if not self._enforce_admin_rate_limit(action="admin.query_log.compact"):
+        if not self._require_admin_action(action="admin.query_log.compact"):
             return
         mode = str(body.get("mode", "vacuum") or "vacuum")
         dry_run = bool(body.get("dry_run", True))
-        collector: Optional[StatsCollector] = getattr(self._server(), "stats", None)
+        collector: StatsCollector | None = getattr(self._server(), "stats", None)
         store = getattr(collector, "_store", None) if collector is not None else None
         try:
             payload = _admin_logic.execute_query_log_compact(
@@ -1837,12 +1574,9 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         payload["server_time"] = _utc_now_iso()
         self._send_json(200, payload)
 
-    def _handle_admin_rate_limit_hot_keys(self, params: Dict[str, list[str]]) -> None:
+    def _handle_admin_rate_limit_hot_keys(self, params: dict[str, list[str]]) -> None:
         """Brief: Handle GET /api/v1/admin/rate_limit/hot_keys."""
-
-        if not self._require_auth():
-            return
-        if not self._enforce_admin_rate_limit(action="admin.rate_limit.hot_keys"):
+        if not self._require_admin_action(action="admin.rate_limit.hot_keys"):
             return
         plugin_name = self._get_query_param(params, "plugin")
         limit = max(1, min(self._get_int_param(params, "limit", 20), 200))
@@ -1861,14 +1595,10 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         payload["server_time"] = _utc_now_iso()
         self._send_json(200, payload)
 
-    def _handle_admin_rate_limit_reset_counters(self, body: Dict[str, Any]) -> None:
+    def _handle_admin_rate_limit_reset_counters(self, body: dict[str, Any]) -> None:
         """Brief: Handle POST /api/v1/admin/rate_limit/reset_counters."""
 
-        if not self._require_auth():
-            return
-        if not self._enforce_admin_rate_limit(
-            action="admin.rate_limit.reset_counters"
-        ):
+        if not self._require_admin_action(action="admin.rate_limit.reset_counters"):
             return
         plugin = body.get("plugin")
         if plugin is not None and not isinstance(plugin, str):
@@ -1885,46 +1615,39 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
                 include_global=include_global,
             )
         except _admin_logic.AdminLogicHttpError as exc:
-            self._send_json(
-                exc.status_code,
-                {"detail": exc.detail, "server_time": _utc_now_iso()},
-            )
+            self._send_admin_logic_error(exc)
             return
         payload["server_time"] = _utc_now_iso()
         self._send_json(200, payload)
 
     def _handle_admin_version_compat(self) -> None:
         """Brief: Handle GET /api/v1/admin/version/compat."""
-
-        if not self._require_auth():
+        if not self._require_admin_action(action="admin.version.compat"):
             return
-        if not self._enforce_admin_rate_limit(action="admin.version.compat"):
-            return
-        payload = _admin_logic.build_admin_version_compat_payload(
+        status_code, payload = _endpoint_services.build_admin_version_compat_result(
             plugins=list(getattr(self._server(), "plugins", []) or []),
             stats_collector=getattr(self._server(), "stats", None),
+            build_payload=_admin_logic.build_admin_version_compat_payload,
         )
-        payload["server_time"] = _utc_now_iso()
-        self._send_json(200, payload)
+        self._send_json(int(status_code), payload)
 
     def _handle_admin_diag_runtime_snapshot(self) -> None:
         """Brief: Handle GET /api/v1/admin/diag/runtime-snapshot."""
-
-        if not self._require_auth():
+        if not self._require_admin_action(action="admin.diag.runtime_snapshot"):
             return
-        if not self._enforce_admin_rate_limit(action="admin.diag.runtime_snapshot"):
-            return
-        payload = _admin_logic.build_admin_diag_runtime_snapshot(
-            cfg=getattr(self._server(), "config", {}) or {},
-            config_path=getattr(self._server(), "config_path", None),
-            runtime_state=self._admin_runtime_state(),
-            plugins=list(getattr(self._server(), "plugins", []) or []),
-            stats_collector=getattr(self._server(), "stats", None),
+        status_code, payload = (
+            _endpoint_services.build_admin_diag_runtime_snapshot_result(
+                config=getattr(self._server(), "config", None),
+                config_path=getattr(self._server(), "config_path", None),
+                runtime_state=self._admin_runtime_state(),
+                plugins=list(getattr(self._server(), "plugins", []) or []),
+                stats_collector=getattr(self._server(), "stats", None),
+                build_payload=_admin_logic.build_admin_diag_runtime_snapshot,
+            )
         )
-        payload["server_time"] = _utc_now_iso()
-        self._send_json(200, payload)
+        self._send_json(int(status_code), payload)
 
-    def _handle_query_log_aggregate(self, params: Dict[str, list[str]]) -> None:
+    def _handle_query_log_aggregate(self, params: dict[str, list[str]]) -> None:
         """Brief: Handle GET /api/v1/query_log/aggregate for the threaded fallback server.
 
         Inputs:
@@ -1937,7 +1660,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         if not self._require_auth():
             return
 
-        collector: Optional[StatsCollector] = getattr(self._server(), "stats", None)
+        collector: StatsCollector | None = getattr(self._server(), "stats", None)
         store = getattr(collector, "_store", None) if collector is not None else None
         if store is None:
             self._send_json(
@@ -2036,7 +1759,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         action: str,
         target: str,
         ok: bool,
-        details: Dict[str, Any] | None = None,
+        details: dict[str, Any] | None = None,
     ) -> None:
         """Brief: Best-effort append an admin audit event.
 
@@ -2058,6 +1781,51 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             details=details or {},
         )
 
+    def _require_admin_action(self, *, action: str) -> bool:
+        """Brief: Enforce admin auth and per-action rate limits.
+
+        Inputs:
+          - action: Stable rate-limit action identifier.
+
+        Outputs:
+          - True when request may continue; False when a response was already sent.
+        """
+
+        if not self._require_auth():
+            return False
+        return bool(self._enforce_admin_rate_limit(action=action))
+
+    def _send_admin_logic_error(self, exc: _admin_logic.AdminLogicHttpError) -> None:
+        """Brief: Serialize AdminLogicHttpError as JSON error response.
+
+        Inputs:
+          - exc: AdminLogicHttpError raised by admin_logic helpers.
+
+        Outputs:
+          - None (sends JSON response with exc.status_code and exc.detail).
+        """
+
+        self._send_json(
+            exc.status_code,
+            {"detail": exc.detail, "server_time": _utc_now_iso()},
+        )
+
+    def _send_admin_payload(
+        self, payload: dict[str, Any], *, status_code: int = 200
+    ) -> None:
+        """Brief: Send admin JSON payload with server_time attached.
+
+        Inputs:
+          - payload: JSON-compatible payload mapping.
+          - status_code: HTTP status code for the response.
+
+        Outputs:
+          - None (sends JSON response).
+        """
+
+        payload["server_time"] = _utc_now_iso()
+        self._send_json(int(status_code), payload)
+
     def _handle_admin_status(self) -> None:
         """Brief: Handle GET /api/v1/admin/status."""
 
@@ -2065,15 +1833,15 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             return
         if not self._enforce_admin_rate_limit(action="admin.status"):
             return
-        payload = _admin_logic.build_admin_status_payload(
-            cfg=getattr(self._server(), "config", {}) or {},
+        status_code, payload = _endpoint_services.build_admin_status_result(
+            config=getattr(self._server(), "config", None),
             config_path=getattr(self._server(), "config_path", None),
             stats_collector=getattr(self._server(), "stats", None),
             plugins=list(getattr(self._server(), "plugins", []) or []),
             admin_runtime_state=self._admin_runtime_state(),
+            build_payload=_admin_logic.build_admin_status_payload,
         )
-        payload["server_time"] = _utc_now_iso()
-        self._send_json(200, payload)
+        self._send_json(int(status_code), payload)
 
     def _handle_admin_capabilities(self) -> None:
         """Brief: Handle GET /api/v1/admin/capabilities."""
@@ -2082,14 +1850,14 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             return
         if not self._enforce_admin_rate_limit(action="admin.capabilities"):
             return
-        payload = _admin_logic.build_admin_capabilities_payload(
+        status_code, payload = _endpoint_services.build_admin_capabilities_result(
             stats_collector=getattr(self._server(), "stats", None),
             plugins=list(getattr(self._server(), "plugins", []) or []),
+            build_payload=_admin_logic.build_admin_capabilities_payload,
         )
-        payload["server_time"] = _utc_now_iso()
-        self._send_json(200, payload)
+        self._send_json(int(status_code), payload)
 
-    def _handle_admin_audit(self, params: Dict[str, list[str]]) -> None:
+    def _handle_admin_audit(self, params: dict[str, list[str]]) -> None:
         """Brief: Handle GET /api/v1/admin/audit."""
 
         if not self._require_auth():
@@ -2100,7 +1868,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         list_fn = getattr(runtime_state, "list_audit_events", None)
         limit = self._get_int_param(params, "limit", 100)
         action = self._get_query_param(params, "action")
-        items: list[Dict[str, Any]] = []
+        items: list[dict[str, Any]] = []
         if callable(list_fn):
             try:
                 raw = list_fn(limit=int(limit), action=action)
@@ -2148,7 +1916,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             },
         )
 
-    def _handle_admin_config_verify(self, body: Dict[str, Any]) -> None:
+    def _handle_admin_config_verify(self, body: dict[str, Any]) -> None:
         """Brief: Handle POST /api/v1/admin/config/verify."""
 
         if not self._require_auth():
@@ -2196,7 +1964,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         payload["server_time"] = _utc_now_iso()
         self._send_json(200, payload)
 
-    def _handle_admin_query_log_clear(self, body: Dict[str, Any]) -> None:
+    def _handle_admin_query_log_clear(self, body: dict[str, Any]) -> None:
         """Brief: Handle POST /api/v1/admin/query_log/clear."""
 
         if not self._require_auth():
@@ -2213,7 +1981,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             )
             return
         dry_run = bool(body.get("dry_run", False))
-        collector: Optional[StatsCollector] = getattr(self._server(), "stats", None)
+        collector: StatsCollector | None = getattr(self._server(), "stats", None)
         store = getattr(collector, "_store", None) if collector is not None else None
         try:
             payload = _admin_logic.execute_query_log_clear(
@@ -2246,7 +2014,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         payload["server_time"] = _utc_now_iso()
         self._send_json(200, payload)
 
-    def _handle_admin_rate_limit_keys(self, params: Dict[str, list[str]]) -> None:
+    def _handle_admin_rate_limit_keys(self, params: dict[str, list[str]]) -> None:
         """Brief: Handle GET /api/v1/admin/rate_limit/keys."""
 
         if not self._require_auth():
@@ -2280,7 +2048,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         payload["server_time"] = _utc_now_iso()
         self._send_json(200, payload)
 
-    def _handle_admin_rate_limit_clear(self, body: Dict[str, Any]) -> None:
+    def _handle_admin_rate_limit_clear(self, body: dict[str, Any]) -> None:
         """Brief: Handle POST /api/v1/admin/rate_limit/clear."""
 
         if not self._require_auth():
@@ -2340,14 +2108,12 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         *,
         target: str,
         action: str,
-        body: Dict[str, Any],
+        body: dict[str, Any],
     ) -> None:
         """Brief: Handle POST record mutation admin endpoints."""
 
-        if not self._require_auth():
-            return
         action_norm = str(action or "").strip().lower()
-        if not self._enforce_admin_rate_limit(
+        if not self._require_admin_action(
             action=f"admin.records.{action_norm or 'unknown'}"
         ):
             return
@@ -2411,12 +2177,9 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
                 ok=False,
                 details={"detail": str(exc.detail)},
             )
-            self._send_json(
-                exc.status_code,
-                {"detail": exc.detail, "server_time": _utc_now_iso()},
-            )
+            self._send_admin_logic_error(exc)
             return
-        details: Dict[str, Any] = {}
+        details: dict[str, Any] = {}
         if action_norm in {"apply", "delete"}:
             details["persist"] = bool(body.get("persist", False))
         self._admin_audit(
@@ -2429,7 +2192,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         self._send_json(200, payload)
 
     def _handle_logs(
-        self, params: Dict[str, list[str]]
+        self, params: dict[str, list[str]]
     ) -> None:  # pragma: no cover - threaded /logs mirrors FastAPI endpoint
         """Brief: Handle GET /logs.
 
@@ -2441,22 +2204,11 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
 
         if not self._require_auth():
             return
-
-        buf: Optional[RingBuffer] = getattr(self._server(), "log_buffer", None)
-        if buf is None:
-            entries: list[Any] = []
-        else:
-            raw = params.get("limit", ["100"])[0]
-            try:
-                limit = max(0, int(raw))
-            except ValueError:
-                limit = 100
-            entries = buf.snapshot(limit=limit)
-
-        self._send_json(
-            200,
-            {"server_time": _utc_now_iso(), "entries": entries},
+        status_code, payload = _endpoint_services.build_logs_result(
+            log_buffer=getattr(self._server(), "log_buffer", None),
+            limit=params.get("limit", ["100"])[0],
         )
+        self._send_json(int(status_code), payload)
 
     def _handle_upstream_status(
         self,
@@ -2472,10 +2224,11 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         if not self._require_auth():
             return
 
-        cfg = getattr(self._server(), "config", {}) or {}
-        payload = _admin_logic.build_upstream_status_payload(cfg)
-        payload["server_time"] = _utc_now_iso()
-        self._send_json(200, payload)
+        status_code, payload = _endpoint_services.build_upstream_status_result(
+            config=getattr(self._server(), "config", None),
+            build_payload=_admin_logic.build_upstream_status_payload,
+        )
+        self._send_json(int(status_code), payload)
 
     def _schedule_restart(self, *, delay_seconds: float = 1.0) -> None:
         """Brief: Schedule a process restart by delivering SIGHUP.
@@ -2489,7 +2242,9 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         runtime_state: object | None = None
         try:
             runtime_state = _admin_logic.get_admin_runtime_state(self._server())
-        except Exception:  # pragma: nocover - defensive against foreign server state objects
+        except (
+            Exception
+        ):  # pragma: nocover - defensive against foreign server state objects
             runtime_state = None
         set_restart = getattr(runtime_state, "set_restart_pending", None)
         if callable(set_restart):
@@ -2499,7 +2254,9 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
                     reason="threaded.restart",
                     signal_name="SIGHUP",
                 )
-            except Exception:  # pragma: nocover - best-effort restart metadata must not block signal scheduling
+            except (
+                Exception
+            ):  # pragma: nocover - best-effort restart metadata must not block signal scheduling
                 pass
         _admin_logic.add_admin_audit_event(
             runtime_state,
@@ -2561,7 +2318,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         )
         return False
 
-    def _read_admin_json_body(self) -> Dict[str, Any] | None:
+    def _read_admin_json_body(self) -> dict[str, Any] | None:
         """Brief: Parse bounded JSON body for admin action POST endpoints.
 
         Inputs:
@@ -2606,7 +2363,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         self._last_admin_json_body = dict(body)
         return body
 
-    def _save_config_to_disk(self, *, body: Dict[str, Any]) -> Dict[str, Any]:
+    def _save_config_to_disk(self, *, body: dict[str, Any]) -> dict[str, Any]:
         """Brief: Persist raw YAML to disk and validate it.
 
         Inputs:
@@ -2631,7 +2388,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             raise ValueError("config_path not configured")
 
         cfg_path_abs = os.path.abspath(cfg_path)
-        ts = datetime.now(timezone.utc).isoformat().replace(":", "-")
+        ts = datetime.now(UTC).isoformat().replace(":", "-")
         backup_path = f"{cfg_path_abs}.bak.{ts}"
         upload_path = f"{cfg_path_abs}.new"
 
@@ -2696,7 +2453,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         }
 
     def _handle_config_save(
-        self, body: Dict[str, Any]
+        self, body: dict[str, Any]
     ) -> None:  # pragma: no cover - threaded /config/save mirrors FastAPI endpoint
         """Brief: Handle POST /config/save to persist config without applying it.
 
@@ -2747,7 +2504,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             },
         )
 
-    def _handle_config_save_and_reload(self, body: Dict[str, Any]) -> None:
+    def _handle_config_save_and_reload(self, body: dict[str, Any]) -> None:
         """Brief: Handle POST /config/save_and_reload to save and reload when possible.
 
         Inputs:
@@ -2803,8 +2560,8 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         if reload_res.ok:
             try:
                 snap = _runtime_config.get_runtime_snapshot()
-                setattr(self._server(), "config", snap.cfg)
-                setattr(self._server(), "plugins", list(snap.plugins or []))
+                self._server().config = snap.cfg
+                self._server().plugins = list(snap.plugins or [])
             except Exception:
                 pass
 
@@ -2860,7 +2617,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             },
         )
 
-    def _handle_config_save_and_restart(self, body: Dict[str, Any]) -> None:
+    def _handle_config_save_and_restart(self, body: dict[str, Any]) -> None:
         """Brief: Handle POST /config/save_and_restart to save config then restart.
 
         Inputs:
@@ -2960,8 +2717,8 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         if reload_res.ok:
             try:
                 snap = _runtime_config.get_runtime_snapshot()
-                setattr(self._server(), "config", snap.cfg)
-                setattr(self._server(), "plugins", list(snap.plugins or []))
+                self._server().config = snap.cfg
+                self._server().plugins = list(snap.plugins or [])
             except Exception:
                 pass
 
@@ -3056,8 +2813,8 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         if reload_res.ok:
             try:
                 snap = _runtime_config.get_runtime_snapshot()
-                setattr(self._server(), "config", snap.cfg)
-                setattr(self._server(), "plugins", list(snap.plugins or []))
+                self._server().config = snap.cfg
+                self._server().plugins = list(snap.plugins or [])
             except Exception:
                 pass
 
@@ -3256,7 +3013,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         *,
         method: str,
         path: str,
-        params: Dict[str, list[str]],
+        params: dict[str, list[str]],
         duration_ms: float,
         error_text: str | None = None,
     ) -> None:
@@ -3280,7 +3037,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         status_code = int(status_obj) if isinstance(status_obj, int) else None
         body_obj = getattr(self, "_last_admin_json_body", None)
         headers_obj = {k: v for k, v in self.headers.items()}
-        normalized_query: Dict[str, Any] = {}
+        normalized_query: dict[str, Any] = {}
         for key, values in dict(params or {}).items():
             if isinstance(values, list):
                 if not values:
@@ -3364,9 +3121,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
 
     def do_OPTIONS(
         self,
-    ) -> (
-        None
-    ):  # noqa: N802  # pragma: nocover - [low-level HTTP verb handler for fallback server]
+    ) -> None:  # pragma: nocover - [low-level HTTP verb handler for fallback server]
         """Brief: Handle CORS preflight requests.
 
         Inputs: none
@@ -3560,7 +3315,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             },
         )
 
-    def _handle_cache_table(self, path: str, params: Dict[str, list[str]]) -> None:
+    def _handle_cache_table(self, path: str, params: dict[str, list[str]]) -> None:
         """Brief: Handle GET /api/v1/cache/table/{table_id}.
 
         Inputs:
@@ -3675,7 +3430,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         payload["table_id"] = str(table_id)
         self._send_json(200, payload)
 
-    def _handle_plugin_table(self, path: str, params: Dict[str, list[str]]) -> None:
+    def _handle_plugin_table(self, path: str, params: dict[str, list[str]]) -> None:
         """Brief: Handle GET /api/v1/plugins/{plugin_name}/table/{table_id}.
 
         Inputs:
@@ -3852,7 +3607,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             },
         )
 
-    def _handle_plugin_api_get(self, path: str, params: Dict[str, list[str]]) -> bool:
+    def _handle_plugin_api_get(self, path: str, params: dict[str, list[str]]) -> bool:
         """Brief: Handle expanded plugin GET endpoints under /api/v1/plugins/{name}/.
 
         Inputs:
@@ -3965,10 +3720,12 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
                 )
             elif endpoint.startswith("zone_records/dns_update/zones/"):
                 zone = endpoint[len("zone_records/dns_update/zones/") :].strip()
-                payload = _admin_logic.build_plugin_zone_records_dns_update_zone_payload(
-                    plugins_list,
-                    plugin_name,
-                    zone=zone,
+                payload = (
+                    _admin_logic.build_plugin_zone_records_dns_update_zone_payload(
+                        plugins_list,
+                        plugin_name,
+                        zone=zone,
+                    )
                 )
             elif endpoint == "upstream_router/evaluate":
                 payload = _admin_logic.build_plugin_upstream_evaluate_payload(
@@ -3988,6 +3745,57 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         payload["server_time"] = _utc_now_iso()
         self._send_json(200, _json_safe(payload))
         return True
+
+    def _handle_named_plugin_snapshot(
+        self, path: str, *, suffix: str, label: str
+    ) -> None:
+        """Brief: Handle GET named-plugin snapshot endpoints with shared logic.
+
+        Inputs:
+          - path: Full request path.
+          - suffix: Route suffix (for example '/docker_hosts').
+          - label: Plugin label passed to build_named_plugin_snapshot().
+
+        Outputs:
+          - None (sends JSON response with snapshot or error).
+        """
+
+        if not self._require_auth():
+            return
+        prefix = "/api/v1/plugins/"
+        raw_segment = path[len(prefix) : -len(str(suffix))]
+        plugin_name = raw_segment.strip("/")
+        if self._is_plugin_api_disabled(plugin_name):
+            self._send_json(
+                404,
+                {
+                    "detail": f"plugin API disabled for '{plugin_name}'",
+                    "server_time": _utc_now_iso(),
+                },
+            )
+            return
+        plugins_list = self._filter_plugins_for_api(
+            getattr(self._server(), "plugins", []) or []
+        )
+        try:
+            snap = _admin_logic.build_named_plugin_snapshot(
+                plugins_list, plugin_name, label=label
+            )
+        except _admin_logic.AdminLogicHttpError as exc:
+            self._send_json(
+                exc.status_code,
+                {"detail": exc.detail, "server_time": _utc_now_iso()},
+            )
+            return
+
+        self._send_json(
+            200,
+            {
+                "server_time": _utc_now_iso(),
+                "plugin": snap["plugin"],
+                "data": _json_safe(snap["data"]),
+            },
+        )
 
     def _handle_plugin_api_post(self, path: str) -> bool:
         """Brief: Handle plugin POST endpoints under /api/v1/plugins/{name}/.
@@ -4029,9 +3837,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         try:
             if endpoint in {"etc_hosts/reload", "docker_hosts/reload"}:
                 plugin_kind = (
-                    "etc_hosts"
-                    if endpoint.startswith("etc_hosts/")
-                    else "docker_hosts"
+                    "etc_hosts" if endpoint.startswith("etc_hosts/") else "docker_hosts"
                 )
                 payload = _admin_logic.build_plugin_reload_payload(
                     plugins_list,
@@ -4086,43 +3892,10 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
           - None (sends JSON response with snapshot or error).
         """
 
-        if not self._require_auth():
-            return
-        # Extract plugin_name between the fixed prefix and suffix.
-        prefix = "/api/v1/plugins/"
-        suffix = "/docker_hosts"
-        raw_segment = path[len(prefix) : -len(suffix)]
-        plugin_name = raw_segment.strip("/")
-        if self._is_plugin_api_disabled(plugin_name):
-            self._send_json(
-                404,
-                {
-                    "detail": f"plugin API disabled for '{plugin_name}'",
-                    "server_time": _utc_now_iso(),
-                },
-            )
-            return
-        plugins_list = self._filter_plugins_for_api(
-            getattr(self._server(), "plugins", []) or []
-        )
-        try:
-            snap = _admin_logic.build_named_plugin_snapshot(
-                plugins_list, plugin_name, label="DockerHosts"
-            )
-        except _admin_logic.AdminLogicHttpError as exc:
-            self._send_json(
-                exc.status_code,
-                {"detail": exc.detail, "server_time": _utc_now_iso()},
-            )
-            return
-
-        self._send_json(
-            200,
-            {
-                "server_time": _utc_now_iso(),
-                "plugin": snap["plugin"],
-                "data": _json_safe(snap["data"]),
-            },
+        self._handle_named_plugin_snapshot(
+            path,
+            suffix="/docker_hosts",
+            label="DockerHosts",
         )
 
     def _handle_mdns_snapshot(self, path: str) -> None:
@@ -4135,42 +3908,10 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
           - None (sends JSON response with snapshot or error).
         """
 
-        if not self._require_auth():
-            return
-        prefix = "/api/v1/plugins/"
-        suffix = "/mdns"
-        raw_segment = path[len(prefix) : -len(suffix)]
-        plugin_name = raw_segment.strip("/")
-        if self._is_plugin_api_disabled(plugin_name):
-            self._send_json(
-                404,
-                {
-                    "detail": f"plugin API disabled for '{plugin_name}'",
-                    "server_time": _utc_now_iso(),
-                },
-            )
-            return
-        plugins_list = self._filter_plugins_for_api(
-            getattr(self._server(), "plugins", []) or []
-        )
-        try:
-            snap = _admin_logic.build_named_plugin_snapshot(
-                plugins_list, plugin_name, label="MdnsBridge"
-            )
-        except _admin_logic.AdminLogicHttpError as exc:
-            self._send_json(
-                exc.status_code,
-                {"detail": exc.detail, "server_time": _utc_now_iso()},
-            )
-            return
-
-        self._send_json(
-            200,
-            {
-                "server_time": _utc_now_iso(),
-                "plugin": snap["plugin"],
-                "data": _json_safe(snap["data"]),
-            },
+        self._handle_named_plugin_snapshot(
+            path,
+            suffix="/mdns",
+            label="MdnsBridge",
         )
 
     def _handle_etc_hosts_snapshot(self, path: str) -> None:
@@ -4183,42 +3924,10 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
           - None (sends JSON response with snapshot or error).
         """
 
-        if not self._require_auth():
-            return
-        prefix = "/api/v1/plugins/"
-        suffix = "/etc_hosts"
-        raw_segment = path[len(prefix) : -len(suffix)]
-        plugin_name = raw_segment.strip("/")
-        if self._is_plugin_api_disabled(plugin_name):
-            self._send_json(
-                404,
-                {
-                    "detail": f"plugin API disabled for '{plugin_name}'",
-                    "server_time": _utc_now_iso(),
-                },
-            )
-            return
-        plugins_list = self._filter_plugins_for_api(
-            getattr(self._server(), "plugins", []) or []
-        )
-        try:
-            snap = _admin_logic.build_named_plugin_snapshot(
-                plugins_list, plugin_name, label="EtcHosts"
-            )
-        except _admin_logic.AdminLogicHttpError as exc:
-            self._send_json(
-                exc.status_code,
-                {"detail": exc.detail, "server_time": _utc_now_iso()},
-            )
-            return
-
-        self._send_json(
-            200,
-            {
-                "server_time": _utc_now_iso(),
-                "plugin": snap["plugin"],
-                "data": _json_safe(snap["data"]),
-            },
+        self._handle_named_plugin_snapshot(
+            path,
+            suffix="/etc_hosts",
+            label="EtcHosts",
         )
 
     def _handle_access_control_snapshot(self, path: str) -> None:
@@ -4231,42 +3940,10 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
           - None (sends JSON response with snapshot or error).
         """
 
-        if not self._require_auth():
-            return
-        prefix = "/api/v1/plugins/"
-        suffix = "/access_control"
-        raw_segment = path[len(prefix) : -len(suffix)]
-        plugin_name = raw_segment.strip("/")
-        if self._is_plugin_api_disabled(plugin_name):
-            self._send_json(
-                404,
-                {
-                    "detail": f"plugin API disabled for '{plugin_name}'",
-                    "server_time": _utc_now_iso(),
-                },
-            )
-            return
-        plugins_list = self._filter_plugins_for_api(
-            getattr(self._server(), "plugins", []) or []
-        )
-        try:
-            snap = _admin_logic.build_named_plugin_snapshot(
-                plugins_list, plugin_name, label="AccessControl"
-            )
-        except _admin_logic.AdminLogicHttpError as exc:
-            self._send_json(
-                exc.status_code,
-                {"detail": exc.detail, "server_time": _utc_now_iso()},
-            )
-            return
-
-        self._send_json(
-            200,
-            {
-                "server_time": _utc_now_iso(),
-                "plugin": snap["plugin"],
-                "data": _json_safe(snap["data"]),
-            },
+        self._handle_named_plugin_snapshot(
+            path,
+            suffix="/access_control",
+            label="AccessControl",
         )
 
     def _handle_rate_limit_snapshot(self, path: str) -> None:
@@ -4279,49 +3956,15 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
           - None (sends JSON response with snapshot or error).
         """
 
-        if not self._require_auth():
-            return
-        prefix = "/api/v1/plugins/"
-        suffix = "/rate_limit"
-        raw_segment = path[len(prefix) : -len(suffix)]
-        plugin_name = raw_segment.strip("/")
-        if self._is_plugin_api_disabled(plugin_name):
-            self._send_json(
-                404,
-                {
-                    "detail": f"plugin API disabled for '{plugin_name}'",
-                    "server_time": _utc_now_iso(),
-                },
-            )
-            return
-        plugins_list = self._filter_plugins_for_api(
-            getattr(self._server(), "plugins", []) or []
-        )
-        try:
-            snap = _admin_logic.build_named_plugin_snapshot(
-                plugins_list, plugin_name, label="RateLimit"
-            )
-        except _admin_logic.AdminLogicHttpError as exc:
-            self._send_json(
-                exc.status_code,
-                {"detail": exc.detail, "server_time": _utc_now_iso()},
-            )
-            return
-
-        self._send_json(
-            200,
-            {
-                "server_time": _utc_now_iso(),
-                "plugin": snap["plugin"],
-                "data": _json_safe(snap["data"]),
-            },
+        self._handle_named_plugin_snapshot(
+            path,
+            suffix="/rate_limit",
+            label="RateLimit",
         )
 
     def do_GET(
         self,
-    ) -> (
-        None
-    ):  # noqa: N802  # pragma: no cover - low-level HTTP verb handler for fallback server
+    ) -> None:  # pragma: no cover - low-level HTTP verb handler for fallback server
         """Brief: Dispatch GET requests to admin endpoints.
 
         Inputs: none
@@ -4361,112 +4004,155 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
                     self._send_text(404, "not found")
                     return
 
-        if path == "/openapi.json":
-            self._handle_openapi_json()
-        elif path == "/docs":
-            self._handle_docs()
-        elif path == "/docs/oauth2-redirect":
-            self._handle_docs_oauth2_redirect()
-        elif path in {"/health", "/api/v1/health"}:
-            self._handle_health()
-        elif path in {"/about", "/api/v1/about"}:
-            self._handle_about()
-        elif path in {"/ready", "/api/v1/ready"}:
-            self._handle_ready()
-        elif path in {"/stats", "/api/v1/stats"}:
-            self._handle_stats(params)
-        elif path.startswith("/api/v1/stats/table/"):
-            self._handle_stats_table(path, params)
-        elif path == "/api/v1/cache":
-            self._handle_cache_snapshot()
-        elif path.startswith("/api/v1/cache/table/"):
-            self._handle_cache_table(path, params)
-        elif path.startswith("/api/v1/plugins/") and "/table/" in path:
-            self._handle_plugin_table(path, params)
-        elif path in {"/traffic", "/api/v1/traffic"}:
-            self._handle_traffic(params)
-        elif path in {"/config", "/api/v1/config"}:
-            self._handle_config()
-        elif path in {"/config.json", "/api/v1/config.json"}:
-            self._handle_config_json()
-        elif path in {"/config/raw", "/api/v1/config/raw"}:
-            self._handle_config_raw()
-        elif path in {"/config/raw.json", "/api/v1/config/raw.json"}:
-            self._handle_config_raw_json()
-        elif path in {"/config/schema", "/api/v1/config/schema"}:
-            self._handle_config_schema()
-        elif path in {"/api/v1/config/diagram.png", "/config/diagram.png"}:
-            self._handle_config_diagram_png(params)
-        elif path in {"/api/v1/config/diagram-dark.png", "/config/diagram-dark.png"}:
-            self._handle_config_diagram_png_dark(params)
-        elif path in {"/api/v1/config/diagram.dot", "/config/diagram.dot"}:
-            self._handle_config_diagram_dot(params)
-        elif path in {"/logs", "/api/v1/logs"}:
-            self._handle_logs(params)
-        elif path in {"/query_log", "/api/v1/query_log"}:
-            self._handle_query_log(params)
-        elif path in {"/api/v1/query_log/aggregate", "/query_log/aggregate"}:
-            self._handle_query_log_aggregate(params)
-        elif path == "/api/v1/admin/status":
-            self._handle_admin_status()
-        elif path == "/api/v1/admin/capabilities":
-            self._handle_admin_capabilities()
-        elif path == "/api/v1/admin/audit":
-            self._handle_admin_audit(params)
-        elif path == "/api/v1/admin/restart/status":
-            self._handle_admin_restart_status()
-        elif path == "/api/v1/admin/tasks":
-            self._handle_admin_tasks(params)
-        elif path == "/api/v1/admin/rate_limit/hot_keys":
-            self._handle_admin_rate_limit_hot_keys(params)
-        elif path == "/api/v1/admin/version/compat":
-            self._handle_admin_version_compat()
-        elif path == "/api/v1/admin/diag/runtime-snapshot":
-            self._handle_admin_diag_runtime_snapshot()
-        elif path == "/api/v1/admin/rate_limit/keys":
-            self._handle_admin_rate_limit_keys(params)
-        elif path == "/api/v1/upstream_status":
-            self._handle_upstream_status()
-        elif path == "/api/v1/ratelimit":
+        def _handle_rate_limit_stats_get() -> None:
+            """Brief: Handle GET /api/v1/ratelimit.
+
+            Inputs: none
+            Outputs: None (sends JSON response).
+            """
+
             if not self._require_auth():
                 return
-            # Rate-limit statistics are derived from config and sqlite profile DBs.
-            cfg = getattr(self._server(), "config", None)
-            plugins_list = getattr(self._server(), "plugins", None)
-            data = _collect_rate_limit_stats(cfg, plugins=plugins_list)
-            data["server_time"] = _utc_now_iso()
-            self._send_json(200, data)
-        elif path == "/api/v1/plugin_pages":
-            self._handle_plugin_pages_list()
-        elif path == "/api/v1/plugins/ui":
-            self._handle_plugins_ui_descriptors()
-        elif path.startswith("/api/v1/plugin_pages/"):
-            self._handle_plugin_page_detail_route(path)
-        elif self._handle_plugin_api_get(path, params):
+            status_code, payload = _endpoint_services.build_rate_limit_result(
+                config=getattr(self._server(), "config", None),
+                plugins=getattr(self._server(), "plugins", None),
+                collect_stats=_collect_rate_limit_stats,
+            )
+            self._send_json(int(status_code), payload)
+
+        if path == "/api/v1/ratelimit":
+            return _handle_rate_limit_stats_get()
+        static_handler_name = self.HTTP_GET_MAP_STATIC.get(path)
+        if static_handler_name:
+            return getattr(self, static_handler_name)()
+        param_handler_name = self.HTTP_GET_MAP_PARAM.get(path)
+        if param_handler_name:
+            return getattr(self, param_handler_name)(params)
+
+        # Prefix and special routes
+        if path.startswith("/api/v1/stats/table/"):
+            return self._handle_stats_table(path, params)
+        if path.startswith("/api/v1/cache/table/"):
+            return self._handle_cache_table(path, params)
+        if path.startswith("/api/v1/plugins/") and "/table/" in path:
+            return self._handle_plugin_table(path, params)
+
+        def _dispatch_if_path_matches(
+            route_paths: set[str],
+            handler: Any,
+            *,
+            pass_params: bool = False,
+        ) -> bool:
+            """Brief: Invoke handler when the request path matches any alias.
+
+            Inputs:
+              - route_paths: Alias paths that map to one handler.
+              - handler: Bound handler callable to invoke.
+              - pass_params: Whether to pass parsed query parameters.
+
+            Outputs:
+              - True when a matching route was dispatched, else False.
+            """
+
+            if path not in route_paths:
+                return False
+            if pass_params:
+                handler(params)
+            else:
+                handler()
+            return True
+
+        if _dispatch_if_path_matches(
+            {"/traffic", "/api/v1/traffic"},
+            self._handle_traffic,
+            pass_params=True,
+        ):
             return
-        elif path.startswith("/api/v1/plugins/") and path.endswith("/docker_hosts"):
-            self._handle_docker_hosts_snapshot(path)
-        elif path.startswith("/api/v1/plugins/") and path.endswith("/mdns"):
-            self._handle_mdns_snapshot(path)
-        elif path.startswith("/api/v1/plugins/") and path.endswith("/etc_hosts"):
-            self._handle_etc_hosts_snapshot(path)
-        elif path.startswith("/api/v1/plugins/") and path.endswith("/access_control"):
-            self._handle_access_control_snapshot(path)
-        elif path.startswith("/api/v1/plugins/") and path.endswith("/rate_limit"):
-            self._handle_rate_limit_snapshot(path)
-        elif path in {"/", "/index.html"}:
-            self._handle_index()
-        else:
-            # As a last resort, try to serve from html/ if the file exists.
-            if self._try_serve_www(path):
-                return
-            self._send_text(404, "not found")
+        if _dispatch_if_path_matches(
+            {"/config", "/api/v1/config"}, self._handle_config
+        ):
+            return
+        if _dispatch_if_path_matches(
+            {"/config.json", "/api/v1/config.json"},
+            self._handle_config_json,
+        ):
+            return
+        if _dispatch_if_path_matches(
+            {"/config/raw", "/api/v1/config/raw"},
+            self._handle_config_raw,
+        ):
+            return
+        if _dispatch_if_path_matches(
+            {"/config/raw.json", "/api/v1/config/raw.json"},
+            self._handle_config_raw_json,
+        ):
+            return
+        if _dispatch_if_path_matches(
+            {"/config/schema", "/api/v1/config/schema"},
+            self._handle_config_schema,
+        ):
+            return
+        if _dispatch_if_path_matches(
+            {"/api/v1/config/diagram.png", "/config/diagram.png"},
+            self._handle_config_diagram_png,
+            pass_params=True,
+        ):
+            return
+        if _dispatch_if_path_matches(
+            {"/api/v1/config/diagram-dark.png", "/config/diagram-dark.png"},
+            self._handle_config_diagram_png_dark,
+            pass_params=True,
+        ):
+            return
+        if _dispatch_if_path_matches(
+            {"/api/v1/config/diagram.dot", "/config/diagram.dot"},
+            self._handle_config_diagram_dot,
+            pass_params=True,
+        ):
+            return
+        if _dispatch_if_path_matches(
+            {"/logs", "/api/v1/logs"},
+            self._handle_logs,
+            pass_params=True,
+        ):
+            return
+        if _dispatch_if_path_matches(
+            {"/query_log", "/api/v1/query_log"},
+            self._handle_query_log,
+            pass_params=True,
+        ):
+            return
+        if _dispatch_if_path_matches(
+            {"/api/v1/query_log/aggregate", "/query_log/aggregate"},
+            self._handle_query_log_aggregate,
+            pass_params=True,
+        ):
+            return
+        if path.startswith("/api/v1/plugin_pages/"):
+            return self._handle_plugin_page_detail_route(path)
+        # plugin named snapshots and plugin-specific suffix-based routes
+        for suffix, label in [
+            ("/docker_hosts", "DockerHosts"),
+            ("/mdns", "MdnsBridge"),
+            ("/etc_hosts", "EtcHosts"),
+            ("/access_control", "AccessControl"),
+            ("/rate_limit", "RateLimit"),
+        ]:
+            if path.startswith("/api/v1/plugins/") and path.endswith(suffix):
+                return self._handle_named_plugin_snapshot(
+                    path, suffix=suffix, label=label
+                )
+        # plugin expanded GET handlers
+        if self._handle_plugin_api_get(path, params):
+            return
+        # fallback to static
+        if self._try_serve_www(path):
+            return
+        self._send_text(404, "not found")
 
     def do_POST(
         self,
-    ) -> (
-        None
-    ):  # noqa: N802  # pragma: no cover - low-level HTTP verb handler for fallback server
+    ) -> None:  # pragma: no cover - low-level HTTP verb handler for fallback server
         """Brief: Dispatch POST requests to admin endpoints.
 
         Inputs: none
@@ -4485,51 +4171,39 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             self._send_text(404, "not found")
             return
 
-        if path in {"/stats/reset", "/api/v1/stats/reset"}:
-            self._handle_stats_reset()
-        elif path == "/api/v1/admin/audit/clear":
-            self._handle_admin_audit_clear()
-        elif path == "/api/v1/admin/config/verify":
+        def _dispatch_json_body(handler: Any) -> None:
+            """Brief: Parse JSON body and call a one-arg handler.
+
+            Inputs:
+              - handler: Callable that accepts parsed body dict.
+
+            Outputs:
+              - None.
+            """
+
             body = self._read_admin_json_body()
             if body is None:
                 return
-            self._handle_admin_config_verify(body)
-        elif path == "/api/v1/admin/config/diff":
-            body = self._read_admin_json_body()
-            if body is None:
-                return
-            self._handle_admin_config_diff(body)
-        elif path == "/api/v1/admin/config/lint":
-            body = self._read_admin_json_body()
-            if body is None:
-                return
-            self._handle_admin_config_lint(body)
-        elif path == "/api/v1/admin/query_log/clear":
-            body = self._read_admin_json_body()
-            if body is None:
-                return
-            self._handle_admin_query_log_clear(body)
-        elif path == "/api/v1/admin/query_log/export":
-            body = self._read_admin_json_body()
-            if body is None:
-                return
-            self._handle_admin_query_log_export(body)
-        elif path == "/api/v1/admin/query_log/compact":
-            body = self._read_admin_json_body()
-            if body is None:
-                return
-            self._handle_admin_query_log_compact(body)
-        elif path == "/api/v1/admin/rate_limit/clear":
-            body = self._read_admin_json_body()
-            if body is None:
-                return
-            self._handle_admin_rate_limit_clear(body)
-        elif path == "/api/v1/admin/rate_limit/reset_counters":
-            body = self._read_admin_json_body()
-            if body is None:
-                return
-            self._handle_admin_rate_limit_reset_counters(body)
-        elif path.startswith("/api/v1/admin/records/"):
+            handler(body)
+
+        def _read_authed_admin_json_body() -> dict[str, Any] | None:
+            """Brief: Enforce auth then parse bounded JSON request body.
+
+            Inputs: none.
+            Outputs: Parsed body dict or None when request handling already replied.
+            """
+
+            if not self._require_auth():
+                return None
+            return self._read_admin_json_body()
+
+        post_no_body_handler_name = self.HTTP_POST_MAP_NO_BODY.get(path)
+        if post_no_body_handler_name:
+            return getattr(self, post_no_body_handler_name)()
+        post_json_handler_name = self.HTTP_POST_MAP_JSON_BODY.get(path)
+        if post_json_handler_name:
+            return _dispatch_json_body(getattr(self, post_json_handler_name))
+        if path.startswith("/api/v1/admin/records/"):
             suffix = path[len("/api/v1/admin/records/") :]
             parts = [p for p in suffix.split("/") if p]
             if len(parts) != 2:
@@ -4540,7 +4214,8 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             if body is None:
                 return
             self._handle_admin_records_action(target=target, action=action, body=body)
-        elif path in {"/api/v1/config/diagram.png", "/config/diagram.png"}:
+            return
+        if path in {"/api/v1/config/diagram.png", "/config/diagram.png"}:
             if not self._require_auth():
                 return
             raw_body = self._read_request_body_limited(
@@ -4550,7 +4225,8 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             if raw_body is None:
                 return
             self._handle_config_diagram_png_upload(raw_body)
-        elif path in {
+            return
+        if path in {
             "/config/save",
             "/api/v1/config/save",
             "/config/save_and_reload",
@@ -4558,61 +4234,25 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             "/config/save_and_restart",
             "/api/v1/config/save_and_restart",
         }:
-            if not self._require_auth():
+            body = _read_authed_admin_json_body()
+            if body is None:
                 return
-            raw_body = self._read_request_body_limited(
-                max_bytes=int(MAX_ADMIN_JSON_BODY_BYTES),
-                too_large_detail=(
-                    f"request body too large (max {int(MAX_ADMIN_JSON_BODY_BYTES):,} bytes)"
-                ),
-            )
-            if raw_body is None:
+            config_save_handlers: dict[str, Any] = {
+                "/config/save": self._handle_config_save,
+                "/api/v1/config/save": self._handle_config_save,
+                "/config/save_and_reload": self._handle_config_save_and_reload,
+                "/api/v1/config/save_and_reload": self._handle_config_save_and_reload,
+                "/config/save_and_restart": self._handle_config_save_and_restart,
+                "/api/v1/config/save_and_restart": self._handle_config_save_and_restart,
+            }
+            handler = config_save_handlers.get(path)
+            if handler is None:
+                self._send_text(404, "not found")
                 return
-            try:
-                body = json.loads(raw_body.decode("utf-8") or "{}")
-            except Exception:
-                self._send_json(
-                    400,
-                    {
-                        "detail": "invalid JSON body",
-                        "server_time": _utc_now_iso(),
-                    },
-                )
-                return
-            if not isinstance(body, dict):
-                self._send_json(
-                    400,
-                    {
-                        "detail": "request body must be a JSON object",
-                        "server_time": _utc_now_iso(),
-                    },
-                )
-                return
-            self._last_admin_json_body = dict(body)
-            if path in {"/config/save", "/api/v1/config/save"}:
-                self._handle_config_save(body)
-            elif path in {"/config/save_and_reload", "/api/v1/config/save_and_reload"}:
-                self._handle_config_save_and_reload(body)
-            else:
-                self._handle_config_save_and_restart(body)
-        elif path in {
-            "/config/reload",
-            "/api/v1/config/reload",
-            "/reload",
-            "/api/v1/reload",
-        }:
-            self._handle_config_reload()
-        elif path in {
-            "/config/reload_reloadable",
-            "/api/v1/config/reload_reloadable",
-            "/reload_reloadable",
-            "/api/v1/reload_reloadable",
-        }:
-            self._handle_config_reload_reloadable()
-        elif path in {"/restart", "/api/v1/restart"}:
-            if not self._require_auth():
-                return
-            body = self._read_admin_json_body()
+            handler(body)
+            return
+        if path in {"/restart", "/api/v1/restart"}:
+            body = _read_authed_admin_json_body()
             if body is None:
                 return
             delay_seconds = 1.0
@@ -4634,14 +4274,14 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
                     },
                 },
             )
-        elif self._handle_plugin_api_post(path):
             return
-        else:
-            self._send_text(404, "not found")
+        if self._handle_plugin_api_post(path):
+            return
+        self._send_text(404, "not found")
 
     def log_message(
         self, format: str, *args: Any
-    ) -> None:  # noqa: A003  # pragma: no cover - logging-only fallback path
+    ) -> None:  # pragma: no cover - logging-only fallback path
         """Brief: Suppress BaseHTTPRequestHandler's default request logging.
 
         Note: This implementation is intentionally quiet (no-op) during normal
