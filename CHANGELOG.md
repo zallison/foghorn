@@ -5,6 +5,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 ### Added
+- Added `server.features.refuse_any` to refuse QTYPE ANY queries with `REFUSED` as an optional amplification mitigation.
+- Added recursive next-hop destination controls `server.resolver.allow_private_destinations` (default `true` for split-horizon) and `server.resolver.destination_allowlist` for optional private-glue filtering.
+- Added stats persistence cardinality caps (`stats.max_store_clients`, `max_store_domains`, `max_store_subdomains`, `max_store_qtype_qnames`) to bound distinct identity keys written to stats backends.
+- Threaded TCP listeners now enforce the same connection/query/idle hardening knobs as asyncio TCP (`max_connections`, `max_connections_per_ip`, `max_queries_per_connection`, `idle_timeout_seconds`).
 - Added shared database driver helpers in `src/foghorn/plugins/db_drivers.py` for MQTT, MongoDB, PostgreSQL, and MySQL import/fallback selection used by cache and query-log backends.
 - Added shared query-log domain helpers in `src/foghorn/plugins/querylog/common.py` (`normalize_domain`, `is_subdomain`).
 - Added shared web endpoint service builders in `src/foghorn/servers/webserver/endpoint_services.py` for health/about/ready, stats/traffic/logs, admin actions, rate-limit, and config/diagram payloads.
@@ -45,6 +49,7 @@ All notable changes to this project will be documented in this file.
 - Admin plugin/cache paged tables now retain active search text, sort selection, page size, and enabled filters across auto-refresh cycles, preventing view resets while monitoring mDNS and other plugin pages.
 
 ### Tests
+- Added security-hardening regression coverage for threaded TCP connection/query caps, `refuse_any`, recursive destination allowlisting, and stats store cardinality caps (`tests/servers/test_tcp_threaded_limits.py`, `tests/test_security_hardening_batch.py`).
 - Updated MySQL/PostgreSQL cache TTL backend tests and MQTT/MySQL/SQLite query-log backend tests to import shared `db_drivers` and `querylog.common` helpers.
 - Added `tests/servers/test_api_request_audit.py` coverage for redaction behavior and append-only trigger enforcement.
 - Added FastAPI and threaded integration tests to verify API request audit row insertion and sensitive field redaction.
@@ -60,6 +65,9 @@ All notable changes to this project will be documented in this file.
 - Added startup warning regression coverage for `foghorn.main` security-warning helper paths, DNSSEC missing-dependency warning logging, and statistics retention warning logging (`tests/test_main_security_warnings.py`).
 - Added webserver startup warning regression coverage for public plaintext admin binds, public OpenAPI/docs exposure, permissive public CORS, and public threaded fallback warnings (`tests/test_webserver.py`).
 - Added API audit startup warning coverage for implicit `api_request_audit` defaults (`tests/servers/test_api_request_audit.py`).
+
+### Documentation
+- Documented `server.features.refuse_any`, recursive destination policy knobs, threaded TCP hardening parity, and `stats.max_store_*` cardinality caps in README, example configs, and query-log hardening docs.
 
 ## 0.7.1
 ### Added
