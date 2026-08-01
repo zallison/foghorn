@@ -23,6 +23,10 @@ server:
     # This is only for restricted environments where asyncio is unavailable.
     allow_unsafe_threaded_listeners: false
 
+    # Bounded background executor for cache refresh / NOTIFY-style work.
+    bg_executor_workers: 4
+    bg_executor_max_pending: 128
+
   # ----- Listener configuration -----
   listen:
     # Global listener overload response policy. Applies to listeners unless
@@ -53,7 +57,7 @@ server:
       # Overload policy used for connection-limit rejections.
       overload_response: drop # servfail | refused | drop
 
-      # Connection hardening (asyncio TCP listener only)
+      # Connection hardening (asyncio and threaded TCP listeners)
       max_connections: 1024
       max_connections_per_ip: 64
       max_queries_per_connection: 100
@@ -113,6 +117,9 @@ server:
 
     # Recursive-only tuning (default is 12 for better DoS resistance)
     max_depth: 12
+    # Keep true for split-horizon; set false to skip private next-hop glue.
+    allow_private_destinations: true
+    destination_allowlist: []
 
     # Master switch for asyncio-based listeners and uvicorn-based admin/DoH.
     # When false, threaded fallbacks are used where available.
@@ -142,6 +149,7 @@ server:
   features:
     enable_ede: false     # Extended DNS Errors
     forward_local: false  # Forward requests for .local upstream?
+    refuse_any: false     # Refuse QTYPE ANY (amplification mitigation)
     ecs:
       enabled: false
       forward_inbound: false
@@ -198,6 +206,8 @@ server:
     auth:
       # none | token
       mode: none
+      # When mode=token and token is null/blank, Foghorn generates a random
+      # 32-character token at startup and logs it as a WARNING.
       token: null
 
     # Keys that will be redacted in /config and /config.json outputs.
@@ -221,5 +231,13 @@ logging:
 
 stats:
   enabled: false
+  # Caps for distinct identity keys mirrored into a persistence backend.
+  # Totals/qtypes are unaffected. Set 0 to disable a given cap.
+  max_unique_clients: 50000
+  max_unique_domains: 50000
+  max_store_clients: 50000
+  max_store_domains: 50000
+  max_store_subdomains: 50000
+  max_store_qtype_qnames: 50000
 
 plugins: []

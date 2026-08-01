@@ -231,6 +231,8 @@ Other newer or specialized DNS-related RFCs not listed above should be assumed
 - Negative and referral caching follow RFC 2308 semantics for SOA/NS-based TTLs.
 - DNSSEC is best used in **passthrough/upstream-validated** mode for now; local validation exists but is experimental.
 - Advanced DNS extensions (cookies, extended errors, DoQ, ODoH) are out of scope at present.
+- Operators may optionally refuse QTYPE ANY via `server.features.refuse_any: true` as an amplification-reduction policy (not required by RFCs).
+- Recursive mode defaults to allowing private next-hop glue for split-horizon deployments; set `server.resolver.allow_private_destinations: false` to skip non-global glue with optional `destination_allowlist` exceptions.
 - Zone transfers are supported in a **limited form**: the `ZoneRecords` plugin
   can optionally perform AXFR at startup to hydrate or refresh authoritative
   zones, and Foghorn can answer AXFR/IXFR queries for zones served by

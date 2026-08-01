@@ -38,6 +38,12 @@ When `server.http.auth.mode: token` is enabled, protected endpoints require *eit
 Example header:
 - `Authorization: Bearer example-token-123`
 
+If `mode: token` is set but `server.http.auth.token` is missing/blank, Foghorn
+auto-generates a random 32-character alphanumeric token at admin webserver
+startup, stores it in the in-memory config, and logs it once at WARNING so
+operators can retrieve it. Prefer setting an explicit token in config for
+production deployments.
+
 ### No-auth mode
 When `server.http.auth.mode` is not `token` (default: `none`), protected endpoints are not enforced.
 

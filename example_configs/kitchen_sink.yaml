@@ -255,6 +255,14 @@ server:
     # Shared threadpool used by asyncio listeners (TCP/DoT). Set to null to use a
     # conservative default.
     resolver_executor_workers: null
+    bg_executor_workers: 4
+    bg_executor_max_pending: 128
+    allow_unsafe_threaded_listeners: false
+
+  features:
+    enable_ede: false
+    forward_local: false
+    refuse_any: false
 
   listen:
     udp:
@@ -266,7 +274,7 @@ server:
       enabled: false
       host: 127.0.0.1
       port: 5335
-      # Connection hardening (asyncio TCP listener only)
+      # Connection hardening (asyncio and threaded TCP listeners)
       max_connections: 1024
       max_connections_per_ip: 64
       max_queries_per_connection: 100
@@ -305,7 +313,13 @@ server:
     validation: upstream_ad
     udp_payload_size: 1232
   resolver:
+    mode: forward
     timeout_ms: 2000
+    per_try_timeout_ms: 2000
+    max_depth: 12
+    # Default true preserves split-horizon recursion.
+    allow_private_destinations: true
+    destination_allowlist: []
     use_asyncio: true
   http:
     enabled: false
@@ -346,6 +360,12 @@ stats:
   track_latency: true
   force_rebuild: false
   source_backend: default-stats
+  max_unique_clients: 50000
+  max_unique_domains: 50000
+  max_store_clients: 50000
+  max_store_domains: 50000
+  max_store_subdomains: 50000
+  max_store_qtype_qnames: 50000
   ignore:
     top_clients: []
     top_domains: []

@@ -19,8 +19,14 @@ server:
       enabled: true
       host: 0.0.0.0
       port: 5353
+      max_connections: 1024
+      max_connections_per_ip: 64
+      max_queries_per_connection: 100
+      idle_timeout_seconds: 15.0
     dot:
       enabled: false
+  features:
+    refuse_any: false
   dnssec:
     mode: passthrough
     validation: upstream_ad

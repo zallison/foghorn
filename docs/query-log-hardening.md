@@ -56,3 +56,11 @@ Sampling works best when combined with:
   - `prune_every_n_inserts`
 - `logging.max_logging_queue` to bound async queue memory.
 - `logging.query_log_dedupe.window_seconds` to suppress short-window repeats.
+- `stats.max_store_clients` / `max_store_domains` / `max_store_subdomains` /
+  `max_store_qtype_qnames` to bound distinct identity keys mirrored into the
+  persistence backend (default `50000`; `0` disables a cap). These caps do not
+  stop query-log rows themselves; they limit high-cardinality aggregate counter
+  keys that can otherwise grow without bound under flood traffic.
+- Listener concurrency limits (`listen.udp.max_inflight*`,
+  `listen.tcp.max_connections*`) and a `rate` plugin for request-path shedding
+  before logs are considered.

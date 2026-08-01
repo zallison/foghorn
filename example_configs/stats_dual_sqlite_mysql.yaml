@@ -25,3 +25,8 @@ stats:
   track_latency: true
   force_rebuild: false
   source_backend: primary-sqlite
+  # Bound high-cardinality identity keys in the stats store.
+  max_store_clients: 50000
+  max_store_domains: 50000
+  max_store_subdomains: 50000
+  max_store_qtype_qnames: 50000

@@ -390,6 +390,7 @@ Without `trust-ad`, glibc clears the AD flag before handing answers to applicati
   - Includes:
     - `enable_ede`: RFC 8914 Extended DNS Errors (attach EDE options on selected synthetic responses when EDNS is present).
     - `forward_local`: allow forwarding `.local` and RFC1918 PTR lookups.
+    - `refuse_any`: when true, refuse QTYPE ANY (`255`) with `REFUSED` to reduce amplification risk (default `false`).
     - `ecs.enabled`: enable EDNS Client Subnet handling.
     - `ecs.forward_inbound`: forward inbound ECS only when it is trusted.
     - `ecs.synthesize_from_client_ip`: synthesize outbound ECS from transport source IP in forward mode.
@@ -402,6 +403,9 @@ Without `trust-ad`, glibc clears the AD flag before handing answers to applicati
 	- `forward` (default): forward to configured `upstreams`.
 	- `recursive`: walk from root servers.
 	- `master` / `none`: authoritative-only (no forwarding; cache miss -> REFUSED).
+  - Recursive destination policy (split-horizon safe defaults):
+	- `allow_private_destinations` (default `true`): when `false`, skip non-global next-hop glue (private/loopback/link-local/etc.).
+	- `destination_allowlist`: optional IP/CIDR exceptions still accepted when private destinations are blocked.
 - `server.http`
   - Admin web UI listener configuration.
 
@@ -496,6 +500,13 @@ Important fields include:
 - `enabled`: master on/off switch for statistics.
 - `source_backend`: which `logging.backends[*].id` (or backend alias) to treat
   as the primary read backend.
+- `max_unique_clients` / `max_unique_domains`: caps for in-memory unique tracking
+  (default `50000` each).
+- `max_store_clients` / `max_store_domains` / `max_store_subdomains` /
+  `max_store_qtype_qnames`: caps for distinct identity keys mirrored into the
+  persistent stats store (default `50000` each; `0` disables a given cap).
+  Totals and qtype counters are unaffected; only high-cardinality identity keys
+  are bounded to limit disk growth under flood traffic.
 
 Example:
 
@@ -923,11 +934,52 @@ Foghorn includes several built-in security protections to mitigate DoS/DDoS atta
 
 - **DoH parameter size validation**: Oversized base64-encoded DNS parameters are rejected (HTTP 413) before decoding, preventing processing of megabyte-scale payloads.
 - **Recursive resolver depth limits**: Default `max_depth` is 12 (configurable via `server.resolver.max_depth`) to limit recursion depth and prevent abuse through deep delegation chains.
+- **Recursive next-hop destination policy**: By default, recursive mode allows private next-hop glue for split-horizon networks. Set `server.resolver.allow_private_destinations: false` to skip non-global glue, with optional `server.resolver.destination_allowlist` CIDRs/IPs for exceptions.
+- **Optional QTYPE ANY refusal**: Set `server.features.refuse_any: true` to answer QTYPE ANY with `REFUSED` (reduces classic amplification answers).
 - **Upstream health cleanup**: The `DNSUDPHandler._cleanup_upstream_health()` method periodically removes stale healthy entries from the `upstream_health` tracking dictionary to prevent unbounded memory growth.
 - **Rate limiting and concurrency controls**: The `rate` plugin provides per-client or per-(client,domain) rate limiting (see below). Combined with listener connection limits (`max_connections`, `max_connections_per_ip`) and per-connection query caps (`max_queries_per_connection`), this provides defense at multiple layers.
-- **DNS response size limits**: UDP responses are capped at 1232 bytes to minimize amplification potential. DoH response sizes are also limited to large payloads.
+- **Threaded TCP hardening**: The threaded TCP fallback now honors the same connection/query/idle limits as the asyncio TCP listener (`max_connections`, `max_connections_per_ip`, `max_queries_per_connection`, `idle_timeout_seconds`).
+- **UDP response size ceiling**: UDP answers are truncated (`TC=1`) under the effective EDNS/server ceiling (default ~1232 bytes) to limit amplification.
+- **Bounded background work**: Cache-refresh / NOTIFY-style background tasks use a bounded executor (`server.limits.bg_executor_workers` / `bg_executor_max_pending`).
+- **Stats store cardinality caps**: Persistent counter keys for clients/domains/subdomains/qtype-qnames are capped via `stats.max_store_*` (default 50000) to avoid unbounded disk growth under flood traffic.
+- **Startup security warnings**: Foghorn warns on risky defaults such as exposed listeners without a rate-limit plugin, unrestricted AXFR allowlists, non-loopback DoH without TLS, ACL `default=allow`, and persistence without query-log retention.
 
-When deploying Foghorn as an authoritative or recursive resolver on exposed interfaces, consider enabling these protections and monitoring the metrics exposed via the admin UI for query patterns and error rates.
+When deploying Foghorn on exposed interfaces, enable rate limiting, consider `server.features.refuse_any: true`, configure query-log retention, and monitor metrics in the admin UI.
+
+Example security-oriented knobs:
+
+```yaml
+server:
+  features:
+    refuse_any: true
+  resolver:
+    mode: recursive
+    max_depth: 12
+    # Default true preserves split-horizon; set false to skip private glue.
+    allow_private_destinations: true
+    destination_allowlist: []
+  listen:
+    tcp:
+      max_connections: 1024
+      max_connections_per_ip: 64
+      max_queries_per_connection: 100
+      idle_timeout_seconds: 15.0
+  limits:
+    bg_executor_workers: 4
+    bg_executor_max_pending: 128
+
+stats:
+  enabled: true
+  max_store_clients: 50000
+  max_store_domains: 50000
+  max_store_subdomains: 50000
+  max_store_qtype_qnames: 50000
+
+logging:
+  query_log_retention:
+    max_records: 500000
+    days: 7
+```
 
 ### 4.8 Rate limiting (`rate`)
 

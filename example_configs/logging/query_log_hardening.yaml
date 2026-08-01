@@ -10,11 +10,24 @@
 # - stats.source_backend must point at one of logging.backends[*].id.
 
 server:
+  features:
+    # Optional amplification mitigation for open-ish listeners.
+    refuse_any: true
   listen:
     udp:
       enabled: true
       host: 0.0.0.0
       port: 53
+      max_inflight: 1024
+      max_inflight_per_ip: 64
+    tcp:
+      enabled: true
+      host: 0.0.0.0
+      port: 53
+      max_connections: 1024
+      max_connections_per_ip: 64
+      max_queries_per_connection: 100
+      idle_timeout_seconds: 15.0
   resolver:
     mode: forward
     timeout_ms: 2000
@@ -70,3 +83,8 @@ stats:
   enabled: true
   source_backend: local-log
   interval_seconds: 300
+  # Bound distinct identity keys written to the stats backend under flood traffic.
+  max_store_clients: 50000
+  max_store_domains: 50000
+  max_store_subdomains: 50000
+  max_store_qtype_qnames: 50000
