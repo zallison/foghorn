@@ -584,6 +584,10 @@ def test__recv_exact_returns_bytes_and_none() -> None:
 
 
 def test__tcphandler_handle_happy_path_and_short_header(monkeypatch) -> None:
+    # Ensure class-level handler knobs are defaults (other tests may mutate them).
+    tcp_server_mod._TCPHandler.idle_timeout_seconds = 15.0
+    tcp_server_mod._TCPHandler.max_queries_per_connection = 100
+    tcp_server_mod._TCPHandler.conn_limiter = None
     """Brief: _TCPHandler.handle processes one frame then exits on short header.
 
     Inputs:

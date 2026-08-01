@@ -169,7 +169,9 @@ def test_listen_dns_populates_udp_and_tcp(monkeypatch):
 
     tcp_calls = {"count": 0, "host": None, "port": None}
 
-    def fake_serve_tcp_threaded(host, port, resolver):  # type: ignore[no-untyped-def]
+    def fake_serve_tcp_threaded(host, port, resolver, **kwargs):  # type: ignore[no-untyped-def]
+        # Accept extra listener limit kwargs (max_connections, etc.) from main.
+        _ = kwargs
         tcp_calls["count"] += 1
         tcp_calls["host"] = host
         tcp_calls["port"] = port
