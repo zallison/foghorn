@@ -2581,15 +2581,51 @@ def test_get_system_info_handles_missing_psutil(monkeypatch) -> None:
     assert "process_rss_mb" in info
 
 
-def test_token_auth_500_when_token_missing() -> None:
-    """Brief: auth.mode=token without a token yields HTTP 500 error on protected endpoints.
+def test_ensure_web_auth_token_helper_generates_once_and_skips_existing(caplog) -> None:
+    """Brief: ensure_web_auth_token generates only for mode=token without token.
+
+    Inputs:
+      - caplog: pytest log capture fixture.
+
+    Outputs:
+      - Generates a 32-char token once; leaves existing tokens unchanged; ignores non-token modes.
+    """
+
+    import logging
+
+    from foghorn.servers.webserver.http_helpers import ensure_web_auth_token
+
+    cfg_none = {"auth": {"mode": "none"}}
+    assert ensure_web_auth_token(cfg_none) is None
+    assert "token" not in cfg_none["auth"]
+
+    cfg_existing = {"auth": {"mode": "token", "token": "already-set"}}
+    assert ensure_web_auth_token(cfg_existing) is None
+    assert cfg_existing["auth"]["token"] == "already-set"
+
+    cfg_missing = {"auth": {"mode": "token"}}
+    with caplog.at_level(logging.WARNING, logger="foghorn.webserver"):
+        generated = ensure_web_auth_token(cfg_missing)
+    assert generated is not None
+    assert len(generated) == 32
+    assert cfg_missing["auth"]["token"] == generated
+    # Second call is a no-op.
+    assert ensure_web_auth_token(cfg_missing) is None
+
+
+def test_token_auth_auto_generates_token_when_missing(caplog) -> None:
+    """Brief: auth.mode=token without a token auto-generates a 32-char token.
 
     Inputs:
       - server.http config with auth.mode=token and no token value.
+      - caplog: pytest log capture fixture.
 
     Outputs:
-      - /stats responds with 500 and an explanatory error message.
+      - A 32-character token is written into config and logged at WARNING.
+      - /stats requires the generated token (401 without, 200 with).
     """
+
+    import logging
 
     cfg = {
         "server": {
@@ -2601,13 +2637,23 @@ def test_token_auth_500_when_token_missing() -> None:
     }
     collector = StatsCollector(track_uniques=False)
 
-    app = create_app(stats=collector, config=cfg, log_buffer=RingBuffer())
-    client = TestClient(app)
+    with caplog.at_level(logging.WARNING, logger="foghorn.webserver"):
+        app = create_app(stats=collector, config=cfg, log_buffer=RingBuffer())
 
-    resp = client.get("/stats")
-    assert resp.status_code == 500
-    body = resp.json()
-    assert body["detail"] == "webserver.auth.token not configured"
+    token = str(cfg["server"]["http"]["auth"].get("token") or "")
+    assert len(token) == 32
+    assert token.isalnum()
+    assert any(
+        "generated a temporary 32-character token" in rec.getMessage()
+        for rec in caplog.records
+    )
+
+    client = TestClient(app)
+    denied = client.get("/stats")
+    assert denied.status_code == 401
+
+    ok = client.get("/stats", headers={"Authorization": f"Bearer {token}"})
+    assert ok.status_code == 200
 
 
 def test_admin_api_auth_enforced_by_default_when_mode_unset() -> None:
@@ -2617,7 +2663,8 @@ def test_admin_api_auth_enforced_by_default_when_mode_unset() -> None:
       - server.http enabled config without auth.mode/token.
 
     Outputs:
-      - /api/v1/admin/status returns 500 with token-not-configured detail.
+      - /api/v1/admin/status returns 401 unauthorized (default mode=token; a
+        temporary token is generated at startup when one is missing).
     """
 
     cfg = {"server": {"http": {"enabled": True}}}
@@ -2625,9 +2672,9 @@ def test_admin_api_auth_enforced_by_default_when_mode_unset() -> None:
     client = TestClient(app)
 
     resp = client.get("/api/v1/admin/status")
-    assert resp.status_code == 500
+    assert resp.status_code == 401
     body = resp.json()
-    assert body["detail"] == "webserver.auth.token not configured"
+    assert body["detail"] == "unauthorized"
 
 
 def test_auth_mode_unsupported_fails_closed() -> None:

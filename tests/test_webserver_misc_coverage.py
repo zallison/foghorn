@@ -38,12 +38,13 @@ def test_get_package_build_info_pep610_commit_id_path(
       - info['git_sha'] is populated from commit_id.
     """
 
-    # Newer implementations of _get_package_build_info may not be wrapped in
-    # functools.lru_cache; guard cache_clear() so the test stays compatible with
-    # both cached and non-cached designs.
+    # Clear any registered/lru cache so monkeypatched packaging metadata is used.
     cache_clear = getattr(web_mod._get_package_build_info, "cache_clear", None)
-    if callable(cache_clear):  # pragma: no cover - compatibility path
+    if callable(cache_clear):  # pragma: no cover - lru_cache compatibility path
         cache_clear()
+    cache_obj = getattr(web_mod._get_package_build_info, "cache", None)
+    if cache_obj is not None and hasattr(cache_obj, "clear"):
+        cache_obj.clear()
 
     monkeypatch.delenv("FOGHORN_GIT_SHA", raising=False)
     monkeypatch.delenv("GIT_SHA", raising=False)
@@ -54,8 +55,11 @@ def test_get_package_build_info_pep610_commit_id_path(
         def read_text(self, name: str) -> str | None:
             return direct_url if name == "direct_url.json" else None
 
+    # Patch the module that _get_package_build_info actually imports from.
+    import foghorn.servers.webserver.meta_helpers as meta_helpers
+
     monkeypatch.setattr(
-        web_mod.importlib_metadata, "distribution", lambda _n: DummyDist()
+        meta_helpers.importlib_metadata, "distribution", lambda _n: DummyDist()
     )
 
     info = web_mod._get_package_build_info()

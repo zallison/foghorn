@@ -944,12 +944,17 @@ def test_resolve_query_bytes_recursive_mode_uses_recursive_resolver(
             max_depth: int = 16,
             timeout_ms: int = 2000,
             per_try_timeout_ms: int = 2000,
+            allow_private_destinations: bool = True,
+            **kwargs,
         ) -> None:
+            # Accept newer RecursiveResolver kwargs for forward compatibility.
+            _ = kwargs
             self.cache = cache
             self.stats = stats
             self.max_depth = max_depth
             self.timeout_ms = timeout_ms
             self.per_try_timeout_ms = per_try_timeout_ms
+            self.allow_private_destinations = bool(allow_private_destinations)
 
         def resolve(self, req: DNSRecord):  # noqa: D401
             """Resolve via fake recursive path, returning a fixed A answer."""

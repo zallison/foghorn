@@ -70,12 +70,27 @@ def test_get_package_build_info_env_pep610_and_exception(
       - On distribution() error, function still returns a dict without raising.
     """
 
-    # Ensure a clean cache between scenarios. Newer implementations of
-    # _get_package_build_info may not use functools.lru_cache, so guard this
-    # call to support both cached and non-cached designs.
-    cache_clear = getattr(web_mod._get_package_build_info, "cache_clear", None)
-    if callable(cache_clear):  # pragma: no cover - compatibility path
-        cache_clear()
+    import foghorn.servers.webserver.meta_helpers as meta_helpers
+
+    def _clear_build_info_cache() -> None:
+        """Brief: Clear registered/lru caches for _get_package_build_info.
+
+        Inputs:
+          - None.
+
+        Outputs:
+          - None.
+        """
+
+        cache_clear = getattr(web_mod._get_package_build_info, "cache_clear", None)
+        if callable(cache_clear):  # pragma: no cover - lru_cache compatibility path
+            cache_clear()
+        cache_obj = getattr(web_mod._get_package_build_info, "cache", None)
+        if cache_obj is not None and hasattr(cache_obj, "clear"):
+            cache_obj.clear()
+
+    # Ensure a clean cache between scenarios.
+    _clear_build_info_cache()
 
     monkeypatch.setenv("FOGHORN_GIT_SHA", "env-sha")
     monkeypatch.setenv("FOGHORN_BUILD_ID", "env-build")
@@ -96,8 +111,9 @@ def test_get_package_build_info_env_pep610_and_exception(
                 return direct_url
             return None
 
+    # Patch the module that _get_package_build_info actually imports from.
     monkeypatch.setattr(
-        web_mod.importlib_metadata, "distribution", lambda _n: DummyDist()
+        meta_helpers.importlib_metadata, "distribution", lambda _n: DummyDist()
     )
 
     info = web_mod._get_package_build_info()
@@ -107,13 +123,10 @@ def test_get_package_build_info_env_pep610_and_exception(
     assert info["vcs_url"] == "https://example.invalid/repo.git"
     assert info["requested_revision"] == "main"
 
-    # Now exercise the exception path, again tolerating implementations that
-    # are not cache-wrapped.
-    cache_clear = getattr(web_mod._get_package_build_info, "cache_clear", None)
-    if callable(cache_clear):  # pragma: no cover - compatibility path
-        cache_clear()
+    # Now exercise the exception path with a fresh cache entry.
+    _clear_build_info_cache()
     monkeypatch.setattr(
-        web_mod.importlib_metadata,
+        meta_helpers.importlib_metadata,
         "distribution",
         lambda _n: (_ for _ in ()).throw(RuntimeError("boom")),
     )
