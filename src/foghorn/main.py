@@ -562,6 +562,7 @@ def main(argv: List[str] | None = None) -> int:
     features = resolve_server_feature_flags(server_cfg)
     enable_ede = bool(features["enable_ede"])
     forward_local = bool(features["forward_local"])
+    refuse_any = bool(features["refuse_any"])
     ecs_enabled = bool(features["ecs_enabled"])
     ecs_forward_inbound = bool(features["ecs_forward_inbound"])
     ecs_synthesize_from_client_ip = bool(features["ecs_synthesize_from_client_ip"])
@@ -695,6 +696,7 @@ def main(argv: List[str] | None = None) -> int:
             edns_payload=edns_payload,
             enable_ede=enable_ede,
             forward_local=forward_local,
+            refuse_any=refuse_any,
             ecs_enabled=ecs_enabled,
             ecs_forward_inbound=ecs_forward_inbound,
             ecs_synthesize_from_client_ip=ecs_synthesize_from_client_ip,
@@ -2230,6 +2232,7 @@ def _initialize_runtime_snapshot(
     edns_payload: int,
     enable_ede: bool,
     forward_local: bool,
+    refuse_any: bool = False,
     ecs_enabled: bool,
     ecs_forward_inbound: bool,
     ecs_synthesize_from_client_ip: bool,
@@ -2282,6 +2285,7 @@ def _initialize_runtime_snapshot(
       - edns_payload: Effective EDNS UDP payload size.
       - enable_ede: EDE feature toggle.
       - forward_local: .local forwarding toggle.
+      - refuse_any: When true, refuse QTYPE ANY queries.
       - ecs_enabled: Enable EDNS Client Subnet support.
       - ecs_forward_inbound: Forward trusted inbound ECS options upstream.
       - ecs_synthesize_from_client_ip: Synthesize ECS when inbound ECS is absent.
@@ -2359,6 +2363,7 @@ def _initialize_runtime_snapshot(
             edns_udp_payload=int(effective_edns),
             enable_ede=bool(enable_ede),
             forward_local=bool(forward_local),
+            refuse_any=bool(refuse_any),
             ecs_enabled=bool(ecs_enabled),
             ecs_forward_inbound=bool(ecs_forward_inbound),
             ecs_synthesize_from_client_ip=bool(ecs_synthesize_from_client_ip),

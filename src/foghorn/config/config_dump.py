@@ -440,6 +440,7 @@ def _expand_server_feature_flags(server_cfg: Dict[str, Any]) -> None:
     features_cfg["forward_local"] = bool(
         features_cfg.get("forward_local", legacy_forward_local)
     )
+    features_cfg["refuse_any"] = bool(features_cfg.get("refuse_any", False))
 
     ecs_cfg = features_cfg.get("ecs")
     if not isinstance(ecs_cfg, dict):

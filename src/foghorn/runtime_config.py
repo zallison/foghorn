@@ -233,6 +233,7 @@ class RuntimeSnapshot:
     edns_udp_payload: int
     enable_ede: bool
     forward_local: bool
+    refuse_any: bool
     ecs_enabled: bool
     ecs_forward_inbound: bool
     ecs_synthesize_from_client_ip: bool
@@ -300,7 +301,7 @@ def resolve_server_feature_flags(server_cfg: Dict[str, Any]) -> Dict[str, Any]:
 
     Outputs:
       - dict with normalized feature values:
-          - enable_ede / forward_local booleans.
+          - enable_ede / forward_local / refuse_any booleans.
           - ecs_* controls for resolver ingestion/forwarding/targeting.
 
     Notes:
@@ -351,6 +352,7 @@ def resolve_server_feature_flags(server_cfg: Dict[str, Any]) -> Dict[str, Any]:
         if "forward_local" in features
         else _to_bool(cfg.get("forward_local"), False)
     )
+    refuse_any = _to_bool(features.get("refuse_any"), False)
 
     ecs_obj = features.get("ecs")
     ecs_cfg = ecs_obj if isinstance(ecs_obj, dict) else {}
@@ -402,6 +404,7 @@ def resolve_server_feature_flags(server_cfg: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "enable_ede": bool(enable_ede),
         "forward_local": bool(forward_local),
+        "refuse_any": bool(refuse_any),
         "ecs_enabled": _to_bool(ecs_cfg.get("enabled"), False),
         "ecs_forward_inbound": _to_bool(ecs_cfg.get("forward_inbound"), False),
         "ecs_synthesize_from_client_ip": _to_bool(
@@ -1116,6 +1119,7 @@ def _build_snapshot(
         edns_udp_payload=max(512, int(edns_udp_payload)),
         enable_ede=bool(features["enable_ede"]),
         forward_local=bool(features["forward_local"]),
+        refuse_any=bool(features["refuse_any"]),
         ecs_enabled=bool(features["ecs_enabled"]),
         ecs_forward_inbound=bool(features["ecs_forward_inbound"]),
         ecs_synthesize_from_client_ip=bool(features["ecs_synthesize_from_client_ip"]),
@@ -1322,6 +1326,7 @@ def _default_snapshot() -> RuntimeSnapshot:
         edns_udp_payload=1232,
         enable_ede=False,
         forward_local=False,
+        refuse_any=False,
         ecs_enabled=False,
         ecs_forward_inbound=False,
         ecs_synthesize_from_client_ip=False,

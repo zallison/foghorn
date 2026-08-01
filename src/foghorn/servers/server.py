@@ -856,6 +856,7 @@ def _resolve_core(
             edns_udp_payload=max(512, int(snap.edns_udp_payload)),
             enable_ede=bool(snap.enable_ede),
             forward_local=bool(snap.forward_local),
+            refuse_any=bool(getattr(snap, "refuse_any", False)),
             ecs_enabled=bool(getattr(snap, "ecs_enabled", False)),
             ecs_forward_inbound=bool(getattr(snap, "ecs_forward_inbound", False)),
             ecs_synthesize_from_client_ip=bool(
@@ -1126,6 +1127,59 @@ def _resolve_core(
                 Exception
             ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
                 pass
+
+        # Optional amplification mitigation: refuse QTYPE ANY (255).
+        try:
+            refuse_any = bool(getattr(handler, "refuse_any", False))
+        except Exception:
+            refuse_any = False
+        if refuse_any:
+            try:
+                qtype_num = int(qtype)
+            except Exception:
+                qtype_num = int(qtype or 0)
+            if qtype_num == int(getattr(QTYPE, "ANY", 255)):
+                r = req.reply()
+                r.header.rcode = RCODE.REFUSED
+                _echo_client_edns(req, r)
+                _attach_ede_option(
+                    req,
+                    r,
+                    21,
+                    "QTYPE ANY refused",
+                )
+                wire = _set_response_id(r.pack(), req.header.id)
+                if stats is not None:
+                    try:
+                        stats.record_response_rcode("REFUSED", qname)
+                        qtype_name = _qtype_label_for_stats(qtype)
+                        result_ctx = {"source": "refuse_any", "action": "refuse"}
+                        result_ctx.update(request_result_meta)
+                        stats.record_query_result(
+                            client_ip=client_ip,
+                            qname=qname,
+                            qtype=qtype_name,
+                            rcode="REFUSED",
+                            upstream_id=None,
+                            status="refuse_any",
+                            error=None,
+                            first=None,
+                            result=result_ctx,
+                        )
+                    except Exception:
+                        pass
+                if stats is not None and t0 is not None:
+                    try:
+                        t1 = _time.perf_counter()
+                        stats.record_latency(t1 - t0)
+                    except Exception:
+                        pass
+                return _ResolveCoreResult(
+                    wire=wire,
+                    dnssec_status=None,
+                    upstream_id=None,
+                    rcode_name="REFUSED",
+                )
 
         # Pre plugins
         ctx = PluginContext(client_ip=client_ip, listener=listener, secure=secure)
