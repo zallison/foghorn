@@ -390,6 +390,49 @@ def _augment_statistics_persistence_schema(base: Dict[str, Any]) -> None:
                 ),
             }
 
+        # In-memory unique tracking caps.
+        for key, default, desc in (
+            (
+                "max_unique_clients",
+                50000,
+                "Maximum unique client IP values retained in memory when unique tracking is enabled.",
+            ),
+            (
+                "max_unique_domains",
+                50000,
+                "Maximum unique domain values retained in memory when unique tracking is enabled.",
+            ),
+            (
+                "max_store_clients",
+                50000,
+                "Maximum distinct client keys mirrored into the persistent stats store (0 disables the cap).",
+            ),
+            (
+                "max_store_domains",
+                50000,
+                "Maximum distinct base-domain keys mirrored into the persistent stats store (0 disables the cap).",
+            ),
+            (
+                "max_store_subdomains",
+                50000,
+                "Maximum distinct subdomain keys mirrored into the persistent stats store (0 disables the cap).",
+            ),
+            (
+                "max_store_qtype_qnames",
+                50000,
+                "Maximum distinct qtype|qname keys mirrored into the persistent stats store (0 disables the cap).",
+            ),
+        ):
+            stats_props.setdefault(
+                key,
+                {
+                    "type": "integer",
+                    "minimum": 0,
+                    "default": default,
+                    "description": desc,
+                },
+            )
+
         persistence_obj = stats_props.get("persistence")
         if not isinstance(persistence_obj, dict):
             return
@@ -791,6 +834,33 @@ def _augment_server_limits_and_listen_schema(base: Dict[str, Any]) -> None:
             http_props = http_schema.get("properties")
             if isinstance(http_props, dict):
                 http_props.setdefault(
+                    "host",
+                    {
+                        "type": "string",
+                        "default": "127.0.0.1",
+                        "description": (
+                            "Bind address for the admin HTTP server that serves the "
+                            "web UI, API, OpenAPI schema, and Swagger UI. Defaults to "
+                            "loopback (127.0.0.1) so the admin surface is not exposed "
+                            "on all interfaces. Use 0.0.0.0 or a specific interface IP "
+                            "only when intentional and preferably behind auth/TLS."
+                        ),
+                    },
+                )
+                http_props.setdefault(
+                    "port",
+                    {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 65535,
+                        "default": 5380,
+                        "description": (
+                            "TCP port for the admin HTTP server (web UI, API, OpenAPI, "
+                            "Swagger). Default: 5380."
+                        ),
+                    },
+                )
+                http_props.setdefault(
                     "allow_threaded_fallback",
                     {
                         "type": "boolean",
@@ -827,6 +897,41 @@ def _augment_server_limits_and_listen_schema(base: Dict[str, Any]) -> None:
                         "description": "When false, disable Swagger UI at /docs (requires enable_schema=true).",
                     },
                 )
+
+                # server.http.auth.*
+                auth_obj = http_props.get("auth")
+                if not isinstance(auth_obj, dict):
+                    auth_obj = {"type": "object", "additionalProperties": True}
+                    http_props["auth"] = auth_obj
+                auth_schema = _ensure_obj_schema(auth_obj)
+                if auth_schema is not None:
+                    auth_props = auth_schema.setdefault("properties", {})
+                    if isinstance(auth_props, dict):
+                        auth_props.setdefault(
+                            "mode",
+                            {
+                                "type": "string",
+                                "enum": ["none", "token"],
+                                "default": "token",
+                                "description": (
+                                    "Admin HTTP authentication mode for the web UI, API, "
+                                    "OpenAPI schema, and Swagger UI. Default: token "
+                                    "(require Authorization: Bearer <token> or X-API-Key). "
+                                    "Use none only for intentionally open local setups."
+                                ),
+                            },
+                        )
+                        auth_props.setdefault(
+                            "token",
+                            {
+                                "type": "string",
+                                "description": (
+                                    "Shared secret used when auth.mode=token. When mode is "
+                                    "token and this is unset, Foghorn generates a temporary "
+                                    "token at startup and logs it once."
+                                ),
+                            },
+                        )
 
         # server.axfr.*
         axfr_obj = server_props.get("axfr")
@@ -1452,6 +1557,25 @@ def _build_v2_root_schema(
                 "default": 16,
                 "description": "Maximum delegation hops for recursive mode.",
             },
+            "allow_private_destinations": {
+                "type": "boolean",
+                "default": True,
+                "description": (
+                    "When false, recursive mode skips next-hop glue addresses that "
+                    "are private/loopback/link-local/multicast/reserved. Default "
+                    "true preserves split-horizon recursion."
+                ),
+            },
+            "destination_allowlist": {
+                "type": "array",
+                "items": {"type": "string"},
+                "default": [],
+                "description": (
+                    "Optional CIDR/IP allowlist for recursive next-hop destinations "
+                    "when allow_private_destinations is false. Matching destinations "
+                    "are still accepted."
+                ),
+            },
             "per_try_timeout_ms": {
                 "type": "integer",
                 "minimum": 0,
@@ -1767,7 +1891,88 @@ def _build_v2_root_schema(
         },
     }
 
-    statistics_schema = base_props.get("statistics", {"type": "object"})
+    # Prefer the augmented v2 stats block; fall back to legacy "statistics".
+    statistics_schema = base_props.get("stats")
+    if not isinstance(statistics_schema, dict):
+        statistics_schema = base_props.get("statistics", {"type": "object"})
+    if not isinstance(statistics_schema, dict):
+        statistics_schema = {"type": "object"}
+    # Ensure cardinality-cap knobs are always documented on the emitted stats schema.
+    stats_props = statistics_schema.get("properties")
+    if not isinstance(stats_props, dict):
+        stats_props = {}
+        statistics_schema = dict(statistics_schema)
+        statistics_schema["type"] = "object"
+        statistics_schema["properties"] = stats_props
+    for key, default, desc in (
+        (
+            "enabled",
+            True,
+            "Master on/off switch for runtime statistics collection.",
+        ),
+        (
+            "source_backend",
+            None,
+            "Identifier of the primary statistics/query-log backend to read from.",
+        ),
+        (
+            "max_unique_clients",
+            50000,
+            "Maximum unique client IP values retained in memory when unique tracking is enabled.",
+        ),
+        (
+            "max_unique_domains",
+            50000,
+            "Maximum unique domain values retained in memory when unique tracking is enabled.",
+        ),
+        (
+            "max_store_clients",
+            50000,
+            "Maximum distinct client keys mirrored into the persistent stats store (0 disables the cap).",
+        ),
+        (
+            "max_store_domains",
+            50000,
+            "Maximum distinct base-domain keys mirrored into the persistent stats store (0 disables the cap).",
+        ),
+        (
+            "max_store_subdomains",
+            50000,
+            "Maximum distinct subdomain keys mirrored into the persistent stats store (0 disables the cap).",
+        ),
+        (
+            "max_store_qtype_qnames",
+            50000,
+            "Maximum distinct qtype|qname keys mirrored into the persistent stats store (0 disables the cap).",
+        ),
+    ):
+        if key == "source_backend":
+            stats_props.setdefault(
+                key,
+                {
+                    "type": "string",
+                    "description": desc,
+                },
+            )
+        elif key == "enabled":
+            stats_props.setdefault(
+                key,
+                {
+                    "type": "boolean",
+                    "default": True,
+                    "description": desc,
+                },
+            )
+        else:
+            stats_props.setdefault(
+                key,
+                {
+                    "type": "integer",
+                    "minimum": 0,
+                    "default": default,
+                    "description": desc,
+                },
+            )
 
     # Web/admin HTTP schema: only consider server.http in the base schema. If
     # it is missing, fall back to a minimal object schema rather than any
@@ -2349,6 +2554,11 @@ def _build_v2_root_schema(
                             "forward_local": {
                                 "type": "boolean",
                                 "description": "Allow forwarding .local queries to upstream resolvers. Default false blocks them per RFC 6762.",
+                                "default": False,
+                            },
+                            "refuse_any": {
+                                "type": "boolean",
+                                "description": "When true, refuse QTYPE ANY (255) queries with REFUSED to reduce amplification risk.",
                                 "default": False,
                             },
                             "ecs": {

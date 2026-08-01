@@ -1541,25 +1541,54 @@
               "type": "object"
             },
             "UpstreamRouteTarget": {
-              "description": "Brief: Single upstream target host/port pair.\n\nInputs:\n  - host: Upstream DNS host.\n  - port: Upstream DNS port.\n\nOutputs:\n  - UpstreamRouteTarget instance with normalized types.",
+              "additionalProperties": true,
+              "description": "Brief: Single upstream target (host/port or URL-form).\n\nInputs:\n  - host: Upstream DNS host (host/port form).\n  - port: Upstream DNS port (host/port form).\n  - url: Optional URL-form upstream (e.g. ``dot://1.1.1.1``).\n  - Additional transport/tls/id fields are allowed via ``extra=\"allow\"``.\n\nOutputs:\n  - UpstreamRouteTarget instance with normalized types.\n\nNotes:\n  - Matches top-level ``upstreams.endpoints`` shapes: either explicit\n    ``host``/``port`` or a ``url`` scheme form expanded later by\n    config_parser / route normalization.",
               "properties": {
                 "host": {
-                  "description": "Type: string.",
-                  "title": "Host",
-                  "type": "string"
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "title": "Host"
                 },
                 "port": {
-                  "description": "Type: integer.",
-                  "maximum": 65535,
-                  "minimum": 1,
-                  "title": "Port",
-                  "type": "integer"
+                  "anyOf": [
+                    {
+                      "description": "Type: integer.",
+                      "maximum": 65535,
+                      "minimum": 1,
+                      "type": "integer"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "title": "Port"
+                },
+                "url": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "title": "Url"
                 }
               },
-              "required": [
-                "host",
-                "port"
-              ],
               "title": "UpstreamRouteTarget",
               "type": "object"
             }
@@ -4584,25 +4613,54 @@
               "type": "object"
             },
             "UpstreamRouteTarget": {
-              "description": "Brief: Single upstream target host/port pair.\n\nInputs:\n  - host: Upstream DNS host.\n  - port: Upstream DNS port.\n\nOutputs:\n  - UpstreamRouteTarget instance with normalized types.",
+              "additionalProperties": true,
+              "description": "Brief: Single upstream target (host/port or URL-form).\n\nInputs:\n  - host: Upstream DNS host (host/port form).\n  - port: Upstream DNS port (host/port form).\n  - url: Optional URL-form upstream (e.g. ``dot://1.1.1.1``).\n  - Additional transport/tls/id fields are allowed via ``extra=\"allow\"``.\n\nOutputs:\n  - UpstreamRouteTarget instance with normalized types.\n\nNotes:\n  - Matches top-level ``upstreams.endpoints`` shapes: either explicit\n    ``host``/``port`` or a ``url`` scheme form expanded later by\n    config_parser / route normalization.",
               "properties": {
                 "host": {
-                  "description": "Type: string.",
-                  "title": "Host",
-                  "type": "string"
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "title": "Host"
                 },
                 "port": {
-                  "description": "Type: integer.",
-                  "maximum": 65535,
-                  "minimum": 1,
-                  "title": "Port",
-                  "type": "integer"
+                  "anyOf": [
+                    {
+                      "description": "Type: integer.",
+                      "maximum": 65535,
+                      "minimum": 1,
+                      "type": "integer"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "title": "Port"
+                },
+                "url": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "title": "Url"
                 }
               },
-              "required": [
-                "host",
-                "port"
-              ],
               "title": "UpstreamRouteTarget",
               "type": "object"
             }
@@ -7037,6 +7095,11 @@
               "description": "Optional human metadata string (max 254 characters).",
               "maxLength": 254,
               "type": "string"
+            },
+            "refuse_any": {
+              "default": false,
+              "description": "When true, refuse QTYPE ANY (255) queries with REFUSED to reduce amplification risk.",
+              "type": "boolean"
             }
           },
           "type": "object"
@@ -7054,6 +7117,36 @@
               "default": true,
               "description": "When false, refuse to start the threaded stdlib admin HTTP fallback when FastAPI/uvicorn or asyncio is unavailable. Default: true.",
               "type": "boolean"
+            },
+            "auth": {
+              "additionalProperties": true,
+              "description": "Type: object. Object with subkeys: mode, token.",
+              "properties": {
+                "comment": {
+                  "description": "Optional human metadata string (max 254 characters).",
+                  "maxLength": 254,
+                  "type": "string"
+                },
+                "id": {
+                  "description": "Optional human metadata string (max 254 characters).",
+                  "maxLength": 254,
+                  "type": "string"
+                },
+                "mode": {
+                  "default": "token",
+                  "description": "Admin HTTP authentication mode for the web UI, API, OpenAPI schema, and Swagger UI. Default: token (require Authorization: Bearer <token> or X-API-Key). Use none only for intentionally open local setups. Default: \"token\".",
+                  "enum": [
+                    "none",
+                    "token"
+                  ],
+                  "type": "string"
+                },
+                "token": {
+                  "description": "Shared secret used when auth.mode=token. When mode is token and this is unset, Foghorn generates a temporary token at startup and logs it once.",
+                  "type": "string"
+                }
+              },
+              "type": "object"
             },
             "comment": {
               "description": "Optional human metadata string (max 254 characters).",
@@ -7075,10 +7168,22 @@
               "description": "When false, disable OpenAPI schema generation and /openapi.json. Default: true.",
               "type": "boolean"
             },
+            "host": {
+              "default": "127.0.0.1",
+              "description": "Bind address for the admin HTTP server that serves the web UI, API, OpenAPI schema, and Swagger UI. Defaults to loopback (127.0.0.1) so the admin surface is not exposed on all interfaces. Use 0.0.0.0 or a specific interface IP only when intentional and preferably behind auth/TLS. Default: \"127.0.0.1\".",
+              "type": "string"
+            },
             "id": {
               "description": "Optional human metadata string (max 254 characters).",
               "maxLength": 254,
               "type": "string"
+            },
+            "port": {
+              "default": 5380,
+              "description": "TCP port for the admin HTTP server (web UI, API, OpenAPI, Swagger). Default: 5380.",
+              "maximum": 65535,
+              "minimum": 1,
+              "type": "integer"
             }
           },
           "type": "object"
@@ -7429,10 +7534,23 @@
           "additionalProperties": true,
           "description": "Resolver configuration. mode selects how unanswered queries are handled: forward (default), recursive (walk from root), or master (authoritative-only; no forwarding). 'none' is an alias for 'master'.",
           "properties": {
+            "allow_private_destinations": {
+              "default": true,
+              "description": "When false, recursive mode skips next-hop glue addresses that are private/loopback/link-local/multicast/reserved. Default true preserves split-horizon recursion.",
+              "type": "boolean"
+            },
             "comment": {
               "description": "Optional human metadata string (max 254 characters).",
               "maxLength": 254,
               "type": "string"
+            },
+            "destination_allowlist": {
+              "default": [],
+              "description": "Optional CIDR/IP allowlist for recursive next-hop destinations when allow_private_destinations is false. Matching destinations are still accepted.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
             },
             "id": {
               "description": "Optional human metadata string (max 254 characters).",
@@ -7480,15 +7598,61 @@
       "type": "object"
     },
     "stats": {
+      "description": "Type: object. Object with subkeys: comment, id, max_store_clients, max_store_domains, max_store_qtype_qnames, max_store_subdomains, max_unique_clients, max_unique_domains.",
       "properties": {
         "comment": {
           "description": "Optional human metadata string (max 254 characters).",
           "maxLength": 254,
           "type": "string"
         },
+        "enabled": {
+          "default": true,
+          "description": "Master on/off switch for runtime statistics collection. Default: true.",
+          "type": "boolean"
+        },
         "id": {
           "description": "Optional human metadata string (max 254 characters).",
           "maxLength": 254,
+          "type": "string"
+        },
+        "max_store_clients": {
+          "default": 50000,
+          "description": "Maximum distinct client keys mirrored into the persistent stats store (0 disables the cap). Default: 50000.",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_store_domains": {
+          "default": 50000,
+          "description": "Maximum distinct base-domain keys mirrored into the persistent stats store (0 disables the cap). Default: 50000.",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_store_qtype_qnames": {
+          "default": 50000,
+          "description": "Maximum distinct qtype|qname keys mirrored into the persistent stats store (0 disables the cap). Default: 50000.",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_store_subdomains": {
+          "default": 50000,
+          "description": "Maximum distinct subdomain keys mirrored into the persistent stats store (0 disables the cap). Default: 50000.",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_unique_clients": {
+          "default": 50000,
+          "description": "Maximum unique client IP values retained in memory when unique tracking is enabled. Default: 50000.",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_unique_domains": {
+          "default": 50000,
+          "description": "Maximum unique domain values retained in memory when unique tracking is enabled. Default: 50000.",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "source_backend": {
+          "description": "Identifier of the primary statistics/query-log backend to read from. When logging.backends is configured, this typically matches one of the backends[].id values.",
           "type": "string"
         }
       },
