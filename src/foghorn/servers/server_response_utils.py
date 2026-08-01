@@ -60,6 +60,50 @@ def _compute_effective_ttl_cache_key(resp: object, min_cache_ttl: int) -> tuple:
     return (rcode, has_answers, ttls, int(min_cache_ttl))
 
 
+def _compute_negative_ttl_cache_key(resp: object, fallback_ttl: int) -> tuple:
+    """Brief: Stable key for _compute_negative_ttl caching.
+
+    Inputs:
+      - resp: Parsed DNSRecord-like object.
+      - fallback_ttl: Fallback TTL in seconds.
+
+    Outputs:
+      - tuple: Cache key derived from authority SOA/NS TTL fields and fallback.
+    """
+
+    auth_rrs = getattr(resp, "auth", None) or []
+    soa_parts: list[tuple[int, int | None]] = []
+    ns_ttls: list[int] = []
+    try:
+        for rr in auth_rrs:
+            rtype = getattr(rr, "rtype", None)
+            if rtype == QTYPE.SOA:
+                ttl_val = getattr(rr, "ttl", None)
+                rr_ttl = int(ttl_val) if isinstance(ttl_val, (int, float)) else -1
+                rdata = getattr(rr, "rdata", None)
+                minimum = getattr(rdata, "minttl", None)
+                if minimum is None:
+                    minimum = getattr(rdata, "minimum", None)
+                if minimum is None:
+                    try:
+                        times = getattr(rdata, "times", None)
+                        if isinstance(times, tuple) and len(times) >= 5:
+                            minimum = times[4]
+                    except Exception:
+                        minimum = None
+                min_i = int(minimum) if isinstance(minimum, (int, float)) else None
+                soa_parts.append((rr_ttl, min_i))
+            elif rtype == QTYPE.NS:
+                ttl_val = getattr(rr, "ttl", None)
+                if isinstance(ttl_val, (int, float)):
+                    ns_ttls.append(int(ttl_val))
+    except Exception:
+        soa_parts = []
+        ns_ttls = []
+
+    return (tuple(soa_parts), tuple(ns_ttls), int(fallback_ttl))
+
+
 def _max_cache_ttl_seconds() -> int:
     """Brief: Resolve a maximum cache TTL cap for computed TTLs.
 
@@ -130,6 +174,10 @@ def compute_effective_ttl(resp: DNSRecord, min_cache_ttl: int) -> int:
         return max(0, int(min_cache_ttl))
 
 
+@registered_cached(
+    cache=TTLCache(maxsize=1024, ttl=60),
+    key=_compute_negative_ttl_cache_key,
+)
 def _compute_negative_ttl(resp: DNSRecord, fallback_ttl: int) -> int:
     """Compute TTL for negative or referral caching using SOA/NS where possible.
 
@@ -146,6 +194,7 @@ def _compute_negative_ttl(resp: DNSRecord, fallback_ttl: int) -> int:
       - For delegation/referral responses without SOA but with NS records, we
         fall back to the minimum NS TTL.
       - If neither SOA nor NS TTLs are available, fallback_ttl is used.
+      - Results are registered-TTL cached by authority TTL shape + fallback.
     """
     try:
         auth_rrs = getattr(resp, "auth", None) or []
