@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import socketserver
+import threading
 from concurrent.futures import Executor
 from typing import Callable
 
@@ -12,6 +13,79 @@ from foghorn.servers.overload_response import (
 )
 
 logger = logging.getLogger("foghorn.servers.tcp_server")
+
+
+class _ThreadedConnLimiter:
+    """Brief: Bound total and per-IP concurrent connections for threaded TCP.
+
+    Inputs:
+      - max_connections: Global concurrent connection cap.
+      - max_per_ip: Per-client-IP concurrent connection cap.
+
+    Outputs:
+      - Instance with acquire/release methods.
+    """
+
+    def __init__(self, *, max_connections: int, max_per_ip: int) -> None:
+        self._sem = threading.BoundedSemaphore(max(1, int(max_connections)))
+        self._max_per_ip = max(1, int(max_per_ip))
+        self._lock = threading.Lock()
+        self._per_ip: dict[str, int] = {}
+
+    def acquire(self, client_ip: str) -> bool:
+        """Brief: Try to reserve one connection slot for client_ip.
+
+        Inputs:
+          - client_ip: Source IP string.
+
+        Outputs:
+          - bool: True when a slot was acquired.
+        """
+
+        if not self._sem.acquire(blocking=False):
+            return False
+        ok = False
+        try:
+            with self._lock:
+                cur = int(self._per_ip.get(client_ip, 0) or 0)
+                if cur >= self._max_per_ip:
+                    ok = False
+                else:
+                    self._per_ip[client_ip] = cur + 1
+                    ok = True
+            return ok
+        except Exception:
+            ok = False
+            return False
+        finally:
+            if not ok:
+                try:
+                    self._sem.release()
+                except Exception:
+                    pass
+
+    def release(self, client_ip: str) -> None:
+        """Brief: Release one connection slot for client_ip.
+
+        Inputs:
+          - client_ip: Source IP string.
+
+        Outputs:
+          - None.
+        """
+
+        try:
+            with self._lock:
+                cur = int(self._per_ip.get(client_ip, 0) or 0)
+                if cur <= 1:
+                    self._per_ip.pop(client_ip, None)
+                else:
+                    self._per_ip[client_ip] = cur - 1
+        finally:
+            try:
+                self._sem.release()
+            except Exception:
+                pass
 
 
 class _TCPHandler(socketserver.BaseRequestHandler):
@@ -29,6 +103,10 @@ class _TCPHandler(socketserver.BaseRequestHandler):
     """
 
     resolver: Callable[[bytes, str], bytes] = lambda b, ip: b
+    idle_timeout_seconds: float = 15.0
+    max_queries_per_connection: int = 100
+    overload_response: str = OVERLOAD_RESPONSE_DROP
+    conn_limiter: _ThreadedConnLimiter | None = None
 
     def handle(self) -> None:
         peer_ip = (
@@ -36,15 +114,38 @@ class _TCPHandler(socketserver.BaseRequestHandler):
             if isinstance(self.client_address, tuple)
             else "0.0.0.0"
         )
+        limiter = getattr(self, "conn_limiter", None)
+        acquired = True
+        if limiter is not None:
+            acquired = bool(limiter.acquire(peer_ip))
+            if not acquired:
+                # Best-effort: close without processing when overloaded.
+                return
         try:
             from dnslib import QTYPE, DNSRecord
 
             from foghorn.servers import server as _server_mod
 
             sock = self.request  # type: ignore
-            # Set a modest timeout to avoid permanent hangs
-            sock.settimeout(15)
+            # Bound idle reads to avoid permanent hangs under slow clients.
+            try:
+                idle_timeout = float(
+                    getattr(self, "idle_timeout_seconds", 15.0) or 15.0
+                )
+            except Exception:
+                idle_timeout = 15.0
+            sock.settimeout(max(0.1, idle_timeout))
+            try:
+                max_queries = int(
+                    getattr(self, "max_queries_per_connection", 100) or 100
+                )
+            except Exception:
+                max_queries = 100
+            max_queries = max(1, max_queries)
+            query_count = 0
             while True:
+                if query_count >= max_queries:
+                    break
                 hdr = _recv_exact(sock, 2)
                 if not hdr or len(hdr) != 2:
                     break
@@ -94,6 +195,7 @@ class _TCPHandler(socketserver.BaseRequestHandler):
                 # client observes a timeout at the TCP or application layer.
                 if not resp:
                     break
+                query_count += 1
                 sock.sendall(len(resp).to_bytes(2, "big") + resp)
         except (ConnectionError, OSError, TimeoutError):
             return
@@ -102,10 +204,24 @@ class _TCPHandler(socketserver.BaseRequestHandler):
                 "Unhandled error in threaded TCP handler for client %s",
                 peer_ip,
             )
+        finally:
+            if limiter is not None and acquired:
+                try:
+                    limiter.release(peer_ip)
+                except Exception:
+                    pass
 
 
 def serve_tcp_threaded(
-    host: str, port: int, resolver: Callable[[bytes, str], bytes]
+    host: str,
+    port: int,
+    resolver: Callable[[bytes, str], bytes],
+    *,
+    max_connections: int = 1024,
+    max_connections_per_ip: int = 64,
+    max_queries_per_connection: int = 100,
+    idle_timeout_seconds: float = 15.0,
+    overload_response: str = OVERLOAD_RESPONSE_DROP,
 ) -> None:
     """
     Serve DNS-over-TCP using socketserver.ThreadingTCPServer as a fallback when asyncio is unavailable.
@@ -114,6 +230,11 @@ def serve_tcp_threaded(
       - host: Listen address
       - port: Listen port
       - resolver: Callable mapping (query_bytes, client_ip) -> response_bytes
+      - max_connections: Global concurrent connection cap.
+      - max_connections_per_ip: Per-client concurrent connection cap.
+      - max_queries_per_connection: Max non-transfer queries accepted per stream.
+      - idle_timeout_seconds: Socket read timeout used as idle bound.
+      - overload_response: Reserved for parity with asyncio path (drop on reject).
     Outputs:
       - None (runs forever)
 
@@ -121,9 +242,20 @@ def serve_tcp_threaded(
       >>> # In a thread
       >>> # serve_tcp_threaded('0.0.0.0', 5353, resolver)
     """
-    # Bind handler with resolver
+    # Bind handler with resolver and hardening knobs.
     handler_cls = _TCPHandler
     handler_cls.resolver = staticmethod(resolver)  # type: ignore
+    handler_cls.idle_timeout_seconds = float(idle_timeout_seconds or 15.0)
+    handler_cls.max_queries_per_connection = max(
+        1, int(max_queries_per_connection or 100)
+    )
+    handler_cls.overload_response = normalize_overload_response(
+        overload_response, default=OVERLOAD_RESPONSE_DROP
+    )
+    handler_cls.conn_limiter = _ThreadedConnLimiter(
+        max_connections=int(max_connections or 1),
+        max_per_ip=int(max_connections_per_ip or 1),
+    )
     server = socketserver.ThreadingTCPServer((host, port), handler_cls)
     server.daemon_threads = True
     try:

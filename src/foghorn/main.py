@@ -1078,7 +1078,22 @@ def main(argv: List[str] | None = None) -> int:
                     "Enable asyncio TCP listener or set server.limits.allow_unsafe_threaded_listeners=true."
                 )
             try:
-                serve_tcp_threaded(thost, tport, _resolve_tcp)
+                serve_tcp_threaded(
+                    thost,
+                    tport,
+                    _resolve_tcp,
+                    max_connections=int(tcp_cfg.get("max_connections", 1024) or 1024),
+                    max_connections_per_ip=int(
+                        tcp_cfg.get("max_connections_per_ip", 64) or 64
+                    ),
+                    max_queries_per_connection=int(
+                        tcp_cfg.get("max_queries_per_connection", 100) or 100
+                    ),
+                    idle_timeout_seconds=float(
+                        tcp_cfg.get("idle_timeout_seconds", 15.0) or 15.0
+                    ),
+                    overload_response=str(tcp_cfg.get("overload_response", "drop")),
+                )
             except Exception as exc:
                 _record_listener_error("tcp", exc)
                 raise
