@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import logging
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from dnslib import RCODE, DNSRecord
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, Field, ConfigDict, model_validator
 
 from .base import BasePlugin, PluginContext, PluginDecision, plugin_aliases
 from foghorn.utils import dns_names
@@ -13,18 +13,48 @@ logger = logging.getLogger(__name__)
 
 
 class UpstreamRouteTarget(BaseModel):
-    """Brief: Single upstream target host/port pair.
+    """Brief: Single upstream target (host/port or URL-form).
 
     Inputs:
-      - host: Upstream DNS host.
-      - port: Upstream DNS port.
+      - host: Upstream DNS host (host/port form).
+      - port: Upstream DNS port (host/port form).
+      - url: Optional URL-form upstream (e.g. ``dot://1.1.1.1``).
+      - Additional transport/tls/id fields are allowed via ``extra="allow"``.
 
     Outputs:
       - UpstreamRouteTarget instance with normalized types.
+
+    Notes:
+      - Matches top-level ``upstreams.endpoints`` shapes: either explicit
+        ``host``/``port`` or a ``url`` scheme form expanded later by
+        config_parser / route normalization.
     """
 
-    host: str
-    port: int = Field(ge=1, le=65535)
+    host: Optional[str] = None
+    port: Optional[int] = Field(default=None, ge=1, le=65535)
+    url: Optional[str] = None
+
+    model_config = ConfigDict(extra="allow")
+
+    @model_validator(mode="after")
+    def _require_host_port_or_url(self) -> "UpstreamRouteTarget":
+        """Brief: Require either URL-form or host (+ optional port).
+
+        Inputs:
+          - self: Partially validated model.
+
+        Outputs:
+          - self when valid.
+
+        Raises:
+          - ValueError: When neither url nor host is provided.
+        """
+
+        has_url = isinstance(self.url, str) and bool(self.url.strip())
+        has_host = isinstance(self.host, str) and bool(self.host.strip())
+        if not has_url and not has_host:
+            raise ValueError("upstream target requires 'url' or 'host'")
+        return self
 
 
 class UpstreamRoute(BaseModel):
@@ -137,6 +167,48 @@ class UpstreamRouter(BasePlugin):
         # Do not alter decision flow; just return
         return None
 
+    def _normalize_route_upstream(
+        self, up: Dict[str, Any]
+    ) -> Optional[Dict[str, object]]:
+        """Brief: Normalize one route upstream entry to runtime shape.
+
+        Inputs:
+          - up: Raw upstream mapping (host/port and/or url form).
+
+        Outputs:
+          - Normalized upstream dict, or None when the entry is invalid.
+        """
+
+        try:
+            from foghorn.config.config_parser import _normalize_url_form_upstream_entry
+        except Exception:  # pragma: no cover - defensive import
+            _normalize_url_form_upstream_entry = None  # type: ignore[assignment]
+
+        if _normalize_url_form_upstream_entry is not None and up.get("url") is not None:
+            try:
+                url_norm = _normalize_url_form_upstream_entry(up)
+            except Exception:
+                logger.debug(
+                    "UpstreamRouter: invalid url-form upstream %r", up, exc_info=True
+                )
+                return None
+            if isinstance(url_norm, dict):
+                return dict(url_norm)
+            return None
+
+        host = up.get("host")
+        port = up.get("port")
+        # Host-form entries still require an explicit port (legacy route schema).
+        if not host or port is None:
+            return None
+        try:
+            normalized: Dict[str, object] = dict(up)
+            normalized["host"] = str(host)
+            normalized["port"] = int(port)
+        except (TypeError, ValueError):
+            return None
+        return normalized
+
     def _normalize_routes(self, routes: List[Dict]) -> List[Dict]:
         """
         Normalizes and validates routing rules using only the modern 'upstreams' list format.
@@ -176,7 +248,8 @@ class UpstreamRouter(BasePlugin):
             # Modern multiple-upstreams format only. Preserve any additional
             # upstream configuration keys (transport/tls/method/headers/etc.) so
             # that routes can use the same rich upstream definitions as the
-            # top-level `upstreams` block.
+            # top-level `upstreams` block. URL-form entries are expanded via the
+            # shared config_parser helper.
             upstream_candidates: List[Dict[str, object]] = []
             multiple_upstreams = r.get("upstreams")
             if multiple_upstreams and isinstance(multiple_upstreams, list):
@@ -184,20 +257,9 @@ class UpstreamRouter(BasePlugin):
                     if not isinstance(up, dict):
                         continue
 
-                    host = up.get("host")
-                    port = up.get("port")
-                    if not host or port is None:
+                    normalized = self._normalize_route_upstream(up)
+                    if normalized is None:
                         continue
-
-                    try:
-                        # Start from the original mapping so we keep fields like
-                        # transport/tls/method/headers, then normalize host/port.
-                        normalized: Dict[str, object] = dict(up)
-                        normalized["host"] = str(host)
-                        normalized["port"] = int(port)
-                    except (TypeError, ValueError):
-                        continue
-
                     upstream_candidates.append(normalized)
 
             # Only add route if we have valid matching criteria and at least one upstream
