@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ipaddress
 import logging
 import random
 import time
@@ -150,6 +151,8 @@ class RecursiveResolver:
       - max_depth: Maximum number of delegation/referral hops per query.
       - timeout_ms: Overall timeout budget per query (best effort).
       - per_try_timeout_ms: Per-authority query timeout in milliseconds.
+      - allow_private_destinations: When false, skip non-global next-hop IPs.
+      - destination_allowlist: Optional IP/CIDR exceptions when private hops are blocked.
 
     Outputs:
       - Instances able to resolve a DNSRecord request via resolve().
@@ -163,6 +166,8 @@ class RecursiveResolver:
         max_depth: int = 12,
         timeout_ms: int = 2000,
         per_try_timeout_ms: int = 2000,
+        allow_private_destinations: bool = True,
+        destination_allowlist: list[str] | None = None,
     ) -> None:
         # `cache` is the currently configured DNS cache plugin. We derive a
         # separate namespaced TTL cache from it (when backed by sqlite) to store
@@ -178,6 +183,29 @@ class RecursiveResolver:
         self._max_depth = max(1, int(max_depth or 1))
         self._timeout_ms = int(timeout_ms or 2000)
         self._per_try_timeout_ms = int(per_try_timeout_ms or self._timeout_ms)
+        self._allow_private_destinations = bool(allow_private_destinations)
+        allow_nets: list[ipaddress._BaseNetwork] = []
+        for entry in list(destination_allowlist or []):
+            text_entry = str(entry or "").strip()
+            if not text_entry:
+                continue
+            try:
+                if "/" in text_entry:
+                    allow_nets.append(ipaddress.ip_network(text_entry, strict=False))
+                else:
+                    addr = ipaddress.ip_address(text_entry)
+                    allow_nets.append(
+                        ipaddress.ip_network(
+                            f"{addr}/{'32' if addr.version == 4 else '128'}",
+                            strict=False,
+                        )
+                    )
+            except Exception:
+                logger.debug(
+                    "Ignoring invalid recursive destination_allowlist entry %r",
+                    text_entry,
+                )
+        self._destination_allow_networks = tuple(allow_nets)
 
     def _query_single(self, server: _Server, wire: bytes) -> Optional[bytes]:
         """Brief: Send a single query to an authority over UDP with TCP fallback.
@@ -296,6 +324,39 @@ class RecursiveResolver:
             pass
         return max(1, int(default_ttl))
 
+    def _destination_allowed(self, host: str) -> bool:
+        """Brief: Decide whether a recursive next-hop IP is allowed.
+
+        Inputs:
+          - host: Candidate next-hop IP string from glue/authority data.
+
+        Outputs:
+          - bool: True when the destination may be queried.
+
+        Notes:
+          - Default allow_private_destinations=True preserves split-horizon.
+          - When false, non-global addresses are skipped unless they match
+            destination_allowlist.
+        """
+
+        if self._allow_private_destinations:
+            return True
+        try:
+            addr = ipaddress.ip_address(str(host or "").strip())
+        except Exception:
+            return False
+        for net in self._destination_allow_networks:
+            try:
+                if addr in net:
+                    return True
+            except Exception:
+                continue
+        # Reject non-global destinations (private, loopback, link-local, etc.).
+        try:
+            return bool(addr.is_global)
+        except Exception:
+            return False
+
     def _extract_next_servers(self, resp: DNSRecord) -> List[_Server]:
         """Brief: Derive next-hop authority servers from an NS referral.
 
@@ -382,6 +443,8 @@ class RecursiveResolver:
             except (
                 Exception
             ):  # pragma: nocover defensive: bad glue rdata formatting is an upstream data bug and not worth dedicated tests
+                continue
+            if not self._destination_allowed(host):
                 continue
             glue.setdefault(name.lower(), []).append(_Server(host, 53))
 

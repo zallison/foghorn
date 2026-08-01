@@ -1817,12 +1817,37 @@ def _resolve_core(
             except Exception:  # pragma: no cover - defensive
                 per_try_ms = recursion_timeout_ms
 
+            allow_private_destinations = True
+            destination_allowlist: list[str] = []
+            try:
+                if snap is not None:
+                    resolver_cfg_snap = (
+                        (snap.cfg.get("server") or {}).get("resolver")
+                        if isinstance(getattr(snap, "cfg", None), dict)
+                        else {}
+                    )
+                    if not isinstance(resolver_cfg_snap, dict):
+                        resolver_cfg_snap = {}
+                    allow_private_destinations = bool(
+                        resolver_cfg_snap.get("allow_private_destinations", True)
+                    )
+                    raw_allow = resolver_cfg_snap.get("destination_allowlist") or []
+                    if isinstance(raw_allow, list):
+                        destination_allowlist = [
+                            str(x).strip() for x in raw_allow if str(x).strip()
+                        ]
+            except Exception:
+                allow_private_destinations = True
+                destination_allowlist = []
+
             resolver = RecursiveResolver(
                 cache=getattr(plugin_base, "DNS_CACHE", None),
                 stats=stats,
                 max_depth=max_depth,
                 timeout_ms=recursion_timeout_ms,
                 per_try_timeout_ms=per_try_ms,
+                allow_private_destinations=allow_private_destinations,
+                destination_allowlist=destination_allowlist,
             )
 
             # Perform iterative resolution. RecursiveResolver is responsible for
