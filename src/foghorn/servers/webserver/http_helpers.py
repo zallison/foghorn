@@ -4,7 +4,9 @@ import hmac
 import json
 import logging
 import os
+import secrets
 import signal
+import string
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -96,6 +98,62 @@ def resolve_www_root(config: Dict[str, Any] | None = None) -> str:
     return str(pkg_html.resolve())
 
 
+_AUTO_TOKEN_ALPHABET = string.ascii_letters + string.digits
+
+
+def ensure_web_auth_token(
+    web_cfg: Dict[str, Any] | None,
+    *,
+    length: int = 32,
+) -> str | None:
+    """Brief: Ensure server.http.auth.token exists when auth.mode is token.
+
+    Inputs:
+      - web_cfg: server.http mapping (mutated in place when a token is generated).
+      - length: Generated token length (default 32).
+
+    Outputs:
+      - str | None: Newly generated token when one was created; otherwise None.
+
+    Notes:
+      - Acts when auth.mode is 'token' (the default when unset) and token is
+        missing/blank.
+      - Logs the generated token at WARNING so operators can retrieve it once.
+    """
+
+    if not isinstance(web_cfg, dict):
+        return None
+
+    auth_cfg = web_cfg.get("auth")
+    if not isinstance(auth_cfg, dict):
+        auth_cfg = {}
+        web_cfg["auth"] = auth_cfg
+
+    mode = str(auth_cfg.get("mode", "token") or "token").strip().lower()
+    if mode != "token":
+        return None
+
+    existing = str(auth_cfg.get("token") or "").strip()
+    if existing:
+        return None
+
+    try:
+        token_len = max(16, int(length))
+    except Exception:
+        token_len = 32
+
+    generated = "".join(secrets.choice(_AUTO_TOKEN_ALPHABET) for _ in range(token_len))
+    auth_cfg["token"] = generated
+    web_cfg["auth"] = auth_cfg
+
+    logger.warning(
+        "server.http.auth.mode=token but no token was configured; "
+        "generated a **session** token (store this securely): %s",
+        generated,
+    )
+    return generated
+
+
 def _extract_provided_auth_token(
     authorization_header: str | None,
     api_key_header: str | None,
@@ -123,7 +181,7 @@ def _evaluate_web_auth(
     *,
     authorization_header: str | None,
     api_key_header: str | None,
-    default_mode: str = "none",
+    default_mode: str = "token",
 ) -> tuple[bool, int | None, str | None, Dict[str, str] | None]:
     """Brief: Evaluate configured web auth for a single request.
 
@@ -142,7 +200,7 @@ def _evaluate_web_auth(
 
     Behaviour:
       - ``mode=none`` allows all requests.
-      - ``mode=token`` enforces a static bearer/API key token.
+      - ``mode=token`` (default) enforces a static bearer/API key token.
       - Unknown auth modes fail closed.
     """
 
@@ -168,18 +226,19 @@ def _evaluate_web_auth(
     return True, None, None, None
 
 
-def _build_auth_dependency(web_cfg: Dict[str, Any], *, default_mode: str = "none"):
+def _build_auth_dependency(web_cfg: Dict[str, Any], *, default_mode: str = "token"):
     """Build a FastAPI dependency enforcing optional admin auth.
 
     Inputs:
       - web_cfg: webserver config dict from YAML (or {}).
+      - default_mode: Fallback auth mode when webserver.auth.mode is unset.
 
     Outputs:
       - Dependency callable usable with FastAPI Depends().
 
     Modes:
-      - none (default): no authentication.
-      - token: require Authorization: Bearer <token> or X-API-Key header.
+      - token (default): require Authorization: Bearer <token> or X-API-Key header.
+      - none: no authentication.
       - basic: require HTTP Basic credentials (not implemented yet; reserved).
     """
 
@@ -188,7 +247,7 @@ def _build_auth_dependency(web_cfg: Dict[str, Any], *, default_mode: str = "none
             web_cfg,
             authorization_header=request.headers.get("authorization"),
             api_key_header=request.headers.get("x-api-key"),
-            default_mode=str(default_mode or "none"),
+            default_mode=str(default_mode or "token"),
         )
         if authorized:
             return None

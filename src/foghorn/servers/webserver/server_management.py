@@ -24,6 +24,7 @@ from ...stats import StatsCollector
 from .admin_state import AdminRuntimeState
 from .api_request_audit import ApiRequestAuditLogger
 from .config_helpers import _get_web_cfg
+from .http_helpers import ensure_web_auth_token
 from .logging_utils import RingBuffer
 from .runtime import RuntimeState
 from .threaded_handlers import _ThreadedAdminRequestHandler
@@ -355,9 +356,15 @@ def start_webserver(
     host = str(web_cfg.get("host", "127.0.0.1"))
     port = int(web_cfg.get("port", 5380))
 
+    # When auth.mode=token and token is missing, generate a temporary token and
+    # log it so operators can still access the admin API.
+    ensure_web_auth_token(web_cfg)
+
     # Warn when the API is enabled without effective authentication.
     auth_cfg = web_cfg.get("auth") or {}
-    auth_mode = str(auth_cfg.get("mode", "none")).strip().lower()
+    if not isinstance(auth_cfg, dict):
+        auth_cfg = {}
+    auth_mode = str(auth_cfg.get("mode", "token")).strip().lower()
     auth_token = auth_cfg.get("token")
     api_enabled = bool(web_cfg.get("enable_api", True))
     api_auth_missing = auth_mode in {"", "none"} or (
