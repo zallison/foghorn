@@ -5,6 +5,7 @@ import json
 import os
 from typing import Any, Dict, Final
 
+from foghorn.utils.register_caches import registered_ttl_cache
 from .stats_helpers import _utc_now_iso
 
 _GITHUB_URL: Final[str] = "https://github.com/zallison/foghorn"
@@ -15,6 +16,7 @@ except Exception:  # pragma: no cover - best effort
     FOGHORN_VERSION = "unknown"
 
 
+@registered_ttl_cache(maxsize=1, ttl=300)
 def _get_package_build_info() -> Dict[str, Any]:
     """Brief: Best-effort build metadata (commit, VCS url, etc.) from packaging.
 
@@ -32,6 +34,7 @@ def _get_package_build_info() -> Dict[str, Any]:
       - Prefers environment variables so container builds can inject stable build
         identifiers.
       - Falls back to PEP 610 direct_url.json metadata when available.
+      - Cached briefly; build metadata is effectively constant for a process.
     """
 
     info: Dict[str, Any] = {

@@ -7,7 +7,9 @@ import threading
 import time
 from datetime import datetime, timezone
 from typing import Any, Dict
-from foghorn.utils.register_caches import registered_ttl_cache
+
+from cachetools import TTLCache
+from foghorn.utils.register_caches import registered_cached, registered_ttl_cache
 
 from ...stats import StatsCollector, StatsSnapshot
 
@@ -16,7 +18,9 @@ logger = logging.getLogger("foghorn.webserver")
 
 # Lightweight cache for expensive system metrics to keep /stats fast under load.
 _SYSTEM_INFO_CACHE_TTL_SECONDS = 5.0
+_SYSTEM_INFO_CACHE = TTLCache(maxsize=1, ttl=int(_SYSTEM_INFO_CACHE_TTL_SECONDS))
 _SYSTEM_INFO_CACHE_LOCK = threading.Lock()
+# Legacy mirrors kept for tests/tools that inspect foghorn.servers.webserver.*
 _last_system_info: Dict[str, Any] | None = None
 _last_system_info_ts: float = 0.0
 _SYSTEM_INFO_DETAIL_MODE = "full"  # "full" or "basic"
@@ -25,8 +29,9 @@ _SYSTEM_INFO_DETAIL_MODE = "full"  # "full" or "basic"
 # /traffic handlers. This keeps repeated polls from re-snapshotting the
 # StatsCollector multiple times per second.
 _STATS_SNAPSHOT_CACHE_TTL_SECONDS = 5.0
+_STATS_SNAPSHOT_CACHE = TTLCache(maxsize=32, ttl=int(_STATS_SNAPSHOT_CACHE_TTL_SECONDS))
 _STATS_SNAPSHOT_CACHE_LOCK = threading.Lock()
-# Map id(StatsCollector) -> (StatsSnapshot, timestamp)
+# Legacy mirror of recent snapshots for diagnostics/tests.
 _last_stats_snapshots: Dict[int, tuple[StatsSnapshot, float]] = {}
 _SIMPLE_STATS_TABLE_IDS = {
     "top_clients",
@@ -231,6 +236,50 @@ def _read_proc_meminfo(path: str = "/proc/meminfo") -> Dict[str, int]:
     return result
 
 
+def _stats_snapshot_cache_key(collector: StatsCollector) -> tuple:
+    """Brief: Cache key for non-reset stats snapshots.
+
+    Inputs:
+      - collector: Active StatsCollector instance.
+
+    Outputs:
+      - tuple containing the collector identity.
+    """
+
+    return (id(collector),)
+
+
+@registered_cached(cache=_STATS_SNAPSHOT_CACHE, key=_stats_snapshot_cache_key)
+def _snapshot_collector_cached(collector: StatsCollector) -> StatsSnapshot:
+    """Brief: Take a non-reset StatsCollector snapshot via registered cache.
+
+    Inputs:
+      - collector: Active StatsCollector instance.
+
+    Outputs:
+      - StatsSnapshot from collector.snapshot(reset=False).
+    """
+
+    return collector.snapshot(reset=False)
+
+
+def _sync_stats_snapshot_cache_ttl() -> None:
+    """Brief: Apply module TTL setting onto the registered snapshot TTLCache.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None. Best-effort mutation of ``_STATS_SNAPSHOT_CACHE.ttl``.
+    """
+
+    try:
+        ttl_i = max(0, int(float(_STATS_SNAPSHOT_CACHE_TTL_SECONDS)))
+        _STATS_SNAPSHOT_CACHE.ttl = ttl_i
+    except Exception:  # pragma: no cover - defensive ttl sync
+        pass
+
+
 def _get_stats_snapshot_cached(collector: StatsCollector, reset: bool) -> StatsSnapshot:
     """Return StatsSnapshot using a short-lived cache when reset is False.
 
@@ -245,22 +294,23 @@ def _get_stats_snapshot_cached(collector: StatsCollector, reset: bool) -> StatsS
     global _last_stats_snapshots
 
     collector_id = id(collector)
+    _sync_stats_snapshot_cache_ttl()
 
     if reset:
         snap = collector.snapshot(reset=True)
+        # Drop any non-reset cached entry for this collector so the next poll
+        # observes the post-reset view.
+        try:
+            cache_key = _stats_snapshot_cache_key(collector)
+            _STATS_SNAPSHOT_CACHE.pop(cache_key, None)  # type: ignore[arg-type]
+            _STATS_SNAPSHOT_CACHE[cache_key] = snap  # type: ignore[index]
+        except Exception:  # pragma: no cover - defensive cache update
+            pass
         with _STATS_SNAPSHOT_CACHE_LOCK:
             _last_stats_snapshots[collector_id] = (snap, time.time())
         return snap
 
-    now = time.time()
-    with _STATS_SNAPSHOT_CACHE_LOCK:
-        entry = _last_stats_snapshots.get(collector_id)
-    if entry is not None:
-        cached, cached_ts = entry
-        if now - cached_ts < _STATS_SNAPSHOT_CACHE_TTL_SECONDS:
-            return cached
-
-    snap = collector.snapshot(reset=False)
+    snap = _snapshot_collector_cached(collector)
     with _STATS_SNAPSHOT_CACHE_LOCK:
         _last_stats_snapshots[collector_id] = (snap, time.time())
     return snap
@@ -324,47 +374,53 @@ def resolve_stats_table_rows(
     return [], "unknown_table"
 
 
-def get_system_info() -> Dict[str, Any]:
-    """Brief: Collect simple system and process memory usage snapshot.
+def _system_info_cache_key() -> tuple:
+    """Brief: Constant key for the single-slot system info cache.
 
     Inputs:
       - None.
 
     Outputs:
-      - Dict containing keys such as "load_1m", "load_5m", "load_15m",
-        "memory_total_bytes", "memory_used_bytes", "memory_free_bytes",
-        "memory_available_bytes".
+      - tuple used as the cachetools key for get_system_info.
     """
 
-    global _last_system_info, _last_system_info_ts
+    return ("system_info",)
 
-    # Resolve the webserver core module once so that tests which monkeypatch
-    # foghorn.servers.webserver.* can influence behaviour here. When available
-    # we also use its cache globals and TTL so tests can control caching via
-    # foghorn.servers.webserver._SYSTEM_INFO_CACHE_TTL_SECONDS and
-    # _reset_system_info_cache().
-    web_core = None
-    try:  # pragma: no cover - import failure is environment-specific
-        import importlib
 
-        web_core = importlib.import_module("foghorn.servers.webserver.core")
-    except Exception:
-        web_core = None
+def _sync_system_info_cache_ttl(web_core: Any | None = None) -> float:
+    """Brief: Sync registered system-info TTLCache from module/core TTL globals.
 
-    now = time.time()
-    cached = _last_system_info
-    cached_ts = _last_system_info_ts
-    ttl = _SYSTEM_INFO_CACHE_TTL_SECONDS
+    Inputs:
+      - web_core: Optional foghorn.servers.webserver.core module.
+
+    Outputs:
+      - Effective TTL in seconds (>= 0).
+    """
+
+    ttl = float(_SYSTEM_INFO_CACHE_TTL_SECONDS)
     if web_core is not None:
         try:
             ttl = float(getattr(web_core, "_SYSTEM_INFO_CACHE_TTL_SECONDS", ttl))
         except Exception:
-            ttl = _SYSTEM_INFO_CACHE_TTL_SECONDS
-        cached = getattr(web_core, "_last_system_info", cached)
-        cached_ts = getattr(web_core, "_last_system_info_ts", cached_ts)
+            ttl = float(_SYSTEM_INFO_CACHE_TTL_SECONDS)
+    try:
+        ttl_i = max(0, int(ttl))
+        _SYSTEM_INFO_CACHE.ttl = ttl_i
+    except Exception:  # pragma: no cover - defensive ttl sync
+        pass
+    return max(0.0, float(ttl))
 
-    if cached is not None and now - cached_ts < ttl:
-        return dict(cached)
+
+def _collect_system_info(web_core: Any | None) -> Dict[str, Any]:
+    """Brief: Build a fresh system/process metrics payload.
+
+    Inputs:
+      - web_core: Optional foghorn.servers.webserver.core module used for
+        monkeypatch-friendly os/psutil/_read_proc_meminfo lookups.
+
+    Outputs:
+      - Dict of system metrics suitable for /stats.
+    """
 
     payload: Dict[str, Any] = {
         "load_1m": None,
@@ -441,6 +497,7 @@ def get_system_info() -> Dict[str, Any]:
     process_io_counters = None
     process_open_files_count = None
     process_connections_count = None
+    detail_mode = str(_SYSTEM_INFO_DETAIL_MODE or "full").lower()
 
     if psutil_mod is not None:
         try:
@@ -470,17 +527,18 @@ def get_system_info() -> Dict[str, Any]:
             except Exception:
                 process_io_counters = None
 
-            # Open files / connections
-            try:
-                files = proc.open_files()
-                process_open_files_count = len(files) if files is not None else 0
-            except Exception:
-                process_open_files_count = None
-            try:
-                conns = proc.connections()
-                process_connections_count = len(conns) if conns is not None else 0
-            except Exception:
-                process_connections_count = None
+            # Open files / connections are relatively expensive; skip in basic mode.
+            if detail_mode != "basic":
+                try:
+                    files = proc.open_files()
+                    process_open_files_count = len(files) if files is not None else 0
+                except Exception:
+                    process_open_files_count = None
+                try:
+                    conns = proc.connections()
+                    process_connections_count = len(conns) if conns is not None else 0
+                except Exception:
+                    process_connections_count = None
         except Exception:  # pragma: no cover - psutil-specific failures
             rss_bytes = None
 
@@ -493,12 +551,100 @@ def get_system_info() -> Dict[str, Any]:
     payload["process_io_counters"] = process_io_counters
     payload["process_open_files_count"] = process_open_files_count
     payload["process_connections_count"] = process_connections_count
+    return payload
 
-    # Publish into cache for subsequent callers. Keep both this module's cache
-    # and the _core module's exported cache in sync so tests that reset or
-    # inspect foghorn.servers.webserver._last_system_info* behave as expected.
-    now = time.time()
+
+@registered_cached(cache=_SYSTEM_INFO_CACHE, key=_system_info_cache_key)
+def _get_system_info_cached() -> Dict[str, Any]:
+    """Brief: Registered-cache wrapper around system metrics collection.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - Fresh system metrics dict from _collect_system_info.
+    """
+
+    web_core = None
+    try:  # pragma: no cover - import failure is environment-specific
+        import importlib
+
+        web_core = importlib.import_module("foghorn.servers.webserver.core")
+    except Exception:
+        web_core = None
+    return _collect_system_info(web_core)
+
+
+def get_system_info() -> Dict[str, Any]:
+    """Brief: Collect simple system and process memory usage snapshot.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - Dict containing keys such as "load_1m", "load_5m", "load_15m",
+        "memory_total_bytes", "memory_used_bytes", "memory_free_bytes",
+        "memory_available_bytes".
+
+    Notes:
+      - Uses a registered TTLCache backend. Tests can still clear/inspect the
+        legacy ``_last_system_info*`` mirrors on webserver.core and adjust TTL
+        via ``_SYSTEM_INFO_CACHE_TTL_SECONDS``.
+    """
+
+    global _last_system_info, _last_system_info_ts
+
+    # Resolve the webserver core module once so that tests which monkeypatch
+    # foghorn.servers.webserver.* can influence behaviour here.
+    web_core = None
+    try:  # pragma: no cover - import failure is environment-specific
+        import importlib
+
+        web_core = importlib.import_module("foghorn.servers.webserver.core")
+    except Exception:
+        web_core = None
+
+    ttl = _sync_system_info_cache_ttl(web_core)
+
+    # Honor test resets of legacy mirrors: when _last_system_info is cleared on
+    # core/module, drop the registered cache entry too.
+    legacy_cached = _last_system_info
+    legacy_ts = _last_system_info_ts
+    if web_core is not None:
+        legacy_cached = getattr(web_core, "_last_system_info", legacy_cached)
+        legacy_ts = getattr(web_core, "_last_system_info_ts", legacy_ts)
+    if legacy_cached is None:
+        try:
+            _SYSTEM_INFO_CACHE.clear()
+        except Exception:  # pragma: no cover - defensive clear
+            pass
+    else:
+        # If legacy cache is still valid under the effective TTL, reuse it so
+        # tests that only advance webserver.time.time continue to work.
+        try:
+            now = time.time()
+            if web_core is not None:
+                time_mod = getattr(web_core, "time", None)
+                if time_mod is not None and hasattr(time_mod, "time"):
+                    now = float(time_mod.time())
+            if now - float(legacy_ts or 0.0) < float(ttl):
+                return dict(legacy_cached)
+            # Expired legacy entry: force registered cache miss.
+            _SYSTEM_INFO_CACHE.clear()
+        except Exception:
+            pass
+
+    payload = _get_system_info_cached()
     snapshot = dict(payload)
+    now = time.time()
+    try:
+        if web_core is not None:
+            time_mod = getattr(web_core, "time", None)
+            if time_mod is not None and hasattr(time_mod, "time"):
+                now = float(time_mod.time())
+    except Exception:
+        now = time.time()
+
     with _SYSTEM_INFO_CACHE_LOCK:
         _last_system_info = snapshot
         _last_system_info_ts = now
@@ -510,7 +656,7 @@ def get_system_info() -> Dict[str, Any]:
         except Exception:  # pragma: no cover - defensive
             pass
 
-    return payload
+    return dict(snapshot)
 
 
 def _is_rate_limit_plugin_entry(entry_obj: Any) -> bool:

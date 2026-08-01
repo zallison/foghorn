@@ -69,8 +69,10 @@ from .config_helpers import (
 from .http_helpers import (
     _build_auth_dependency,
     _json_safe,
+    ensure_web_auth_token,
     resolve_www_root,
 )
+
 from .logging_utils import (
     RingBuffer,
     _Suppress2xxAccessFilter,
@@ -152,9 +154,16 @@ _last_rate_limit_snapshot_ts: float = 0.0
 # implementation lives in config_helpers.
 _CONFIG_TEXT_CACHE_TTL_SECONDS = _config_helpers._CONFIG_TEXT_CACHE_TTL_SECONDS
 _CONFIG_TEXT_CACHE_LOCK = _config_helpers._CONFIG_TEXT_CACHE_LOCK
-_last_config_text_key = None  # type: ignore[assignment]
-_last_config_text = None  # type: ignore[assignment]
-_last_config_text_ts = 0.0
+_CONFIG_TEXT_CACHE = _config_helpers._CONFIG_TEXT_CACHE
+_last_config_text_key = _config_helpers._last_config_text_key
+_last_config_text = _config_helpers._last_config_text
+_last_config_text_ts = _config_helpers._last_config_text_ts
+
+# System-info registered cache + legacy mirrors for tests.
+_SYSTEM_INFO_CACHE = _stats_helpers._SYSTEM_INFO_CACHE
+_last_system_info = _stats_helpers._last_system_info
+_last_system_info_ts = _stats_helpers._last_system_info_ts
+_STATS_SNAPSHOT_CACHE = _stats_helpers._STATS_SNAPSHOT_CACHE
 
 
 def create_app(
@@ -225,16 +234,29 @@ def create_app(
     if isinstance(ttl_raw, (int, float)) and ttl_raw > 0:
         _SYSTEM_INFO_CACHE_TTL_SECONDS = float(ttl_raw)
         _stats_helpers._SYSTEM_INFO_CACHE_TTL_SECONDS = float(ttl_raw)
+        try:
+            _stats_helpers._SYSTEM_INFO_CACHE.ttl = max(0, int(ttl_raw))
+        except Exception:  # pragma: no cover - defensive ttl apply
+            pass
 
     # Optional tuning for how often StatsCollector.snapshot() is recomputed.
     stats_ttl_raw = web_cfg.get("stats_snapshot_ttl_seconds")
     if isinstance(stats_ttl_raw, (int, float)) and stats_ttl_raw > 0:
         _stats_helpers._STATS_SNAPSHOT_CACHE_TTL_SECONDS = float(stats_ttl_raw)
+        try:
+            _stats_helpers._STATS_SNAPSHOT_CACHE.ttl = max(0, int(stats_ttl_raw))
+        except Exception:  # pragma: no cover - defensive ttl apply
+            pass
 
     # Optional tuning for how often sanitized YAML text is recomputed for /config.
     cfg_ttl_raw = web_cfg.get("config_cache_ttl_seconds")
     if isinstance(cfg_ttl_raw, (int, float)) and cfg_ttl_raw > 0:
         _CONFIG_TEXT_CACHE_TTL_SECONDS = float(cfg_ttl_raw)
+        _config_helpers._CONFIG_TEXT_CACHE_TTL_SECONDS = float(cfg_ttl_raw)
+        try:
+            _config_helpers._CONFIG_TEXT_CACHE.ttl = max(0, int(cfg_ttl_raw))
+        except Exception:  # pragma: no cover - defensive ttl apply
+            pass
 
     # Optional control over how heavy the system metrics collection is.
     detail_raw = str(web_cfg.get("system_metrics_detail", "full")).lower()
@@ -281,6 +303,9 @@ def create_app(
             allow_headers=allow_headers,
         )
 
+    # When auth.mode=token and no token is configured, generate one and log it.
+    ensure_web_auth_token(web_cfg)
+
     auth_dep = _build_auth_dependency(web_cfg)
     admin_auth_dep = _build_auth_dependency(web_cfg, default_mode="token")
 
@@ -306,7 +331,10 @@ def create_app(
         """
 
         audit_logger = getattr(app.state, "api_request_audit_logger", None)
-        if not isinstance(audit_logger, ApiRequestAuditLogger) or not audit_logger.enabled:
+        if (
+            not isinstance(audit_logger, ApiRequestAuditLogger)
+            or not audit_logger.enabled
+        ):
             return await call_next(request)
 
         started_ts = time.time()

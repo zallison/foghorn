@@ -21,6 +21,7 @@ from ...utils.config_diagram import (
     generate_dot_text_from_config_path,
     stale_diagram_warning,
 )
+from foghorn.utils.register_caches import registered_ttl_cache
 from .config_helpers import (
     _get_config_raw_json,
     _get_config_raw_text,
@@ -116,8 +117,8 @@ def _normalize_top_limit(raw_top: Any, default: int = 10) -> int:
     return int(limit)
 
 
+@registered_ttl_cache(maxsize=8, ttl=60)
 def _resolve_host_identity(
-    *,
     hostname: str | None = None,
     host_ip: str | None = None,
 ) -> tuple[str, str]:
@@ -129,6 +130,10 @@ def _resolve_host_identity(
 
     Outputs:
       - Tuple of (hostname, host_ip).
+
+    Notes:
+      - Results are TTL-cached (60s) because hostname/IP rarely change in-process
+        and /stats + /traffic poll frequently.
     """
 
     host_name_out = str(hostname) if isinstance(hostname, str) and hostname else ""

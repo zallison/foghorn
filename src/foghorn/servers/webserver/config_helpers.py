@@ -20,14 +20,17 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Tuple, Final
 
 import yaml
+from cachetools import TTLCache
 
-from foghorn.utils.register_caches import registered_lru_cache
+from foghorn.utils.register_caches import registered_cached, registered_lru_cache
 
 # Short-lived cache for sanitized YAML configuration text returned by /config.
 # The underlying on-disk config rarely changes, so a small TTL avoids repeated
 # disk I/O and redaction work under frequent polling.
 _CONFIG_TEXT_CACHE_TTL_SECONDS = 2.0
+_CONFIG_TEXT_CACHE = TTLCache(maxsize=8, ttl=int(_CONFIG_TEXT_CACHE_TTL_SECONDS))
 _CONFIG_TEXT_CACHE_LOCK = threading.Lock()
+# Legacy mirrors for tests that inspect foghorn.servers.webserver cache state.
 _last_config_text_key: tuple[str, tuple[str, ...]] | None = None
 _last_config_text: str | None = None
 _last_config_text_ts: float = 0.0
@@ -136,6 +139,83 @@ def sanitize_config(
     return redacted
 
 
+def _sanitized_config_yaml_cache_key(
+    cfg: Dict[str, Any], cfg_path: str | None, redact_keys: List[str] | None
+) -> tuple:
+    """Brief: Build cache key for sanitized YAML config text.
+
+    Inputs:
+      - cfg: In-memory configuration mapping (unused; path/redact drive the key).
+      - cfg_path: Optional filesystem path to the active YAML config file.
+      - redact_keys: List of key names whose values should be redacted.
+
+    Outputs:
+      - tuple cache key of (cfg_path, sorted redact keys).
+    """
+
+    _ = cfg
+    return (str(cfg_path or ""), tuple(sorted(str(k) for k in (redact_keys or []))))
+
+
+def _sync_config_text_cache_ttl() -> float:
+    """Brief: Apply module/core TTL setting onto the registered config TTLCache.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - Effective TTL seconds.
+    """
+
+    ttl = float(_CONFIG_TEXT_CACHE_TTL_SECONDS)
+    try:
+        import foghorn.servers.webserver.core as web_core
+
+        ttl = float(getattr(web_core, "_CONFIG_TEXT_CACHE_TTL_SECONDS", ttl))
+    except Exception:
+        ttl = float(_CONFIG_TEXT_CACHE_TTL_SECONDS)
+    try:
+        _CONFIG_TEXT_CACHE.ttl = max(0, int(ttl))
+    except Exception:  # pragma: no cover - defensive ttl sync
+        pass
+    return max(0.0, float(ttl))
+
+
+@registered_cached(cache=_CONFIG_TEXT_CACHE, key=_sanitized_config_yaml_cache_key)
+def _build_sanitized_config_yaml(
+    cfg: Dict[str, Any], cfg_path: str | None, redact_keys: List[str] | None
+) -> str:
+    """Brief: Compute sanitized configuration YAML text (cache miss path).
+
+    Inputs:
+      - cfg: In-memory configuration mapping.
+      - cfg_path: Optional filesystem path to the active YAML config file.
+      - redact_keys: List of key names whose values should be redacted.
+
+    Outputs:
+      - YAML string with sensitive values redacted.
+    """
+
+    if cfg_path:
+        try:
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                raw_text = f.read()
+            return _redact_yaml_text_preserving_layout(raw_text, redact_keys or [])
+        except Exception:  # pragma: no cover - I/O specific
+            clean = sanitize_config(cfg, redact_keys=redact_keys or [])
+            try:
+                return yaml.safe_dump(clean, sort_keys=False)  # type: ignore[arg-type]
+            except Exception:
+                return ""
+    clean = sanitize_config(cfg, redact_keys=redact_keys or [])
+    try:
+        return yaml.safe_dump(clean, sort_keys=False)  # type: ignore[arg-type]
+    except (
+        Exception
+    ):  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
+        return ""
+
+
 def _get_sanitized_config_yaml_cached(
     cfg: Dict[str, Any], cfg_path: str | None, redact_keys: List[str] | None
 ) -> str:
@@ -148,45 +228,51 @@ def _get_sanitized_config_yaml_cached(
 
     Outputs:
       - YAML string with sensitive values redacted.
+
+    Notes:
+      - Backed by a registered TTLCache. Legacy ``_last_config_text*`` mirrors
+        remain for tests that clear/inspect cache state via webserver module.
     """
 
     global _last_config_text_key, _last_config_text, _last_config_text_ts
 
-    key = (str(cfg_path or ""), tuple(sorted(str(k) for k in (redact_keys or []))))
-    now = time.time()
-    with _CONFIG_TEXT_CACHE_LOCK:
-        if (
-            _last_config_text is not None
-            and _last_config_text_key == key
-            and now - _last_config_text_ts < _CONFIG_TEXT_CACHE_TTL_SECONDS
-        ):
-            return _last_config_text
+    _ = _sync_config_text_cache_ttl()
+    key = _sanitized_config_yaml_cache_key(cfg, cfg_path, redact_keys)
 
-    # Cache miss: compute sanitized YAML text.
-    if cfg_path:
+    web_core = None
+    try:
+        import foghorn.servers.webserver.core as web_core_mod
+
+        web_core = web_core_mod
+    except Exception:
+        web_core = None
+
+    # Tests reset foghorn.servers.webserver._last_config_text* to force a cold
+    # cache. When those mirrors are cleared, drop the registered entry too.
+    legacy_text = _last_config_text
+    if web_core is not None:
+        legacy_text = getattr(web_core, "_last_config_text", legacy_text)
+    if legacy_text is None:
         try:
-            with open(cfg_path, "r", encoding="utf-8") as f:
-                raw_text = f.read()
-            body = _redact_yaml_text_preserving_layout(raw_text, redact_keys or [])
-        except Exception:  # pragma: no cover - I/O specific
-            clean = sanitize_config(cfg, redact_keys=redact_keys or [])
-            try:
-                body = yaml.safe_dump(clean, sort_keys=False)  # type: ignore[arg-type]
-            except Exception:
-                body = ""
-    else:
-        clean = sanitize_config(cfg, redact_keys=redact_keys or [])
-        try:
-            body = yaml.safe_dump(clean, sort_keys=False)  # type: ignore[arg-type]
-        except (
-            Exception
-        ):  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
-            body = ""
+            _CONFIG_TEXT_CACHE.pop(key, None)  # type: ignore[arg-type]
+        except Exception:  # pragma: no cover - defensive pop
+            pass
+
+    body = _build_sanitized_config_yaml(cfg, cfg_path, redact_keys)
+    now_ts = time.time()
 
     with _CONFIG_TEXT_CACHE_LOCK:
         _last_config_text_key = key
         _last_config_text = body
-        _last_config_text_ts = time.time()
+        _last_config_text_ts = now_ts
+
+    if web_core is not None:
+        try:
+            setattr(web_core, "_last_config_text_key", key)
+            setattr(web_core, "_last_config_text", body)
+            setattr(web_core, "_last_config_text_ts", now_ts)
+        except Exception:  # pragma: no cover - defensive mirror sync
+            pass
     return body
 
 
