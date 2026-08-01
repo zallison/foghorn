@@ -2193,6 +2193,16 @@ def _initialize_statistics_subsystem(
             query_log_sample_rate=query_log_sample_rate,
             query_log_dedupe_window_seconds=query_log_dedupe_window_seconds,
             query_log_dedupe_max_entries=query_log_dedupe_max_entries,
+            max_unique_clients=int(stats_cfg.get("max_unique_clients", 50000) or 50000),
+            max_unique_domains=int(stats_cfg.get("max_unique_domains", 50000) or 50000),
+            max_store_clients=int(stats_cfg.get("max_store_clients", 50000) or 50000),
+            max_store_domains=int(stats_cfg.get("max_store_domains", 50000) or 50000),
+            max_store_subdomains=int(
+                stats_cfg.get("max_store_subdomains", 50000) or 50000
+            ),
+            max_store_qtype_qnames=int(
+                stats_cfg.get("max_store_qtype_qnames", 50000) or 50000
+            ),
         )
 
         # Best-effort warm-load of persisted aggregate counters on startup.

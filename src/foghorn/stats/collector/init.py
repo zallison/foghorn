@@ -67,6 +67,10 @@ class _StatsCollectorInitUtils:
         query_log_dedupe_max_entries: int = 50000,
         max_unique_clients: int = DEFAULT_MAX_UNIQUE_CLIENTS,
         max_unique_domains: int = DEFAULT_MAX_UNIQUE_DOMAINS,
+        max_store_clients: int = DEFAULT_MAX_UNIQUE_CLIENTS,
+        max_store_domains: int = DEFAULT_MAX_UNIQUE_DOMAINS,
+        max_store_subdomains: int = DEFAULT_MAX_UNIQUE_DOMAINS,
+        max_store_qtype_qnames: int = DEFAULT_MAX_UNIQUE_DOMAINS,
     ) -> None:
         """Initialize statistics collector with configuration flags.
 
@@ -110,6 +114,14 @@ class _StatsCollectorInitUtils:
                 retained in memory when unique tracking is enabled.
             max_unique_domains: Maximum number of unique domain values retained
                 in memory when unique tracking is enabled.
+            max_store_clients: Maximum distinct client keys mirrored into the
+                persistent store (0 disables the cap).
+            max_store_domains: Maximum distinct base-domain keys mirrored into
+                the persistent store (0 disables the cap).
+            max_store_subdomains: Maximum distinct subdomain keys mirrored into
+                the persistent store (0 disables the cap).
+            max_store_qtype_qnames: Maximum distinct qtype|qname keys mirrored
+                into the persistent store (0 disables the cap).
 
         Outputs:
             None
@@ -161,6 +173,38 @@ class _StatsCollectorInitUtils:
             parsed_max_unique_domains = DEFAULT_MAX_UNIQUE_DOMAINS
         self.max_unique_clients = max(0, parsed_max_unique_clients)
         self.max_unique_domains = max(0, parsed_max_unique_domains)
+        try:
+            parsed_max_store_clients = int(max_store_clients)
+        except (TypeError, ValueError):
+            parsed_max_store_clients = DEFAULT_MAX_UNIQUE_CLIENTS
+        try:
+            parsed_max_store_domains = int(max_store_domains)
+        except (TypeError, ValueError):
+            parsed_max_store_domains = DEFAULT_MAX_UNIQUE_DOMAINS
+        try:
+            parsed_max_store_subdomains = int(max_store_subdomains)
+        except (TypeError, ValueError):
+            parsed_max_store_subdomains = DEFAULT_MAX_UNIQUE_DOMAINS
+        try:
+            parsed_max_store_qtype_qnames = int(max_store_qtype_qnames)
+        except (TypeError, ValueError):
+            parsed_max_store_qtype_qnames = DEFAULT_MAX_UNIQUE_DOMAINS
+        self.max_store_clients = max(0, parsed_max_store_clients)
+        self.max_store_domains = max(0, parsed_max_store_domains)
+        self.max_store_subdomains = max(0, parsed_max_store_subdomains)
+        self.max_store_qtype_qnames = max(0, parsed_max_store_qtype_qnames)
+        self._store_clients_seen: set[str] = set()
+        self._store_domains_seen: set[str] = set()
+        self._store_subdomains_seen: set[str] = set()
+        self._store_qtype_qnames_seen: set[str] = set()
+        self._store_clients_dropped = 0
+        self._store_domains_dropped = 0
+        self._store_subdomains_dropped = 0
+        self._store_qtype_qnames_dropped = 0
+        self._store_clients_limit_warned = False
+        self._store_domains_limit_warned = False
+        self._store_subdomains_limit_warned = False
+        self._store_qtype_qnames_limit_warned = False
 
         # Optional persistent store for long-lived aggregates and query logs.
         # This can be any BaseStatsStore implementation, including
@@ -255,6 +299,55 @@ class _StatsCollectorInitUtils:
             ignore_top_domains or [],
             ignore_top_subdomains or [],
         )
+
+    def _allow_store_key_locked(
+        self,
+        *,
+        scope: str,
+        key: str,
+        seen: set[str],
+        limit: int,
+        dropped_attr: str,
+        warned_attr: str,
+        label: str,
+    ) -> bool:
+        """Brief: Admit a persistent-store key while enforcing a cardinality cap.
+
+        Inputs:
+          - scope: Store scope name (for logging context).
+          - key: Key string to admit.
+          - seen: In-memory set of previously admitted keys for this scope.
+          - limit: Maximum distinct keys (0 disables the cap).
+          - dropped_attr: Attribute name for dropped-key counter.
+          - warned_attr: Attribute name for one-shot warning flag.
+          - label: Human-readable label used in warning messages.
+
+        Outputs:
+          - bool: True when the key may be persisted.
+        """
+
+        value = str(key or "")
+        if not value:
+            return False
+        if limit <= 0:
+            return True
+        if value in seen:
+            return True
+        if len(seen) >= int(limit):
+            setattr(self, dropped_attr, int(getattr(self, dropped_attr, 0) or 0) + 1)
+            if not bool(getattr(self, warned_attr, False)):
+                logger.warning(
+                    "StatsCollector store %s tracking reached max=%d; "
+                    "new unseen %s keys will not be persisted (scope=%s)",
+                    label,
+                    int(limit),
+                    label,
+                    scope,
+                )
+                setattr(self, warned_attr, True)
+            return False
+        seen.add(value)
+        return True
 
     def _track_unique_client_locked(self, client_ip: str) -> None:
         """Brief: Add a unique client IP while enforcing a maximum set size.

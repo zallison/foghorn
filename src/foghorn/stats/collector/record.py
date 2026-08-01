@@ -107,14 +107,48 @@ class _StatsCollectorRecordUtils:
                 persist_counts.append(("totals", "total_queries", 1))
                 if self.include_qtype_breakdown:
                     persist_counts.append(("qtypes", qtype, 1))
-                persist_counts.append(("clients", client_ip, 1))
-                if _is_subdomain(domain):
+                if self._allow_store_key_locked(
+                    scope="clients",
+                    key=client_ip,
+                    seen=self._store_clients_seen,
+                    limit=self.max_store_clients,
+                    dropped_attr="_store_clients_dropped",
+                    warned_attr="_store_clients_limit_warned",
+                    label="client",
+                ):
+                    persist_counts.append(("clients", client_ip, 1))
+                if _is_subdomain(domain) and self._allow_store_key_locked(
+                    scope="sub_domains",
+                    key=domain,
+                    seen=self._store_subdomains_seen,
+                    limit=self.max_store_subdomains,
+                    dropped_attr="_store_subdomains_dropped",
+                    warned_attr="_store_subdomains_limit_warned",
+                    label="subdomain",
+                ):
                     persist_counts.append(("sub_domains", domain, 1))
-                if base:
+                if base and self._allow_store_key_locked(
+                    scope="domains",
+                    key=base,
+                    seen=self._store_domains_seen,
+                    limit=self.max_store_domains,
+                    dropped_attr="_store_domains_dropped",
+                    warned_attr="_store_domains_limit_warned",
+                    label="domain",
+                ):
                     persist_counts.append(("domains", base, 1))
                 if qtype and domain:
                     qkey = f"{qtype}|{domain}"
-                    persist_counts.append(("qtype_qnames", qkey, 1))
+                    if self._allow_store_key_locked(
+                        scope="qtype_qnames",
+                        key=qkey,
+                        seen=self._store_qtype_qnames_seen,
+                        limit=self.max_store_qtype_qnames,
+                        dropped_attr="_store_qtype_qnames_dropped",
+                        warned_attr="_store_qtype_qnames_limit_warned",
+                        label="qtype_qname",
+                    ):
+                        persist_counts.append(("qtype_qnames", qkey, 1))
 
         self._persist_increment_counts(
             counts=persist_counts,
