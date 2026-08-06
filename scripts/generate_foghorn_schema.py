@@ -537,6 +537,150 @@ def _flatten_optional_enums(node: Any) -> None:
                 _flatten_optional_enums(sub)
 
 
+def _enrich_schema_descriptions(schema: dict[str, Any]) -> None:
+    """Brief: Heuristically populate missing descriptions/default notes.
+
+    Inputs:
+      - schema: Mutable JSON Schema mapping to enrich in place.
+
+    Outputs:
+      - None; ``schema`` is updated in place where descriptions are missing.
+
+    Notes:
+      - Never overwrites existing ``description`` fields.
+      - Adds brief type/enum/subkey notes and appends Default when present.
+    """
+
+    def _describe_node(node: Any) -> None:
+        if not isinstance(node, dict):
+            return
+
+        has_description = isinstance(node.get("description"), str) and bool(
+            str(node.get("description")).strip()
+        )
+        type_value = node.get("type")
+        enum_values = node.get("enum")
+        # Infer type/enum from simple anyOf/oneOf unions when top-level type is absent
+        # (common for Optional[...] fields emitted by Pydantic).
+        if type_value is None or enum_values is None:
+            for union_key in ("anyOf", "oneOf"):
+                union = node.get(union_key)
+                if not isinstance(union, list):
+                    continue
+                inferred_types: list[str] = []
+                inferred_enum: list[Any] | None = None
+                for branch in union:
+                    if not isinstance(branch, dict):
+                        continue
+                    bt = branch.get("type")
+                    if isinstance(bt, str):
+                        inferred_types.append(bt)
+                    elif isinstance(bt, list):
+                        inferred_types.extend(str(x) for x in bt)
+                    if "enum" in branch and isinstance(branch.get("enum"), list):
+                        inferred_enum = list(branch["enum"])
+                if type_value is None and inferred_types:
+                    # Preserve order, unique
+                    seen: set[str] = set()
+                    ordered: list[str] = []
+                    for t in inferred_types:
+                        if t not in seen:
+                            seen.add(t)
+                            ordered.append(t)
+                    type_value = ordered[0] if len(ordered) == 1 else ordered
+                if enum_values is None and inferred_enum is not None:
+                    enum_values = inferred_enum
+        properties = (
+            node.get("properties") if isinstance(node.get("properties"), dict) else None
+        )
+        pattern_props = (
+            node.get("patternProperties")
+            if isinstance(node.get("patternProperties"), dict)
+            else None
+        )
+        default_value = node.get("default") if "default" in node else None
+
+        pieces: list[str] = []
+
+        if not has_description:
+            if isinstance(type_value, str):
+                pieces.append(f"Type: {type_value}.")
+            elif isinstance(type_value, list) and type_value:
+                joined = ", ".join(str(t) for t in type_value)
+                pieces.append(f"Types: {joined}.")
+
+            if isinstance(enum_values, list) and enum_values:
+                pieces.append(
+                    "Valid values: "
+                    + ", ".join(json.dumps(v, ensure_ascii=False) for v in enum_values)
+                    + "."
+                )
+
+            if properties:
+                keys_preview = ", ".join(sorted(properties.keys())[:8])
+                pieces.append(f"Object with subkeys: {keys_preview}.")
+
+            if pattern_props:
+                patterns_preview = ", ".join(sorted(pattern_props.keys())[:4])
+                pieces.append(
+                    f"Object with keys matching patterns: {patterns_preview}."
+                )
+
+        if default_value is not None:
+            default_str = json.dumps(default_value, ensure_ascii=False)
+            existing = node.get("description", "")
+            default_sentence = f"Default: {default_str}."
+            if default_sentence not in str(existing):
+                pieces.append(default_sentence)
+
+        if pieces and not has_description:
+            node["description"] = " ".join(pieces)
+        elif pieces and has_description:
+            default_sentences = [p for p in pieces if p.startswith("Default:")]
+            if default_sentences:
+                desc = str(node["description"]).rstrip()
+                if not desc.endswith("."):
+                    desc += "."
+                desc += " " + " ".join(default_sentences)
+                node["description"] = desc
+
+    def _walk(node: Any) -> None:
+        if isinstance(node, dict):
+            _describe_node(node)
+
+            for key in ("properties", "patternProperties", "$defs", "definitions"):
+                child = node.get(key)
+                if isinstance(child, dict):
+                    for sub_key, sub in child.items():
+                        _walk(sub)
+                        # Plugin catalog entries nest the real schema under config_schema.
+                        if (
+                            key in {"$defs", "definitions"}
+                            and sub_key in {"PluginConfigs", "plugin_configs"}
+                            and isinstance(sub, dict)
+                        ):
+                            for plugin_meta in sub.values():
+                                if isinstance(plugin_meta, dict):
+                                    cfg = plugin_meta.get("config_schema")
+                                    if isinstance(cfg, dict):
+                                        _walk(cfg)
+
+            child = node.get("items")
+            if isinstance(child, dict):
+                _walk(child)
+            elif isinstance(child, list):
+                for sub in child:
+                    _walk(sub)
+
+            for key in ("oneOf", "anyOf", "allOf"):
+                child = node.get(key)
+                if isinstance(child, list):
+                    for sub in child:
+                        _walk(sub)
+
+    _walk(schema)
+
+
 def build_document() -> dict[str, Any]:
     """Brief: Build the full Foghorn configuration JSON Schema document.
 
@@ -582,6 +726,10 @@ def build_document() -> dict[str, Any]:
     props = schema.get("properties")
     if isinstance(props, dict) and "$schema" not in props and "schema_uri" in props:
         props["$schema"] = props.pop("schema_uri")
+
+    # Fill missing leaf/object descriptions for editor tooling (does not
+    # overwrite existing Field(description=...) text).
+    _enrich_schema_descriptions(schema)
 
     return schema
 
