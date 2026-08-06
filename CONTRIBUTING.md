@@ -62,6 +62,8 @@ All PRs must include:
 ## Schema generation
 `assets/config-schema.json` is generated output.
 - Do not edit it directly.
+- Core config shape lives in Pydantic models under `src/foghorn/config/models/` (`FoghornConfig` and section models).
+- Plugin config shapes come from each plugin's `get_config_model()` / `get_config_schema()`.
 - After config/schema-affecting changes, regenerate with `make schema` (or `./scripts/generate_foghorn_schema.py -o assets/config-schema.json`).
 
 ## Adding/changing dependencies

@@ -46,6 +46,8 @@ Important directories and modules:
   - Process entry point; orchestrates config, plugins, cache, stats, and listeners.
 - `src/foghorn/config/`
   - `config_parser.py`: reads YAML, applies `vars`, validates against JSON Schema, normalizes shapes into the `server`, `upstreams`, `logging`, `stats`, and `plugins` blocks consumed by the rest of the code.
+  - `config_schema.py`: loads `assets/config-schema.json` and runs jsonschema validation plus normalizations.
+  - `models/`: Pydantic source of truth for the core config JSON Schema (`FoghornConfig` and section models).
   - `logging_config.py`: logging setup and per-plugin logger helpers.
 - `src/foghorn/plugins/resolve/`
   - `base.py`: `BasePlugin`, `PluginContext`, and shared helpers; owns the global `DNS_CACHE` reference by default.
@@ -77,15 +79,19 @@ Important directories and modules:
 
 Foghorn validates configuration using a JSON Schema document in `assets/config-schema.json`. This file must not be edited directly in code or by hand.
 
-Instead, the project uses a generator script:
+**Source of truth** for the core config shape is the Pydantic models under `src/foghorn/config/models/` (root model: `FoghornConfig`). The generator only emits JSON Schema from those models plus discovered plugins:
 
+- `src/foghorn/config/models/`
+  - `root.py`: `FoghornConfig` top-level document
+  - `server.py`, `upstreams.py`, `logging_section.py`, `stats.py`, `plugins.py`, `vars_section.py`, `common.py`
 - `scripts/generate_foghorn_schema.py`
-  - Loads the existing base schema from `assets/config-schema.json`.
-  - Discovers resolve plugins via `foghorn.plugins.resolve.registry.discover_plugins()`.
-  - For each plugin, obtains a configuration model or explicit schema and attaches it under `$defs.PluginConfigs`.
-  - Normalizes top-level layout (`vars`, `server`, `upstreams`, `logging`, `stats`, `plugins`) and ensures helper definitions such as `DecoratedCacheOverride`, `PluginInstance`, `upstream_host`, and `upstream_doh` are present.
+  - Calls `FoghornConfig.model_json_schema()`
+  - Discovers resolve plugins via `foghorn.plugins.resolve.registry.discover_plugins()`
+  - Attaches per-plugin config schemas under `$defs.PluginConfigs` / `$defs.plugin_configs`
+  - Applies light post-processing (stable `$defs` names, vars `patternProperties`, conditional `upstreams` requirement)
+  - Does **not** load `assets/config-schema.json` as input
 
-When you make changes that affect configuration shape, regenerate the schema with either:
+When you make changes that affect configuration shape, edit the Pydantic models (or plugin `get_config_model()`), then regenerate:
 
 ```bash
 # From the project root
@@ -342,27 +348,28 @@ stats:
 
 ---
 
-## 7. Updating the schema generator
+## 7. Updating the configuration schema
 
-When you introduce new top-level configuration fields or change important structures (for example, adding new properties under `stats.persistence` or `server.cache`), you may need to update `scripts/generate_foghorn_schema.py`.
+When you introduce new top-level configuration fields or change important structures (for example, adding properties under `server.cache` or `logging`), update the Pydantic models in `src/foghorn/config/models/`. Only touch `scripts/generate_foghorn_schema.py` for emission/post-process behavior (plugin catalog, conditionals, stable `$defs` names).
 
 Typical changes include:
 
-- Extending `_augment_statistics_persistence_schema()` when new statistics/query-log options are added so they appear under the `stats` block and the `logging.backends` catalog in the schema.
-- Extending `_build_v2_root_schema()` when you want to add or rearrange top-level properties (for example, introducing a new block under `server`).
-- Adjusting how plugin definitions are copied into `$defs.PluginConfigs` when plugin metadata changes.
+- Adding fields to section models such as `ServerConfig`, `LoggingConfig`, `UpstreamsConfig`, or `StatsConfig`.
+- Adjusting `extra="forbid"` vs `extra="allow"` to match how strict a nested object should be.
+- Ensuring plugin config models expose `get_config_model()` so they appear under `$defs.PluginConfigs`.
 
 Workflow:
 
-1. Modify the generator code.
+1. Modify the Pydantic models (and/or plugin config models).
 2. Run the generator:
 
    ```bash
-   ./scripts/generate_foghorn_schema.py -o assets/config-schema.json
+   make schema
+   # or: ./scripts/generate_foghorn_schema.py -o assets/config-schema.json
    ```
 
 3. Review the diff to ensure only the intended parts of the schema changed.
-4. Run tests and, if present, any editor tooling that relies on the schema.
+4. Run schema-related tests (at least `tests/test_generate_foghorn_schema.py` and `tests/test_config_schema.py`).
 
 Remember: `assets/config-schema.json` is generated output; never hand-edit it.
 

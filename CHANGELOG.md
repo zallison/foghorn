@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 
 ## [Unreleased]
+
+### Changed
+- Core configuration JSON Schema is generated from Pydantic models under `src/foghorn/config/models/` (`FoghornConfig` and section models) instead of circularly rewriting `assets/config-schema.json`.
+- `scripts/generate_foghorn_schema.py` is a thin emitter (model dump, plugin `$defs` catalog, light post-processing) and restores heuristic `description` enrichment for editor tooling.
+
+### Added
+- `src/foghorn/config/models/` package as the source of truth for core config schema fields.
+- `tests/config/test_foghorn_config_models.py` for FoghornConfig and nested model defaults.
+
+### Documentation
+- `docs/README-DEV.md` and `CONTRIBUTING.md` describe the Pydantic-driven schema workflow and `make schema` regenerate step.
+
 ### Added
 - Added downstream DNS COOKIE (RFC 7873) support under `server.features.cookies` with `enabled` (default `true`), `mode` (`learn` | `require_udp`), optional `secret` / `secret_old`, and `lifetime_seconds` (default 86400).
 - Cookie helpers in `edns_utils` generate and validate IP-bound server cookies (HMAC, lifetime, current/old key rollover), classify request cookies, build BADCOOKIE (RCODE 23) responses, strip COOKIE options from cache payloads, and re-bind server cookies on outbound responses.
