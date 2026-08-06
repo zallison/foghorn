@@ -55,6 +55,7 @@ All notable changes to this project will be documented in this file.
 - Admin webserver startup now warns for non-loopback plaintext binds, public OpenAPI/Swagger exposure, permissive public CORS settings, and non-loopback threaded fallback usage.
 - API request audit startup now warns when enabled with implicit defaults for `db_path` or retention configuration.
 ### Fixed
+- Runtime snapshot initialization in `main` now passes `cookies_enabled` / `cookies_mode` / `cookies_secret` / `cookies_secret_old` / `cookies_lifetime_seconds` into `RuntimeSnapshot`, fixing startup after DNS COOKIE support was added.
 - RateLimit webserver stats now resolve runtime reader callbacks by `db_path` using exact, absolute, and normalized suffix matching, preventing missed current-window/profile metrics when configured paths and plugin runtime paths differ.
 - Admin plugin/cache paged tables now retain active search text, sort selection, page size, and enabled filters across auto-refresh cycles, preventing view resets while monitoring mDNS and other plugin pages.
 
