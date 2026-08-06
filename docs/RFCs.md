@@ -20,7 +20,7 @@ This document summarizes how Foghorn’s behavior maps onto major DNS-related RF
 |      7766 | DNS over TCP                                    | Implemented                                                            |
 |      7858 | DNS over TLS (DoT)                              | Implemented                                                            |
 |      7871 | Client Subnet in DNS Queries (ECS)              | Partially implemented (trust-gated forward mode)                       |
-|      7873 | Domain Name System (DNS) Cookies                | Partially implemented (cache-safe rebind/strip; no server cookie auth) |
+|      7873 | Domain Name System (DNS) Cookies                | Partially implemented (downstream server cookies + cache hygiene)      |
 |      7958 | DNSSEC Trust Anchor Publication for the Root    | Implemented                                                            |
 |      8484 | DNS over HTTPS (DoH)                            | Implemented                                                            |
 |      8914 | Extended DNS Errors                             | Partially implemented (policy/upstream failures; default on)           |
@@ -125,18 +125,23 @@ Foghorn implements a standards-aware subset of EDNS(0), centralized in
 
 ### 3.2 DNS Cookies – RFC 7873 (Partial)
 
-Foghorn does **not** implement full DNS Cookie authentication (no server-secret
-cookie generation/validation as a first-class anti-amplification feature).
+Foghorn implements **downstream server cookies** for client↔Foghorn traffic,
+plus cache-safe COOKIE hygiene:
 
-It does implement **cache-safe COOKIE hygiene** on the resolver response path:
-
-- Strips upstream DNS COOKIE options before caching responses.
-- Rebinds COOKIE on each client response to the active request’s client cookie.
-- Removes COOKIE from responses when the request carried no COOKIE, so stale
-  upstream cookies are not leaked across clients or cache hits.
-
-This keeps shared caching correct when clients or upstreams emit COOKIE options,
-without claiming full RFC 7873 server-cookie semantics.
+- Config: `server.features.cookies` (`enabled` default **true**, `mode: learn|require_udp`,
+  optional `secret` / `secret_old`, `lifetime_seconds`).
+- Learn mode (default when enabled): always answer; when the client sends an
+  8-byte client cookie, responses carry `client||server` where the server cookie
+  is an HMAC bound to client cookie + client IP (+ timestamp/key-id).
+- `require_udp`: UDP requests without a valid server cookie get **BADCOOKIE**
+  (RCODE 23, via EDNS extended RCODE) with a fresh server cookie and no
+  cache/plugin/upstream work. TCP/DoT/DoH are not required.
+- Strip upstream COOKIE options before caching; recompute/attach per request on
+  cache hits so shared cache payloads stay cookie-free.
+- Ephemeral per-process secret when `secret` is unset; multi-instance
+  `require_udp` should configure a shared secret.
+- Outbound/upstream client cookies (Foghorn as a cookie client to authoritatives)
+  are not implemented.
 
 ### 3.3 Client Subnet (ECS) – RFC 7871 (Partial)
 
@@ -327,9 +332,9 @@ The following RFCs (and related features) are not implemented directly in Foghor
 - **RFC 9250 – DNS over QUIC (DoQ)**
   - No QUIC transport for DNS; only UDP, TCP, DoT, and DoH are supported.
 
-- **Full RFC 7873 DNS Cookie authentication**
-  - No server-secret cookie generation/validation as an anti-forgery feature;
-    only cache-safe COOKIE strip/rebind is implemented (see §3.2).
+- **Upstream DNS Cookies (Foghorn as cookie client)**
+  - Downstream server cookies are implemented (see §3.2); Foghorn does not yet
+    store/send cookies toward upstream resolvers/authoritatives.
 
 - **True incremental IXFR client/server deltas (RFC 1995/5936 IXFR)**
   - IXFR queries are answered with full-zone AXFR-style transfers; no IXFR pull client.
@@ -349,7 +354,7 @@ Other newer or specialized DNS-related RFCs not listed above should be assumed
 - DNSSEC is best used in **passthrough/upstream-validated** mode for production comfort; local validation exists but remains experimental.
 - EDE is on by default for clearer policy/upstream diagnostics; full DNSSEC EDE coverage is still limited.
 - ECS is trust-gated in forward mode and bypasses shared cache when it affects answers.
-- COOKIE options are handled safely across cache hits but are not a full cookie-auth deployment.
+- Downstream DNS COOKIEs default on in learn mode; use `require_udp` plus a shared secret for public UDP resolvers. Cache payloads remain cookie-free.
 - ZoneRecords can act as a limited authoritative edge: static/BIND sources, AXFR hydrate/refresh (startup + poll + NOTIFY-driven), optional DNS UPDATE with journals, outbound NOTIFY, and AXFR/IXFR serving over TCP/DoT with TSIG and allowlists.
 - IXFR remains full-zone transfer style; there is no incremental IXFR client.
 - Leading `*` wildcards in ZoneRecords are intentionally broader than RFC 4592.

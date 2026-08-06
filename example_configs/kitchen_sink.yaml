@@ -262,6 +262,9 @@ server:
   features:
     enable_ede: false
     forward_local: false
+    cookies:
+      enabled: true
+      mode: learn
     refuse_any: false
 
   listen:

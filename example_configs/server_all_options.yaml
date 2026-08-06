@@ -150,6 +150,12 @@ server:
     enable_ede: false     # Extended DNS Errors
     forward_local: false  # Forward requests for .local upstream?
     refuse_any: false     # Refuse QTYPE ANY (amplification mitigation)
+    cookies:
+      enabled: true       # Downstream DNS COOKIE (RFC 7873) server cookies
+      mode: learn         # learn | require_udp
+      secret: null        # optional shared HMAC secret; null => ephemeral per process
+      secret_old: null    # optional previous secret for rollover
+      lifetime_seconds: 86400
     ecs:
       enabled: false
       forward_inbound: false
