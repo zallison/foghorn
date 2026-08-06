@@ -2,23 +2,36 @@
 
 from __future__ import annotations
 
+import base64
 import copy
+import hashlib
+import hmac
 import ipaddress
 import logging
 import math
-from typing import Any, Dict, Optional
+import os
+import struct
+import time
+from typing import Any, Dict, Optional, Tuple
 
-from dnslib import EDNS0, QTYPE, DNSRecord, EDNSOption
+from dnslib import EDNS0, QTYPE, DNSHeader, DNSRecord, EDNSOption
 
 logger = logging.getLogger("foghorn.server")
 
 _EDNS_COOKIE_OPTION_CODE = 10
 _DNS_COOKIE_CLIENT_BYTES = 8
+_DNS_COOKIE_SERVER_BYTES = 16
+_DNS_COOKIE_VERSION = 1
+_DNS_COOKIE_KEY_ID_CURRENT = 0
+_DNS_COOKIE_KEY_ID_OLD = 1
+_DNS_COOKIE_FUTURE_SKEW_SECONDS = 60
+RCODE_BADCOOKIE = 23
 _ECS_OPTION_CODE = 8
 _EDNS_UDP_PAYLOAD_MIN = 512
 _EDNS_UDP_PAYLOAD_MAX = 4096
 
 _EDNS_PAYLOAD_CLAMP_WARNED: set[int] = set()
+_EPHEMERAL_COOKIE_SECRET: bytes | None = None
 
 
 def _mask_prefix_bytes(raw: bytes, prefix_len: int, total_bits: int) -> bytes:
@@ -586,14 +599,115 @@ def attach_ede_option(
         return
 
 
-def extract_client_cookie_from_request(req: DNSRecord) -> Optional[bytes]:
-    """Brief: Extract normalized client-cookie bytes from request EDNS options.
+def decode_cookie_secret(value: object) -> Optional[bytes]:
+    """Brief: Decode a configured cookie secret into raw key bytes.
 
     Inputs:
-      - req: Parsed DNS request record.
+      - value: Secret as bytes, base64/hex/utf-8 string, or None.
 
     Outputs:
-      - Optional[bytes]: Eight-byte client-cookie value.
+      - bytes key when usable, else None.
+    """
+
+    if value is None:
+        return None
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        raw = bytes(value)
+        return raw if raw else None
+    text = str(value).strip()
+    if not text:
+        return None
+    # Prefer base64, then hex, then raw UTF-8.
+    try:
+        decoded = base64.b64decode(text, validate=False)
+        if decoded:
+            return decoded
+    except Exception:
+        pass
+    try:
+        cleaned = text.replace(":", "").replace(" ", "")
+        if len(cleaned) % 2 == 0 and all(
+            ch in "0123456789abcdefABCDEF" for ch in cleaned
+        ):
+            decoded = bytes.fromhex(cleaned)
+            if decoded:
+                return decoded
+    except Exception:
+        pass
+    return text.encode("utf-8")
+
+
+def get_or_create_ephemeral_cookie_secret() -> bytes:
+    """Brief: Return a process-local ephemeral cookie secret.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - bytes: 32-byte secret stable for the process lifetime.
+    """
+
+    global _EPHEMERAL_COOKIE_SECRET
+    if _EPHEMERAL_COOKIE_SECRET is None:
+        _EPHEMERAL_COOKIE_SECRET = os.urandom(32)
+    return _EPHEMERAL_COOKIE_SECRET
+
+
+def _canonical_client_ip_bytes(client_ip: object) -> bytes:
+    """Brief: Canonicalize a client IP for cookie MAC input.
+
+    Inputs:
+      - client_ip: Transport client IP string.
+
+    Outputs:
+      - bytes: Packed IP when parseable, else lowercased UTF-8 text.
+    """
+
+    text = str(client_ip or "").strip()
+    if not text:
+        return b""
+    try:
+        return ipaddress.ip_address(text).packed
+    except Exception:
+        return text.lower().encode("utf-8")
+
+
+def parse_cookie_option_payload(payload: bytes) -> Optional[Dict[str, Any]]:
+    """Brief: Parse a DNS COOKIE option payload into client/server parts.
+
+    Inputs:
+      - payload: Raw COOKIE option bytes.
+
+    Outputs:
+      - dict with client_cookie and optional server_cookie, or None if malformed.
+    """
+
+    try:
+        data = bytes(payload or b"")
+    except Exception:
+        return None
+    if len(data) < _DNS_COOKIE_CLIENT_BYTES:
+        return None
+    # RFC 7873: client cookie is 8 bytes; server cookie is 8..32 when present.
+    if len(data) == _DNS_COOKIE_CLIENT_BYTES:
+        return {"client_cookie": data, "server_cookie": None}
+    server = data[_DNS_COOKIE_CLIENT_BYTES:]
+    if len(server) < 8 or len(server) > 32:
+        return None
+    return {
+        "client_cookie": data[:_DNS_COOKIE_CLIENT_BYTES],
+        "server_cookie": server,
+    }
+
+
+def parse_cookie_from_request(req: DNSRecord) -> Optional[Dict[str, Any]]:
+    """Brief: Parse the first COOKIE option from a DNS request.
+
+    Inputs:
+      - req: Parsed DNS request.
+
+    Outputs:
+      - Parsed cookie dict or None when absent/invalid.
     """
 
     try:
@@ -612,12 +726,323 @@ def extract_client_cookie_from_request(req: DNSRecord) -> Optional[bytes]:
                     raw = bytes(getattr(opt, "data", b"") or b"")
                 except Exception:
                     raw = b""
-                if len(raw) < _DNS_COOKIE_CLIENT_BYTES:
-                    return None
-                return raw[:_DNS_COOKIE_CLIENT_BYTES]
+                parsed = parse_cookie_option_payload(raw)
+                if parsed is not None:
+                    return parsed
     except Exception:
         return None
     return None
+
+
+def extract_client_cookie_from_request(req: DNSRecord) -> Optional[bytes]:
+    """Brief: Extract normalized client-cookie bytes from request EDNS options.
+
+    Inputs:
+      - req: Parsed DNS request record.
+
+    Outputs:
+      - Optional[bytes]: Eight-byte client-cookie value.
+    """
+
+    parsed = parse_cookie_from_request(req)
+    if not parsed:
+        return None
+    client = parsed.get("client_cookie")
+    if not isinstance(client, (bytes, bytearray)):
+        return None
+    if len(client) != _DNS_COOKIE_CLIENT_BYTES:
+        return None
+    return bytes(client)
+
+
+def generate_server_cookie(
+    *,
+    client_cookie: bytes,
+    client_ip: object,
+    secret: bytes,
+    key_id: int = _DNS_COOKIE_KEY_ID_CURRENT,
+    now: Optional[int] = None,
+) -> bytes:
+    """Brief: Generate a versioned server cookie bound to client cookie + IP.
+
+    Inputs:
+      - client_cookie: 8-byte client cookie.
+      - client_ip: Transport client IP.
+      - secret: HMAC key bytes.
+      - key_id: 0=current secret, 1=old secret.
+      - now: Optional unix timestamp override.
+
+    Outputs:
+      - bytes: Fixed-length server cookie payload.
+    """
+
+    cc = bytes(client_cookie or b"")
+    if len(cc) != _DNS_COOKIE_CLIENT_BYTES:
+        raise ValueError("client_cookie must be 8 bytes")
+    secret_b = bytes(secret or b"")
+    if not secret_b:
+        raise ValueError("secret must be non-empty")
+    ts = int(time.time() if now is None else now) & 0xFFFFFFFF
+    kid = int(key_id) & 0xFF
+    version = int(_DNS_COOKIE_VERSION) & 0xFF
+    header = bytes([version, kid]) + struct.pack("!I", ts)
+    mac_input = header + cc + _canonical_client_ip_bytes(client_ip)
+    digest = hmac.new(secret_b, mac_input, hashlib.sha256).digest()
+    # 2 + 4 + 10 = 16 byte server cookie
+    return header + digest[:10]
+
+
+def validate_server_cookie(
+    *,
+    client_cookie: bytes,
+    server_cookie: bytes,
+    client_ip: object,
+    secret: Optional[bytes],
+    secret_old: Optional[bytes] = None,
+    lifetime_seconds: int = 86400,
+    now: Optional[int] = None,
+) -> bool:
+    """Brief: Validate a server cookie against current/old secrets.
+
+    Inputs:
+      - client_cookie: 8-byte client cookie from the request.
+      - server_cookie: Server cookie bytes from the request.
+      - client_ip: Transport client IP.
+      - secret: Current HMAC secret.
+      - secret_old: Optional previous secret for rollover.
+      - lifetime_seconds: Maximum cookie age.
+      - now: Optional unix timestamp override.
+
+    Outputs:
+      - bool: True when the cookie is valid under at least one secret.
+    """
+
+    try:
+        sc = bytes(server_cookie or b"")
+        cc = bytes(client_cookie or b"")
+    except Exception:
+        return False
+    if len(cc) != _DNS_COOKIE_CLIENT_BYTES:
+        return False
+    if len(sc) != _DNS_COOKIE_SERVER_BYTES:
+        return False
+    version = int(sc[0])
+    key_id = int(sc[1])
+    if version != _DNS_COOKIE_VERSION:
+        return False
+    if key_id not in (_DNS_COOKIE_KEY_ID_CURRENT, _DNS_COOKIE_KEY_ID_OLD):
+        return False
+    ts = int(struct.unpack("!I", sc[2:6])[0])
+    now_i = int(time.time() if now is None else now)
+    try:
+        lifetime = max(1, int(lifetime_seconds))
+    except Exception:
+        lifetime = 86400
+    if ts > now_i + int(_DNS_COOKIE_FUTURE_SKEW_SECONDS):
+        return False
+    if ts + lifetime < now_i:
+        return False
+
+    candidates: list[Tuple[int, bytes]] = []
+    if secret:
+        candidates.append((_DNS_COOKIE_KEY_ID_CURRENT, bytes(secret)))
+    if secret_old:
+        candidates.append((_DNS_COOKIE_KEY_ID_OLD, bytes(secret_old)))
+    # Also accept current secret under key_id old during misconfig, but prefer
+    # matching key_id first.
+    for kid, key in candidates:
+        if kid != key_id:
+            continue
+        try:
+            expected = generate_server_cookie(
+                client_cookie=cc,
+                client_ip=client_ip,
+                secret=key,
+                key_id=kid,
+                now=ts,
+            )
+        except Exception:
+            continue
+        if hmac.compare_digest(expected, sc):
+            return True
+    # Fallback: try all secrets regardless of key_id tag.
+    for kid, key in candidates:
+        try:
+            expected = generate_server_cookie(
+                client_cookie=cc,
+                client_ip=client_ip,
+                secret=key,
+                key_id=key_id,
+                now=ts,
+            )
+        except Exception:
+            continue
+        if hmac.compare_digest(expected, sc):
+            return True
+    return False
+
+
+def classify_request_cookie(
+    req: DNSRecord,
+    *,
+    client_ip: object,
+    secret: Optional[bytes],
+    secret_old: Optional[bytes] = None,
+    lifetime_seconds: int = 86400,
+    now: Optional[int] = None,
+) -> str:
+    """Brief: Classify inbound COOKIE state for require/learn policy.
+
+    Inputs:
+      - req: Parsed DNS request.
+      - client_ip: Transport client IP.
+      - secret/secret_old/lifetime_seconds/now: Validation inputs.
+
+    Outputs:
+      - str: one of none | client_only | valid | invalid
+    """
+
+    parsed = parse_cookie_from_request(req)
+    if not parsed:
+        return "none"
+    client = parsed.get("client_cookie")
+    server = parsed.get("server_cookie")
+    if not isinstance(client, (bytes, bytearray)):
+        return "none"
+    if server is None:
+        return "client_only"
+    if validate_server_cookie(
+        client_cookie=bytes(client),
+        server_cookie=bytes(server),
+        client_ip=client_ip,
+        secret=secret,
+        secret_old=secret_old,
+        lifetime_seconds=lifetime_seconds,
+        now=now,
+    ):
+        return "valid"
+    return "invalid"
+
+
+def build_badcookie_response(
+    req: DNSRecord,
+    *,
+    client_ip: object,
+    secret: bytes,
+    now: Optional[int] = None,
+) -> bytes:
+    """Brief: Build a BADCOOKIE (RCODE 23) response with a fresh server cookie.
+
+    Inputs:
+      - req: Parsed client request.
+      - client_ip: Transport client IP for cookie binding.
+      - secret: Current cookie secret.
+      - now: Optional timestamp override.
+
+    Outputs:
+      - bytes: Wire-format BADCOOKIE response.
+    """
+
+    try:
+        req_id = int(getattr(getattr(req, "header", None), "id", 0) or 0)
+    except Exception:
+        req_id = 0
+    try:
+        resp = req.reply()
+    except Exception:
+        resp = DNSRecord(DNSHeader(id=req_id, qr=1, ra=1))
+        try:
+            if getattr(req, "q", None) is not None:
+                resp.add_question(req.q)
+        except Exception:
+            pass
+    # BADCOOKIE is RCODE 23: low 4 bits in header, high bits in OPT EXTENDED-RCODE.
+    try:
+        resp.header.rcode = int(RCODE_BADCOOKIE) & 0x0F
+    except Exception:
+        pass
+
+    # Ensure OPT exists when client sent EDNS, then attach cookie.
+    try:
+        echo_client_edns(req, resp)
+    except Exception:
+        pass
+    strip_cookie_options_from_response_record(resp)
+
+    # Set EDNS extended RCODE high bits for full RCODE 23.
+    try:
+        opt_rr = None
+        for rr in getattr(resp, "ar", None) or []:
+            if getattr(rr, "rtype", None) == QTYPE.OPT:
+                opt_rr = rr
+                break
+        if opt_rr is None:
+            # Ensure an OPT exists so extended RCODE can be carried.
+            client_opts = [
+                rr
+                for rr in (getattr(req, "ar", None) or [])
+                if getattr(rr, "rtype", None) == QTYPE.OPT
+            ]
+            if client_opts:
+                resp.add_ar(copy.deepcopy(client_opts[0]))
+            else:
+                resp.add_ar(EDNS0(udp_len=1232))
+            for rr in getattr(resp, "ar", None) or []:
+                if getattr(rr, "rtype", None) == QTYPE.OPT:
+                    opt_rr = rr
+                    break
+        if opt_rr is not None:
+            try:
+                ttl_val = int(getattr(opt_rr, "ttl", 0) or 0) & 0xFFFFFFFF
+            except Exception:
+                ttl_val = 0
+            ext_hi = (int(RCODE_BADCOOKIE) >> 4) & 0xFF
+            version = (ttl_val >> 16) & 0xFF
+            flags = ttl_val & 0xFFFF
+            opt_rr.ttl = (ext_hi << 24) | (version << 16) | (flags & 0xFFFF)
+    except Exception:
+        pass
+
+    client_cookie = extract_client_cookie_from_request(req)
+    if client_cookie is not None and secret:
+        try:
+            server_cookie = generate_server_cookie(
+                client_cookie=client_cookie,
+                client_ip=client_ip,
+                secret=secret,
+                key_id=_DNS_COOKIE_KEY_ID_CURRENT,
+                now=now,
+            )
+            opt_rr = None
+            for rr in getattr(resp, "ar", None) or []:
+                if getattr(rr, "rtype", None) == QTYPE.OPT:
+                    opt_rr = rr
+                    break
+            if opt_rr is None:
+                # Client had a cookie so it had EDNS; synthesize a minimal OPT.
+                opt_rr = EDNS0(udp_len=1232)
+                resp.add_ar(opt_rr)
+            rdata_list = getattr(opt_rr, "rdata", None)
+            if not isinstance(rdata_list, list):
+                opt_rr.rdata = []
+                rdata_list = opt_rr.rdata
+            rdata_list.append(
+                EDNSOption(
+                    _EDNS_COOKIE_OPTION_CODE,
+                    bytes(client_cookie) + bytes(server_cookie),
+                )
+            )
+        except Exception:
+            pass
+    try:
+        return resp.pack()
+    except Exception:
+        # Minimal fallback header-only BADCOOKIE.
+        header = bytearray(12)
+        header[0:2] = int(req_id).to_bytes(2, "big")
+        header[2] = 0x80  # QR=1
+        header[3] = int(RCODE_BADCOOKIE) & 0x0F
+        return bytes(header)
 
 
 def strip_cookie_options_from_response_record(resp: DNSRecord) -> bool:
@@ -674,15 +1099,34 @@ def strip_response_cookie_options(response_wire: bytes) -> bytes:
         return response_wire
 
 
-def bind_response_cookie_to_request(req: DNSRecord, response_wire: bytes) -> bytes:
-    """Brief: Rebind response COOKIE to current request client-cookie.
+def bind_response_cookie_to_request(
+    req: DNSRecord,
+    response_wire: bytes,
+    *,
+    client_ip: object = None,
+    cookies_enabled: bool = False,
+    secret: Optional[bytes] = None,
+    now: Optional[int] = None,
+) -> bytes:
+    """Brief: Rebind response COOKIE for hygiene or RFC 7873 server cookies.
 
     Inputs:
       - req: Parsed DNS request.
       - response_wire: Wire-format DNS response bytes.
+      - client_ip: Transport client IP used when minting server cookies.
+      - cookies_enabled: When True, attach client||server cookie.
+      - secret: HMAC secret for server cookie generation.
+      - now: Optional timestamp override for server cookies.
 
     Outputs:
       - bytes: Updated response wire bytes.
+
+    Notes:
+      - Always strips stale upstream COOKIE options first.
+      - When cookies_enabled is False, echoes only the 8-byte client cookie
+        (legacy hygiene behavior).
+      - When enabled and a client cookie is present, attaches a fresh server
+        cookie bound to client_ip. Does not invent client cookies.
     """
 
     if not isinstance(response_wire, (bytes, bytearray, memoryview)):
@@ -724,11 +1168,28 @@ def bind_response_cookie_to_request(req: DNSRecord, response_wire: bytes) -> byt
                     return msg.pack()
                 return bytes(response_wire)
 
+        # Drop any COOKIE options copied from the client OPT before attaching.
+        strip_cookie_options_from_response_record(msg)
+
+        cookie_payload = bytes(client_cookie)
+        if cookies_enabled and secret:
+            try:
+                server_cookie = generate_server_cookie(
+                    client_cookie=client_cookie,
+                    client_ip=client_ip,
+                    secret=secret,
+                    key_id=_DNS_COOKIE_KEY_ID_CURRENT,
+                    now=now,
+                )
+                cookie_payload = bytes(client_cookie) + bytes(server_cookie)
+            except Exception:
+                cookie_payload = bytes(client_cookie)
+
         rdata_list = getattr(opt_rr, "rdata", None)
         if not isinstance(rdata_list, list):
             opt_rr.rdata = []
             rdata_list = opt_rr.rdata
-        rdata_list.append(EDNSOption(_EDNS_COOKIE_OPTION_CODE, bytes(client_cookie)))
+        rdata_list.append(EDNSOption(_EDNS_COOKIE_OPTION_CODE, cookie_payload))
         changed = True
 
         if changed:
