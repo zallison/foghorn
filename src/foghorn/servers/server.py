@@ -1,11 +1,11 @@
 """Core DNS server orchestration and transport/failover helper utilities."""
 
 import ipaddress
-
 import logging
 import random
 import threading
 from typing import Any, Dict, List, Optional, Tuple
+
 from dnslib import (  # noqa: F401  (re-exported for udp_server._ensure_edns)
     EDNS0,
     OPCODE,
@@ -18,48 +18,48 @@ from dnslib import (  # noqa: F401  (re-exported for udp_server._ensure_edns)
 )
 
 from foghorn.plugins.resolve import base as plugin_base
-from foghorn.plugins.resolve.zone_records import (
-    _client_allowed_for_axfr,  # noqa: F401
-    iter_axfr_messages,  # noqa: F401
-)
 from foghorn.plugins.resolve.base import PluginContext, PluginDecision
+from foghorn.plugins.resolve.zone_records import _client_allowed_for_axfr  # noqa: F401
+from foghorn.plugins.resolve.zone_records import iter_axfr_messages  # noqa: F401
 from foghorn.servers.recursive_resolver import RecursiveResolver
 from foghorn.servers.transports.dot import DoTError, get_dot_pool  # noqa: F401
-from foghorn.servers.transports.tcp import (
+from foghorn.servers.transports.tcp import (  # noqa: F401
     TCPError,
     get_tcp_pool,
     tcp_query,
-)  # noqa: F401
-from foghorn.utils.register_caches import registered_lru_cache
-from .dns_runtime_state import DNSRuntimeState
-
-from .server_opcode import _ResolveCoreResult, _handle_non_query_opcode
-from .server_runtime import DNSServer  # noqa: F401
-from .server_upstream_health import _UPSTREAM_HEALTH, _UpstreamHealth  # noqa: F401
-from .server_failover import (
-    _UPSTREAM_SKIP_LOCK,  # noqa: F401
-    _UPSTREAM_SKIP_WARNED,  # noqa: F401
-    _reset_upstream_skip_warning,  # noqa: F401
-    _send_query_with_failover_impl,
-    _upstream_key_for_skip_warning,  # noqa: F401
-    _warn_upstream_skip_once,  # noqa: F401
 )
+from foghorn.utils.register_caches import registered_lru_cache
+
+from .dns_runtime_state import DNSRuntimeState
+from .edns_utils import (
+    parse_ecs_from_request,
+    strip_ecs_options_from_request,
+    synthesize_ecs_from_client_ip,
+    upsert_ecs_option,
+)
+from .server_failover import _UPSTREAM_SKIP_LOCK  # noqa: F401
+from .server_failover import _UPSTREAM_SKIP_WARNED  # noqa: F401
+from .server_failover import _reset_upstream_skip_warning  # noqa: F401
+from .server_failover import _upstream_key_for_skip_warning  # noqa: F401
+from .server_failover import _warn_upstream_skip_once  # noqa: F401
+from .server_failover import (
+    _send_query_with_failover_impl,
+)
+from .server_opcode import _handle_non_query_opcode, _ResolveCoreResult
+from .server_response_utils import _ensure_edns_request  # noqa: F401
+from .server_response_utils import compute_effective_ttl  # noqa: F401
 from .server_response_utils import (
     _attach_ede_option,
     _bind_response_cookie_to_request,
+    _build_badcookie_response,
+    _classify_request_cookie,
     _compute_negative_ttl,
     _echo_client_edns,
-    _ensure_edns_request,  # noqa: F401
-    _strip_response_cookie_options,
     _set_response_id,
-    compute_effective_ttl,  # noqa: F401
+    _strip_response_cookie_options,
 )
-from .edns_utils import (
-    parse_ecs_from_request,
-    synthesize_ecs_from_client_ip,
-    strip_ecs_options_from_request,
-    upsert_ecs_option,
-)
+from .server_runtime import DNSServer  # noqa: F401
+from .server_upstream_health import _UPSTREAM_HEALTH, _UpstreamHealth  # noqa: F401
 
 logger = logging.getLogger("foghorn.server")
 
@@ -857,6 +857,13 @@ def _resolve_core(
             enable_ede=bool(snap.enable_ede),
             forward_local=bool(snap.forward_local),
             refuse_any=bool(getattr(snap, "refuse_any", False)),
+            cookies_enabled=bool(getattr(snap, "cookies_enabled", True)),
+            cookies_mode=str(getattr(snap, "cookies_mode", "learn") or "learn"),
+            cookies_secret=getattr(snap, "cookies_secret", None),
+            cookies_secret_old=getattr(snap, "cookies_secret_old", None),
+            cookies_lifetime_seconds=int(
+                getattr(snap, "cookies_lifetime_seconds", 86400) or 86400
+            ),
             ecs_enabled=bool(getattr(snap, "ecs_enabled", False)),
             ecs_forward_inbound=bool(getattr(snap, "ecs_forward_inbound", False)),
             ecs_synthesize_from_client_ip=bool(
@@ -954,6 +961,93 @@ def _resolve_core(
                 rcode_name="FORMERR",
             )
 
+        # Downstream DNS COOKIE (RFC 7873) require_udp short-circuit.
+        # Runs before cache/plugins/upstream so invalid UDP cookies are cheap.
+        try:
+            cookies_enabled = bool(getattr(handler, "cookies_enabled", True))
+        except Exception:
+            cookies_enabled = True
+        try:
+            cookies_mode = str(
+                getattr(handler, "cookies_mode", "learn") or "learn"
+            ).lower()
+        except Exception:
+            cookies_mode = "learn"
+        cookies_secret = getattr(handler, "cookies_secret", None)
+        cookies_secret_old = getattr(handler, "cookies_secret_old", None)
+        try:
+            cookies_lifetime_seconds = int(
+                getattr(handler, "cookies_lifetime_seconds", 86400) or 86400
+            )
+        except Exception:
+            cookies_lifetime_seconds = 86400
+        if not isinstance(cookies_secret, (bytes, bytearray)):
+            cookies_secret = None
+        else:
+            cookies_secret = bytes(cookies_secret)
+        if not isinstance(cookies_secret_old, (bytes, bytearray)):
+            cookies_secret_old = None
+        else:
+            cookies_secret_old = bytes(cookies_secret_old)
+
+        if (
+            cookies_enabled
+            and cookies_mode == "require_udp"
+            and str(listener or "").lower() == "udp"
+        ):
+            cookie_status = _classify_request_cookie(
+                req,
+                client_ip=client_ip,
+                secret=cookies_secret,
+                secret_old=cookies_secret_old,
+                lifetime_seconds=cookies_lifetime_seconds,
+            )
+            if cookie_status != "valid":
+                wire = _build_badcookie_response(
+                    req,
+                    client_ip=client_ip,
+                    secret=cookies_secret or b"",
+                )
+                wire = _set_response_id(wire, req.header.id)
+                if stats is not None:
+                    try:
+                        # qname may not be normalized yet; best-effort from wire.
+                        qn = ""
+                        try:
+                            qn = str(req.questions[0].qname).rstrip(".")
+                        except Exception:
+                            qn = ""
+                        stats.record_response_rcode("BADCOOKIE", qn)
+                        stats.record_query_result(
+                            client_ip=client_ip,
+                            qname=qn,
+                            qtype="UNKNOWN",
+                            rcode="BADCOOKIE",
+                            upstream_id=None,
+                            status="cookie_required",
+                            error=None,
+                            first=None,
+                            result={
+                                "source": "cookies",
+                                "action": "badcookie",
+                                "cookie_status": str(cookie_status),
+                            },
+                        )
+                    except Exception:
+                        pass
+                if stats is not None and t0 is not None:
+                    try:
+                        t1 = _time.perf_counter()
+                        stats.record_latency(t1 - t0)
+                    except Exception:
+                        pass
+                return _ResolveCoreResult(
+                    wire=wire,
+                    dnssec_status=None,
+                    upstream_id=None,
+                    rcode_name="BADCOOKIE",
+                )
+
         q = req.questions[0]
         # Normalize the parsed qname by stripping the wire/root trailing dot.
         # DNS wire format does not preserve whether the original client input
@@ -977,7 +1071,7 @@ def _resolve_core(
                     if _qtype_num in _DNSSEC_SEARCH_QUALIFICATION_EXCLUDED_QTYPES:
                         _search = ""
                 if _search:
-                    from foghorn.utils.dns_names import should_qualify, qualify_name
+                    from foghorn.utils.dns_names import qualify_name, should_qualify
 
                     _qual = should_qualify(
                         qname,
@@ -1694,7 +1788,13 @@ def _resolve_core(
             ):  # pragma: no cover - defensive/metrics path excluded from coverage
                 _schedule_cache_refresh(data, client_ip)
 
-            cached = _bind_response_cookie_to_request(req, cached)
+            cached = _bind_response_cookie_to_request(
+                req,
+                cached,
+                client_ip=client_ip,
+                cookies_enabled=bool(getattr(handler, "cookies_enabled", True)),
+                secret=getattr(handler, "cookies_secret", None),
+            )
             wire = _set_response_id(cached, req.header.id)
             if stats is not None and t0 is not None:
                 try:
@@ -2433,7 +2533,13 @@ def _resolve_core(
         ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
             pass  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
 
-        out = _bind_response_cookie_to_request(req, out)
+        out = _bind_response_cookie_to_request(
+            req,
+            out,
+            client_ip=client_ip,
+            cookies_enabled=bool(getattr(handler, "cookies_enabled", True)),
+            secret=getattr(handler, "cookies_secret", None),
+        )
         wire = _set_response_id(out, req.header.id)
 
         # Record response rcode and append to persistent query_log when enabled.

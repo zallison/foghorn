@@ -9,9 +9,12 @@ from cachetools import TTLCache
 from dnslib import QTYPE, RCODE, DNSRecord
 
 from foghorn.utils.register_caches import registered_cached
+
 from .edns_utils import (
     attach_ede_option,
     bind_response_cookie_to_request,
+    build_badcookie_response,
+    classify_request_cookie,
     echo_client_edns,
     ensure_edns_request,
     extract_client_cookie_from_request,
@@ -330,12 +333,24 @@ def _strip_response_cookie_options(response_wire: bytes) -> bytes:
     return strip_response_cookie_options(response_wire)
 
 
-def _bind_response_cookie_to_request(req: DNSRecord, response_wire: bytes) -> bytes:
+def _bind_response_cookie_to_request(
+    req: DNSRecord,
+    response_wire: bytes,
+    *,
+    client_ip: object = None,
+    cookies_enabled: bool = False,
+    secret: object = None,
+    now: int | None = None,
+) -> bytes:
     """Brief: Rebind response COOKIE to the active request client-cookie.
 
     Inputs:
       - req: Parsed DNS query DNSRecord.
       - response_wire: Wire-format DNS response bytes.
+      - client_ip: Transport client IP for server-cookie binding.
+      - cookies_enabled: Enable RFC 7873 server cookies.
+      - secret: Optional HMAC secret bytes.
+      - now: Optional timestamp override.
 
     Outputs:
       - bytes: Response bytes with stale COOKIE removed and request cookie bound.
@@ -343,9 +358,88 @@ def _bind_response_cookie_to_request(req: DNSRecord, response_wire: bytes) -> by
     Notes:
       - When the request has no COOKIE option, this removes response COOKIE.
       - Non-COOKIE EDNS options are preserved.
+      - When cookies_enabled, attaches client||server cookie using secret.
     """
 
-    return bind_response_cookie_to_request(req, response_wire)
+    secret_b = (
+        bytes(secret) if isinstance(secret, (bytes, bytearray, memoryview)) else secret
+    )
+    return bind_response_cookie_to_request(
+        req,
+        response_wire,
+        client_ip=client_ip,
+        cookies_enabled=bool(cookies_enabled),
+        secret=secret_b if isinstance(secret_b, (bytes, bytearray)) else None,
+        now=now,
+    )
+
+
+def _classify_request_cookie(
+    req: DNSRecord,
+    *,
+    client_ip: object,
+    secret: object = None,
+    secret_old: object = None,
+    lifetime_seconds: int = 86400,
+    now: int | None = None,
+) -> str:
+    """Brief: Classify inbound COOKIE state for require/learn policy.
+
+    Inputs:
+      - req: Parsed DNS request.
+      - client_ip: Transport client IP.
+      - secret/secret_old/lifetime_seconds/now: Validation inputs.
+
+    Outputs:
+      - str: none | client_only | valid | invalid
+    """
+
+    secret_b = (
+        bytes(secret) if isinstance(secret, (bytes, bytearray, memoryview)) else None
+    )
+    old_b = (
+        bytes(secret_old)
+        if isinstance(secret_old, (bytes, bytearray, memoryview))
+        else None
+    )
+    return classify_request_cookie(
+        req,
+        client_ip=client_ip,
+        secret=secret_b,
+        secret_old=old_b,
+        lifetime_seconds=lifetime_seconds,
+        now=now,
+    )
+
+
+def _build_badcookie_response(
+    req: DNSRecord,
+    *,
+    client_ip: object,
+    secret: object,
+    now: int | None = None,
+) -> bytes:
+    """Brief: Build BADCOOKIE response with optional fresh server cookie.
+
+    Inputs:
+      - req: Parsed DNS request.
+      - client_ip: Transport client IP.
+      - secret: Current cookie secret.
+      - now: Optional timestamp override.
+
+    Outputs:
+      - bytes: Wire-format BADCOOKIE response.
+    """
+
+    secret_b = (
+        bytes(secret) if isinstance(secret, (bytes, bytearray, memoryview)) else b""
+    )
+    return build_badcookie_response(
+        req,
+        client_ip=client_ip,
+        secret=secret_b,
+        now=now,
+    )
 
 
 def _ensure_edns_request(
