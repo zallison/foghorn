@@ -49,30 +49,9 @@ from foghorn.servers.webserver import (
 from foghorn.stats import StatsCollector, StatsSQLiteStore
 
 
-def _normalize_web_cfg_layout(config: dict | None) -> dict | None:
-    """Brief: Translate legacy top-level webserver config into server.http for tests.
-
-    Inputs:
-      - config: Optional application config mapping used by webserver tests.
-
-    Outputs:
-      - dict | None: Config mapping with server.http populated from legacy
-        webserver when server.http is absent.
-    """
-
-    if not isinstance(config, dict):
-        return config
-
-    normalized = dict(config)
-    legacy_web_cfg = normalized.get("webserver")
-    server_cfg = normalized.get("server")
-    if isinstance(legacy_web_cfg, dict):
-        if not isinstance(server_cfg, dict):
-            server_cfg = {}
-            normalized["server"] = server_cfg
-        if not isinstance(server_cfg.get("http"), dict):
-            server_cfg["http"] = dict(legacy_web_cfg)
-    return normalized
+from tests.helpers.webserver_test_cfg import (
+    normalize_web_cfg_layout as _normalize_web_cfg_layout,
+)
 
 
 _create_app = create_app
@@ -93,6 +72,12 @@ def start_webserver(*args, **kwargs):  # type: ignore[no-redef]
     if "config" in kwargs:
         kwargs["config"] = _normalize_web_cfg_layout(kwargs.get("config"))
     return _start_webserver(*args, **kwargs)
+
+
+def _threaded_cfg(config: dict | None) -> dict | None:
+    """Brief: Normalize config for direct _AdminHTTPServer constructions in tests."""
+
+    return _normalize_web_cfg_layout(config)
 
 
 def test_sanitize_config_redacts_simple_keys() -> None:
@@ -124,7 +109,7 @@ def test_docs_and_openapi_endpoints_enabled() -> None:
     """Brief: FastAPI admin app exposes /docs and /openapi.json.
 
     Inputs:
-      - App created with minimal config.
+      - App created with API/schema/docs explicitly enabled.
 
     Outputs:
       - /docs returns HTML.
@@ -132,7 +117,15 @@ def test_docs_and_openapi_endpoints_enabled() -> None:
     """
 
     cfg = {
-        "webserver": {"enabled": True},
+        "server": {
+            "http": {
+                "enabled": True,
+                "enable_api": True,
+                "enable_admin": True,
+                "enable_schema": True,
+                "enable_docs": True,
+            }
+        },
         "listen": {"udp": {"enabled": False}},
         "resolver": {"mode": "recursive"},
     }
@@ -179,7 +172,13 @@ def test_disable_schema_disables_openapi_and_docs() -> None:
     """
 
     cfg = {
-        "server": {"http": {"enabled": True, "enable_schema": False}},
+        "server": {
+            "http": {
+                "enabled": True,
+                "enable_api": True,
+                "enable_schema": False,
+            }
+        },
         "listen": {"udp": {"enabled": False}},
         "resolver": {"mode": "recursive"},
     }
@@ -202,7 +201,14 @@ def test_disable_docs_disables_docs_but_keeps_openapi() -> None:
     """
 
     cfg = {
-        "server": {"http": {"enabled": True, "enable_docs": False}},
+        "server": {
+            "http": {
+                "enabled": True,
+                "enable_api": True,
+                "enable_schema": True,
+                "enable_docs": False,
+            }
+        },
         "listen": {"udp": {"enabled": False}},
         "resolver": {"mode": "recursive"},
     }
@@ -225,7 +231,13 @@ def test_disable_api_removes_core_endpoints_from_openapi() -> None:
     """
 
     cfg = {
-        "server": {"http": {"enabled": True, "enable_api": False}},
+        "server": {
+            "http": {
+                "enabled": True,
+                "enable_api": False,
+                "enable_schema": True,
+            }
+        },
         "listen": {"udp": {"enabled": False}},
         "resolver": {"mode": "recursive"},
     }
@@ -237,6 +249,69 @@ def test_disable_api_removes_core_endpoints_from_openapi() -> None:
     schema = client.get("/openapi.json").json()
     paths = schema.get("paths") or {}
     assert "/api/v1/health" not in paths
+
+
+def test_http_feature_gates_default_off() -> None:
+    """Brief: enable_api/admin/schema/docs default to false when unset.
+
+    Inputs:
+      - create_app config with only server.http.enabled=true.
+
+    Outputs:
+      - /api/v1/health, /api/v1/admin/status, /openapi.json, and /docs are 404.
+    """
+
+    import foghorn.servers.webserver.core as web_core
+
+    cfg = {
+        "server": {"http": {"enabled": True}},
+        "listen": {"udp": {"enabled": False}},
+        "resolver": {"mode": "recursive"},
+    }
+    # Call production create_app directly (not the test wrapper that opts gates on).
+    app = web_core.create_app(stats=None, config=cfg, log_buffer=RingBuffer())
+    client = TestClient(app)
+
+    assert client.get("/api/v1/health").status_code == 404
+    assert client.get("/api/v1/admin/status").status_code == 404
+    assert client.get("/openapi.json").status_code == 404
+    assert client.get("/docs").status_code == 404
+
+
+def test_disable_admin_removes_admin_endpoints() -> None:
+    """Brief: server.http.enable_admin=false removes /api/v1/admin/* routes.
+
+    Inputs:
+      - create_app config with enable_api=true and enable_admin=false.
+
+    Outputs:
+      - /api/v1/health remains available.
+      - /api/v1/admin/status is 404.
+      - OpenAPI paths omit /api/v1/admin/status.
+    """
+
+    cfg = {
+        "server": {
+            "http": {
+                "enabled": True,
+                "enable_api": True,
+                "enable_admin": False,
+                "enable_schema": True,
+            }
+        },
+        "listen": {"udp": {"enabled": False}},
+        "resolver": {"mode": "recursive"},
+    }
+    app = create_app(stats=None, config=cfg, log_buffer=RingBuffer())
+    client = TestClient(app)
+
+    assert client.get("/api/v1/health").status_code == 200
+    assert client.get("/api/v1/admin/status").status_code == 404
+
+    schema = client.get("/openapi.json").json()
+    paths = schema.get("paths") or {}
+    assert "/api/v1/health" in paths
+    assert "/api/v1/admin/status" not in paths
 
 
 def test_api_request_audit_logs_redacted_api_calls_to_sqlite(tmp_path: Path) -> None:
@@ -885,7 +960,7 @@ def test_stats_fastapi_and_threaded_payloads_match(monkeypatch) -> None:
         ("127.0.0.1", 0),
         web_mod._ThreadedAdminRequestHandler,
         stats=collector,
-        config=base_cfg,
+        config=_threaded_cfg(base_cfg),
         log_buffer=RingBuffer(),
         config_path=None,
     )
@@ -1014,7 +1089,7 @@ def test_stats_table_endpoint_fastapi_and_threaded_match() -> None:
             ("127.0.0.1", 0),
             web_mod._ThreadedAdminRequestHandler,
             stats=collector,
-            config=cfg,
+            config=_threaded_cfg(cfg),
             log_buffer=RingBuffer(),
             config_path=None,
         )
@@ -2111,7 +2186,7 @@ def test_config_json_fastapi_and_threaded_payloads_match() -> None:
         ("127.0.0.1", 0),
         web_mod._ThreadedAdminRequestHandler,
         stats=None,
-        config=cfg,
+        config=_threaded_cfg(cfg),
         log_buffer=RingBuffer(),
         config_path=None,
     )
@@ -2175,7 +2250,7 @@ def test_config_raw_threaded_endpoint_returns_plain_yaml(tmp_path) -> None:
         ("127.0.0.1", 0),
         web_mod._ThreadedAdminRequestHandler,
         stats=None,
-        config=cfg,
+        config=_threaded_cfg(cfg),
         log_buffer=RingBuffer(),
         config_path=str(cfg_path),
     )
@@ -2233,7 +2308,7 @@ def test_config_raw_json_threaded_endpoint_reads_from_disk(tmp_path) -> None:
         ("127.0.0.1", 0),
         web_mod._ThreadedAdminRequestHandler,
         stats=None,
-        config=cfg,
+        config=_threaded_cfg(cfg),
         log_buffer=RingBuffer(),
         config_path=str(cfg_path),
     )
@@ -2323,7 +2398,7 @@ def test_reload_threaded_refuses_when_restart_required_but_reload_reloadable_app
             ("127.0.0.1", 0),
             web_mod._ThreadedAdminRequestHandler,
             stats=None,
-            config=current_cfg,
+            config=_threaded_cfg(current_cfg),
             log_buffer=RingBuffer(),
             config_path=str(cfg_path),
         )
@@ -2631,20 +2706,24 @@ def test_token_auth_auto_generates_token_when_missing(caplog) -> None:
         "server": {
             "http": {
                 "enabled": True,
+                "enable_api": True,
                 "auth": {"mode": "token"},
             }
         }
     }
     collector = StatsCollector(track_uniques=False)
 
+    import foghorn.servers.webserver.core as web_core
+
     with caplog.at_level(logging.WARNING, logger="foghorn.webserver"):
-        app = create_app(stats=collector, config=cfg, log_buffer=RingBuffer())
+        app = web_core.create_app(stats=collector, config=cfg, log_buffer=RingBuffer())
 
     token = str(cfg["server"]["http"]["auth"].get("token") or "")
     assert len(token) == 32
     assert token.isalnum()
     assert any(
-        "generated a temporary 32-character token" in rec.getMessage()
+        "generated a **session** token" in rec.getMessage()
+        or "generated a temporary 32-character token" in rec.getMessage()
         for rec in caplog.records
     )
 
@@ -2667,8 +2746,18 @@ def test_admin_api_auth_enforced_by_default_when_mode_unset() -> None:
         temporary token is generated at startup when one is missing).
     """
 
-    cfg = {"server": {"http": {"enabled": True}}}
-    app = create_app(stats=None, config=cfg, log_buffer=RingBuffer())
+    import foghorn.servers.webserver.core as web_core
+
+    cfg = {
+        "server": {
+            "http": {
+                "enabled": True,
+                "enable_api": True,
+                "enable_admin": True,
+            }
+        }
+    }
+    app = web_core.create_app(stats=None, config=cfg, log_buffer=RingBuffer())
     client = TestClient(app)
 
     resp = client.get("/api/v1/admin/status")
@@ -3460,23 +3549,18 @@ def test_start_webserver_sets_uvicorn_limits_from_nofile(monkeypatch) -> None:
     assert cfg_obj.timeout_keep_alive == 5
 
 
-def test_start_webserver_warns_when_public_host_without_auth(
-    monkeypatch, caplog
-) -> None:
-    """Brief: start_webserver warns when binding to 0.0.0.0 without auth.
+def test_start_webserver_refuses_public_host_without_auth(monkeypatch, caplog) -> None:
+    """Brief: start_webserver refuses non-loopback bind when API auth is missing.
 
     Inputs:
-      - Config with host 0.0.0.0 and auth.mode=none.
+      - Config with host 0.0.0.0, enable_api=true, auth.mode=none.
 
     Outputs:
-      - Warning log mentioning unauthenticated binding.
+      - Handle is None and an error log explains fail-closed policy.
     """
 
     import sys
     import types
-
-    # Install dummy uvicorn implementation similar to earlier tests
-    state3: dict[str, object] = {}
 
     class DummyConfig3:
         def __init__(self, app, host, port, log_level):  # noqa: ANN001, ANN002
@@ -3487,13 +3571,16 @@ def test_start_webserver_warns_when_public_host_without_auth(
 
     class DummyServer3:
         def __init__(self, config):  # noqa: ANN001
-            state3["config"] = config
+            self.config = config
 
         def run(self) -> None:
-            state3["ran"] = True
+            return None
 
-    dummy_uvicorn3 = types.SimpleNamespace(Config=DummyConfig3, Server=DummyServer3)
-    monkeypatch.setitem(sys.modules, "uvicorn", dummy_uvicorn3)
+    monkeypatch.setitem(
+        sys.modules,
+        "uvicorn",
+        types.SimpleNamespace(Config=DummyConfig3, Server=DummyServer3),
+    )
 
     cfg4 = {
         "server": {
@@ -3501,17 +3588,18 @@ def test_start_webserver_warns_when_public_host_without_auth(
                 "enabled": True,
                 "host": "0.0.0.0",
                 "port": 0,
+                "enable_api": True,
                 "auth": {"mode": "none"},
             }
         }
     }
 
-    with caplog.at_level("WARNING", logger="foghorn.webserver"):
+    with caplog.at_level("ERROR", logger="foghorn.webserver"):
         handle = start_webserver(stats=None, config=cfg4, log_buffer=RingBuffer())
 
-    assert isinstance(handle, WebServerHandle)
+    assert handle is None
     assert any(
-        "bound to 0.0.0.0 without authentication" in rec.getMessage()
+        "Refusing to start admin webserver on non-loopback host" in rec.getMessage()
         for rec in caplog.records
     )
 
@@ -3572,6 +3660,253 @@ def test_start_webserver_warns_for_public_plaintext_admin_bind(
         "bound to 0.0.0.0 over plaintext HTTP" in rec.getMessage()
         for rec in caplog.records
     )
+
+
+def test_resolve_admin_tls_files_requires_both_or_neither() -> None:
+    """Brief: server.http TLS accepts both cert/key or neither.
+
+    Inputs:
+      - Partial and complete TLS path mappings.
+
+    Outputs:
+      - ValueError for half-configured TLS; normalized paths otherwise.
+    """
+
+    import foghorn.servers.webserver.server_management as web_mgmt
+
+    assert web_mgmt._resolve_admin_tls_files({}) == (None, None)
+    assert web_mgmt._resolve_admin_tls_files(
+        {"cert_file": "a.pem", "key_file": "a.key"}
+    ) == ("a.pem", "a.key")
+    try:
+        web_mgmt._resolve_admin_tls_files({"cert_file": "a.pem"})
+        raise AssertionError("expected ValueError")
+    except ValueError as exc:
+        assert "both cert_file and key_file" in str(exc)
+
+
+def test_start_webserver_passes_tls_files_to_uvicorn(monkeypatch, tmp_path) -> None:
+    """Brief: start_webserver forwards cert_file/key_file to uvicorn.Config.
+
+    Inputs:
+      - Temporary cert/key paths and dummy uvicorn module.
+
+    Outputs:
+      - Dummy Config receives ssl_certfile/ssl_keyfile.
+    """
+
+    import sys
+    import time
+    import types
+
+    cert = tmp_path / "admin.pem"
+    key = tmp_path / "admin.key"
+    cert.write_text("CERT", encoding="utf-8")
+    key.write_text("KEY", encoding="utf-8")
+
+    state: dict[str, object] = {}
+
+    class DummyConfig:
+        def __init__(
+            self,
+            app,  # noqa: ANN001
+            host,  # noqa: ANN001
+            port,  # noqa: ANN001
+            log_level,  # noqa: ANN001
+            ssl_certfile=None,  # noqa: ANN001
+            ssl_keyfile=None,  # noqa: ANN001
+            limit_concurrency=None,  # noqa: ANN001
+            backlog=None,  # noqa: ANN001
+            timeout_keep_alive=None,  # noqa: ANN001
+        ) -> None:
+            self.app = app
+            self.host = host
+            self.port = port
+            self.log_level = log_level
+            self.ssl_certfile = ssl_certfile
+            self.ssl_keyfile = ssl_keyfile
+
+    class DummyServer:
+        def __init__(self, config):  # noqa: ANN001
+            state["config"] = config
+
+        def run(self) -> None:
+            state["ran"] = True
+
+    monkeypatch.setitem(
+        sys.modules,
+        "uvicorn",
+        types.SimpleNamespace(Config=DummyConfig, Server=DummyServer),
+    )
+
+    cfg = {
+        "server": {
+            "http": {
+                "enabled": True,
+                "host": "127.0.0.1",
+                "port": 0,
+                "cert_file": str(cert),
+                "key_file": str(key),
+            }
+        }
+    }
+    handle = start_webserver(stats=None, config=cfg, log_buffer=RingBuffer())
+    assert isinstance(handle, WebServerHandle)
+    time.sleep(0.05)
+    assert state.get("ran") is True
+    cfg_obj = state.get("config")
+    assert isinstance(cfg_obj, DummyConfig)
+    assert cfg_obj.ssl_certfile == str(cert)
+    assert cfg_obj.ssl_keyfile == str(key)
+
+
+def test_start_webserver_rejects_partial_tls_config(caplog) -> None:
+    """Brief: start_webserver returns None when only one TLS path is set.
+
+    Inputs:
+      - Config with cert_file but no key_file.
+
+    Outputs:
+      - None handle and an error log about invalid TLS configuration.
+    """
+
+    cfg = {
+        "server": {
+            "http": {
+                "enabled": True,
+                "host": "127.0.0.1",
+                "port": 0,
+                "cert_file": "./missing.pem",
+            }
+        }
+    }
+    with caplog.at_level("ERROR", logger="foghorn.webserver"):
+        handle = start_webserver(stats=None, config=cfg, log_buffer=RingBuffer())
+    assert handle is None
+    assert any(
+        "Invalid admin TLS configuration" in rec.getMessage() for rec in caplog.records
+    )
+
+
+def test_start_webserver_no_plaintext_warning_when_tls_enabled(
+    monkeypatch, caplog, tmp_path
+) -> None:
+    """Brief: public bind with TLS does not emit plaintext HTTP warning.
+
+    Inputs:
+      - Config with host 0.0.0.0 and cert_file/key_file set.
+
+    Outputs:
+      - No plaintext HTTP warning is logged.
+    """
+
+    import sys
+    import types
+
+    cert = tmp_path / "admin.pem"
+    key = tmp_path / "admin.key"
+    cert.write_text("CERT", encoding="utf-8")
+    key.write_text("KEY", encoding="utf-8")
+
+    class DummyConfig:
+        def __init__(
+            self, app, host, port, log_level, **kwargs
+        ):  # noqa: ANN001, ANN003
+            self.app = app
+            self.host = host
+            self.port = port
+            self.log_level = log_level
+            self.kwargs = kwargs
+
+    class DummyServer:
+        def __init__(self, config):  # noqa: ANN001
+            self.config = config
+
+        def run(self) -> None:
+            return None
+
+    monkeypatch.setitem(
+        sys.modules,
+        "uvicorn",
+        types.SimpleNamespace(Config=DummyConfig, Server=DummyServer),
+    )
+
+    cfg = {
+        "server": {
+            "http": {
+                "enabled": True,
+                "host": "0.0.0.0",
+                "port": 0,
+                "auth": {"mode": "token", "token": "abc123"},
+                "cert_file": str(cert),
+                "key_file": str(key),
+                "enable_schema": False,
+                "enable_docs": False,
+            }
+        }
+    }
+    with caplog.at_level("WARNING", logger="foghorn.webserver"):
+        handle = start_webserver(stats=None, config=cfg, log_buffer=RingBuffer())
+    assert isinstance(handle, WebServerHandle)
+    assert not any("over plaintext HTTP" in rec.getMessage() for rec in caplog.records)
+
+
+def test_threaded_admin_webserver_wraps_socket_for_tls(monkeypatch, tmp_path) -> None:
+    """Brief: threaded admin fallback wraps the listen socket when TLS is configured.
+
+    Inputs:
+      - Temporary cert/key paths and a fake SSLContext.
+
+    Outputs:
+      - wrap_socket is invoked and a handle is returned.
+    """
+
+    import foghorn.servers.webserver.server_management as web_mgmt
+
+    cert = tmp_path / "admin.pem"
+    key = tmp_path / "admin.key"
+    cert.write_text("CERT", encoding="utf-8")
+    key.write_text("KEY", encoding="utf-8")
+
+    wrapped: dict[str, object] = {}
+
+    class FakeSocket:
+        pass
+
+    class FakeContext:
+        def __init__(self, protocol):  # noqa: ANN001
+            self.protocol = protocol
+            self.minimum_version = None
+            self.loaded = None
+
+        def load_cert_chain(self, certfile=None, keyfile=None):  # noqa: ANN001
+            self.loaded = (certfile, keyfile)
+
+        def wrap_socket(self, sock, server_side=False):  # noqa: ANN001
+            wrapped["sock"] = sock
+            wrapped["server_side"] = server_side
+            return FakeSocket()
+
+    monkeypatch.setattr(web_mgmt.ssl, "SSLContext", FakeContext, raising=True)
+
+    # Force threaded path.
+    cfg = {
+        "foghorn": {"use_asyncio": False},
+        "server": {
+            "http": {
+                "enabled": True,
+                "host": "127.0.0.1",
+                "port": 0,
+                "cert_file": str(cert),
+                "key_file": str(key),
+            }
+        },
+    }
+    handle = start_webserver(stats=None, config=cfg, log_buffer=RingBuffer())
+    assert isinstance(handle, WebServerHandle)
+    assert isinstance(wrapped.get("sock"), object)
+    assert wrapped.get("server_side") is True
+    handle.stop()
 
 
 def test_start_webserver_warns_for_public_openapi_and_docs_exposure(

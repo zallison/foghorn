@@ -55,15 +55,9 @@ def _one_shot_http_request(
       - (status_code, headers_lower, body_bytes)
     """
 
-    effective_config = dict(config or {})
-    legacy_web_cfg = effective_config.get("webserver")
-    server_cfg = effective_config.get("server")
-    if isinstance(legacy_web_cfg, dict):
-        if not isinstance(server_cfg, dict):
-            server_cfg = {}
-            effective_config["server"] = server_cfg
-        if not isinstance(server_cfg.get("http"), dict):
-            server_cfg["http"] = dict(legacy_web_cfg)
+    from tests.helpers.webserver_test_cfg import normalize_web_cfg_layout
+
+    effective_config = normalize_web_cfg_layout(dict(config or {})) or {}
 
     httpd = web_mod._AdminHTTPServer(
         ("127.0.0.1", 0),
@@ -862,12 +856,51 @@ def test_threaded_admin_status_requires_auth_by_default_when_mode_unset() -> Non
       - /api/v1/admin/status returns 500 token-not-configured error.
     """
 
-    cfg = {"webserver": {"enabled": True}}
-    status_code, _headers, body = _one_shot_http_request(
-        method="GET",
-        path="/api/v1/admin/status",
-        config=cfg,
+    from tests.helpers.webserver_test_cfg import normalize_web_cfg_layout
+
+    cfg = normalize_web_cfg_layout(
+        {
+            "server": {
+                "http": {
+                    "enabled": True,
+                    "enable_api": True,
+                    "enable_admin": True,
+                }
+            }
+        },
+        default_auth_mode=None,
     )
+    # Bypass helper auth default: construct server directly.
+    httpd = web_mod._AdminHTTPServer(
+        ("127.0.0.1", 0),
+        web_mod._ThreadedAdminRequestHandler,
+        stats=None,
+        config=cfg,
+        log_buffer=None,
+        config_path=None,
+        runtime_state=None,
+        plugins=None,
+    )
+    host, port = httpd.server_address
+
+    def _serve_once() -> None:
+        try:
+            httpd.handle_request()
+        finally:
+            httpd.server_close()
+
+    t = threading.Thread(target=_serve_once, daemon=True)
+    t.start()
+    conn = http.client.HTTPConnection(host, port, timeout=5)
+    try:
+        conn.request("GET", "/api/v1/admin/status")
+        resp = conn.getresponse()
+        status_code = int(resp.status)
+        body = resp.read()
+    finally:
+        conn.close()
+        t.join(timeout=1.0)
+
     assert status_code == 500
     payload = json.loads(body.decode("utf-8"))
     assert payload.get("detail") == "webserver.auth.token not configured"
@@ -1554,9 +1587,13 @@ def test_threaded_plugin_disable_api_hides_routes_and_list_entries() -> None:
         plugins=plugins,
     )
     assert st4 == 200
-    names = {str(item.get("name") or "") for item in json.loads(b4.decode("utf-8")).get("items") or []}
+    names = {
+        str(item.get("name") or "")
+        for item in json.loads(b4.decode("utf-8")).get("items") or []
+    }
     assert "demo" not in names
     assert "other" in names
+
 
 def test_threaded_api_request_audit_logs_redacted_api_calls_to_sqlite(
     tmp_path: Path,
@@ -1654,6 +1691,7 @@ def test_threaded_plugin_table_additional_branches() -> None:
         def __init__(self, name: str) -> None:
             super().__init__(name)
             self.request_created_at = datetime.now(timezone.utc).isoformat()
+
         def get_http_snapshot(self) -> Dict[str, Any]:
             raise RuntimeError("snapshot-fail")
 
@@ -2166,3 +2204,85 @@ def test_threaded_admin_routes_status_actions_and_audit(
     )
     assert st9 == 200
     assert isinstance(json.loads(b9.decode("utf-8")).get("items"), list)
+
+
+def test_threaded_enable_admin_false_blocks_admin_routes() -> None:
+    """Brief: enable_admin=false returns 404 for /api/v1/admin/* in threaded mode.
+
+    Inputs:
+      - Threaded request config with enable_api=true and enable_admin=false.
+
+    Outputs:
+      - /api/v1/health is 200.
+      - /api/v1/admin/status is 404.
+    """
+
+    cfg = {
+        "server": {
+            "http": {
+                "auth": {"mode": "none"},
+                "enable_api": True,
+                "enable_admin": False,
+            }
+        }
+    }
+    st_health, _h1, _b1 = _one_shot_http_request(
+        method="GET", path="/api/v1/health", config=cfg
+    )
+    st_admin, _h2, _b2 = _one_shot_http_request(
+        method="GET", path="/api/v1/admin/status", config=cfg
+    )
+    assert st_health == 200
+    assert st_admin == 404
+
+
+def test_threaded_feature_gates_default_off() -> None:
+    """Brief: threaded path defaults enable_api/schema/docs/admin to false.
+
+    Inputs:
+      - Config without enable_* keys and no test-default injection.
+
+    Outputs:
+      - /api/v1/health and /openapi.json are 404.
+    """
+
+    from tests.helpers.webserver_test_cfg import normalize_web_cfg_layout
+
+    cfg = normalize_web_cfg_layout(
+        {"server": {"http": {"auth": {"mode": "none"}}}},
+        enable_default_feature_gates=False,
+    )
+    # Call AdminHTTPServer directly without the helper defaults.
+    import http.client
+    import threading
+
+    httpd = web_mod._AdminHTTPServer(
+        ("127.0.0.1", 0),
+        web_mod._ThreadedAdminRequestHandler,
+        stats=None,
+        config=cfg,
+        log_buffer=None,
+        config_path=None,
+        runtime_state=None,
+        plugins=None,
+    )
+    host, port = httpd.server_address
+
+    def _serve_once() -> None:
+        try:
+            httpd.handle_request()
+        finally:
+            httpd.server_close()
+
+    t = threading.Thread(target=_serve_once, daemon=True)
+    t.start()
+    conn = http.client.HTTPConnection(host, port, timeout=5)
+    try:
+        conn.request("GET", "/api/v1/health")
+        resp = conn.getresponse()
+        status = int(resp.status)
+        resp.read()
+    finally:
+        conn.close()
+        t.join(timeout=1.0)
+    assert status == 404

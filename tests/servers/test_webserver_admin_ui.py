@@ -26,6 +26,38 @@ except ModuleNotFoundError:  # pragma: no cover - environment dependent
 from foghorn.servers.webserver import AdminPageSpec, create_app, start_webserver
 
 
+from tests.helpers.webserver_test_cfg import (
+    normalize_web_cfg_layout as _normalize_web_cfg_layout,
+)
+
+_create_app = create_app
+
+
+def create_app(*args, **kwargs):  # type: ignore[no-redef]
+    """Brief: Test wrapper that opts into historical HTTP feature gates."""
+
+    if "config" in kwargs:
+        kwargs["config"] = _normalize_web_cfg_layout(kwargs.get("config"))
+    elif args:
+        # create_app(stats, config, ...)
+        args = list(args)
+        if len(args) >= 2:
+            args[1] = _normalize_web_cfg_layout(args[1])
+        args = tuple(args)
+    return _create_app(*args, **kwargs)
+
+
+_start_webserver = start_webserver
+
+
+def start_webserver(*args, **kwargs):  # type: ignore[no-redef]
+    """Brief: Test wrapper that opts into historical HTTP feature gates."""
+
+    if "config" in kwargs:
+        kwargs["config"] = _normalize_web_cfg_layout(kwargs.get("config"))
+    return _start_webserver(*args, **kwargs)
+
+
 class _PluginWithPages:
     """Brief: Dummy plugin exposing get_admin_pages and get_admin_ui_descriptor.
 
