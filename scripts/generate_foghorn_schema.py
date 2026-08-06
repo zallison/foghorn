@@ -872,31 +872,128 @@ def _augment_server_limits_and_listen_schema(base: Dict[str, Any]) -> None:
                     },
                 )
                 http_props.setdefault(
-                    "enable_api",
+                    "cert_file",
                     {
-                        "type": "boolean",
-                        "default": True,
+                        "type": ["string", "null"],
+                        "default": None,
                         "description": (
-                            "When false, do not serve the admin API endpoints (e.g. /api/v1/stats, /config, /logs)."
+                            "Optional TLS certificate path for the admin HTTP server. "
+                            "When set, key_file is also required and the listener serves HTTPS "
+                            "(same cert_file/key_file pattern as server.listen.doh)."
                         ),
                     },
                 )
                 http_props.setdefault(
-                    "enable_schema",
+                    "key_file",
                     {
-                        "type": "boolean",
-                        "default": True,
-                        "description": "When false, disable OpenAPI schema generation and /openapi.json.",
+                        "type": ["string", "null"],
+                        "default": None,
+                        "description": (
+                            "Optional TLS private key path for the admin HTTP server. "
+                            "When set, cert_file is also required."
+                        ),
                     },
                 )
                 http_props.setdefault(
-                    "enable_docs",
+                    "generate",
                     {
-                        "type": "boolean",
-                        "default": True,
-                        "description": "When false, disable Swagger UI at /docs (requires enable_schema=true).",
+                        "type": ["string", "boolean"],
+                        "enum": [
+                            "yes",
+                            "no",
+                            "maybe",
+                            "true",
+                            "false",
+                            "on",
+                            "off",
+                            "1",
+                            "0",
+                            True,
+                            False,
+                        ],
+                        "default": "no",
+                        "description": (
+                            "Optional self-signed TLS generation policy for internal/LAN use "
+                            "(encryption, not authentication). "
+                            "no: never generate (default). "
+                            "maybe: if cert_file/key_file are missing and openssl is available, "
+                            "generate a self-signed pair; if openssl is missing, continue without TLS. "
+                            "yes: same as maybe but fail startup when generation is required and openssl is unavailable. "
+                            "When paths are unset and generation runs, defaults are "
+                            "<config_dir>/keys/foghorn_admin.pem and .key (or ./keys)."
+                        ),
                     },
                 )
+                http_props.setdefault(
+                    "keys_dir",
+                    {
+                        "type": ["string", "null"],
+                        "default": None,
+                        "description": (
+                            "Optional directory for auto-generated admin TLS files when "
+                            "generate is maybe/yes and cert_file/key_file are unset."
+                        ),
+                    },
+                )
+                http_props.setdefault(
+                    "tls_days",
+                    {
+                        "type": "integer",
+                        "minimum": 1,
+                        "default": 3650,
+                        "description": (
+                            "Validity days for auto-generated self-signed admin certificates. "
+                            "Default: 3650 (~10 years)."
+                        ),
+                    },
+                )
+                for _key, _default, _desc in (
+                    (
+                        "enable_api",
+                        False,
+                        (
+                            "When true, serve the admin API endpoints "
+                            "(e.g. /api/v1/stats, /config, /logs). Default: false."
+                        ),
+                    ),
+                    (
+                        "enable_admin",
+                        False,
+                        (
+                            "When true, serve /api/v1/admin/* management endpoints. "
+                            "Requires enable_api=true. Default: false."
+                        ),
+                    ),
+                    (
+                        "enable_schema",
+                        False,
+                        (
+                            "When true, enable OpenAPI schema generation and "
+                            "/openapi.json. Default: false."
+                        ),
+                    ),
+                    (
+                        "enable_docs",
+                        False,
+                        (
+                            "When true, enable Swagger UI at /docs "
+                            "(requires enable_schema=true). Default: false."
+                        ),
+                    ),
+                ):
+                    existing = http_props.get(_key)
+                    if isinstance(existing, dict):
+                        existing = dict(existing)
+                        existing["type"] = "boolean"
+                        existing["default"] = _default
+                        existing["description"] = _desc
+                        http_props[_key] = existing
+                    else:
+                        http_props[_key] = {
+                            "type": "boolean",
+                            "default": _default,
+                            "description": _desc,
+                        }
 
                 # server.http.auth.*
                 auth_obj = http_props.get("auth")
@@ -921,17 +1018,15 @@ def _augment_server_limits_and_listen_schema(base: Dict[str, Any]) -> None:
                                 ),
                             },
                         )
-                        auth_props.setdefault(
-                            "token",
-                            {
-                                "type": "string",
-                                "description": (
-                                    "Shared secret used when auth.mode=token. When mode is "
-                                    "token and this is unset, Foghorn generates a temporary "
-                                    "token at startup and logs it once."
-                                ),
-                            },
-                        )
+                        auth_props["token"] = {
+                            "type": ["string", "null"],
+                            "default": None,
+                            "description": (
+                                "Shared secret used when auth.mode=token. When mode is "
+                                "token and this is unset/null, Foghorn generates a temporary "
+                                "token at startup and logs it once."
+                            ),
+                        }
 
         # server.axfr.*
         axfr_obj = server_props.get("axfr")

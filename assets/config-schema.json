@@ -7142,31 +7142,64 @@
                   "type": "string"
                 },
                 "token": {
-                  "description": "Shared secret used when auth.mode=token. When mode is token and this is unset, Foghorn generates a temporary token at startup and logs it once.",
-                  "type": "string"
+                  "default": null,
+                  "description": "Shared secret used when auth.mode=token. When mode is token and this is unset/null, Foghorn generates a temporary token at startup and logs it once.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 }
               },
               "type": "object"
+            },
+            "cert_file": {
+              "default": null,
+              "description": "Optional TLS certificate path for the admin HTTP server. When set, key_file is also required and the listener serves HTTPS (same cert_file/key_file pattern as server.listen.doh).",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "comment": {
               "description": "Optional human metadata string (max 254 characters).",
               "maxLength": 254,
               "type": "string"
             },
+            "enable_admin": {
+              "default": false,
+              "description": "When true, serve /api/v1/admin/* management endpoints. Requires enable_api=true. Default: false.",
+              "type": "boolean"
+            },
             "enable_api": {
-              "default": true,
-              "description": "When false, do not serve the admin API endpoints (e.g. /api/v1/stats, /config, /logs). Default: true.",
+              "default": false,
+              "description": "When true, serve the admin API endpoints (e.g. /api/v1/stats, /config, /logs). Default: false.",
               "type": "boolean"
             },
             "enable_docs": {
-              "default": true,
-              "description": "When false, disable Swagger UI at /docs (requires enable_schema=true). Default: true.",
+              "default": false,
+              "description": "When true, enable Swagger UI at /docs (requires enable_schema=true). Default: false.",
               "type": "boolean"
             },
             "enable_schema": {
-              "default": true,
-              "description": "When false, disable OpenAPI schema generation and /openapi.json. Default: true.",
+              "default": false,
+              "description": "When true, enable OpenAPI schema generation and /openapi.json. Default: false.",
               "type": "boolean"
+            },
+            "generate": {
+              "default": "no",
+              "description": "Optional self-signed TLS generation policy for internal/LAN use (encryption, not authentication). no: never generate (default). maybe: if cert_file/key_file are missing and openssl is available, generate a self-signed pair; if openssl is missing, continue without TLS. yes: same as maybe but fail startup when generation is required and openssl is unavailable. When paths are unset and generation runs, defaults are <config_dir>/keys/foghorn_admin.pem and .key (or ./keys). Default: \"no\".",
+              "enum": [
+                "yes",
+                "no",
+                "maybe",
+                "true",
+                "false",
+                "on",
+                "off",
+                "1",
+                "0"
+              ],
+              "type": "string"
             },
             "host": {
               "default": "127.0.0.1",
@@ -7178,10 +7211,32 @@
               "maxLength": 254,
               "type": "string"
             },
+            "key_file": {
+              "default": null,
+              "description": "Optional TLS private key path for the admin HTTP server. When set, cert_file is also required.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "keys_dir": {
+              "default": null,
+              "description": "Optional directory for auto-generated admin TLS files when generate is maybe/yes and cert_file/key_file are unset.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "port": {
               "default": 5380,
               "description": "TCP port for the admin HTTP server (web UI, API, OpenAPI, Swagger). Default: 5380.",
               "maximum": 65535,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "tls_days": {
+              "default": 3650,
+              "description": "Validity days for auto-generated self-signed admin certificates. Default: 3650 (~10 years). Default: 3650.",
               "minimum": 1,
               "type": "integer"
             }

@@ -56,6 +56,40 @@ if TYPE_CHECKING:
 logger = logging.getLogger("foghorn.webserver")
 
 
+def _is_control_plane_path(path: str) -> bool:
+    """Brief: Return True for reload/restart/config-write admin control paths.
+
+    Inputs:
+      - path: Request URL path.
+
+    Outputs:
+      - bool
+    """
+
+    p = str(path or "")
+    if p.startswith("/api/v1/admin"):
+        return True
+    control_exact = {
+        "/reload",
+        "/api/v1/reload",
+        "/reload_reloadable",
+        "/api/v1/reload_reloadable",
+        "/restart",
+        "/api/v1/restart",
+        "/config/reload",
+        "/api/v1/config/reload",
+        "/config/reload_reloadable",
+        "/api/v1/config/reload_reloadable",
+        "/config/save",
+        "/api/v1/config/save",
+        "/config/save_and_reload",
+        "/api/v1/config/save_and_reload",
+        "/config/save_and_restart",
+        "/api/v1/config/save_and_restart",
+    }
+    return p in control_exact
+
+
 class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
     """Brief: Minimal admin HTTP handler using the standard library.
 
@@ -631,7 +665,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         """
 
         web_cfg = self._web_cfg()
-        if not bool(web_cfg.get("enable_schema", True)):
+        if not bool(web_cfg.get("enable_schema", False)):
             self._send_text(404, "openapi schema not available")
             return
 
@@ -649,8 +683,8 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         """
 
         web_cfg = self._web_cfg()
-        if not bool(web_cfg.get("enable_docs", True)) or not bool(
-            web_cfg.get("enable_schema", True)
+        if not bool(web_cfg.get("enable_docs", False)) or not bool(
+            web_cfg.get("enable_schema", False)
         ):
             self._send_text(404, "docs not available")
             return
@@ -685,8 +719,8 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         """
 
         web_cfg = self._web_cfg()
-        if not bool(web_cfg.get("enable_docs", True)) or not bool(
-            web_cfg.get("enable_schema", True)
+        if not bool(web_cfg.get("enable_docs", False)) or not bool(
+            web_cfg.get("enable_schema", False)
         ):
             self._send_text(404, "not found")
             return
@@ -3968,7 +4002,8 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         self._begin_api_audit_context(path=path, params=params)
 
         web_cfg = self._web_cfg()
-        enable_api = bool(web_cfg.get("enable_api", True))
+        enable_api = bool(web_cfg.get("enable_api", False))
+        enable_admin = bool(web_cfg.get("enable_admin", False))
 
         if not enable_api:
             # Keep a minimal surface when the admin API is disabled.
@@ -3994,6 +4029,9 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
                 if path not in {"/openapi.json", "/docs", "/docs/oauth2-redirect"}:
                     self._send_text(404, "not found")
                     return
+        elif not enable_admin and _is_control_plane_path(path):
+            self._send_text(404, "not found")
+            return
 
         def _handle_rate_limit_stats_get() -> None:
             """Brief: Handle GET /api/v1/ratelimit.
@@ -4156,9 +4194,13 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         self._begin_api_audit_context(path=path, params=params)
 
         web_cfg = self._web_cfg()
-        enable_api = bool(web_cfg.get("enable_api", True))
+        enable_api = bool(web_cfg.get("enable_api", False))
+        enable_admin = bool(web_cfg.get("enable_admin", False))
 
         if not enable_api:
+            self._send_text(404, "not found")
+            return
+        if not enable_admin and _is_control_plane_path(path):
             self._send_text(404, "not found")
             return
 

@@ -379,11 +379,17 @@ def _expand_server_http_defaults(server_cfg: Dict[str, Any]) -> None:
     http_cfg.setdefault("port", 5380)
 
     # Feature gates (defaults from foghorn.servers.webserver.core).
-    http_cfg.setdefault("enable_api", True)
-    http_cfg.setdefault("enable_schema", True)
-    http_cfg.setdefault("enable_docs", True)
+    http_cfg.setdefault("enable_api", False)
+    http_cfg.setdefault("enable_admin", False)
+    http_cfg.setdefault("enable_schema", False)
+    http_cfg.setdefault("enable_docs", False)
 
     http_cfg.setdefault("allow_threaded_fallback", True)
+    http_cfg.setdefault("cert_file", None)
+    http_cfg.setdefault("key_file", None)
+    http_cfg.setdefault("generate", "no")
+    http_cfg.setdefault("keys_dir", None)
+    http_cfg.setdefault("tls_days", 3650)
     http_cfg.setdefault("www_root", None)
     http_cfg.setdefault("index", True)
 

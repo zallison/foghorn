@@ -209,9 +209,10 @@ def create_app(
         install_uvicorn_2xx_suppression()
         yield
 
-    enable_api = bool(web_cfg.get("enable_api", True))
-    enable_schema = bool(web_cfg.get("enable_schema", True))
-    enable_docs = bool(web_cfg.get("enable_docs", True))
+    enable_api = bool(web_cfg.get("enable_api", False))
+    enable_admin = bool(web_cfg.get("enable_admin", False))
+    enable_schema = bool(web_cfg.get("enable_schema", False))
+    enable_docs = bool(web_cfg.get("enable_docs", False))
 
     # FastAPI only supports Swagger UI when OpenAPI is enabled.
     docs_url = "/docs" if enable_docs and enable_schema else None
@@ -313,9 +314,15 @@ def create_app(
     if enable_api:
         _register_core_routes(app)
         _register_stats_routes(app, auth_dep, FOGHORN_VERSION)
-        _register_config_routes(app, auth_dep)
+        _register_config_routes(
+            app,
+            auth_dep,
+            admin_auth_dep=admin_auth_dep,
+            enable_admin=enable_admin,
+        )
         _register_query_log_routes(app, auth_dep)
-        _register_admin_routes(app, admin_auth_dep)
+        if enable_admin:
+            _register_admin_routes(app, admin_auth_dep)
         _register_plugin_routes(app, auth_dep)
 
     @app.middleware("http")
