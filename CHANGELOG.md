@@ -5,6 +5,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 ### Added
+- Added downstream DNS COOKIE (RFC 7873) support under `server.features.cookies` with `enabled` (default `true`), `mode` (`learn` | `require_udp`), optional `secret` / `secret_old`, and `lifetime_seconds` (default 86400).
+- Cookie helpers in `edns_utils` generate and validate IP-bound server cookies (HMAC, lifetime, current/old key rollover), classify request cookies, build BADCOOKIE (RCODE 23) responses, strip COOKIE options from cache payloads, and re-bind server cookies on outbound responses.
+- In `require_udp` mode, UDP queries without a valid server cookie receive BADCOOKIE with a fresh server cookie and skip cache, plugins, and upstream work; TCP/DoT/DoH are not required to present cookies.
+- When `secret` is unset, an ephemeral per-process cookie secret is used; multi-instance `require_udp` deployments should configure a shared secret.
 - Added secure-by-default admin HTTP surface gates `server.http.enable_api`, `enable_admin`, `enable_schema`, and `enable_docs` (all default `false`), so API, control-plane mutations, OpenAPI schema, and Swagger docs stay off unless explicitly enabled.
 - Added optional admin TLS configuration under `server.http`: `cert_file`, `key_file`, `generate` (`yes`/`no`/`maybe`), `keys_dir`, and `tls_days`, with helpers in `src/foghorn/servers/webserver/tls_certs.py` for path allowlisting and optional openssl self-signed certificate generation at startup.
 - Added `server.features.refuse_any` to refuse QTYPE ANY queries with `REFUSED` as an optional amplification mitigation.
@@ -27,6 +31,7 @@ All notable changes to this project will be documented in this file.
 - Added retention controls and pruning machinery to API request audit storage (`src/foghorn/servers/webserver/api_request_audit.py`), including configurable max-record/max-bytes/prune-cadence behavior and control-row state tracking.
 
 ### Changed
+- Config schema generation, config dump (with cookie secret redaction), runtime feature resolution, and `DNSRuntimeState` now carry `server.features.cookies` settings through the server path.
 - Admin FastAPI construction and threaded admin handlers now honor `enable_api` / `enable_admin` / `enable_schema` / `enable_docs`; docs require both `enable_docs` and `enable_schema`, and save/reload/restart mutation routes register only when `enable_admin` is true.
 - Admin server startup now resolves or generates TLS material via `ensure_admin_tls_files`, passes cert/key into uvicorn when present, and logs `http` vs `https` based on the resolved pair.
 - Config dump defaults and generated schema now include the HTTP surface gates and admin TLS fields with secure defaults.
@@ -54,6 +59,7 @@ All notable changes to this project will be documented in this file.
 - Admin plugin/cache paged tables now retain active search text, sort selection, page size, and enabled filters across auto-refresh cycles, preventing view resets while monitoring mDNS and other plugin pages.
 
 ### Tests
+- Added `tests/server/test_dns_cookies.py` coverage for server-cookie roundtrip/rollover/expiry, default-enabled feature flags, learn-mode attach and cache strip hygiene, `require_udp` BADCOOKIE skip-upstream behavior, valid-cookie acceptance, TCP non-blocking, and disabled-mode hygiene; updated existing cookie-handling tests for the new defaults.
 - Added `tests/helpers/webserver_test_cfg.py` (`normalize_web_cfg_layout`) and adapted webserver suites so fixtures explicitly enable the HTTP surfaces they exercise under the new secure defaults.
 - Added `tests/test_webserver_tls_generate.py` coverage for generate policy aliases, openssl availability, default key paths, incomplete pairs, and path-allowlist rejection.
 - Expanded FastAPI/threaded/admin UI coverage for feature-gate behavior, hidden reload/restart when admin is off, and TLS startup integration (`tests/test_webserver.py`, `tests/test_threaded_handlers_coverage.py`, `tests/servers/test_webserver_admin_ui.py`).
@@ -75,6 +81,8 @@ All notable changes to this project will be documented in this file.
 - Added API audit startup warning coverage for implicit `api_request_audit` defaults (`tests/servers/test_api_request_audit.py`).
 
 ### Documentation
+- Documented `server.features.cookies` options in `example_configs/kitchen_sink.yaml` and `example_configs/server_all_options.yaml`.
+- Updated `docs/RFCs.md` for RFC 7873 downstream server cookies, learn/`require_udp` modes, cache hygiene, and remaining upstream-cookie gap.
 - Documented HTTP surface gates and admin TLS generate options in `example_configs/kitchen_sink.yaml` and `example_configs/server_all_options.yaml`.
 - Expanded `docs/RFCs.md` notes for transport, TLS/DoT, DNS Cookies, ECS, extended errors, zone transfers/TSIG, and related feature coverage.
 - Documented `server.features.refuse_any`, recursive destination policy knobs, threaded TCP hardening parity, and `stats.max_store_*` cardinality caps in README, example configs, and query-log hardening docs.
