@@ -1,14 +1,15 @@
 """Shared DNS runtime/config state for resolver and transport handlers."""
 
 from __future__ import annotations
-import logging
 
+import logging
 import time
 from typing import Dict, List, Optional
 
 from dnslib import DNSRecord
 
 from foghorn.plugins.resolve.base import BasePlugin
+
 from .edns_utils import ensure_edns_request
 
 logger = logging.getLogger("foghorn.server")
@@ -66,6 +67,12 @@ class DNSRuntimeState:
 
     # When False (default), .local is not forwarded upstream.
     forward_local: bool = False
+    # Downstream DNS COOKIE (RFC 7873) controls.
+    cookies_enabled: bool = True
+    cookies_mode: str = "learn"  # learn | require_udp
+    cookies_secret: bytes | None = None
+    cookies_secret_old: bytes | None = None
+    cookies_lifetime_seconds: int = 86400
     # EDNS Client Subnet (ECS) runtime controls.
     ecs_enabled: bool = False
     ecs_forward_inbound: bool = False

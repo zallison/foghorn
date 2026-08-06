@@ -38,7 +38,7 @@ import logging
 import threading
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, List, Sequence, Tuple, Final
+from typing import Any, Dict, Final, List, Sequence, Tuple
 
 from .config.config_parser import (
     load_plugins,
@@ -234,6 +234,11 @@ class RuntimeSnapshot:
     enable_ede: bool
     forward_local: bool
     refuse_any: bool
+    cookies_enabled: bool
+    cookies_mode: str
+    cookies_secret: bytes | None
+    cookies_secret_old: bytes | None
+    cookies_lifetime_seconds: int
     ecs_enabled: bool
     ecs_forward_inbound: bool
     ecs_synthesize_from_client_ip: bool
@@ -302,6 +307,7 @@ def resolve_server_feature_flags(server_cfg: Dict[str, Any]) -> Dict[str, Any]:
     Outputs:
       - dict with normalized feature values:
           - enable_ede / forward_local / refuse_any booleans.
+          - cookies_* controls for downstream DNS COOKIE (RFC 7873).
           - ecs_* controls for resolver ingestion/forwarding/targeting.
 
     Notes:
@@ -401,10 +407,39 @@ def resolve_server_feature_flags(server_cfg: Dict[str, Any]) -> Dict[str, Any]:
                 index,
             )
 
+    cookies_obj = features.get("cookies")
+    cookies_cfg = cookies_obj if isinstance(cookies_obj, dict) else {}
+    cookies_enabled = _to_bool(cookies_cfg.get("enabled"), True)
+    mode_raw = str(cookies_cfg.get("mode", "learn") or "learn").strip().lower()
+    if mode_raw in {"require", "require-udp", "require_udp", "udp"}:
+        cookies_mode = "require_udp"
+    else:
+        cookies_mode = "learn"
+    from foghorn.servers.edns_utils import (
+        decode_cookie_secret,
+        get_or_create_ephemeral_cookie_secret,
+    )
+
+    cookies_secret = decode_cookie_secret(cookies_cfg.get("secret"))
+    if cookies_secret is None and cookies_enabled:
+        cookies_secret = get_or_create_ephemeral_cookie_secret()
+    cookies_secret_old = decode_cookie_secret(cookies_cfg.get("secret_old"))
+    cookies_lifetime_seconds = _to_int(
+        cookies_cfg.get("lifetime_seconds", 86400),
+        86400,
+        minimum=1,
+        maximum=604800,
+    )
+
     return {
         "enable_ede": bool(enable_ede),
         "forward_local": bool(forward_local),
         "refuse_any": bool(refuse_any),
+        "cookies_enabled": bool(cookies_enabled),
+        "cookies_mode": str(cookies_mode),
+        "cookies_secret": cookies_secret,
+        "cookies_secret_old": cookies_secret_old,
+        "cookies_lifetime_seconds": int(cookies_lifetime_seconds),
         "ecs_enabled": _to_bool(ecs_cfg.get("enabled"), False),
         "ecs_forward_inbound": _to_bool(ecs_cfg.get("forward_inbound"), False),
         "ecs_synthesize_from_client_ip": _to_bool(
@@ -1120,6 +1155,13 @@ def _build_snapshot(
         enable_ede=bool(features["enable_ede"]),
         forward_local=bool(features["forward_local"]),
         refuse_any=bool(features["refuse_any"]),
+        cookies_enabled=bool(features.get("cookies_enabled", True)),
+        cookies_mode=str(features.get("cookies_mode", "learn") or "learn"),
+        cookies_secret=features.get("cookies_secret"),
+        cookies_secret_old=features.get("cookies_secret_old"),
+        cookies_lifetime_seconds=int(
+            features.get("cookies_lifetime_seconds", 86400) or 86400
+        ),
         ecs_enabled=bool(features["ecs_enabled"]),
         ecs_forward_inbound=bool(features["ecs_forward_inbound"]),
         ecs_synthesize_from_client_ip=bool(features["ecs_synthesize_from_client_ip"]),
@@ -1308,6 +1350,13 @@ def _default_snapshot() -> RuntimeSnapshot:
     except Exception:
         cache_plugin = None  # pragma: no cover - defensive: import failures unlikely
 
+    try:
+        from foghorn.servers.edns_utils import get_or_create_ephemeral_cookie_secret
+
+        default_cookie_secret = get_or_create_ephemeral_cookie_secret()
+    except Exception:
+        default_cookie_secret = None
+
     return RuntimeSnapshot(
         cfg={},
         plugins=[],
@@ -1327,6 +1376,11 @@ def _default_snapshot() -> RuntimeSnapshot:
         enable_ede=False,
         forward_local=False,
         refuse_any=False,
+        cookies_enabled=True,
+        cookies_mode="learn",
+        cookies_secret=default_cookie_secret,
+        cookies_secret_old=None,
+        cookies_lifetime_seconds=86400,
         ecs_enabled=False,
         ecs_forward_inbound=False,
         ecs_synthesize_from_client_ip=False,

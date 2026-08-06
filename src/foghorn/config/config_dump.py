@@ -448,6 +448,32 @@ def _expand_server_feature_flags(server_cfg: Dict[str, Any]) -> None:
     )
     features_cfg["refuse_any"] = bool(features_cfg.get("refuse_any", False))
 
+    cookies_cfg = features_cfg.get("cookies")
+    if not isinstance(cookies_cfg, dict):
+        cookies_cfg = {}
+        features_cfg["cookies"] = cookies_cfg
+    cookies_cfg["enabled"] = bool(cookies_cfg.get("enabled", True))
+    mode_raw = str(cookies_cfg.get("mode", "learn") or "learn").strip().lower()
+    if mode_raw in {"require", "require-udp", "require_udp", "udp"}:
+        cookies_cfg["mode"] = "require_udp"
+    else:
+        cookies_cfg["mode"] = "learn"
+    # Never expand real secrets into dumps; show presence only.
+    if cookies_cfg.get("secret"):
+        cookies_cfg["secret"] = "***"
+    else:
+        cookies_cfg["secret"] = None
+    if cookies_cfg.get("secret_old"):
+        cookies_cfg["secret_old"] = "***"
+    else:
+        cookies_cfg["secret_old"] = None
+    try:
+        cookies_cfg["lifetime_seconds"] = max(
+            1, min(604800, int(cookies_cfg.get("lifetime_seconds", 86400)))
+        )
+    except Exception:
+        cookies_cfg["lifetime_seconds"] = 86400
+
     ecs_cfg = features_cfg.get("ecs")
     if not isinstance(ecs_cfg, dict):
         ecs_cfg = {}

@@ -2656,6 +2656,41 @@ def _build_v2_root_schema(
                                 "description": "When true, refuse QTYPE ANY (255) queries with REFUSED to reduce amplification risk.",
                                 "default": False,
                             },
+                            "cookies": {
+                                "type": "object",
+                                "additionalProperties": False,
+                                "description": "Downstream DNS COOKIE (RFC 7873) server-cookie controls.",
+                                "properties": {
+                                    "enabled": {
+                                        "type": "boolean",
+                                        "default": True,
+                                        "description": "Enable downstream server-cookie generation and validation.",
+                                    },
+                                    "mode": {
+                                        "type": "string",
+                                        "enum": ["learn", "require_udp"],
+                                        "default": "learn",
+                                        "description": "learn always answers and attaches cookies; require_udp rejects UDP without a valid server cookie via BADCOOKIE.",
+                                    },
+                                    "secret": {
+                                        "type": ["string", "null"],
+                                        "default": None,
+                                        "description": "Optional cookie HMAC secret (base64/hex/raw). When null, an ephemeral per-process secret is used.",
+                                    },
+                                    "secret_old": {
+                                        "type": ["string", "null"],
+                                        "default": None,
+                                        "description": "Optional previous cookie secret accepted during rollover.",
+                                    },
+                                    "lifetime_seconds": {
+                                        "type": "integer",
+                                        "minimum": 1,
+                                        "maximum": 604800,
+                                        "default": 86400,
+                                        "description": "Maximum age of accepted server cookies in seconds.",
+                                    },
+                                },
+                            },
                             "ecs": {
                                 "type": "object",
                                 "additionalProperties": False,

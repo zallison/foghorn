@@ -6992,6 +6992,60 @@
               "maxLength": 254,
               "type": "string"
             },
+            "cookies": {
+              "additionalProperties": false,
+              "description": "Downstream DNS COOKIE (RFC 7873) server-cookie controls.",
+              "properties": {
+                "comment": {
+                  "description": "Optional human metadata string (max 254 characters).",
+                  "maxLength": 254,
+                  "type": "string"
+                },
+                "enabled": {
+                  "default": true,
+                  "description": "Enable downstream server-cookie generation and validation.",
+                  "type": "boolean"
+                },
+                "id": {
+                  "description": "Optional human metadata string (max 254 characters).",
+                  "maxLength": 254,
+                  "type": "string"
+                },
+                "lifetime_seconds": {
+                  "default": 86400,
+                  "description": "Maximum age of accepted server cookies in seconds.",
+                  "maximum": 604800,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "mode": {
+                  "default": "learn",
+                  "description": "learn always answers and attaches cookies; require_udp rejects UDP without a valid server cookie via BADCOOKIE.",
+                  "enum": [
+                    "learn",
+                    "require_udp"
+                  ],
+                  "type": "string"
+                },
+                "secret": {
+                  "default": null,
+                  "description": "Optional cookie HMAC secret (base64/hex/raw). When null, an ephemeral per-process secret is used.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "secret_old": {
+                  "default": null,
+                  "description": "Optional previous cookie secret accepted during rollover.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "type": "object"
+            },
             "ecs": {
               "additionalProperties": false,
               "description": "EDNS Client Subnet (ECS) trust, forwarding, and targeting controls.",
