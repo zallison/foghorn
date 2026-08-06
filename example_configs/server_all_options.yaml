@@ -169,14 +169,25 @@ server:
     host: 127.0.0.1
     port: 5380
 
-    # Optional feature gates
+    # Optional feature gates (all default false)
     enable_api: true
+    enable_admin: true
     enable_schema: true
     enable_docs: true
 
     # When false, refuse to start the threaded stdlib admin HTTP fallback when
     # FastAPI/uvicorn or asyncio is unavailable.
     allow_threaded_fallback: true
+
+    # Optional HTTPS for the admin listener (same shape as listen.doh).
+    # When both are set, Foghorn serves HTTPS directly; omit both for plain HTTP.
+    cert_file: null
+    key_file: null
+    # Optional self-signed generation for internal/LAN encryption (needs openssl).
+    # no | maybe | yes  (aliases: true/false, on/off, 1/0)
+    generate: "no"
+    keys_dir: null
+    tls_days: 3650
 
     # Static assets root (directory containing index.html, css/js, etc.).
     # If null/unset, falls back to $FOGHORN_WWW_ROOT, ./html, or package html/.

@@ -246,7 +246,7 @@ plugins:
       enabled: false
       keys_dir: ./config/var/keys
       algorithm: ECDSAP256SHA256
-      generate: maybe
+      generate: "maybe"
       validity_days: 30
       nsec3: true
 server:
@@ -326,14 +326,25 @@ server:
     host: 127.0.0.1
     port: 5380
 
-    # Optional feature gates
+    # Optional feature gates (all default false)
     enable_api: true
+    enable_admin: true
     enable_schema: true
     enable_docs: true
 
     # When false, refuse to start the threaded stdlib admin HTTP fallback when
     # FastAPI/uvicorn or asyncio is unavailable.
     allow_threaded_fallback: true
+
+    # Optional HTTPS for the admin listener (same shape as listen.doh).
+    # When both are set, Foghorn serves HTTPS directly; omit both for plain HTTP.
+    cert_file: null
+    key_file: null
+    # Optional self-signed generation for internal/LAN encryption (needs openssl).
+    # no | maybe | yes  (aliases: true/false, on/off, 1/0)
+    generate: "no"
+    keys_dir: null
+    tls_days: 3650
     logs:
       buffer_size: 500
     system_info_ttl_seconds: 2.0
