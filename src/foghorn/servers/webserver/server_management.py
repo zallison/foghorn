@@ -14,6 +14,7 @@ import inspect
 import logging
 import os
 import socket
+import ssl
 import threading
 
 # Forward declaration for create_app - actual import happens in start_webserver
@@ -28,6 +29,7 @@ from .http_helpers import ensure_web_auth_token
 from .logging_utils import RingBuffer
 from .runtime import RuntimeState
 from .threaded_handlers import _ThreadedAdminRequestHandler
+from .tls_certs import ensure_admin_tls_files, resolve_admin_tls_files
 from .types_and_buffers import WebServerHandle
 
 if TYPE_CHECKING:
@@ -108,6 +110,10 @@ def _derive_uvicorn_limit_concurrency(web_cfg: Dict[str, Any]) -> int:
     return max(64, min(512, int(soft_nofile) // 2))
 
 
+# Backward-compatible aliases for tests that import private helpers.
+_resolve_admin_tls_files = resolve_admin_tls_files
+
+
 def _build_uvicorn_config(
     *,
     uvicorn_module: Any,
@@ -115,8 +121,10 @@ def _build_uvicorn_config(
     host: str,
     port: int,
     web_cfg: Dict[str, Any],
+    ssl_cert: str | None = None,
+    ssl_key: str | None = None,
 ) -> Any:
-    """Brief: Build uvicorn.Config with optional hardening args when supported.
+    """Brief: Build uvicorn.Config with optional hardening and TLS args.
 
     Inputs:
       - uvicorn_module: Imported uvicorn module exposing Config.
@@ -124,6 +132,8 @@ def _build_uvicorn_config(
       - host: Listen host.
       - port: Listen port.
       - web_cfg: server.http configuration mapping.
+      - ssl_cert: Optional TLS certificate path.
+      - ssl_key: Optional TLS private key path.
 
     Outputs:
       - uvicorn.Config instance.
@@ -135,6 +145,9 @@ def _build_uvicorn_config(
         "port": port,
         "log_level": "warning",
     }
+    if ssl_cert and ssl_key:
+        config_kwargs["ssl_certfile"] = ssl_cert
+        config_kwargs["ssl_keyfile"] = ssl_key
 
     try:
         params = inspect.signature(uvicorn_module.Config).parameters
@@ -152,7 +165,7 @@ def _build_uvicorn_config(
         config_kwargs["timeout_keep_alive"] = 5
 
     logger.info(
-        "Admin webserver uvicorn limits: limit_concurrency=%s backlog=%s soft_nofile=%s",
+        "Admin webserver uvicorn limits: limit_concurrency=%s backlog=%s soft_nofile=%s tls=%s",
         (
             config_kwargs.get("limit_concurrency")
             if "limit_concurrency" in config_kwargs
@@ -160,6 +173,7 @@ def _build_uvicorn_config(
         ),
         config_kwargs.get("backlog", "default"),
         _get_soft_nofile_limit(),
+        bool(ssl_cert and ssl_key),
     )
 
     return uvicorn_module.Config(**config_kwargs)
@@ -281,6 +295,16 @@ def _start_admin_server_threaded(
     port = int(web_cfg.get("port", 5380))
 
     try:
+        cert_file, key_file = ensure_admin_tls_files(
+            web_cfg if isinstance(web_cfg, dict) else {},
+            host=host,
+            config_path=config_path,
+        )
+    except (ValueError, RuntimeError) as exc:
+        logger.error("Invalid admin TLS configuration: %s", exc)
+        return None
+
+    try:
         httpd = _AdminHTTPServer(
             (host, port),
             _ThreadedAdminRequestHandler,
@@ -298,6 +322,22 @@ def _start_admin_server_threaded(
             "Failed to bind threaded admin webserver on %s:%d: %s", host, port, exc
         )
         return None
+
+    if cert_file and key_file:
+        try:
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            context.minimum_version = ssl.TLSVersion.TLSv1_2
+            context.load_cert_chain(certfile=cert_file, keyfile=key_file)
+            httpd.socket = context.wrap_socket(httpd.socket, server_side=True)
+        except Exception as exc:  # pragma: no cover - TLS misconfig
+            logger.error(
+                "Failed to configure TLS for threaded admin webserver: %s", exc
+            )
+            try:
+                httpd.server_close()
+            except Exception:
+                pass
+            return None
 
     def _serve() -> None:
         try:
@@ -320,7 +360,8 @@ def _start_admin_server_threaded(
         daemon=True,
     )
     thread.start()
-    logger.info("Started threaded admin webserver on %s:%d", host, port)
+    scheme = "https" if cert_file and key_file else "http"
+    logger.info("Started threaded admin webserver on %s://%s:%d", scheme, host, port)
     return WebServerHandle(thread, server=httpd)
 
 
@@ -355,6 +396,16 @@ def start_webserver(
     allow_threaded_fallback = bool(web_cfg.get("allow_threaded_fallback", True))
     host = str(web_cfg.get("host", "127.0.0.1"))
     port = int(web_cfg.get("port", 5380))
+    try:
+        cert_file, key_file = ensure_admin_tls_files(
+            web_cfg if isinstance(web_cfg, dict) else {},
+            host=host,
+            config_path=config_path,
+        )
+    except (ValueError, RuntimeError) as exc:
+        logger.error("Invalid admin TLS configuration: %s", exc)
+        return None
+    tls_enabled = bool(cert_file and key_file)
 
     # When auth.mode=token and token is missing, generate a temporary token and
     # log it so operators can still access the admin API.
@@ -366,13 +417,13 @@ def start_webserver(
         auth_cfg = {}
     auth_mode = str(auth_cfg.get("mode", "token")).strip().lower()
     auth_token = auth_cfg.get("token")
-    api_enabled = bool(web_cfg.get("enable_api", True))
+    api_enabled = bool(web_cfg.get("enable_api", False))
     api_auth_missing = auth_mode in {"", "none"} or (
         auth_mode == "token" and not str(auth_token or "").strip()
     )
     bind_is_loopback = _is_loopback_bind_host(host)
-    schema_enabled = bool(web_cfg.get("enable_schema", True))
-    docs_enabled = bool(web_cfg.get("enable_docs", True))
+    schema_enabled = bool(web_cfg.get("enable_schema", False))
+    docs_enabled = bool(web_cfg.get("enable_docs", False))
     cors_cfg = web_cfg.get("cors") if isinstance(web_cfg, dict) else None
     if not isinstance(cors_cfg, dict):
         cors_cfg = {}
@@ -391,9 +442,20 @@ def start_webserver(
             "Foghorn API is enabled but authentication is not configured; "
             "set server.http.auth.mode=token and server.http.auth.token to protect admin endpoints"
         )
-    if not bind_is_loopback:
+    # Fail closed: non-loopback admin API without effective auth is refused even
+    # when TLS (including self-signed) is enabled. TLS is not authentication.
+    if not bind_is_loopback and api_enabled and api_auth_missing:
+        logger.error(
+            "Refusing to start admin webserver on non-loopback host %s: "
+            "enable_api=true requires authentication "
+            "(server.http.auth.mode=token with a configured token). "
+            "TLS alone is not sufficient.",
+            host,
+        )
+        return None
+    if not bind_is_loopback and not tls_enabled:
         logger.warning(
-            "Foghorn admin webserver is bound to %s over plaintext HTTP; use a TLS-terminating reverse proxy or restrict server.http.host to loopback",
+            "Foghorn admin webserver is bound to %s over plaintext HTTP; set server.http.cert_file/key_file, use a TLS-terminating reverse proxy, or restrict server.http.host to loopback",
             host,
         )
 
@@ -601,6 +663,8 @@ def start_webserver(
         host=host,
         port=port,
         web_cfg=web_cfg,
+        ssl_cert=cert_file,
+        ssl_key=key_file,
     )
     server = uvicorn.Server(config_uvicorn)
 
@@ -626,5 +690,6 @@ def start_webserver(
     if runtime_state is not None:
         runtime_state.set_listener("webserver", enabled=True, thread=thread)
 
-    logger.info("Started Foghorn admin ui/api on http://%s:%d", host, port)
+    scheme = "https" if tls_enabled else "http"
+    logger.info("Started Foghorn admin ui/api on %s://%s:%d", scheme, host, port)
     return WebServerHandle(thread)
