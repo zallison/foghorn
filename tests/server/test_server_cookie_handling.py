@@ -9,7 +9,7 @@ Outputs:
 
 from __future__ import annotations
 
-from dnslib import A, EDNS0, QTYPE, RR, DNSRecord, EDNSOption
+from dnslib import EDNS0, QTYPE, RR, A, DNSRecord, EDNSOption
 
 import foghorn.servers.server as srv
 from foghorn.plugins.resolve import base as plugin_base
@@ -97,6 +97,7 @@ def test_cache_hit_rebinds_cookie_and_cache_payload_strips_cookie(
         plugins=[],
         upstream_addrs=[{"host": "1.1.1.1", "port": 53}],
         resolver_mode="forward",
+        cookies_enabled=False,
     )
 
     resp1 = DNSRecord.parse(
@@ -159,6 +160,7 @@ def test_response_cookie_is_removed_when_request_has_no_cookie(
         plugins=[],
         upstream_addrs=[{"host": "1.1.1.1", "port": 53}],
         resolver_mode="forward",
+        cookies_enabled=False,
     )
 
     q = DNSRecord.question(qname, "A")
