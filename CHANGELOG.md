@@ -5,6 +5,8 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 ### Added
+- Added secure-by-default admin HTTP surface gates `server.http.enable_api`, `enable_admin`, `enable_schema`, and `enable_docs` (all default `false`), so API, control-plane mutations, OpenAPI schema, and Swagger docs stay off unless explicitly enabled.
+- Added optional admin TLS configuration under `server.http`: `cert_file`, `key_file`, `generate` (`yes`/`no`/`maybe`), `keys_dir`, and `tls_days`, with helpers in `src/foghorn/servers/webserver/tls_certs.py` for path allowlisting and optional openssl self-signed certificate generation at startup.
 - Added `server.features.refuse_any` to refuse QTYPE ANY queries with `REFUSED` as an optional amplification mitigation.
 - Added recursive next-hop destination controls `server.resolver.allow_private_destinations` (default `true` for split-horizon) and `server.resolver.destination_allowlist` for optional private-glue filtering.
 - Added stats persistence cardinality caps (`stats.max_store_clients`, `max_store_domains`, `max_store_subdomains`, `max_store_qtype_qnames`) to bound distinct identity keys written to stats backends.
@@ -25,6 +27,9 @@ All notable changes to this project will be documented in this file.
 - Added retention controls and pruning machinery to API request audit storage (`src/foghorn/servers/webserver/api_request_audit.py`), including configurable max-record/max-bytes/prune-cadence behavior and control-row state tracking.
 
 ### Changed
+- Admin FastAPI construction and threaded admin handlers now honor `enable_api` / `enable_admin` / `enable_schema` / `enable_docs`; docs require both `enable_docs` and `enable_schema`, and save/reload/restart mutation routes register only when `enable_admin` is true.
+- Admin server startup now resolves or generates TLS material via `ensure_admin_tls_files`, passes cert/key into uvicorn when present, and logs `http` vs `https` based on the resolved pair.
+- Config dump defaults and generated schema now include the HTTP surface gates and admin TLS fields with secure defaults.
 - MySQL and PostgreSQL TTL cache backends now use shared `db_drivers` helpers instead of backend-local driver import utilities.
 - Query-log count rebuild orchestration now lives in `BaseStatsStore`, with backends implementing flush/clear/iterate hooks and dropping duplicated rebuild loops.
 - SQLite, MySQL/MariaDB, PostgreSQL, MongoDB, and MQTT query-log backends now consume shared driver and domain helpers rather than private copies.
@@ -49,6 +54,9 @@ All notable changes to this project will be documented in this file.
 - Admin plugin/cache paged tables now retain active search text, sort selection, page size, and enabled filters across auto-refresh cycles, preventing view resets while monitoring mDNS and other plugin pages.
 
 ### Tests
+- Added `tests/helpers/webserver_test_cfg.py` (`normalize_web_cfg_layout`) and adapted webserver suites so fixtures explicitly enable the HTTP surfaces they exercise under the new secure defaults.
+- Added `tests/test_webserver_tls_generate.py` coverage for generate policy aliases, openssl availability, default key paths, incomplete pairs, and path-allowlist rejection.
+- Expanded FastAPI/threaded/admin UI coverage for feature-gate behavior, hidden reload/restart when admin is off, and TLS startup integration (`tests/test_webserver.py`, `tests/test_threaded_handlers_coverage.py`, `tests/servers/test_webserver_admin_ui.py`).
 - Added security-hardening regression coverage for threaded TCP connection/query caps, `refuse_any`, recursive destination allowlisting, and stats store cardinality caps (`tests/servers/test_tcp_threaded_limits.py`, `tests/test_security_hardening_batch.py`).
 - Updated MySQL/PostgreSQL cache TTL backend tests and MQTT/MySQL/SQLite query-log backend tests to import shared `db_drivers` and `querylog.common` helpers.
 - Added `tests/servers/test_api_request_audit.py` coverage for redaction behavior and append-only trigger enforcement.
@@ -67,6 +75,8 @@ All notable changes to this project will be documented in this file.
 - Added API audit startup warning coverage for implicit `api_request_audit` defaults (`tests/servers/test_api_request_audit.py`).
 
 ### Documentation
+- Documented HTTP surface gates and admin TLS generate options in `example_configs/kitchen_sink.yaml` and `example_configs/server_all_options.yaml`.
+- Expanded `docs/RFCs.md` notes for transport, TLS/DoT, DNS Cookies, ECS, extended errors, zone transfers/TSIG, and related feature coverage.
 - Documented `server.features.refuse_any`, recursive destination policy knobs, threaded TCP hardening parity, and `stats.max_store_*` cardinality caps in README, example configs, and query-log hardening docs.
 
 ## 0.7.1
