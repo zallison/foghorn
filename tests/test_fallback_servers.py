@@ -25,10 +25,45 @@ import pytest
 from foghorn.servers import doh_api as doh_mod
 from foghorn.servers import webserver as web_mod
 from foghorn.servers.doh_api import DoHServerHandle, start_doh_server
-from foghorn.servers.webserver import RingBuffer, WebServerHandle, start_webserver
+from foghorn.servers.webserver import (
+    RingBuffer,
+    WebServerHandle,
+    create_app,
+    start_webserver,
+)
 from foghorn.stats import StatsCollector, StatsSQLiteStore
 
 pytestmark = pytest.mark.slow
+
+
+from tests.helpers.webserver_test_cfg import (
+    normalize_web_cfg_layout as _normalize_web_cfg_layout,
+)
+
+_create_app = create_app
+_start_webserver = start_webserver
+
+
+def create_app(*args, **kwargs):  # type: ignore[no-redef]
+    """Brief: Test wrapper that opts into historical HTTP feature gates."""
+
+    if "config" in kwargs:
+        kwargs["config"] = _normalize_web_cfg_layout(kwargs.get("config"))
+    elif args:
+        # create_app(stats, config, ...)
+        args = list(args)
+        if len(args) >= 2:
+            args[1] = _normalize_web_cfg_layout(args[1])
+        args = tuple(args)
+    return _create_app(*args, **kwargs)
+
+
+def start_webserver(*args, **kwargs):  # type: ignore[no-redef]
+    """Brief: Test wrapper that opts into historical HTTP feature gates."""
+
+    if "config" in kwargs:
+        kwargs["config"] = _normalize_web_cfg_layout(kwargs.get("config"))
+    return _start_webserver(*args, **kwargs)
 
 
 def _encode_dns(q: bytes) -> str:
@@ -163,7 +198,7 @@ def test_admin_webserver_auth_parity_fastapi_and_threaded(monkeypatch: Any) -> N
         },
     }
 
-    app = web_mod.create_app(stats=None, config=cfg, log_buffer=RingBuffer())
+    app = create_app(stats=None, config=cfg, log_buffer=RingBuffer())
     client = TestClient(app)
 
     cases: list[dict[str, Any]] = [
@@ -252,7 +287,7 @@ def test_admin_webserver_missing_token_parity_fastapi_and_threaded(
         },
     }
 
-    app = web_mod.create_app(stats=None, config=cfg, log_buffer=RingBuffer())
+    app = create_app(stats=None, config=cfg, log_buffer=RingBuffer())
     client = TestClient(app)
     fastapi_response = client.get("/stats")
     fastapi_payload = fastapi_response.json()

@@ -8,6 +8,27 @@ from foghorn.servers.webserver import RingBuffer, create_app
 from foghorn.stats import StatsCollector
 
 
+from tests.helpers.webserver_test_cfg import (
+    normalize_web_cfg_layout as _normalize_web_cfg_layout,
+)
+
+_create_app = create_app
+
+
+def create_app(*args, **kwargs):  # type: ignore[no-redef]
+    """Brief: Test wrapper that opts into historical HTTP feature gates."""
+
+    if "config" in kwargs:
+        kwargs["config"] = _normalize_web_cfg_layout(kwargs.get("config"))
+    elif args:
+        # create_app(stats, config, ...)
+        args = list(args)
+        if len(args) >= 2:
+            args[1] = _normalize_web_cfg_layout(args[1])
+        args = tuple(args)
+    return _create_app(*args, **kwargs)
+
+
 def _reset_system_info_cache() -> None:
     """Reset webserver system info cache for deterministic tests.
 

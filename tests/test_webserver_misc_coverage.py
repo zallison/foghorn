@@ -7,6 +7,27 @@ import foghorn.servers.webserver as web_mod
 from foghorn.servers.webserver import RingBuffer, RuntimeState, create_app
 
 
+from tests.helpers.webserver_test_cfg import (
+    normalize_web_cfg_layout as _normalize_web_cfg_layout,
+)
+
+_create_app = create_app
+
+
+def create_app(*args, **kwargs):  # type: ignore[no-redef]
+    """Brief: Test wrapper that opts into historical HTTP feature gates."""
+
+    if "config" in kwargs:
+        kwargs["config"] = _normalize_web_cfg_layout(kwargs.get("config"))
+    elif args:
+        # create_app(stats, config, ...)
+        args = list(args)
+        if len(args) >= 2:
+            args[1] = _normalize_web_cfg_layout(args[1])
+        args = tuple(args)
+    return _create_app(*args, **kwargs)
+
+
 def test_thread_is_alive_handles_is_running_exception() -> None:
     """Brief: _thread_is_alive returns False when is_running raises.
 
