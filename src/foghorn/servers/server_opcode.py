@@ -12,9 +12,9 @@ import time
 from typing import NamedTuple, Optional
 
 from dnslib import RCODE, DNSHeader, DNSRecord
-from foghorn.utils import dns_names, ip_networks
 
 from foghorn.plugins.resolve.base import PluginContext, PluginDecision
+from foghorn.utils import dns_names, ip_networks
 
 from .server_response_utils import _set_response_id
 
@@ -296,11 +296,29 @@ def _handle_non_query_opcode(
 
     # Best-effort TSIG verification before plugin dispatch.
     if msg is not None and getattr(msg, "had_tsig", False):
-        from foghorn.plugins.resolve.zone_records import update_helpers
-        from foghorn.plugins.resolve.zone_records import update_processor
+        from foghorn.plugins.resolve.zone_records import (
+            update_helpers,
+            update_processor,
+        )
 
-        # Gather TSIG key configs across ZoneRecords instances.
+        # Prefer server.features.tsig / snapshot keys; fall back to ZoneRecords UPDATE keys.
         key_configs: list[dict] = []
+        try:
+            from foghorn.runtime_config import get_runtime_snapshot
+
+            snap = get_runtime_snapshot()
+            snap_keys = list(getattr(snap, "tsig_keys", []) or [])
+            if snap_keys:
+                key_configs.extend([dict(k) for k in snap_keys if isinstance(k, dict)])
+        except Exception:
+            pass
+        try:
+            handler_keys = list(getattr(handler, "tsig_keys", []) or [])
+            for k in handler_keys:
+                if isinstance(k, dict):
+                    key_configs.append(dict(k))
+        except Exception:
+            pass
         try:
             plugins = list(getattr(handler, "plugins", []) or [])
         except Exception:
