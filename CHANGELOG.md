@@ -6,14 +6,19 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Changed
+- Config schema (Pydantic), config dump (secret redaction), runtime feature flags, `RuntimeSnapshot`, `main` startup, and handler mapping now carry `server.features.tsig` settings.
 - Core configuration JSON Schema is generated from Pydantic models under `src/foghorn/config/models/` (`FoghornConfig` and section models) instead of circularly rewriting `assets/config-schema.json`.
 - `scripts/generate_foghorn_schema.py` is a thin emitter (model dump, plugin `$defs` catalog, light post-processing) and restores heuristic `description` enrichment for editor tooling.
 
 ### Added
+- Added downstream QUERY TSIG (RFC 2845) under `server.features.tsig` (`enabled` default false, `mode` optional|require, `keys`/`key_sources`, `max_fudge_seconds`, optional `allow_clients`/`listeners`).
+- Shared TSIG helpers in `src/foghorn/servers/tsig_utils.py` (verify/sign/strip/error responses); ZoneRecords `verify_tsig_auth` delegates to the shared implementation.
+- QUERY path verifies TSIG near the cookies gate, signs successful responses, strips TSIG from cache payloads, and re-signs on cache hits; non-QUERY opcode verify prefers server snapshot keys.
 - `src/foghorn/config/models/` package as the source of truth for core config schema fields.
 - `tests/config/test_foghorn_config_models.py` for FoghornConfig and nested model defaults.
 
 ### Documentation
+- Documented `server.features.tsig` in example configs and updated `docs/RFCs.md` RFC 2845 status (downstream QUERY partial; upstream client TSIG still open).
 - `docs/README-DEV.md` and `CONTRIBUTING.md` describe the Pydantic-driven schema workflow and `make schema` regenerate step.
 
 ### Added
@@ -72,6 +77,7 @@ All notable changes to this project will be documented in this file.
 - Admin plugin/cache paged tables now retain active search text, sort selection, page size, and enabled filters across auto-refresh cycles, preventing view resets while monitoring mDNS and other plugin pages.
 
 ### Tests
+- Added `tests/server/test_dns_tsig.py` coverage for feature defaults, verify/sign helpers, optional/require modes, bad TSIG rejection, and cache re-sign hygiene.
 - Added `tests/server/test_dns_cookies.py` coverage for server-cookie roundtrip/rollover/expiry, default-enabled feature flags, learn-mode attach and cache strip hygiene, `require_udp` BADCOOKIE skip-upstream behavior, valid-cookie acceptance, TCP non-blocking, and disabled-mode hygiene; updated existing cookie-handling tests for the new defaults.
 - Added `tests/helpers/webserver_test_cfg.py` (`normalize_web_cfg_layout`) and adapted webserver suites so fixtures explicitly enable the HTTP surfaces they exercise under the new secure defaults.
 - Added `tests/test_webserver_tls_generate.py` coverage for generate policy aliases, openssl availability, default key paths, incomplete pairs, and path-allowlist rejection.

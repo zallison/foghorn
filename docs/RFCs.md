@@ -11,7 +11,7 @@ This document summarizes how Foghorn’s behavior maps onto major DNS-related RF
 |      1996 | DNS NOTIFY                                      | Partially implemented (inbound + outbound for ZoneRecords)             |
 |      2136 | Dynamic Updates in the DNS                      | Partially implemented (ZoneRecords DNS UPDATE + TSIG)                  |
 |      2308 | Negative Caching of DNS Queries                 | Implemented                                                            |
-|      2845 | Secret Key Transaction Authentication for DNS   | Partially implemented (AXFR/IXFR + UPDATE; not general QUERY TSIG)     |
+|      2845 | Secret Key Transaction Authentication for DNS   | Partially implemented (QUERY + AXFR/IXFR + UPDATE; no upstream client TSIG) |
 |      4033–4035 | DNSSEC protocol/records/validation          | Partially implemented                                                  |
 |      4592 | The Role of Wildcards in the Domain Name System | Partial / intentional non-compliance (leading `*` = one-or-more labels)|
 |      5011 | Automated Updates of DNS Security Trust Anchors | Implemented                                                            |
@@ -300,14 +300,20 @@ See `docs/plugins/resolve/zone_update.md` and
 
 ### 5.4 TSIG – RFC 2845 (Partial)
 
-TSIG is implemented for the zone-management paths that need it:
+TSIG is implemented for zone-management paths and optional downstream QUERY auth:
 
+- Downstream QUERY via `server.features.tsig` (default **off**):
+  - `mode: optional` verifies TSIG when present; unsigned queries still work.
+  - `mode: require` rejects missing/invalid TSIG with NOTAUTH before cache/plugins/upstream.
+  - Valid TSIG requests get signed responses; cache payloads stay TSIG-free and are re-signed per request.
+  - Shared helpers live in `src/foghorn/servers/tsig_utils.py`.
+  - Optional `allow_clients` / `listeners` scope enforcement.
 - Upstream AXFR client transfers (`axfr_zones[*].upstreams[*].tsig`).
 - Downstream AXFR/IXFR serving (`server.axfr.require_tsig` + nested `server.axfr.tsig` keys/sources; legacy `tsig_keys` alias retained).
 - DNS UPDATE authentication and best-effort signed error responses.
-- Best-effort MAC verification for signed non-QUERY opcodes before plugin dispatch; signed messages are refused when no keys are configured.
+- Best-effort MAC verification for signed non-QUERY opcodes before plugin dispatch; prefers `server.features.tsig` / snapshot keys, then ZoneRecords UPDATE keys; signed messages are refused when no keys are configured.
 
-General recursive QUERY/response TSIG authentication is not a primary feature.
+**Still missing:** upstream/client TSIG on ordinary forward QUERY traffic to resolvers/authoritatives.
 
 ---
 
@@ -339,8 +345,9 @@ The following RFCs (and related features) are not implemented directly in Foghor
 - **True incremental IXFR client/server deltas (RFC 1995/5936 IXFR)**
   - IXFR queries are answered with full-zone AXFR-style transfers; no IXFR pull client.
 
-- **General-purpose TSIG on ordinary recursive QUERY traffic (RFC 2845)**
-  - TSIG is focused on AXFR/IXFR/UPDATE/NOTIFY paths.
+- **Upstream DNS TSIG (Foghorn as TSIG client on forward QUERY)**
+  - Downstream QUERY TSIG is implemented under `server.features.tsig`; Foghorn does not yet
+    sign ordinary forward queries toward upstream resolvers/authoritatives.
 
 Other newer or specialized DNS-related RFCs not listed above should be assumed
 **not implemented** unless clearly documented in the code or configuration.
@@ -354,6 +361,7 @@ Other newer or specialized DNS-related RFCs not listed above should be assumed
 - DNSSEC is best used in **passthrough/upstream-validated** mode for production comfort; local validation exists but remains experimental.
 - EDE is on by default for clearer policy/upstream diagnostics; full DNSSEC EDE coverage is still limited.
 - ECS is trust-gated in forward mode and bypasses shared cache when it affects answers.
+- Downstream QUERY TSIG is available under `server.features.tsig` (default off; optional/require). Upstream client TSIG is not implemented.
 - Downstream DNS COOKIEs default on in learn mode; use `require_udp` plus a shared secret for public UDP resolvers. Cache payloads remain cookie-free.
 - ZoneRecords can act as a limited authoritative edge: static/BIND sources, AXFR hydrate/refresh (startup + poll + NOTIFY-driven), optional DNS UPDATE with journals, outbound NOTIFY, and AXFR/IXFR serving over TCP/DoT with TSIG and allowlists.
 - IXFR remains full-zone transfer style; there is no incremental IXFR client.

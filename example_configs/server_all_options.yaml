@@ -156,6 +156,14 @@ server:
       secret: null        # optional shared HMAC secret; null => ephemeral per process
       secret_old: null    # optional previous secret for rollover
       lifetime_seconds: 86400
+    tsig:
+      enabled: false      # Downstream QUERY TSIG (RFC 2845); default off
+      mode: optional      # optional | require
+      keys: []            # [{name, secret, algorithm}]
+      key_sources: []     # [{type: file, path: ...}]
+      max_fudge_seconds: 300
+      allow_clients: []   # optional CIDR allowlist
+      listeners: []       # empty = all listeners
     ecs:
       enabled: false
       forward_inbound: false

@@ -265,6 +265,11 @@ server:
     cookies:
       enabled: true
       mode: learn
+    tsig:
+      enabled: false
+      mode: optional
+      keys: []
+      max_fudge_seconds: 300
     refuse_any: false
 
   listen:
