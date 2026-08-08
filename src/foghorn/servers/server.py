@@ -864,6 +864,14 @@ def _resolve_core(
             cookies_lifetime_seconds=int(
                 getattr(snap, "cookies_lifetime_seconds", 86400) or 86400
             ),
+            tsig_enabled=bool(getattr(snap, "tsig_enabled", False)),
+            tsig_mode=str(getattr(snap, "tsig_mode", "optional") or "optional"),
+            tsig_keys=list(getattr(snap, "tsig_keys", []) or []),
+            tsig_max_fudge_seconds=int(
+                getattr(snap, "tsig_max_fudge_seconds", 300) or 300
+            ),
+            tsig_allow_clients=list(getattr(snap, "tsig_allow_clients", []) or []),
+            tsig_listeners=list(getattr(snap, "tsig_listeners", []) or []),
             ecs_enabled=bool(getattr(snap, "ecs_enabled", False)),
             ecs_forward_inbound=bool(getattr(snap, "ecs_forward_inbound", False)),
             ecs_synthesize_from_client_ip=bool(
@@ -1047,6 +1055,209 @@ def _resolve_core(
                     upstream_id=None,
                     rcode_name="BADCOOKIE",
                 )
+
+        # Downstream QUERY TSIG (RFC 2845) gate.
+        # After cookies require_udp; before cache/plugins/upstream.
+        tsig_ctx = {
+            "ok": False,
+            "keyname": None,
+            "algorithm": None,
+            "had_tsig": False,
+        }
+        try:
+            tsig_enabled = bool(getattr(handler, "tsig_enabled", False))
+        except Exception:
+            tsig_enabled = False
+        tsig_keys = list(getattr(handler, "tsig_keys", []) or [])
+        try:
+            tsig_mode = str(
+                getattr(handler, "tsig_mode", "optional") or "optional"
+            ).lower()
+        except Exception:
+            tsig_mode = "optional"
+        if tsig_mode not in {"optional", "require"}:
+            tsig_mode = "optional"
+        try:
+            tsig_max_fudge = int(getattr(handler, "tsig_max_fudge_seconds", 300) or 300)
+        except Exception:
+            tsig_max_fudge = 300
+        tsig_allow_clients = list(getattr(handler, "tsig_allow_clients", []) or [])
+        tsig_listeners = list(getattr(handler, "tsig_listeners", []) or [])
+        listener_l = str(listener or "").lower()
+        tsig_applies = True
+        if tsig_listeners:
+            tsig_applies = listener_l in {str(x).lower() for x in tsig_listeners}
+        if tsig_enabled and tsig_applies:
+            from foghorn.servers import tsig_utils as _tsig
+            from foghorn.utils import ip_networks as _ipn
+
+            data_bytes = data if isinstance(data, (bytes, bytearray)) else b""
+            may_tsig = _tsig.wire_may_contain_tsig(data_bytes)
+            need_check = bool(may_tsig) or tsig_mode == "require"
+            if need_check:
+                if tsig_allow_clients:
+                    if not _ipn.ip_string_in_cidrs(
+                        str(client_ip or "").strip(), tsig_allow_clients
+                    ):
+                        # Outside allowlist: ignore TSIG feature for this client.
+                        need_check = False
+                        tsig_enabled = False
+            if need_check:
+                if not may_tsig:
+                    # require + no additional section => missing TSIG
+                    if tsig_mode == "require":
+                        wire = _tsig.build_tsig_error_response(
+                            bytes(data_bytes),
+                            key_configs=tsig_keys,
+                            sign=False,
+                        )
+                        wire = _set_response_id(wire, req.header.id)
+                        if stats is not None:
+                            try:
+                                qn = ""
+                                try:
+                                    qn = str(req.questions[0].qname).rstrip(".")
+                                except Exception:
+                                    qn = ""
+                                stats.record_response_rcode("NOTAUTH", qn)
+                                stats.record_query_result(
+                                    client_ip=client_ip,
+                                    qname=qn,
+                                    qtype="UNKNOWN",
+                                    rcode="NOTAUTH",
+                                    upstream_id=None,
+                                    status="tsig_required",
+                                    error=None,
+                                    first=None,
+                                    result={
+                                        "source": "tsig",
+                                        "action": "missing",
+                                        "tsig_mode": tsig_mode,
+                                    },
+                                )
+                            except Exception:
+                                pass
+                        if stats is not None and t0 is not None:
+                            try:
+                                t1 = _time.perf_counter()
+                                stats.record_latency(t1 - t0)
+                            except Exception:
+                                pass
+                        return _ResolveCoreResult(
+                            wire=wire,
+                            dnssec_status=None,
+                            upstream_id=None,
+                            rcode_name="NOTAUTH",
+                        )
+                else:
+                    vr = _tsig.verify_request_tsig(
+                        bytes(data_bytes),
+                        tsig_keys,
+                        max_fudge_seconds=tsig_max_fudge,
+                    )
+                    tsig_ctx["had_tsig"] = bool(vr.had_tsig)
+                    if vr.ok:
+                        tsig_ctx["ok"] = True
+                        tsig_ctx["keyname"] = vr.keyname
+                        tsig_ctx["algorithm"] = vr.algorithm
+                        request_result_meta["tsig_ok"] = True
+                        request_result_meta["tsig_key_name"] = vr.keyname
+                    else:
+                        # optional + no_tsig is fine (ARCOUNT may be EDNS-only)
+                        if vr.error_code == "no_tsig" and tsig_mode == "optional":
+                            pass
+                        elif vr.error_code == "no_tsig" and tsig_mode == "require":
+                            wire = _tsig.build_tsig_error_response(
+                                bytes(data_bytes),
+                                key_configs=tsig_keys,
+                                sign=False,
+                            )
+                            wire = _set_response_id(wire, req.header.id)
+                            if stats is not None:
+                                try:
+                                    qn = ""
+                                    try:
+                                        qn = str(req.questions[0].qname).rstrip(".")
+                                    except Exception:
+                                        qn = ""
+                                    stats.record_response_rcode("NOTAUTH", qn)
+                                    stats.record_query_result(
+                                        client_ip=client_ip,
+                                        qname=qn,
+                                        qtype="UNKNOWN",
+                                        rcode="NOTAUTH",
+                                        upstream_id=None,
+                                        status="tsig_required",
+                                        error=vr.error_text,
+                                        first=None,
+                                        result={
+                                            "source": "tsig",
+                                            "action": "missing",
+                                            "tsig_error": vr.error_code,
+                                        },
+                                    )
+                                except Exception:
+                                    pass
+                            if stats is not None and t0 is not None:
+                                try:
+                                    t1 = _time.perf_counter()
+                                    stats.record_latency(t1 - t0)
+                                except Exception:
+                                    pass
+                            return _ResolveCoreResult(
+                                wire=wire,
+                                dnssec_status=None,
+                                upstream_id=None,
+                                rcode_name="NOTAUTH",
+                            )
+                        else:
+                            # bad sig/key/time/etc or optional with present bad TSIG
+                            if vr.had_tsig or tsig_mode == "require":
+                                wire = _tsig.build_tsig_error_response(
+                                    bytes(data_bytes),
+                                    key_configs=tsig_keys,
+                                    keyname=vr.keyname,
+                                    algorithm=vr.algorithm,
+                                    sign=bool(vr.keyname and tsig_keys),
+                                )
+                                wire = _set_response_id(wire, req.header.id)
+                                if stats is not None:
+                                    try:
+                                        qn = ""
+                                        try:
+                                            qn = str(req.questions[0].qname).rstrip(".")
+                                        except Exception:
+                                            qn = ""
+                                        stats.record_response_rcode("NOTAUTH", qn)
+                                        stats.record_query_result(
+                                            client_ip=client_ip,
+                                            qname=qn,
+                                            qtype="UNKNOWN",
+                                            rcode="NOTAUTH",
+                                            upstream_id=None,
+                                            status="tsig_failed",
+                                            error=vr.error_text,
+                                            first=None,
+                                            result={
+                                                "source": "tsig",
+                                                "action": "reject",
+                                                "tsig_error": vr.error_code,
+                                            },
+                                        )
+                                    except Exception:
+                                        pass
+                                if stats is not None and t0 is not None:
+                                    try:
+                                        t1 = _time.perf_counter()
+                                        stats.record_latency(t1 - t0)
+                                    except Exception:
+                                        pass
+                                return _ResolveCoreResult(
+                                    wire=wire,
+                                    dnssec_status=None,
+                                    upstream_id=None,
+                                    rcode_name="NOTAUTH",
+                                )
 
         q = req.questions[0]
         # Normalize the parsed qname by stripping the wire/root trailing dot.
@@ -1788,6 +1999,22 @@ def _resolve_core(
             ):  # pragma: no cover - defensive/metrics path excluded from coverage
                 _schedule_cache_refresh(data, client_ip)
 
+            try:
+                from foghorn.servers.tsig_utils import (
+                    sign_response_tsig,
+                    strip_tsig_from_wire,
+                )
+
+                cached = strip_tsig_from_wire(cached)
+                if tsig_ctx.get("ok") and tsig_ctx.get("keyname"):
+                    cached = sign_response_tsig(
+                        cached,
+                        key_configs=list(getattr(handler, "tsig_keys", []) or []),
+                        keyname=tsig_ctx.get("keyname"),
+                        algorithm=tsig_ctx.get("algorithm"),
+                    )
+            except Exception:
+                pass
             cached = _bind_response_cookie_to_request(
                 req,
                 cached,
@@ -2512,6 +2739,12 @@ def _resolve_core(
                 cache = getattr(plugin_base, "DNS_CACHE", None)
                 if cache is not None:
                     cache_payload = _strip_response_cookie_options(out)
+                    try:
+                        from foghorn.servers.tsig_utils import strip_tsig_from_wire
+
+                        cache_payload = strip_tsig_from_wire(cache_payload)
+                    except Exception:
+                        pass
                     cache.set(cache_key, int(ttl), cache_payload)
 
             # Attach a DNSSEC-related EDE only for explicitly bogus
@@ -2533,6 +2766,22 @@ def _resolve_core(
         ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
             pass  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
 
+        try:
+            from foghorn.servers.tsig_utils import (
+                sign_response_tsig,
+                strip_tsig_from_wire,
+            )
+
+            out = strip_tsig_from_wire(out)
+            if tsig_ctx.get("ok") and tsig_ctx.get("keyname"):
+                out = sign_response_tsig(
+                    out,
+                    key_configs=list(getattr(handler, "tsig_keys", []) or []),
+                    keyname=tsig_ctx.get("keyname"),
+                    algorithm=tsig_ctx.get("algorithm"),
+                )
+        except Exception:
+            pass
         out = _bind_response_cookie_to_request(
             req,
             out,
