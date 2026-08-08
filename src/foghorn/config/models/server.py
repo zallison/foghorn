@@ -350,6 +350,59 @@ class CookiesFeatureConfig(StrictModel):
     lifetime_seconds: int = Field(default=86400, ge=1, le=604800)
 
 
+class TsigFeatureKey(StrictModel):
+    """Brief: One inline server.features.tsig key."""
+
+    name: str
+    algorithm: str = Field(default="hmac-sha256")
+    secret: str
+
+
+class TsigFeatureKeySource(OpenModel):
+    """Brief: External key source under server.features.tsig.key_sources.
+
+    Inputs:
+      - type: Source type (required), e.g. file.
+      - path: Optional filesystem path for file sources.
+
+    Outputs:
+      - TsigFeatureKeySource model.
+    """
+
+    type: str = Field(description="Key source type (for example 'file').")
+    path: str | None = Field(
+        default=None, description="Filesystem path for file sources."
+    )
+
+
+class TsigFeatureConfig(StrictModel):
+    """Brief: server.features.tsig downstream QUERY TSIG controls.
+
+    Inputs:
+      - enabled/mode/keys/key_sources/max_fudge_seconds/allow_clients/listeners.
+
+    Outputs:
+      - TsigFeatureConfig model.
+    """
+
+    enabled: bool = Field(
+        default=False,
+        description="Enable downstream QUERY TSIG verification and response signing.",
+    )
+    mode: Literal["optional", "require"] = Field(
+        default="optional",
+        description=(
+            "optional accepts unsigned queries; require rejects missing TSIG "
+            "with NOTAUTH."
+        ),
+    )
+    keys: list[TsigFeatureKey] = Field(default_factory=list)
+    key_sources: list[TsigFeatureKeySource] = Field(default_factory=list)
+    max_fudge_seconds: int = Field(default=300, ge=0, le=86400)
+    allow_clients: list[str] = Field(default_factory=list)
+    listeners: list[TrustedListener] = Field(default_factory=list)
+
+
 class EcsFeatureConfig(StrictModel):
     """Brief: server.features.ecs EDNS Client Subnet controls.
 
@@ -395,6 +448,7 @@ class ServerFeaturesConfig(StrictModel):
     forward_local: bool = Field(default=False)
     refuse_any: bool = Field(default=False)
     cookies: CookiesFeatureConfig | None = None
+    tsig: TsigFeatureConfig | None = None
     ecs: EcsFeatureConfig | None = None
 
 

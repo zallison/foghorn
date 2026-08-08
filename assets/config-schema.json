@@ -5637,6 +5637,19 @@
           "description": "Type: boolean. Default: false.",
           "title": "Refuse Any",
           "type": "boolean"
+        },
+        "tsig": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TsigFeatureConfig"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Type: null."
         }
       },
       "title": "ServerFeaturesConfig",
@@ -6209,6 +6222,235 @@
         }
       },
       "title": "StatsConfig",
+      "type": "object"
+    },
+    "TsigFeatureConfig": {
+      "additionalProperties": false,
+      "description": "Brief: server.features.tsig downstream QUERY TSIG controls.\n\nInputs:\n  - enabled/mode/keys/key_sources/max_fudge_seconds/allow_clients/listeners.\n\nOutputs:\n  - TsigFeatureConfig model.",
+      "properties": {
+        "allow_clients": {
+          "description": "Type: array.",
+          "items": {
+            "description": "Type: string.",
+            "type": "string"
+          },
+          "title": "Allow Clients",
+          "type": "array"
+        },
+        "comment": {
+          "anyOf": [
+            {
+              "description": "Type: string.",
+              "maxLength": 254,
+              "type": "string"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional human metadata string (max 254 characters).",
+          "title": "Comment"
+        },
+        "enabled": {
+          "default": false,
+          "description": "Enable downstream QUERY TSIG verification and response signing. Default: false.",
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "id": {
+          "anyOf": [
+            {
+              "description": "Type: string.",
+              "maxLength": 254,
+              "type": "string"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional human metadata string (max 254 characters).",
+          "title": "Id"
+        },
+        "key_sources": {
+          "description": "Type: array.",
+          "items": {
+            "$ref": "#/$defs/TsigFeatureKeySource"
+          },
+          "title": "Key Sources",
+          "type": "array"
+        },
+        "keys": {
+          "description": "Type: array.",
+          "items": {
+            "$ref": "#/$defs/TsigFeatureKey"
+          },
+          "title": "Keys",
+          "type": "array"
+        },
+        "listeners": {
+          "description": "Type: array.",
+          "items": {
+            "description": "Type: string. Valid values: \"udp\", \"tcp\", \"dot\", \"doh\", \"secure\", \"insecure\".",
+            "enum": [
+              "udp",
+              "tcp",
+              "dot",
+              "doh",
+              "secure",
+              "insecure"
+            ],
+            "type": "string"
+          },
+          "title": "Listeners",
+          "type": "array"
+        },
+        "max_fudge_seconds": {
+          "default": 300,
+          "description": "Type: integer. Default: 300.",
+          "maximum": 86400,
+          "minimum": 0,
+          "title": "Max Fudge Seconds",
+          "type": "integer"
+        },
+        "mode": {
+          "default": "optional",
+          "description": "optional accepts unsigned queries; require rejects missing TSIG with NOTAUTH. Default: \"optional\".",
+          "enum": [
+            "optional",
+            "require"
+          ],
+          "title": "Mode",
+          "type": "string"
+        }
+      },
+      "title": "TsigFeatureConfig",
+      "type": "object"
+    },
+    "TsigFeatureKey": {
+      "additionalProperties": false,
+      "description": "Brief: One inline server.features.tsig key.",
+      "properties": {
+        "algorithm": {
+          "default": "hmac-sha256",
+          "description": "Type: string. Default: \"hmac-sha256\".",
+          "title": "Algorithm",
+          "type": "string"
+        },
+        "comment": {
+          "anyOf": [
+            {
+              "description": "Type: string.",
+              "maxLength": 254,
+              "type": "string"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional human metadata string (max 254 characters).",
+          "title": "Comment"
+        },
+        "id": {
+          "anyOf": [
+            {
+              "description": "Type: string.",
+              "maxLength": 254,
+              "type": "string"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional human metadata string (max 254 characters).",
+          "title": "Id"
+        },
+        "name": {
+          "description": "Type: string.",
+          "title": "Name",
+          "type": "string"
+        },
+        "secret": {
+          "description": "Type: string.",
+          "title": "Secret",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "secret"
+      ],
+      "title": "TsigFeatureKey",
+      "type": "object"
+    },
+    "TsigFeatureKeySource": {
+      "additionalProperties": true,
+      "description": "Brief: External key source under server.features.tsig.key_sources.\n\nInputs:\n  - type: Source type (required), e.g. file.\n  - path: Optional filesystem path for file sources.\n\nOutputs:\n  - TsigFeatureKeySource model.",
+      "properties": {
+        "comment": {
+          "anyOf": [
+            {
+              "description": "Type: string.",
+              "maxLength": 254,
+              "type": "string"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional human metadata string (max 254 characters).",
+          "title": "Comment"
+        },
+        "id": {
+          "anyOf": [
+            {
+              "description": "Type: string.",
+              "maxLength": 254,
+              "type": "string"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional human metadata string (max 254 characters).",
+          "title": "Id"
+        },
+        "path": {
+          "anyOf": [
+            {
+              "description": "Type: string.",
+              "type": "string"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Filesystem path for file sources.",
+          "title": "Path"
+        },
+        "type": {
+          "description": "Key source type (for example 'file').",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "title": "TsigFeatureKeySource",
       "type": "object"
     },
     "UdpCidrInflightLimit": {
@@ -12912,6 +13154,232 @@
               "description": "Type: boolean. Default: false.",
               "title": "Refuse Any",
               "type": "boolean"
+            },
+            "tsig": {
+              "additionalProperties": false,
+              "default": null,
+              "description": "Brief: server.features.tsig downstream QUERY TSIG controls.\n\nInputs:\n  - enabled/mode/keys/key_sources/max_fudge_seconds/allow_clients/listeners.\n\nOutputs:\n  - TsigFeatureConfig model.",
+              "properties": {
+                "allow_clients": {
+                  "description": "Type: array.",
+                  "items": {
+                    "description": "Type: string.",
+                    "type": "string"
+                  },
+                  "title": "Allow Clients",
+                  "type": "array"
+                },
+                "comment": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "maxLength": 254,
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Optional human metadata string (max 254 characters).",
+                  "title": "Comment"
+                },
+                "enabled": {
+                  "default": false,
+                  "description": "Enable downstream QUERY TSIG verification and response signing. Default: false.",
+                  "title": "Enabled",
+                  "type": "boolean"
+                },
+                "id": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "maxLength": 254,
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Optional human metadata string (max 254 characters).",
+                  "title": "Id"
+                },
+                "key_sources": {
+                  "description": "Type: array.",
+                  "items": {
+                    "additionalProperties": true,
+                    "description": "Brief: External key source under server.features.tsig.key_sources.\n\nInputs:\n  - type: Source type (required), e.g. file.\n  - path: Optional filesystem path for file sources.\n\nOutputs:\n  - TsigFeatureKeySource model.",
+                    "properties": {
+                      "comment": {
+                        "anyOf": [
+                          {
+                            "description": "Type: string.",
+                            "maxLength": 254,
+                            "type": "string"
+                          },
+                          {
+                            "description": "Type: null.",
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "Optional human metadata string (max 254 characters).",
+                        "title": "Comment"
+                      },
+                      "id": {
+                        "anyOf": [
+                          {
+                            "description": "Type: string.",
+                            "maxLength": 254,
+                            "type": "string"
+                          },
+                          {
+                            "description": "Type: null.",
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "Optional human metadata string (max 254 characters).",
+                        "title": "Id"
+                      },
+                      "path": {
+                        "anyOf": [
+                          {
+                            "description": "Type: string.",
+                            "type": "string"
+                          },
+                          {
+                            "description": "Type: null.",
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "Filesystem path for file sources.",
+                        "title": "Path"
+                      },
+                      "type": {
+                        "description": "Key source type (for example 'file').",
+                        "title": "Type",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "type"
+                    ],
+                    "title": "TsigFeatureKeySource",
+                    "type": "object"
+                  },
+                  "title": "Key Sources",
+                  "type": "array"
+                },
+                "keys": {
+                  "description": "Type: array.",
+                  "items": {
+                    "additionalProperties": false,
+                    "description": "Brief: One inline server.features.tsig key.",
+                    "properties": {
+                      "algorithm": {
+                        "default": "hmac-sha256",
+                        "description": "Type: string. Default: \"hmac-sha256\".",
+                        "title": "Algorithm",
+                        "type": "string"
+                      },
+                      "comment": {
+                        "anyOf": [
+                          {
+                            "description": "Type: string.",
+                            "maxLength": 254,
+                            "type": "string"
+                          },
+                          {
+                            "description": "Type: null.",
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "Optional human metadata string (max 254 characters).",
+                        "title": "Comment"
+                      },
+                      "id": {
+                        "anyOf": [
+                          {
+                            "description": "Type: string.",
+                            "maxLength": 254,
+                            "type": "string"
+                          },
+                          {
+                            "description": "Type: null.",
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "Optional human metadata string (max 254 characters).",
+                        "title": "Id"
+                      },
+                      "name": {
+                        "description": "Type: string.",
+                        "title": "Name",
+                        "type": "string"
+                      },
+                      "secret": {
+                        "description": "Type: string.",
+                        "title": "Secret",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "name",
+                      "secret"
+                    ],
+                    "title": "TsigFeatureKey",
+                    "type": "object"
+                  },
+                  "title": "Keys",
+                  "type": "array"
+                },
+                "listeners": {
+                  "description": "Type: array.",
+                  "items": {
+                    "description": "Type: string. Valid values: \"udp\", \"tcp\", \"dot\", \"doh\", \"secure\", \"insecure\".",
+                    "enum": [
+                      "udp",
+                      "tcp",
+                      "dot",
+                      "doh",
+                      "secure",
+                      "insecure"
+                    ],
+                    "type": "string"
+                  },
+                  "title": "Listeners",
+                  "type": "array"
+                },
+                "max_fudge_seconds": {
+                  "default": 300,
+                  "description": "Type: integer. Default: 300.",
+                  "maximum": 86400,
+                  "minimum": 0,
+                  "title": "Max Fudge Seconds",
+                  "type": "integer"
+                },
+                "mode": {
+                  "default": "optional",
+                  "description": "optional accepts unsigned queries; require rejects missing TSIG with NOTAUTH. Default: \"optional\".",
+                  "enum": [
+                    "optional",
+                    "require"
+                  ],
+                  "title": "Mode",
+                  "type": "string"
+                }
+              },
+              "type": [
+                "object",
+                "null"
+              ]
             }
           },
           "type": [

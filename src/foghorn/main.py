@@ -570,6 +570,12 @@ def main(argv: List[str] | None = None) -> int:
     cookies_lifetime_seconds = int(
         features.get("cookies_lifetime_seconds", 86400) or 86400
     )
+    tsig_enabled = bool(features.get("tsig_enabled", False))
+    tsig_mode = str(features.get("tsig_mode", "optional") or "optional")
+    tsig_keys = list(features.get("tsig_keys") or [])
+    tsig_max_fudge_seconds = int(features.get("tsig_max_fudge_seconds", 300) or 300)
+    tsig_allow_clients = list(features.get("tsig_allow_clients") or [])
+    tsig_listeners = list(features.get("tsig_listeners") or [])
     ecs_enabled = bool(features["ecs_enabled"])
     ecs_forward_inbound = bool(features["ecs_forward_inbound"])
     ecs_synthesize_from_client_ip = bool(features["ecs_synthesize_from_client_ip"])
@@ -709,6 +715,12 @@ def main(argv: List[str] | None = None) -> int:
             cookies_secret=cookies_secret,
             cookies_secret_old=cookies_secret_old,
             cookies_lifetime_seconds=cookies_lifetime_seconds,
+            tsig_enabled=tsig_enabled,
+            tsig_mode=tsig_mode,
+            tsig_keys=tsig_keys,
+            tsig_max_fudge_seconds=tsig_max_fudge_seconds,
+            tsig_allow_clients=tsig_allow_clients,
+            tsig_listeners=tsig_listeners,
             ecs_enabled=ecs_enabled,
             ecs_forward_inbound=ecs_forward_inbound,
             ecs_synthesize_from_client_ip=ecs_synthesize_from_client_ip,
@@ -2221,7 +2233,7 @@ def _initialize_statistics_subsystem(
         if not logging_only_effective:
             try:
                 stats_collector.warm_load_from_store()
-                logger.info("Starting Statistics warm-load")
+                logger.debug("Starting Statistics warm-load")
             except (
                 Exception
             ) as exc:  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
@@ -2240,7 +2252,7 @@ def _initialize_statistics_subsystem(
             persistence_store=stats_persistence_store,
         )
 
-        logger.info(
+        logger.debug(
             "Starting Statistics collection (interval=%ds)",
             stats_reporter.interval_seconds,
         )
@@ -2275,6 +2287,12 @@ def _initialize_runtime_snapshot(
     cookies_secret: bytes | None = None,
     cookies_secret_old: bytes | None = None,
     cookies_lifetime_seconds: int = 86400,
+    tsig_enabled: bool = False,
+    tsig_mode: str = "optional",
+    tsig_keys: list | None = None,
+    tsig_max_fudge_seconds: int = 300,
+    tsig_allow_clients: list | None = None,
+    tsig_listeners: list | None = None,
     ecs_enabled: bool,
     ecs_forward_inbound: bool,
     ecs_synthesize_from_client_ip: bool,
@@ -2333,6 +2351,12 @@ def _initialize_runtime_snapshot(
       - cookies_secret: Current cookie HMAC secret bytes, or None.
       - cookies_secret_old: Previous cookie HMAC secret for rollover, or None.
       - cookies_lifetime_seconds: Server-cookie lifetime in seconds.
+      - tsig_enabled: Enable downstream QUERY TSIG (RFC 2845).
+      - tsig_mode: TSIG mode (`optional` or `require`).
+      - tsig_keys: Resolved TSIG key dicts (name/secret/algorithm).
+      - tsig_max_fudge_seconds: Maximum accepted TSIG fudge.
+      - tsig_allow_clients: Optional CIDR allowlist for TSIG-gated queries.
+      - tsig_listeners: Optional listener allowlist for TSIG enforcement.
       - ecs_enabled: Enable EDNS Client Subnet support.
       - ecs_forward_inbound: Forward trusted inbound ECS options upstream.
       - ecs_synthesize_from_client_ip: Synthesize ECS when inbound ECS is absent.
@@ -2416,6 +2440,12 @@ def _initialize_runtime_snapshot(
             cookies_secret=cookies_secret,
             cookies_secret_old=cookies_secret_old,
             cookies_lifetime_seconds=int(cookies_lifetime_seconds or 86400),
+            tsig_enabled=bool(tsig_enabled),
+            tsig_mode=str(tsig_mode or "optional"),
+            tsig_keys=list(tsig_keys or []),
+            tsig_max_fudge_seconds=int(tsig_max_fudge_seconds or 300),
+            tsig_allow_clients=list(tsig_allow_clients or []),
+            tsig_listeners=list(tsig_listeners or []),
             ecs_enabled=bool(ecs_enabled),
             ecs_forward_inbound=bool(ecs_forward_inbound),
             ecs_synthesize_from_client_ip=bool(ecs_synthesize_from_client_ip),

@@ -474,6 +474,47 @@ def _expand_server_feature_flags(server_cfg: Dict[str, Any]) -> None:
     except Exception:
         cookies_cfg["lifetime_seconds"] = 86400
 
+    tsig_cfg = features_cfg.get("tsig")
+    if not isinstance(tsig_cfg, dict):
+        tsig_cfg = {}
+        features_cfg["tsig"] = tsig_cfg
+    tsig_cfg["enabled"] = bool(tsig_cfg.get("enabled", False))
+    mode_raw = str(tsig_cfg.get("mode", "optional") or "optional").strip().lower()
+    if mode_raw in {"require", "required", "mandatory"}:
+        tsig_cfg["mode"] = "require"
+    else:
+        tsig_cfg["mode"] = "optional"
+    keys = tsig_cfg.get("keys")
+    if not isinstance(keys, list):
+        keys = []
+    redacted_keys = []
+    for item in keys:
+        if not isinstance(item, dict):
+            continue
+        entry = dict(item)
+        if entry.get("secret"):
+            entry["secret"] = "***"
+        redacted_keys.append(entry)
+    tsig_cfg["keys"] = redacted_keys
+    key_sources = tsig_cfg.get("key_sources")
+    if not isinstance(key_sources, list):
+        key_sources = []
+    tsig_cfg["key_sources"] = key_sources
+    try:
+        tsig_cfg["max_fudge_seconds"] = max(
+            0, min(86400, int(tsig_cfg.get("max_fudge_seconds", 300)))
+        )
+    except Exception:
+        tsig_cfg["max_fudge_seconds"] = 300
+    allow_clients = tsig_cfg.get("allow_clients")
+    if not isinstance(allow_clients, list):
+        allow_clients = []
+    tsig_cfg["allow_clients"] = [str(v) for v in allow_clients if str(v).strip()]
+    listeners = tsig_cfg.get("listeners")
+    if not isinstance(listeners, list):
+        listeners = []
+    tsig_cfg["listeners"] = [str(v) for v in listeners if str(v).strip()]
+
     ecs_cfg = features_cfg.get("ecs")
     if not isinstance(ecs_cfg, dict):
         ecs_cfg = {}

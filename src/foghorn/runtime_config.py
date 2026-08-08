@@ -239,6 +239,12 @@ class RuntimeSnapshot:
     cookies_secret: bytes | None
     cookies_secret_old: bytes | None
     cookies_lifetime_seconds: int
+    tsig_enabled: bool
+    tsig_mode: str
+    tsig_keys: List[Dict[str, str]]
+    tsig_max_fudge_seconds: int
+    tsig_allow_clients: List[str]
+    tsig_listeners: List[str]
     ecs_enabled: bool
     ecs_forward_inbound: bool
     ecs_synthesize_from_client_ip: bool
@@ -307,7 +313,8 @@ def resolve_server_feature_flags(server_cfg: Dict[str, Any]) -> Dict[str, Any]:
     Outputs:
       - dict with normalized feature values:
           - enable_ede / forward_local / refuse_any booleans.
-          - cookies_* controls for downstream DNS COOKIE (RFC 7873).
+      - cookies_* controls for downstream DNS COOKIE (RFC 7873).
+          - tsig_* controls for downstream QUERY TSIG (RFC 2845).
           - ecs_* controls for resolver ingestion/forwarding/targeting.
 
     Notes:
@@ -431,6 +438,69 @@ def resolve_server_feature_flags(server_cfg: Dict[str, Any]) -> Dict[str, Any]:
         maximum=604800,
     )
 
+    tsig_obj = features.get("tsig")
+    tsig_cfg = tsig_obj if isinstance(tsig_obj, dict) else {}
+    tsig_enabled = _to_bool(tsig_cfg.get("enabled"), False)
+    tsig_mode_raw = str(tsig_cfg.get("mode", "optional") or "optional").strip().lower()
+    if tsig_mode_raw in {"require", "required", "mandatory"}:
+        tsig_mode = "require"
+    else:
+        tsig_mode = "optional"
+    from foghorn.servers.tsig_utils import resolve_features_tsig_keys
+
+    tsig_keys_raw = resolve_features_tsig_keys(tsig_cfg)
+    tsig_keys: list[dict[str, str]] = []
+    for entry in tsig_keys_raw:
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("name") or "").strip()
+        secret = str(entry.get("secret") or "").strip()
+        algorithm = str(entry.get("algorithm") or "hmac-sha256").strip().lower()
+        if not name or not secret:
+            continue
+        tsig_keys.append({"name": name, "secret": secret, "algorithm": algorithm})
+    tsig_max_fudge_seconds = _to_int(
+        tsig_cfg.get("max_fudge_seconds", 300),
+        300,
+        minimum=0,
+        maximum=86400,
+    )
+    allow_raw = tsig_cfg.get("allow_clients", [])
+    if isinstance(allow_raw, str):
+        allow_values = [allow_raw]
+    elif isinstance(allow_raw, list):
+        allow_values = allow_raw
+    else:
+        allow_values = []
+    tsig_allow_clients: list[str] = []
+    for raw in allow_values:
+        text = str(raw or "").strip()
+        if text:
+            tsig_allow_clients.append(text)
+    listeners_raw = tsig_cfg.get("listeners", [])
+    if isinstance(listeners_raw, str):
+        listener_values = [listeners_raw]
+    elif isinstance(listeners_raw, list):
+        listener_values = listeners_raw
+    else:
+        listener_values = []
+    tsig_listeners: list[str] = []
+    for raw in listener_values:
+        token = str(raw or "").strip().lower()
+        if not token:
+            continue
+        expanded: list[str]
+        if token == "secure":
+            expanded = ["dot", "doh"]
+        elif token in {"unsecure", "insecure"}:
+            expanded = ["udp", "tcp"]
+        else:
+            expanded = [token]
+        for candidate in expanded:
+            if candidate in {"udp", "tcp", "dot", "doh"}:
+                if candidate not in tsig_listeners:
+                    tsig_listeners.append(candidate)
+
     return {
         "enable_ede": bool(enable_ede),
         "forward_local": bool(forward_local),
@@ -440,6 +510,12 @@ def resolve_server_feature_flags(server_cfg: Dict[str, Any]) -> Dict[str, Any]:
         "cookies_secret": cookies_secret,
         "cookies_secret_old": cookies_secret_old,
         "cookies_lifetime_seconds": int(cookies_lifetime_seconds),
+        "tsig_enabled": bool(tsig_enabled),
+        "tsig_mode": str(tsig_mode),
+        "tsig_keys": list(tsig_keys),
+        "tsig_max_fudge_seconds": int(tsig_max_fudge_seconds),
+        "tsig_allow_clients": list(tsig_allow_clients),
+        "tsig_listeners": list(tsig_listeners),
         "ecs_enabled": _to_bool(ecs_cfg.get("enabled"), False),
         "ecs_forward_inbound": _to_bool(ecs_cfg.get("forward_inbound"), False),
         "ecs_synthesize_from_client_ip": _to_bool(
@@ -1162,6 +1238,12 @@ def _build_snapshot(
         cookies_lifetime_seconds=int(
             features.get("cookies_lifetime_seconds", 86400) or 86400
         ),
+        tsig_enabled=bool(features.get("tsig_enabled", False)),
+        tsig_mode=str(features.get("tsig_mode", "optional") or "optional"),
+        tsig_keys=list(features.get("tsig_keys") or []),
+        tsig_max_fudge_seconds=int(features.get("tsig_max_fudge_seconds", 300) or 300),
+        tsig_allow_clients=list(features.get("tsig_allow_clients") or []),
+        tsig_listeners=list(features.get("tsig_listeners") or []),
         ecs_enabled=bool(features["ecs_enabled"]),
         ecs_forward_inbound=bool(features["ecs_forward_inbound"]),
         ecs_synthesize_from_client_ip=bool(features["ecs_synthesize_from_client_ip"]),
@@ -1381,6 +1463,12 @@ def _default_snapshot() -> RuntimeSnapshot:
         cookies_secret=default_cookie_secret,
         cookies_secret_old=None,
         cookies_lifetime_seconds=86400,
+        tsig_enabled=False,
+        tsig_mode="optional",
+        tsig_keys=[],
+        tsig_max_fudge_seconds=300,
+        tsig_allow_clients=[],
+        tsig_listeners=[],
         ecs_enabled=False,
         ecs_forward_inbound=False,
         ecs_synthesize_from_client_ip=False,

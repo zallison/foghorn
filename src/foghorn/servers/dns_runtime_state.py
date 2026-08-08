@@ -73,6 +73,13 @@ class DNSRuntimeState:
     cookies_secret: bytes | None = None
     cookies_secret_old: bytes | None = None
     cookies_lifetime_seconds: int = 86400
+    # Downstream QUERY TSIG (RFC 2845) controls.
+    tsig_enabled: bool = False
+    tsig_mode: str = "optional"  # optional | require
+    tsig_keys: list[dict] = []
+    tsig_max_fudge_seconds: int = 300
+    tsig_allow_clients: list[str] = []
+    tsig_listeners: list[str] = []
     # EDNS Client Subnet (ECS) runtime controls.
     ecs_enabled: bool = False
     ecs_forward_inbound: bool = False
