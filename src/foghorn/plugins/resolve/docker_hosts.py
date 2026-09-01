@@ -176,7 +176,8 @@ class DockerHosts(BasePlugin):
 
     setup_provides_dns = True
     setup_requires_dns = True
-    _warning_log_interval_seconds = 60.0
+    # While a sticky condition remains true, re-emit a WARNING at most this often.
+    _condition_rewarn_interval_seconds = 3600.0
 
     @classmethod
     def get_config_model(cls):
@@ -191,46 +192,155 @@ class DockerHosts(BasePlugin):
 
         return DockerHostsConfig
 
-    def _log_warning_rate_limited(self, key: str, message: str, *args: object) -> None:
-        """Brief: Emit warning logs at most once per interval for each key.
+    def _ensure_condition_log_state(self) -> None:
+        """Brief: Lazily initialize sticky condition-log lock and maps.
 
         Inputs:
-          - key: Stable identifier for a warning class (for example
-            "list-containers:<endpoint>").
+          - None.
+
+        Outputs:
+          - None; creates lock/maps when setup() has not run yet (tests/helpers).
+        """
+
+        if not hasattr(self, "_condition_log_lock") or self._condition_log_lock is None:
+            self._condition_log_lock = threading.Lock()
+        if (
+            not hasattr(self, "_condition_failed_by_key")
+            or self._condition_failed_by_key is None
+        ):
+            self._condition_failed_by_key = {}
+        if (
+            not hasattr(self, "_condition_suppressed_by_key")
+            or self._condition_suppressed_by_key is None
+        ):
+            self._condition_suppressed_by_key = {}
+        if (
+            not hasattr(self, "_condition_last_warned_by_key")
+            or self._condition_last_warned_by_key is None
+        ):
+            self._condition_last_warned_by_key = {}
+        if not hasattr(self, "_condition_rewarn_interval_seconds"):
+            self._condition_rewarn_interval_seconds = 3600.0
+
+    def _note_condition_failure(self, key: str, message: str, *args: object) -> None:
+        """Brief: Log sticky-condition failures without flooding reload loops.
+
+        Used for sticky problems (unreachable Docker endpoints, empty mappings).
+        Operators get a WARNING on first failure, quiet repeats (DEBUG), and an
+        hourly WARNING reminder while the condition remains true.
+
+        Inputs:
+          - key: Stable identifier for the condition (for example
+            "endpoint:unix:///var/run/docker.sock").
           - message: Log message template passed to logger.warning().
           - args: Optional %-format arguments for message.
 
         Outputs:
-          - None; either logs immediately or suppresses duplicate warnings until
-            the rate-limit interval elapses.
+          - None; logs on healthy->failing transition, re-warns at most once per
+            `_condition_rewarn_interval_seconds` while still failing, otherwise
+            increments a suppressed-repeat counter (DEBUG only).
+
+        Example:
+          self._note_condition_failure(
+              f"endpoint:{url}",
+              "DockerHosts: failed to list containers for %s: %s",
+              url,
+              exc,
+          )
         """
 
-        interval = float(getattr(self, "_warning_log_interval_seconds", 60.0))
-        if interval <= 0:
+        self._ensure_condition_log_state()
+        now = time.monotonic()
+        interval = float(getattr(self, "_condition_rewarn_interval_seconds", 3600.0))
+        with self._condition_log_lock:
+            prev_failed = bool(self._condition_failed_by_key.get(key, False))
+            last_warned = self._condition_last_warned_by_key.get(key)
+            if prev_failed:
+                should_rewarn = interval > 0 and (
+                    last_warned is None or (now - last_warned) >= interval
+                )
+                if should_rewarn:
+                    # Count only quiet repeats since the previous WARNING.
+                    suppressed = self._condition_suppressed_by_key.get(key, 0)
+                    self._condition_suppressed_by_key[key] = 0
+                    self._condition_last_warned_by_key[key] = now
+                else:
+                    self._condition_suppressed_by_key[key] = (
+                        self._condition_suppressed_by_key.get(key, 0) + 1
+                    )
+                    suppressed = self._condition_suppressed_by_key[key]
+            else:
+                self._condition_failed_by_key[key] = True
+                self._condition_suppressed_by_key[key] = 0
+                self._condition_last_warned_by_key[key] = now
+                suppressed = 0
+                should_rewarn = False
+
+        if not prev_failed:
             logger.warning(message, *args)
             return
 
-        now = time.monotonic()
-        suppressed_count = 0
-        with self._warning_log_state_lock:
-            last_logged = self._warning_log_last_by_key.get(key)
-            if last_logged is not None and (now - last_logged) < interval:
-                self._warning_log_suppressed_by_key[key] = (
-                    self._warning_log_suppressed_by_key.get(key, 0) + 1
+        if should_rewarn:
+            if suppressed > 0:
+                logger.warning(
+                    message + " (still failing; suppressed %d repeated warning(s))",
+                    *args,
+                    suppressed,
                 )
-                return
+            else:
+                logger.warning(message + " (still failing)", *args)
+            return
 
-            suppressed_count = self._warning_log_suppressed_by_key.get(key, 0)
-            self._warning_log_suppressed_by_key[key] = 0
-            self._warning_log_last_by_key[key] = now
+        logger.debug(
+            "DockerHosts: suppressed repeated condition %s (count=%d): " + message,
+            key,
+            suppressed,
+            *args,
+        )
 
-        if suppressed_count > 0:
-            logger.warning(
-                "DockerHosts: suppressed %d repeated warning(s) for %s",
-                suppressed_count,
-                key,
+    def _note_condition_ok(
+        self,
+        key: str,
+        recovery_message: Optional[str] = None,
+        *args: object,
+    ) -> None:
+        """Brief: Clear a sticky failure condition and log recovery once.
+
+        Inputs:
+          - key: Same identifier passed to _note_condition_failure().
+          - recovery_message: Optional logger.info() template emitted only when
+            clearing a previously failed condition. When omitted, recovery is
+            silent aside from clearing internal state.
+          - args: Optional %-format arguments for recovery_message.
+
+        Outputs:
+          - None; logs INFO on failing->healthy transition when recovery_message
+            is provided (includes suppressed repeat count when > 0).
+        """
+
+        self._ensure_condition_log_state()
+        with self._condition_log_lock:
+            was_failed = bool(self._condition_failed_by_key.get(key, False))
+            suppressed = int(self._condition_suppressed_by_key.get(key, 0) or 0)
+            self._condition_failed_by_key[key] = False
+            self._condition_suppressed_by_key[key] = 0
+            self._condition_last_warned_by_key.pop(key, None)
+
+        if not was_failed or not recovery_message:
+            return
+
+        if suppressed > 0:
+            logger.info(
+                recovery_message + " (suppressed %d repeated failure warning(s))",
+                *args,
+                suppressed,
             )
-        logger.warning(message, *args)
+            return
+
+        if args:
+            logger.info(recovery_message, *args)
+        else:
+            logger.info("%s", recovery_message)
 
     def setup(self) -> None:
         """Brief: Initialize DockerHosts and build the initial container mapping.
@@ -248,10 +358,13 @@ class DockerHosts(BasePlugin):
 
         # Runtime configuration
         self._ttl = int(self.config.get("ttl", 300))
-        self._warning_log_interval_seconds = 60.0
-        self._warning_log_state_lock = threading.Lock()
-        self._warning_log_last_by_key: Dict[str, float] = {}
-        self._warning_log_suppressed_by_key: Dict[str, int] = {}
+        # Sticky condition logging: warn on first failure, hourly while still
+        # failing, info once on recovery.
+        self._condition_log_lock = threading.Lock()
+        self._condition_failed_by_key: Dict[str, bool] = {}
+        self._condition_suppressed_by_key: Dict[str, int] = {}
+        self._condition_last_warned_by_key: Dict[str, float] = {}
+        self._condition_rewarn_interval_seconds = 3600.0
 
         # Health/status allowlist. Containers whose effective health/status is
         # not in this list are skipped.
@@ -525,8 +638,11 @@ class DockerHosts(BasePlugin):
                 try:
                     client = self._build_docker_client(url=url, endpoint=ep)
                 except DockerException as exc:
-                    logger.warning(
-                        "DockerHosts: failed to create client for %s: %s", url, exc
+                    self._note_condition_failure(
+                        f"endpoint:{url}",
+                        "DockerHosts: failed to create client for %s: %s",
+                        url,
+                        exc,
                     )
                     continue
                 self._clients[url] = client
@@ -576,12 +692,16 @@ class DockerHosts(BasePlugin):
                 return
             try:
                 self._reload_from_docker()
+                self._note_condition_ok(
+                    "periodic-reload-error",
+                    "DockerHosts: periodic reload recovered",
+                )
             except (
                 Exception
             ) as exc:  # pragma: nocover defensive: periodic reload failures are logged but not worth fragile tests
                 # Avoid emitting a full stack trace for periodic reload failures so
                 # that transient Docker connectivity issues do not flood logs.
-                self._log_warning_rate_limited(
+                self._note_condition_failure(
                     "periodic-reload-error",
                     "DockerHosts: error during periodic reload; keeping previous mappings: %s",
                     exc,
@@ -621,14 +741,16 @@ class DockerHosts(BasePlugin):
         # Lazily create a client for this endpoint so that connection failures
         # during setup do not permanently disable refreshes. Each reload cycle
         # can retry endpoints that were previously unreachable.
+        endpoint_key = f"endpoint:{url}"
+
         if client is None and docker is not None:
             try:
                 client = self._build_docker_client(url=url, endpoint=endpoint)
             except (
                 Exception
             ) as exc:  # pragma: nocover defensive: connection and auth errors depend on external Docker daemon state
-                self._log_warning_rate_limited(
-                    f"create-client:{url}",
+                self._note_condition_failure(
+                    endpoint_key,
                     "DockerHosts: failed to create client for %s during reload: %s",
                     url,
                     exc,
@@ -648,15 +770,22 @@ class DockerHosts(BasePlugin):
             # next interval so that stale mappings disappear when a host is
             # unreachable.
             containers = client.containers.list()
-            return [c.attrs for c in containers]
+            result = [c.attrs for c in containers]
         except Exception as exc:
-            self._log_warning_rate_limited(
-                f"list-containers:{url}",
+            self._note_condition_failure(
+                endpoint_key,
                 "DockerHosts: failed to list containers for %s: %s",
                 url,
                 exc,
             )
             return []
+
+        self._note_condition_ok(
+            endpoint_key,
+            "DockerHosts: endpoint %s is reachable again",
+            url,
+        )
+        return result
 
     @staticmethod
     def _build_tls_config(endpoint: Dict[str, object]) -> Optional[object]:
@@ -1145,16 +1274,20 @@ class DockerHosts(BasePlugin):
                     )
 
         if total_containers and not mapped_containers:
-            self._log_warning_rate_limited(
+            self._note_condition_failure(
                 "mapped-containers-empty",
                 "DockerHosts: inspected %d containers but none had usable hostname/IP",
                 total_containers,
             )
         elif not new_v4 and not new_v6:
-            self._log_warning_rate_limited(
+            self._note_condition_failure(
                 "no-hostname-ip-mappings",
                 "DockerHosts: no hostname/IP mappings were added from any endpoint (no running containers or all were skipped)",
             )
+        else:
+            # Mappings are healthy again; clear sticky empty-map conditions.
+            self._note_condition_ok("mapped-containers-empty")
+            self._note_condition_ok("no-hostname-ip-mappings")
 
         # Prepend a header line to each TXT record collection (if enabled).
         if new_txt:
