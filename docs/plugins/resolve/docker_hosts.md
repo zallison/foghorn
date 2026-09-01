@@ -183,6 +183,11 @@ Top-level `config` keys (described by `DockerHostsConfig`):
   containers and builds forward/reverse maps plus optional TXT summaries.
 - It periodically refreshes those maps at the minimum positive interval across
   endpoints.
+- Endpoint connectivity failures (client create / list containers) and empty
+  mapping conditions use state-change logging: a WARNING on the first failure,
+  silence while the condition persists (DEBUG notes suppressed repeats), an
+  hourly WARNING reminder while still failing, and an INFO when the endpoint or
+  mapping condition recovers.
 - The plugin remains usable even when the `docker` SDK is not installed, but it
   will log a warning and behave as inert until the SDK becomes available.
 - For `tcp://` endpoints without TLS config, the plugin logs a warning because
