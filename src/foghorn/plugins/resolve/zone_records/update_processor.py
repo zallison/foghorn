@@ -56,7 +56,7 @@ def _normalize_dns_name(name: str) -> str:
 
 @registered_ttl_cache(maxsize=1024, ttl=3600)
 def _normalize_tsig_algorithm(alg: str) -> str:
-    """Brief: Normalize a TSIG algorithm name.
+    """Brief: Normalize a TSIG algorithm name via the shared tsig_utils helper.
 
     Inputs:
       - alg: TSIG algorithm text (e.g. 'hmac-sha256.', 'hmac-md5.sig-alg.reg.int.').
@@ -64,18 +64,9 @@ def _normalize_tsig_algorithm(alg: str) -> str:
     Outputs:
       - Normalized algorithm identifier (e.g. 'hmac-sha256', 'hmac-md5').
     """
-    a = str(alg).rstrip(".").lower()
-    if "hmac-sha512" in a:
-        return "hmac-sha512"
-    if "hmac-sha384" in a:
-        return "hmac-sha384"
-    if "hmac-sha256" in a:
-        return "hmac-sha256"
-    if "hmac-sha1" in a:
-        return "hmac-sha1"
-    if "hmac-md5" in a:
-        return "hmac-md5"
-    return a
+    from foghorn.servers.tsig_utils import normalize_tsig_algorithm
+
+    return normalize_tsig_algorithm(alg)
 
 
 def verify_tsig_auth(

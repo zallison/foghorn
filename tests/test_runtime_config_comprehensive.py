@@ -473,6 +473,127 @@ def test_build_snapshot_axfr_tsig_key_sources_are_resolved(tmp_path) -> None:
     ]
 
 
+def test_resolve_axfr_tsig_keys_inherits_feature_keys_when_axfr_empty() -> None:
+    """server.axfr with no keys inherits server.features.tsig keys."""
+
+    feature_keys = [
+        {"name": "shared.example.", "secret": "c2hhcmVk", "algorithm": "hmac-sha256"},
+    ]
+    expected = [
+        {"name": "shared.example.", "secret": "c2hhcmVk", "algorithm": "hmac-sha256"},
+    ]
+    assert runtime_config_mod.resolve_axfr_tsig_keys({}, feature_keys=feature_keys) == (
+        expected
+    )
+    assert (
+        runtime_config_mod.resolve_axfr_tsig_keys(
+            {"tsig": {}, "tsig_keys": []}, feature_keys=feature_keys
+        )
+        == expected
+    )
+    # No feature keys and no axfr keys stays empty.
+    assert runtime_config_mod.resolve_axfr_tsig_keys({}, feature_keys=[]) == []
+
+
+def test_resolve_axfr_tsig_keys_axfr_keys_win_over_feature_keys() -> None:
+    """AXFR-level keys are not merged with inherited feature keys."""
+
+    axfr_cfg = {
+        "tsig": {
+            "keys": [{"name": "axfr.example.", "secret": "YXhmcg=="}],
+        },
+    }
+    feature_keys = [
+        {
+            "name": "feature.example.",
+            "secret": "ZmVhdHVyZQ==",
+            "algorithm": "hmac-sha256",
+        },
+    ]
+    resolved = runtime_config_mod.resolve_axfr_tsig_keys(
+        axfr_cfg, feature_keys=feature_keys
+    )
+    assert [entry["name"] for entry in resolved] == ["axfr.example."]
+
+
+def test_build_snapshot_axfr_tsig_inherits_feature_keys() -> None:
+    """_build_snapshot inherits server.features.tsig keys into AXFR when unset."""
+
+    cfg = {
+        "server": {
+            "resolver": {"mode": "recursive"},
+            "features": {
+                "tsig": {
+                    "enabled": True,
+                    "keys": [
+                        {
+                            "name": "shared.example.",
+                            "secret": "c2hhcmVk",
+                            "algorithm": "hmac-sha256",
+                        }
+                    ],
+                },
+            },
+            "axfr": {"enabled": True, "require_tsig": True},
+        }
+    }
+    snap = _build_snapshot(cfg, stats_collector=None, generation=1)
+    assert snap.axfr_require_tsig is True
+    assert snap.axfr_tsig_keys == [
+        {
+            "name": "shared.example.",
+            "algorithm": "hmac-sha256",
+            "secret": "c2hhcmVk",
+        }
+    ]
+    # Feature TSIG flags stay untouched by the inheritance.
+    assert snap.tsig_keys == [
+        {
+            "name": "shared.example.",
+            "secret": "c2hhcmVk",
+            "algorithm": "hmac-sha256",
+        }
+    ]
+
+
+def test_build_snapshot_axfr_tsig_axfr_keys_win_over_feature_keys() -> None:
+    """Snapshot keeps AXFR-level keys when both axfr and features define keys."""
+
+    cfg = {
+        "server": {
+            "resolver": {"mode": "recursive"},
+            "features": {
+                "tsig": {
+                    "keys": [
+                        {
+                            "name": "shared.example.",
+                            "secret": "c2hhcmVk",
+                            "algorithm": "hmac-sha256",
+                        }
+                    ],
+                },
+            },
+            "axfr": {
+                "enabled": True,
+                "require_tsig": True,
+                "tsig": {
+                    "keys": [
+                        {
+                            "name": "axfr-only.example.",
+                            "algorithm": "hmac-sha512",
+                            "secret": "YXhmcg==",
+                        }
+                    ],
+                },
+            },
+        }
+    }
+    snap = _build_snapshot(cfg, stats_collector=None, generation=2)
+    assert [entry["name"] for entry in snap.axfr_tsig_keys] == ["axfr-only.example."]
+    # Inheritance did not alter the feature-level key list.
+    assert [entry["name"] for entry in snap.tsig_keys] == ["shared.example."]
+
+
 def test_restart_required_reasons_listen_change() -> None:
     """Detect server.listen changes."""
     old = {"server": {"listen": {"udp": {"port": 53}}}}

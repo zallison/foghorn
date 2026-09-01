@@ -89,6 +89,28 @@ def wire_may_contain_tsig(data: bytes | bytearray | memoryview | None) -> bool:
     return arcount > 0
 
 
+def _detect_tsig_without_keyring(request_data: bytes) -> bool:
+    """Brief: Best-effort TSIG-presence detection when no keys are usable.
+
+    Inputs:
+      - request_data: Raw DNS message bytes.
+
+    Outputs:
+      - bool: True when dnspython reports a signed message (it raises
+        UnknownTSIGKey when a keyring is absent); False otherwise.
+    """
+
+    try:
+        msg = dns.message.from_wire(bytes(request_data))
+    except dns.message.UnknownTSIGKey:
+        return True
+    except (dns.exception.DNSException, ValueError) as exc:
+        # Malformed/truncated packets: cannot prove TSIG presence.
+        logger.debug("TSIG presence detection failed to parse wire: %s", exc)
+        return False
+    return bool(getattr(msg, "had_tsig", False))
+
+
 def build_tsig_keyring(
     key_configs: Sequence[dict] | None,
 ) -> Tuple[Optional[object], Dict[str, dict]]:
@@ -161,6 +183,7 @@ def verify_request_tsig(
     """
 
     configs = [c for c in (key_configs or []) if isinstance(c, dict)]
+    raw = bytes(request_data) if request_data else b""
     if not configs:
         return TsigVerifyResult(
             ok=False,
@@ -169,20 +192,34 @@ def verify_request_tsig(
             key_config=None,
             keyname=None,
             algorithm=None,
-            had_tsig=False,
+            had_tsig=_detect_tsig_without_keyring(raw),
             request_msg=None,
         )
 
     keyring, by_name = build_tsig_keyring(configs)
     if keyring is None:
+        has_valid = any(
+            isinstance(c, dict) and c.get("name") and c.get("secret") for c in configs
+        )
+        if not has_valid:
+            return TsigVerifyResult(
+                ok=False,
+                error_code="no_keys",
+                error_text="No usable TSIG keys configured",
+                key_config=None,
+                keyname=None,
+                algorithm=None,
+                had_tsig=_detect_tsig_without_keyring(raw),
+                request_msg=None,
+            )
         return TsigVerifyResult(
             ok=False,
-            error_code="no_keys",
-            error_text="No usable TSIG keys configured",
+            error_code="keyring_error",
+            error_text="Failed to build TSIG keyring",
             key_config=None,
             keyname=None,
             algorithm=None,
-            had_tsig=False,
+            had_tsig=True,
             request_msg=None,
         )
 

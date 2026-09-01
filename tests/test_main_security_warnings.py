@@ -56,6 +56,61 @@ def test_log_startup_security_warnings_emits_expected_messages(caplog) -> None:
     assert any("ACL plugin at plugins[0] uses default=allow" in m for m in messages)
 
 
+def test_log_startup_security_warnings_tsig(caplog) -> None:
+    """Brief: Startup helper warns for risky QUERY TSIG configurations.
+
+    Inputs:
+      - caplog fixture.
+
+    Outputs:
+      - None; asserts warnings for enabled-without-keys and require without
+        allow_clients on non-loopback UDP, and silence on loopback binds.
+    """
+
+    with caplog.at_level("WARNING", logger="foghorn.main"):
+        main_mod._log_startup_security_warnings(
+            logger=main_mod.logging.getLogger("foghorn.main"),
+            cfg={},
+            resolver_mode="forward",
+            upstreams=[],
+            doh_cfg={},
+            axfr_enabled=False,
+            axfr_allow_clients=[],
+            tsig_enabled=True,
+            tsig_mode="require",
+            tsig_keys=[],
+            tsig_allow_clients=[],
+            udp_cfg={"enabled": True, "host": "0.0.0.0"},
+        )
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("no TSIG keys resolved" in m for m in messages)
+    assert any("mode=require on non-loopback UDP host 0.0.0.0" in m for m in messages)
+
+    # Loopback UDP bind does not warn for require-without-allowlist.
+    caplog.clear()
+    with caplog.at_level("WARNING", logger="foghorn.main"):
+        main_mod._log_startup_security_warnings(
+            logger=main_mod.logging.getLogger("foghorn.main"),
+            cfg={},
+            resolver_mode="forward",
+            upstreams=[],
+            doh_cfg={},
+            axfr_enabled=False,
+            axfr_allow_clients=[],
+            tsig_enabled=True,
+            tsig_mode="require",
+            tsig_keys=[
+                {"name": "k.example.", "secret": "x", "algorithm": "hmac-sha256"}
+            ],
+            tsig_allow_clients=[],
+            udp_cfg={"enabled": True, "host": "127.0.0.1"},
+        )
+    assert not any("no TSIG keys resolved" in r.getMessage() for r in caplog.records)
+    assert not any(
+        "mode=require on non-loopback UDP" in r.getMessage() for r in caplog.records
+    )
+
+
 def test_configure_dnssec_validation_resolver_warns_when_deps_missing(
     monkeypatch, caplog
 ) -> None:

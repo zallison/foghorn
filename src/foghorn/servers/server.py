@@ -1063,6 +1063,7 @@ def _resolve_core(
             "keyname": None,
             "algorithm": None,
             "had_tsig": False,
+            "request_msg": None,
         }
         try:
             tsig_enabled = bool(getattr(handler, "tsig_enabled", False))
@@ -1160,6 +1161,7 @@ def _resolve_core(
                         tsig_ctx["ok"] = True
                         tsig_ctx["keyname"] = vr.keyname
                         tsig_ctx["algorithm"] = vr.algorithm
+                        tsig_ctx["request_msg"] = vr.request_msg
                         request_result_meta["tsig_ok"] = True
                         request_result_meta["tsig_key_name"] = vr.keyname
                     else:
@@ -2012,6 +2014,7 @@ def _resolve_core(
                         key_configs=list(getattr(handler, "tsig_keys", []) or []),
                         keyname=tsig_ctx.get("keyname"),
                         algorithm=tsig_ctx.get("algorithm"),
+                        request_msg=tsig_ctx.get("request_msg"),
                     )
             except Exception:
                 pass
@@ -2779,6 +2782,7 @@ def _resolve_core(
                     key_configs=list(getattr(handler, "tsig_keys", []) or []),
                     keyname=tsig_ctx.get("keyname"),
                     algorithm=tsig_ctx.get("algorithm"),
+                    request_msg=tsig_ctx.get("request_msg"),
                 )
         except Exception:
             pass

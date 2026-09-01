@@ -108,14 +108,16 @@ def test_run_setup_plugins_priority_and_fallback(monkeypatch, caplog):
 
     plugins = [POK(), PBAD()]
 
-    caplog.set_level(logging.INFO, logger="foghorn.main.setup")
+    # Setup lines were demoted from INFO to DEBUG (see CHANGELOG), so capture
+    # at DEBUG to observe the per-plugin "Running setup for plugin" message.
+    caplog.set_level(logging.DEBUG, logger="foghorn.main.setup")
     run_setup_plugins(plugins)
 
     # Both plugins must have had setup() invoked despite the bad priority.
     assert plugins[0].calls == ["ok"]
     assert plugins[1].calls == ["bad"]
-    # An info log should have been emitted for each plugin.
-    messages = [r.message for r in caplog.records]
+    # A debug log should have been emitted for each plugin.
+    messages = [r.getMessage() for r in caplog.records]
     assert any("Running setup for plugin" in m for m in messages)
 
 

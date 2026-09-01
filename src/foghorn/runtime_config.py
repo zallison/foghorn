@@ -555,13 +555,18 @@ def resolve_server_feature_flags(server_cfg: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def resolve_axfr_tsig_keys(axfr_cfg: Dict[str, Any]) -> List[Dict[str, str]]:
+def resolve_axfr_tsig_keys(
+    axfr_cfg: Dict[str, Any],
+    feature_keys: List[Dict[str, str]] | None = None,
+) -> List[Dict[str, str]]:
     """Brief: Resolve AXFR TSIG keys using the shared UPDATE key-source resolver.
 
     Inputs:
       - axfr_cfg: `server.axfr` mapping that may contain:
           * tsig.keys / tsig.key_sources (preferred shape)
           * tsig_keys (legacy alias for tsig.keys)
+      - feature_keys: Optional resolved `server.features.tsig` key configs.
+        Auto-inherited when the AXFR block resolves no keys of its own.
 
     Outputs:
       - List of normalized TSIG key dicts containing `name`, `secret`, and
@@ -572,6 +577,9 @@ def resolve_axfr_tsig_keys(axfr_cfg: Dict[str, Any]) -> List[Dict[str, str]]:
         DNS UPDATE share inline/source loading semantics.
       - When both `tsig.keys` and legacy `tsig_keys` are present, entries are
         combined in that order before source-based keys are appended.
+      - When the AXFR block defines no usable keys, `server.features.tsig`
+        keys are inherited so operators can share one keyring across QUERY
+        and AXFR/IXFR serving. AXFR-level keys always win when present.
     """
 
     if not isinstance(axfr_cfg, dict):
@@ -609,6 +617,19 @@ def resolve_axfr_tsig_keys(axfr_cfg: Dict[str, Any]) -> List[Dict[str, str]]:
 
     resolved: List[Dict[str, str]] = []
     for entry in resolved_raw:
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("name") or "").strip()
+        secret = str(entry.get("secret") or "").strip()
+        algorithm = str(entry.get("algorithm") or "hmac-sha256").strip().lower()
+        if not name or not secret:
+            continue
+        resolved.append({"name": name, "secret": secret, "algorithm": algorithm})
+    if resolved:
+        return resolved
+
+    # Auto-inherit server.features.tsig keys when the AXFR block defines none.
+    for entry in feature_keys or []:
         if not isinstance(entry, dict):
             continue
         name = str(entry.get("name") or "").strip()
@@ -1204,7 +1225,11 @@ def _build_snapshot(
         axfr_message_max_bytes = 64000
     axfr_message_max_bytes = max(512, min(65535, int(axfr_message_max_bytes)))
     axfr_require_tsig = bool(axfr_cfg.get("require_tsig", False))
-    axfr_tsig_keys = resolve_axfr_tsig_keys(axfr_cfg)
+    # AXFR inherits server.features.tsig keys when its own block defines none
+    # so operators can share one keyring across QUERY and AXFR auth.
+    axfr_tsig_keys = resolve_axfr_tsig_keys(
+        axfr_cfg, feature_keys=list(features.get("tsig_keys") or [])
+    )
 
     # Cache prefetch knobs are not yet config-plumbed; preserve current values
     # from the active snapshot when available.

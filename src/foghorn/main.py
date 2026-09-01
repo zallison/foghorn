@@ -671,7 +671,8 @@ def main(argv: List[str] | None = None) -> int:
         axfr_message_max_bytes = 64000
     axfr_message_max_bytes = max(512, min(65535, int(axfr_message_max_bytes)))
     axfr_require_tsig = bool(axfr_cfg.get("require_tsig", False))
-    axfr_tsig_keys = resolve_axfr_tsig_keys(axfr_cfg)
+    # AXFR inherits server.features.tsig keys when its own block has none.
+    axfr_tsig_keys = resolve_axfr_tsig_keys(axfr_cfg, feature_keys=tsig_keys)
 
     _log_startup_security_warnings(
         logger=logger,
@@ -681,6 +682,11 @@ def main(argv: List[str] | None = None) -> int:
         doh_cfg=doh_cfg,
         axfr_enabled=axfr_enabled,
         axfr_allow_clients=axfr_allow_clients,
+        tsig_enabled=tsig_enabled,
+        tsig_mode=tsig_mode,
+        tsig_keys=tsig_keys,
+        tsig_allow_clients=tsig_allow_clients,
+        udp_cfg=udp_cfg,
     )
 
     # When performing local DNSSEC validation (including local_extended), point
@@ -1805,6 +1811,11 @@ def _log_startup_security_warnings(
     doh_cfg: dict,
     axfr_enabled: bool,
     axfr_allow_clients: list[str],
+    tsig_enabled: bool = False,
+    tsig_mode: str = "optional",
+    tsig_keys: list | None = None,
+    tsig_allow_clients: list | None = None,
+    udp_cfg: dict | None = None,
 ) -> None:
     """Brief: Emit startup warnings for risky security-sensitive config choices.
 
@@ -1816,6 +1827,11 @@ def _log_startup_security_warnings(
       - doh_cfg: Normalized DoH listener configuration.
       - axfr_enabled: Whether AXFR/IXFR serving is enabled.
       - axfr_allow_clients: Configured AXFR client allowlist entries.
+      - tsig_enabled: Whether downstream QUERY TSIG is enabled.
+      - tsig_mode: TSIG enforcement mode (optional|require).
+      - tsig_keys: Resolved TSIG key configs (empty when none).
+      - tsig_allow_clients: TSIG client CIDR allowlist entries.
+      - udp_cfg: Normalized UDP listener configuration.
 
     Outputs:
       - None.
@@ -1847,6 +1863,27 @@ def _log_startup_security_warnings(
                 "AXFR/IXFR allowlist is overly broad (%s); restrict server.axfr.allow_clients to trusted sources",
                 normalized_allowlist,
             )
+
+    if tsig_enabled:
+        if not (tsig_keys or []):
+            logger.warning(
+                "server.features.tsig is enabled but no TSIG keys resolved; "
+                "TSIG-signed clients are rejected and mode=require fails closed"
+            )
+        if (
+            str(tsig_mode or "").lower() == "require"
+            and not (tsig_allow_clients or [])
+            and isinstance(udp_cfg, dict)
+            and bool(udp_cfg.get("enabled", True))
+        ):
+            udp_host = str(udp_cfg.get("host", "") or "")
+            if _is_non_loopback_bind_host(udp_host):
+                logger.warning(
+                    "QUERY TSIG mode=require on non-loopback UDP host %s without "
+                    "server.features.tsig.allow_clients; all unsigned clients will "
+                    "be refused (NOTAUTH)",
+                    udp_host,
+                )
 
     if resolver_mode == "forward":
         for upstream in upstreams or []:
@@ -2378,7 +2415,9 @@ def _initialize_runtime_snapshot(
       - axfr_max_transfer_rate_bytes_per_second: Optional transfer pacing cap.
       - axfr_message_max_bytes: Max packed DNS message bytes per transfer frame.
       - axfr_require_tsig: Whether inbound AXFR/IXFR requests must use TSIG.
-      - axfr_tsig_keys: Configured TSIG keys for AXFR/IXFR auth.
+      - axfr_tsig_keys: Configured TSIG keys for AXFR/IXFR auth (may include
+        keys auto-inherited from server.features.tsig when the AXFR block has
+        none of its own).
       - cfg_path: Active config file path.
       - args: Parsed CLI args.
 
