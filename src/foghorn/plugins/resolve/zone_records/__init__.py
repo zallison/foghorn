@@ -2349,6 +2349,59 @@ class ZoneRecords(BasePlugin):
             "reason": None,
         }
 
+    def _admin_resolve_commit_apex(self, owner_norm: str) -> str:
+        """Brief: Resolve zone apex used for admin commit_record_actions.
+
+        Inputs:
+          - owner_norm: Normalized owner name.
+
+        Outputs:
+          - Apex string, or empty when unresolved.
+        """
+        from . import commit as zone_commit
+
+        return zone_commit.resolve_zone_apex_for_owner(self, owner_norm)
+
+    def _admin_optional_journal_writer(self, zone_apex: str):
+        """Brief: Open JournalWriter for admin commits when persistence is enabled.
+
+        Inputs:
+          - zone_apex: Zone apex for the journal.
+
+        Outputs:
+          - JournalWriter or None.
+        """
+        if not zone_apex:
+            return None
+        dns_update_cfg = getattr(self, "_dns_update_config", None)
+        if not isinstance(dns_update_cfg, dict):
+            return None
+        persistence_cfg = dns_update_cfg.get("persistence", {})
+        if not isinstance(persistence_cfg, dict) or not bool(
+            persistence_cfg.get("enabled", False)
+        ):
+            return None
+        state_dir = persistence_cfg.get("state_dir")
+        if not state_dir:
+            state_dir = getattr(self, "_dns_update_journal_state_dir", None)
+        if not state_dir:
+            try:
+                from foghorn.runtime_config import get_runtime_state_dir
+
+                runtime_state_dir = get_runtime_state_dir()
+                if runtime_state_dir:
+                    state_dir = f"{runtime_state_dir}/zone_records"
+            except Exception:
+                state_dir = None
+        if not state_dir:
+            return None
+        try:
+            from .journal import JournalWriter
+
+            return JournalWriter(zone_apex=zone_apex, base_dir=str(state_dir))
+        except Exception:
+            return None
+
     def admin_apply_record_mutation(
         self,
         *,
@@ -2371,7 +2424,11 @@ class ZoneRecords(BasePlugin):
 
         Outputs:
           - Dict describing applied mutation.
+
+        Notes:
+          - Memory commit goes through commit.commit_record_actions (shared with DNS UPDATE).
         """
+        from . import commit as zone_commit
 
         check = self.admin_validate_record_mutation(
             owner=owner,
@@ -2434,25 +2491,64 @@ class ZoneRecords(BasePlugin):
         source_label = (
             str(target_path) if target_path is not None else "admin-temporary"
         )
-        key = (owner_norm, int(qtype_i))
-        with self._records_lock:
-            existing = self.records.get(key)
-            if existing is None:
-                self.records[key] = (int(ttl_i), [value_text], [source_label])
-            else:
-                cur_ttl, cur_values, cur_sources = existing
-                values = list(cur_values or [])
-                sources = list(cur_sources or [])
-                if value_text not in values:
-                    values.append(value_text)
-                if source_label not in sources:
-                    sources.append(source_label)
-                self.records[key] = (
-                    int(ttl_i) if ttl_i >= 0 else int(cur_ttl),
-                    values,
-                    sources,
-                )
-            self._rebuild_indexes_from_records()
+        zone_apex = self._admin_resolve_commit_apex(owner_norm)
+        journal_writer = self._admin_optional_journal_writer(zone_apex)
+        actor = {
+            "client_ip": None,
+            "auth_method": "admin_api",
+            "tsig_key_name": None,
+        }
+        try:
+            if journal_writer is not None:
+                try:
+                    if not journal_writer.acquire_lock():
+                        try:
+                            journal_writer.close()
+                        except Exception:
+                            pass
+                        journal_writer = None
+                except Exception:
+                    try:
+                        journal_writer.close()
+                    except Exception:
+                        pass
+                    journal_writer = None
+
+            result = zone_commit.commit_record_actions(
+                self,
+                zone_apex,
+                [
+                    {
+                        "type": "rr_add",
+                        "owner": owner_norm,
+                        "qtype": int(qtype_i),
+                        "ttl": int(ttl_i),
+                        "value": value_text,
+                        "source": source_label,
+                    }
+                ],
+                actor=actor if journal_writer is not None else None,
+                journal_writer=journal_writer,
+                require_journal_persistence=False,
+                bump_soa=bool(zone_apex),
+                send_notify=None if zone_apex else False,
+                mark_update_managed=True,
+                default_source=source_label,
+                enforce_zone_boundary=bool(zone_apex),
+            )
+        finally:
+            if journal_writer is not None:
+                try:
+                    journal_writer.release_lock()
+                except Exception:
+                    pass
+                try:
+                    journal_writer.close()
+                except Exception:
+                    pass
+
+        if not result.ok:
+            raise ValueError(str(result.error or "admin record commit failed"))
 
         return {
             "owner": owner_norm,
@@ -2461,6 +2557,9 @@ class ZoneRecords(BasePlugin):
             "value": value_text,
             "persisted": bool(persist),
             "file_path": target_path,
+            "zone_apex": result.zone_apex or None,
+            "serial_before": result.serial_before,
+            "serial_after": result.serial_after,
         }
 
     def admin_delete_record_mutation(
@@ -2483,7 +2582,11 @@ class ZoneRecords(BasePlugin):
 
         Outputs:
           - Dict describing delete outcome.
+
+        Notes:
+          - Memory commit goes through commit.commit_record_actions (shared with DNS UPDATE).
         """
+        from . import commit as zone_commit
 
         owner_norm = dns_names.normalize_name(owner)
         if not owner_norm:
@@ -2536,39 +2639,86 @@ class ZoneRecords(BasePlugin):
                         "\n".join(out_lines).rstrip("\n") + ("\n" if out_lines else "")
                     )
 
-        deleted = 0
-        with self._records_lock:
-            keys = list(self.records.keys())
-            for key in keys:
-                owner_key, qtype_key = key
-                if dns_names.normalize_name(owner_key) != owner_norm:
-                    continue
-                if qtype_i is not None and int(qtype_key) != int(qtype_i):
-                    continue
-                if value_text is None:
-                    if self.records.pop(key, None) is not None:
-                        deleted += 1
-                    continue
-                entry = self.records.get(key)
-                if entry is None:
-                    continue
-                ttl_cur, values_cur, sources_cur = entry
-                values = [v for v in list(values_cur or []) if str(v) != value_text]
-                if not values:
-                    if self.records.pop(key, None) is not None:
-                        deleted += 1
-                else:
-                    self.records[key] = (int(ttl_cur), values, list(sources_cur or []))
-                    deleted += 1
-            self._rebuild_indexes_from_records()
+        if qtype_i is None:
+            actions = [{"type": "name_delete_all", "owner": owner_norm}]
+        elif value_text is None:
+            actions = [
+                {
+                    "type": "rr_delete_rrset",
+                    "owner": owner_norm,
+                    "qtype": int(qtype_i),
+                }
+            ]
+        else:
+            actions = [
+                {
+                    "type": "rr_delete_values",
+                    "owner": owner_norm,
+                    "qtype": int(qtype_i),
+                    "value": value_text,
+                }
+            ]
+
+        zone_apex = self._admin_resolve_commit_apex(owner_norm)
+        journal_writer = self._admin_optional_journal_writer(zone_apex)
+        actor = {
+            "client_ip": None,
+            "auth_method": "admin_api",
+            "tsig_key_name": None,
+        }
+        try:
+            if journal_writer is not None:
+                try:
+                    if not journal_writer.acquire_lock():
+                        try:
+                            journal_writer.close()
+                        except Exception:
+                            pass
+                        journal_writer = None
+                except Exception:
+                    try:
+                        journal_writer.close()
+                    except Exception:
+                        pass
+                    journal_writer = None
+
+            result = zone_commit.commit_record_actions(
+                self,
+                zone_apex,
+                actions,
+                actor=actor if journal_writer is not None else None,
+                journal_writer=journal_writer,
+                require_journal_persistence=False,
+                bump_soa=bool(zone_apex),
+                send_notify=None if zone_apex else False,
+                mark_update_managed=True,
+                default_source="admin-api",
+                enforce_zone_boundary=bool(zone_apex),
+            )
+        finally:
+            if journal_writer is not None:
+                try:
+                    journal_writer.release_lock()
+                except Exception:
+                    pass
+                try:
+                    journal_writer.close()
+                except Exception:
+                    pass
+
+        if not result.ok:
+            raise ValueError(str(result.error or "admin record delete failed"))
 
         return {
             "owner": owner_norm,
             "qtype": int(qtype_i) if qtype_i is not None else None,
             "value": value_text,
-            "deleted": int(deleted),
+            "deleted": int(result.deleted_rrsets),
             "persisted": bool(persist),
             "file_path": target_path,
+            "zone_apex": result.zone_apex or None,
+            "serial_before": result.serial_before,
+            "serial_after": result.serial_after,
         }
 
     def iter_zone_rrs_for_transfer(
