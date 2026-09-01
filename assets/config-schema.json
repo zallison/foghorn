@@ -3264,11 +3264,11 @@
             },
             "AxfrZoneConfig": {
               "additionalProperties": false,
-              "description": "Brief: Configuration for a single AXFR-backed zone.\n\nInputs:\n  - zone: Zone apex (e.g. \"example.com\").\n  - upstreams: List of upstream servers to transfer from.\n  - masters: Legacy alias for upstreams (deprecated).\n  - allow_no_dnssec: Accept transfer even if DNSSEC is missing or invalid\n    (default True). When False, zones without valid DNSSEC will be rejected\n    once DNSSEC validation for AXFR is implemented.\n  - minimum_reload_time: Minimum seconds between AXFR reloads. Reloads will\n    only occur after this time has elapsed since the original load or since\n    the last NOTIFY was received for the zone.\n  - poll_interval_seconds: Optional polling interval for periodic AXFR refreshes.\n  - allow_private_upstreams: Allow non-public upstream addresses (default True).\n  - allow_public_upstreams: Allow public upstream addresses (default True).\n  - max_rrs_per_zone: Optional maximum RR count for a single AXFR transfer.\n  - max_bytes_per_zone: Optional maximum total bytes for a single AXFR transfer.\n  - max_retries_per_zone: Optional maximum consecutive transfer failures.\n  - failure_backoff_initial_seconds: Initial backoff delay after failure.\n  - failure_backoff_max_seconds: Maximum backoff delay after failures.\n\nOutputs:\n  - AxfrZoneConfig instance.",
+              "description": "Brief: Configuration for a single AXFR-backed zone.\n\nInputs:\n  - zone: Zone apex (e.g. \"example.com\").\n  - upstreams: List of upstream servers to transfer from.\n  - masters: Legacy alias for upstreams (deprecated).\n  - allow_no_dnssec: When true (default), accept AXFR even if apex DNSKEY/RRSIG\n    material is missing/incomplete. When false, reject dnssec_state=none/partial\n    transfers (material check only, not full DNSSEC validation).\n  - minimum_reload_time: Minimum seconds between AXFR reloads. Reloads will\n    only occur after this time has elapsed since the original load or since\n    the last NOTIFY was received for the zone.\n  - poll_interval_seconds: Optional polling interval for periodic AXFR refreshes.\n  - allow_private_upstreams: Allow non-public upstream addresses (default True).\n  - allow_public_upstreams: Allow public upstream addresses (default True).\n  - max_rrs_per_zone: Optional maximum RR count for a single AXFR transfer.\n  - max_bytes_per_zone: Optional maximum total bytes for a single AXFR transfer.\n  - max_retries_per_zone: Optional maximum consecutive transfer failures.\n  - failure_backoff_initial_seconds: Initial backoff delay after failure.\n  - failure_backoff_max_seconds: Maximum backoff delay after failures.\n\nOutputs:\n  - AxfrZoneConfig instance.",
               "properties": {
                 "allow_no_dnssec": {
                   "default": true,
-                  "description": "Accept transfer even if DNSSEC is missing or invalid. When False, zones without valid DNSSEC will be rejected once DNSSEC validation for AXFR is implemented. Default: true.",
+                  "description": "When true (default), load AXFR zones even if apex DNSKEY/RRSIG material is missing or incomplete. When false, reject transfers classified as dnssec_state=none or partial (material completeness check only; not full DNSSEC chain validation). Default: true.",
                   "title": "Allow No Dnssec",
                   "type": "boolean"
                 },
@@ -3728,7 +3728,7 @@
             },
             "UpdateZoneApexConfig": {
               "additionalProperties": false,
-              "description": "Brief: DNS UPDATE configuration for a specific zone.\n\nInputs:\n  - zone: Zone apex (e.g. \"example.com\").\n  - tsig: TSIG configuration.\n  - psk: PSK configuration.\n  - allow_names: List of allowed name patterns (wildcards supported).\n  - allow_names_files: File paths containing allowed names.\n  - block_names: List of blocked names.\n  - block_names_files: File paths containing blocked names.\n  - allow_clients: CIDR list of clients allowed to send UPDATE.\n  - allow_clients_files: File paths containing allowed client CIDRs.\n  - allow_update_ips: CIDR list of IPs allowed in A/AAAA record values.\n  - allow_update_ips_files: File paths containing allowed update IPs.\n  - block_update_ips: CIDR list of IPs blocked from A/AAAA record values.\n  - block_update_ips_files: File paths containing blocked update IPs.\n\nOutputs:\n  - UpdateZoneApexConfig instance.\n\nNotes:\n  - Zone names are normalized by removing leading dots (e.g., \".zaa\" becomes \"zaa\").",
+              "description": "Brief: DNS UPDATE configuration for a specific zone.\n\nInputs:\n  - zone: Zone apex (e.g. \"example.com\").\n  - tsig: TSIG configuration.\n  - psk: Unsupported legacy field; must be omitted/null.\n  - allow_names: List of allowed name patterns (wildcards supported).\n  - allow_names_files: File paths containing allowed names.\n  - block_names: List of blocked names.\n  - block_names_files: File paths containing blocked names.\n  - allow_clients: CIDR list of clients allowed to send UPDATE.\n  - allow_clients_files: File paths containing allowed client CIDRs.\n  - allow_update_ips: CIDR list of IPs allowed in A/AAAA record values.\n  - allow_update_ips_files: File paths containing allowed update IPs.\n  - block_update_ips: CIDR list of IPs blocked from A/AAAA record values.\n  - block_update_ips_files: File paths containing blocked update IPs.\n\nOutputs:\n  - UpdateZoneApexConfig instance.\n\nNotes:\n  - Zone names are normalized by removing leading dots (e.g., \".zaa\" becomes \"zaa\").\n  - Active UPDATE request auth is TSIG-only; ``psk`` is rejected so config cannot\n    imply a second auth path that is not enforced.",
               "properties": {
                 "allow_clients": {
                   "anyOf": [
@@ -3933,7 +3933,7 @@
                     }
                   ],
                   "default": null,
-                  "description": "PSK authentication configuration.",
+                  "description": "Unsupported. DNS UPDATE authentication is TSIG-only; omit this key. If set (including empty tokens), config validation fails closed.",
                   "title": "Psk"
                 },
                 "tsig": {
@@ -9215,11 +9215,11 @@
             },
             "AxfrZoneConfig": {
               "additionalProperties": false,
-              "description": "Brief: Configuration for a single AXFR-backed zone.\n\nInputs:\n  - zone: Zone apex (e.g. \"example.com\").\n  - upstreams: List of upstream servers to transfer from.\n  - masters: Legacy alias for upstreams (deprecated).\n  - allow_no_dnssec: Accept transfer even if DNSSEC is missing or invalid\n    (default True). When False, zones without valid DNSSEC will be rejected\n    once DNSSEC validation for AXFR is implemented.\n  - minimum_reload_time: Minimum seconds between AXFR reloads. Reloads will\n    only occur after this time has elapsed since the original load or since\n    the last NOTIFY was received for the zone.\n  - poll_interval_seconds: Optional polling interval for periodic AXFR refreshes.\n  - allow_private_upstreams: Allow non-public upstream addresses (default True).\n  - allow_public_upstreams: Allow public upstream addresses (default True).\n  - max_rrs_per_zone: Optional maximum RR count for a single AXFR transfer.\n  - max_bytes_per_zone: Optional maximum total bytes for a single AXFR transfer.\n  - max_retries_per_zone: Optional maximum consecutive transfer failures.\n  - failure_backoff_initial_seconds: Initial backoff delay after failure.\n  - failure_backoff_max_seconds: Maximum backoff delay after failures.\n\nOutputs:\n  - AxfrZoneConfig instance.",
+              "description": "Brief: Configuration for a single AXFR-backed zone.\n\nInputs:\n  - zone: Zone apex (e.g. \"example.com\").\n  - upstreams: List of upstream servers to transfer from.\n  - masters: Legacy alias for upstreams (deprecated).\n  - allow_no_dnssec: When true (default), accept AXFR even if apex DNSKEY/RRSIG\n    material is missing/incomplete. When false, reject dnssec_state=none/partial\n    transfers (material check only, not full DNSSEC validation).\n  - minimum_reload_time: Minimum seconds between AXFR reloads. Reloads will\n    only occur after this time has elapsed since the original load or since\n    the last NOTIFY was received for the zone.\n  - poll_interval_seconds: Optional polling interval for periodic AXFR refreshes.\n  - allow_private_upstreams: Allow non-public upstream addresses (default True).\n  - allow_public_upstreams: Allow public upstream addresses (default True).\n  - max_rrs_per_zone: Optional maximum RR count for a single AXFR transfer.\n  - max_bytes_per_zone: Optional maximum total bytes for a single AXFR transfer.\n  - max_retries_per_zone: Optional maximum consecutive transfer failures.\n  - failure_backoff_initial_seconds: Initial backoff delay after failure.\n  - failure_backoff_max_seconds: Maximum backoff delay after failures.\n\nOutputs:\n  - AxfrZoneConfig instance.",
               "properties": {
                 "allow_no_dnssec": {
                   "default": true,
-                  "description": "Accept transfer even if DNSSEC is missing or invalid. When False, zones without valid DNSSEC will be rejected once DNSSEC validation for AXFR is implemented. Default: true.",
+                  "description": "When true (default), load AXFR zones even if apex DNSKEY/RRSIG material is missing or incomplete. When false, reject transfers classified as dnssec_state=none or partial (material completeness check only; not full DNSSEC chain validation). Default: true.",
                   "title": "Allow No Dnssec",
                   "type": "boolean"
                 },
@@ -9679,7 +9679,7 @@
             },
             "UpdateZoneApexConfig": {
               "additionalProperties": false,
-              "description": "Brief: DNS UPDATE configuration for a specific zone.\n\nInputs:\n  - zone: Zone apex (e.g. \"example.com\").\n  - tsig: TSIG configuration.\n  - psk: PSK configuration.\n  - allow_names: List of allowed name patterns (wildcards supported).\n  - allow_names_files: File paths containing allowed names.\n  - block_names: List of blocked names.\n  - block_names_files: File paths containing blocked names.\n  - allow_clients: CIDR list of clients allowed to send UPDATE.\n  - allow_clients_files: File paths containing allowed client CIDRs.\n  - allow_update_ips: CIDR list of IPs allowed in A/AAAA record values.\n  - allow_update_ips_files: File paths containing allowed update IPs.\n  - block_update_ips: CIDR list of IPs blocked from A/AAAA record values.\n  - block_update_ips_files: File paths containing blocked update IPs.\n\nOutputs:\n  - UpdateZoneApexConfig instance.\n\nNotes:\n  - Zone names are normalized by removing leading dots (e.g., \".zaa\" becomes \"zaa\").",
+              "description": "Brief: DNS UPDATE configuration for a specific zone.\n\nInputs:\n  - zone: Zone apex (e.g. \"example.com\").\n  - tsig: TSIG configuration.\n  - psk: Unsupported legacy field; must be omitted/null.\n  - allow_names: List of allowed name patterns (wildcards supported).\n  - allow_names_files: File paths containing allowed names.\n  - block_names: List of blocked names.\n  - block_names_files: File paths containing blocked names.\n  - allow_clients: CIDR list of clients allowed to send UPDATE.\n  - allow_clients_files: File paths containing allowed client CIDRs.\n  - allow_update_ips: CIDR list of IPs allowed in A/AAAA record values.\n  - allow_update_ips_files: File paths containing allowed update IPs.\n  - block_update_ips: CIDR list of IPs blocked from A/AAAA record values.\n  - block_update_ips_files: File paths containing blocked update IPs.\n\nOutputs:\n  - UpdateZoneApexConfig instance.\n\nNotes:\n  - Zone names are normalized by removing leading dots (e.g., \".zaa\" becomes \"zaa\").\n  - Active UPDATE request auth is TSIG-only; ``psk`` is rejected so config cannot\n    imply a second auth path that is not enforced.",
               "properties": {
                 "allow_clients": {
                   "anyOf": [
@@ -9884,7 +9884,7 @@
                     }
                   ],
                   "default": null,
-                  "description": "PSK authentication configuration.",
+                  "description": "Unsupported. DNS UPDATE authentication is TSIG-only; omit this key. If set (including empty tokens), config validation fails closed.",
                   "title": "Psk"
                 },
                 "tsig": {
