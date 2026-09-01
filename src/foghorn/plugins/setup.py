@@ -525,7 +525,7 @@ def run_setup_plugins(
             fallback_to_system = _setup_dns_fallback_to_system(plugin)
             name = plugin.__class__.__name__
 
-            logger.info(
+            logger.debug(
                 "Running setup for plugin %s (phase=%s, setup_priority=%d, abort_on_failure=%s, requires_dns=%s)",
                 name,
                 phase_name,

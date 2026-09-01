@@ -164,7 +164,7 @@ def _build_uvicorn_config(
     if "timeout_keep_alive" in params:
         config_kwargs["timeout_keep_alive"] = 5
 
-    logger.info(
+    logger.debug(
         "Admin webserver uvicorn limits: limit_concurrency=%s backlog=%s soft_nofile=%s tls=%s",
         (
             config_kwargs.get("limit_concurrency")
@@ -494,7 +494,7 @@ def start_webserver(
 
             ok, detail, png_path = ensure_config_diagram_png(config_path=config_path)
             if ok:
-                logger.info("Config diagram: %s (%s)", png_path, detail)
+                logger.debug("Config diagram: %s (%s)", png_path, detail)
             else:
                 logger.warning("Config diagram not generated: %s", detail)
         except Exception:  # pragma: no cover - defensive
