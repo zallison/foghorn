@@ -637,15 +637,15 @@ def test_docker_hosts_iter_containers_logs_and_returns_empty_on_exception(caplog
     assert any("failed to list containers" in r.getMessage() for r in caplog.records)
 
 
-def test_docker_hosts_iter_containers_rate_limits_repeated_errors(monkeypatch, caplog):
-    """Brief: Repeated endpoint-list failures are logged with throttling.
+def test_docker_hosts_iter_containers_state_change_logs_failures(monkeypatch, caplog):
+    """Brief: Endpoint failures warn once, re-warn hourly, then info on recovery.
 
     Inputs:
       - monkeypatch/caplog: pytest fixtures.
 
     Outputs:
-      - None; asserts duplicate warnings are suppressed inside the throttle
-        interval and emitted again after the interval elapses.
+      - None; asserts one WARNING while down, an hourly still-failing reminder,
+        then recovery INFO when listing succeeds again (with suppressed count).
     """
 
     mod = importlib.import_module("foghorn.plugins.resolve.docker_hosts")
@@ -658,32 +658,99 @@ def test_docker_hosts_iter_containers_rate_limits_repeated_errors(monkeypatch, c
     monkeypatch.setattr(plugin, "_reload_from_docker", lambda: None)
     plugin.setup()
 
-    class BadContainers:
+    class ToggleContainers:
+        def __init__(self) -> None:
+            self.fail = True
+
         def list(self):  # noqa: D401
-            """Always raise to exercise repeated failure logging."""
+            """Fail while self.fail is set, else return one dummy container."""
 
-            raise RuntimeError("boom")
+            if self.fail:
+                raise RuntimeError("boom")
+            return [types.SimpleNamespace(attrs={"Id": "ok"})]
 
+    containers = ToggleContainers()
     plugin._clients = {  # type: ignore[attr-defined]
-        "unix:///var/run/docker.sock": types.SimpleNamespace(containers=BadContainers())
+        "unix:///var/run/docker.sock": types.SimpleNamespace(containers=containers)
     }
 
-    timeline = iter([100.0, 101.0, 170.0])
+    # First failure at t=100, quiet repeats, hourly re-warn at t=3700.
+    timeline = iter([100.0, 101.0, 102.0, 3700.0, 3701.0])
     monkeypatch.setattr(mod.time, "monotonic", lambda: next(timeline))
 
-    caplog.set_level("WARNING", logger=mod.__name__)
+    caplog.set_level("DEBUG", logger=mod.__name__)
     endpoint = {"url": "unix:///var/run/docker.sock"}
+
     assert list(plugin._iter_containers_for_endpoint(endpoint)) == []
     assert list(plugin._iter_containers_for_endpoint(endpoint)) == []
     assert list(plugin._iter_containers_for_endpoint(endpoint)) == []
 
     list_failures = [
-        r for r in caplog.records if "failed to list containers" in r.getMessage()
+        r
+        for r in caplog.records
+        if r.levelno >= 30 and "failed to list containers" in r.getMessage()
     ]
-    assert len(list_failures) == 2
+    assert len(list_failures) == 1
     assert any(
-        "suppressed 1 repeated warning(s)" in r.getMessage() for r in caplog.records
+        "suppressed repeated condition" in r.getMessage() for r in caplog.records
     )
+
+    caplog.clear()
+    assert list(plugin._iter_containers_for_endpoint(endpoint)) == []
+    list_failures = [
+        r
+        for r in caplog.records
+        if r.levelno >= 30 and "failed to list containers" in r.getMessage()
+    ]
+    assert len(list_failures) == 1
+    assert any("still failing" in r.getMessage() for r in list_failures)
+    # Two quiet repeats between first WARNING and hourly re-warn.
+    assert any(
+        "suppressed 2 repeated warning(s)" in r.getMessage() for r in list_failures
+    )
+
+    containers.fail = False
+    caplog.clear()
+    items = list(plugin._iter_containers_for_endpoint(endpoint))
+    assert items == [{"Id": "ok"}]
+    assert any("is reachable again" in r.getMessage() for r in caplog.records)
+
+    # A second success while healthy must not emit another recovery line.
+    caplog.clear()
+    assert list(plugin._iter_containers_for_endpoint(endpoint)) == [{"Id": "ok"}]
+    assert not any("is reachable again" in r.getMessage() for r in caplog.records)
+
+
+def test_docker_hosts_condition_helpers_lazy_init(caplog):
+    """Brief: Condition helpers work before setup() initializes state maps.
+
+    Inputs:
+      - caplog: pytest fixture.
+
+    Outputs:
+      - None; asserts failure/ok helpers create state and log transitions.
+    """
+
+    import logging
+
+    mod = importlib.import_module("foghorn.plugins.resolve.docker_hosts")
+    plugin = mod.DockerHosts()
+    plugin.config = {}
+    caplog.set_level(logging.INFO, logger=mod.__name__)
+
+    plugin._note_condition_failure("lazy-key", "DockerHosts: lazy fail %s", "x")
+    assert plugin._condition_failed_by_key["lazy-key"] is True
+    assert any("lazy fail" in r.getMessage() for r in caplog.records)
+
+    caplog.clear()
+    plugin._note_condition_ok("lazy-key", "DockerHosts: lazy ok %s", "x")
+    assert plugin._condition_failed_by_key["lazy-key"] is False
+    assert any("lazy ok" in r.getMessage() for r in caplog.records)
+
+    # Second ok while healthy is silent.
+    caplog.clear()
+    plugin._note_condition_ok("lazy-key", "DockerHosts: lazy ok %s", "x")
+    assert not any("lazy ok" in r.getMessage() for r in caplog.records)
 
 
 def test_docker_hosts_reload_from_docker_logs_when_no_containers(monkeypatch, caplog):
