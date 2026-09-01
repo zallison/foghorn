@@ -112,18 +112,21 @@ class UpdateTsigKeyConfig(BaseModel):
 
 
 class UpdatePskTokenConfig(BaseModel):
-    """Brief: Configuration for a PSK token for DNS UPDATE authentication.
+    """Brief: Legacy PSK token shape retained only for clearer validation errors.
 
     Inputs:
       - token: Pre-shared token (hashed).
 
     Outputs:
       - UpdatePskTokenConfig instance.
+
+    Notes:
+      - DNS UPDATE authorization is TSIG-only. Configuring ``psk`` is rejected.
     """
 
     token: str = Field(
         ...,
-        description="Pre-shared token (hashed).",
+        description="Pre-shared token (hashed). Unsupported; use TSIG instead.",
     )
 
     # Per-token authorization scopes
@@ -162,7 +165,7 @@ class UpdateZoneApexConfig(BaseModel):
     Inputs:
       - zone: Zone apex (e.g. "example.com").
       - tsig: TSIG configuration.
-      - psk: PSK configuration.
+      - psk: Unsupported legacy field; must be omitted/null.
       - allow_names: List of allowed name patterns (wildcards supported).
       - allow_names_files: File paths containing allowed names.
       - block_names: List of blocked names.
@@ -179,6 +182,8 @@ class UpdateZoneApexConfig(BaseModel):
 
     Notes:
       - Zone names are normalized by removing leading dots (e.g., ".zaa" becomes "zaa").
+      - Active UPDATE request auth is TSIG-only; ``psk`` is rejected so config cannot
+        imply a second auth path that is not enforced.
     """
 
     zone: str = Field(..., description="Zone apex (e.g. 'example.com').")
@@ -188,7 +193,10 @@ class UpdateZoneApexConfig(BaseModel):
     )
     psk: Optional[dict] = Field(
         default=None,
-        description="PSK authentication configuration.",
+        description=(
+            "Unsupported. DNS UPDATE authentication is TSIG-only; omit this key. "
+            "If set (including empty tokens), config validation fails closed."
+        ),
     )
     allow_names: Optional[List[str]] = Field(
         default=None,
@@ -243,6 +251,27 @@ class UpdateZoneApexConfig(BaseModel):
           - str: Zone name without leading dots.
         """
         return str(v).lstrip(".")
+
+    @field_validator("psk")
+    @classmethod
+    def reject_unsupported_psk(cls, v: Optional[dict]) -> Optional[dict]:
+        """Brief: Reject dns_update PSK config so auth knobs match runtime.
+
+        Inputs:
+          - v: Optional psk mapping from YAML/JSON config.
+
+        Outputs:
+          - None when unset.
+
+        Raises:
+          - ValueError: when any psk configuration is present.
+        """
+        if v is None:
+            return None
+        raise ValueError(
+            "dns_update.zones[].psk is not supported; UPDATE auth is TSIG-only "
+            "(omit psk and configure tsig.keys / tsig.key_sources)"
+        )
 
     model_config = ConfigDict(extra="forbid")
 
@@ -1849,6 +1878,19 @@ class ZoneRecords(BasePlugin):
 
         # Normalize DNS UPDATE configuration
         dns_update_cfg = self.config.get("dns_update")
+        if isinstance(dns_update_cfg, dict):
+            # Defense in depth: PSK is rejected by the Pydantic model, but raw
+            # dict configs (tests/manual) must still fail closed.
+            zones_raw = dns_update_cfg.get("zones") or []
+            if isinstance(zones_raw, list):
+                for z in zones_raw:
+                    if not isinstance(z, dict):
+                        continue
+                    if z.get("psk") is not None:
+                        raise ValueError(
+                            "dns_update.zones[].psk is not supported; UPDATE auth "
+                            "is TSIG-only (omit psk and configure tsig)"
+                        )
         self._dns_update_config = dns_update_cfg
         self._dns_update_persistence_config = {}
         self._dns_update_journal_state_dir = None

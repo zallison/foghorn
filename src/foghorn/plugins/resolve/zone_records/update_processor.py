@@ -9,8 +9,8 @@ Outputs:
 
 Notes:
   - Full RFC 2136 prerequisite checks and update operations are scaffolded.
-  - PSK authentication support is implemented but currently not used by
-    process_update_message() (TSIG-only for now).
+  - UPDATE request authentication is TSIG-only. ``dns_update.zones[].psk`` is
+    rejected (config validation, plugin setup, and process_update_message).
 """
 
 from __future__ import annotations
@@ -119,16 +119,20 @@ def verify_psk_auth(
     listener: Optional[str],
     token_configs: List[dict],
 ) -> Tuple[bool, Optional[str]]:
-    """Brief: Verify PSK authentication.
+    """Brief: Legacy PSK helper retained for unit tests only.
 
     Inputs:
       - request_token: Token from request.
-      - zone_config: Zone configuration.
+      - zone_config: Zone configuration (unused).
       - listener: Listener type (dot/doh/udp/tcp).
       - token_configs: List of PSK token configurations.
 
     Outputs:
       - Tuple of (authorized, error_message).
+
+    Notes:
+      - Not used by process_update_message. DNS UPDATE auth is TSIG-only;
+        configuring psk fails closed elsewhere.
     """
     # PSK only allowed on secure listeners (DoT/DoH)
     if listener and listener.lower() not in ("dot", "doh"):
@@ -308,6 +312,30 @@ def process_update_message(
         zone_config,
         source_loaders=source_loaders,
     )
+
+    # PSK is not an active UPDATE auth path. Fail closed if still present so a
+    # bypassed schema path cannot look configured-but-open.
+    psk_cfg = zone_config.get("psk") if isinstance(zone_config, dict) else None
+    if psk_cfg is not None:
+        logger.error(
+            "DNS UPDATE refused for zone=%s: dns_update PSK is not supported "
+            "(configure TSIG only)",
+            str(zone_apex),
+        )
+        try:
+            recovered = dns.message.from_wire(request_data, continue_on_error=True)
+            resp = dns.message.make_response(recovered)
+            resp.set_rcode(dns.rcode.REFUSED)
+            return resp.to_wire()
+        except Exception:
+            resp = dns.message.Message()
+            resp.flags |= dns.flags.QR
+            try:
+                resp.set_opcode(dns.opcode.UPDATE)
+            except Exception:
+                pass
+            resp.set_rcode(dns.rcode.REFUSED)
+            return resp.to_wire()
 
     have_auth_config = bool(key_configs)
 
