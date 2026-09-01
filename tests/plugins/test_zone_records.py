@@ -1201,7 +1201,7 @@ def test_reload_records_from_watchdog_sends_notify_for_changed_zones(
 
     notified = {"zones": None}
 
-    def fake_send_for_zones(plugin_obj: object, zones: list[str]) -> None:  # noqa: D401
+    def fake_send_for_zones(plugin_obj: object, zones: list[str]) -> None:
         """Capture the list of zone apexes passed to send_notify_for_zones()."""
 
         _ = plugin_obj
@@ -1255,7 +1255,7 @@ def test_send_notify_for_zones_uses_static_targets(
 
     calls: list[tuple[str, dict]] = []
 
-    def fake_send_notify(zone_apex: str, target: dict) -> None:  # noqa: D401
+    def fake_send_notify(zone_apex: str, target: dict) -> None:
         """Record NOTIFY sends instead of performing network I/O."""
 
         calls.append((zone_apex, dict(target)))
@@ -1797,7 +1797,7 @@ def test_setup_watchdog_enabled_flag_controls_start(
 
     calls = {"start": 0}
 
-    def fake_start(plugin_obj: object) -> None:  # noqa: D401
+    def fake_start(plugin_obj: object) -> None:
         """Count calls to watchdog.start_watchdog without starting a real observer."""
 
         _ = plugin_obj
@@ -2535,7 +2535,7 @@ def test_load_records_axfr_overlays_and_only_runs_once(
 
     calls = {"n": 0}
 
-    def fake_axfr_transfer(host, port, zone, **kwargs):  # noqa: ARG001
+    def fake_axfr_transfer(host, port, zone, **kwargs):
         # Ensure we default to TCP when no transport is specified in config.
         assert kwargs.get("transport", "tcp") == "tcp"
         calls["n"] += 1
@@ -2593,7 +2593,7 @@ def test_load_records_axfr_errors_do_not_abort(
     records_file = tmp_path / "records.txt"
     records_file.write_text("seed-only.test|A|300|192.0.2.10\n", encoding="utf-8")
 
-    def failing_axfr(*a, **k):  # noqa: ARG001
+    def failing_axfr(*a, **k):
         raise axfr_mod.AXFRError("boom")
 
     monkeypatch.setattr(loader_mod, "axfr_transfer", failing_axfr)
@@ -2662,7 +2662,7 @@ def test_axfr_allow_private_upstreams_skips_non_public(monkeypatch) -> None:
         "foghorn.plugins.resolve.zone_records.axfr_dnssec"
     )
 
-    def fake_getaddrinfo(host, *_args, **_kwargs):  # noqa: ARG001
+    def fake_getaddrinfo(host, *_args, **_kwargs):
         return [(socket.AF_INET, None, None, "", ("127.0.0.1", 0))]
 
     monkeypatch.setattr(axfr_mod.socket, "getaddrinfo", fake_getaddrinfo)
@@ -2673,7 +2673,7 @@ def test_axfr_allow_private_upstreams_skips_non_public(monkeypatch) -> None:
         calls["n"] += 1
         return []
 
-    transferred, last_error = axfr_mod._axfr_transfer_for_zone(  # noqa: SLF001
+    transferred, last_error = axfr_mod._axfr_transfer_for_zone(
         "example.com",
         [{"host": "private.example", "port": 53, "timeout_ms": 1000}],
         axfr_fn=fake_axfr,
@@ -2698,7 +2698,7 @@ def test_axfr_transfer_caps_are_forwarded(monkeypatch) -> None:
         "foghorn.plugins.resolve.zone_records.axfr_dnssec"
     )
 
-    def fake_getaddrinfo(host, *_args, **_kwargs):  # noqa: ARG001
+    def fake_getaddrinfo(host, *_args, **_kwargs):
         return [(socket.AF_INET, None, None, "", ("192.0.2.10", 0))]
 
     monkeypatch.setattr(axfr_mod.socket, "getaddrinfo", fake_getaddrinfo)
@@ -2710,7 +2710,7 @@ def test_axfr_transfer_caps_are_forwarded(monkeypatch) -> None:
         seen["max_total_bytes"] = kwargs.get("max_total_bytes")
         return []
 
-    axfr_mod._axfr_transfer_for_zone(  # noqa: SLF001
+    axfr_mod._axfr_transfer_for_zone(
         "example.com",
         [{"host": "up.example", "port": 53, "timeout_ms": 1000}],
         axfr_fn=fake_axfr,
@@ -3874,3 +3874,130 @@ def test_zone_records_soa_synthesis_can_be_disabled() -> None:
     plugin.setup()
 
     assert getattr(plugin, "_zone_soa", {}) == {}
+
+
+def test_overlay_axfr_rejects_when_allow_no_dnssec_false(caplog) -> None:
+    """Brief: allow_no_dnssec=false skips merge for unsigned AXFR transfers.
+
+    Inputs:
+      - caplog: pytest logging fixture.
+
+    Outputs:
+      - None; asserts zone is not loaded when DNSSEC material is absent.
+    """
+
+    import logging
+
+    from dnslib import QTYPE, RR, SOA, A, DNSLabel
+
+    axfr_mod = importlib.import_module(
+        "foghorn.plugins.resolve.zone_records.axfr_dnssec"
+    )
+
+    # Unsigned zone: SOA + A only.
+    transferred = [
+        RR(
+            rname=DNSLabel("unsigned.example."),
+            rtype=QTYPE.SOA,
+            rclass=1,
+            ttl=300,
+            rdata=SOA(
+                mname=DNSLabel("ns.unsigned.example."),
+                rname=DNSLabel("hostmaster.unsigned.example."),
+                times=(1, 3600, 600, 604800, 300),
+            ),
+        ),
+        RR(
+            rname=DNSLabel("host.unsigned.example."),
+            rtype=QTYPE.A,
+            rclass=1,
+            ttl=300,
+            rdata=A("192.0.2.50"),
+        ),
+    ]
+
+    mapping = {}
+    name_index = {}
+    zone_soa = {}
+    classified = set()
+    metadata = {}
+    zones = [
+        {
+            "zone": "unsigned.example",
+            "upstreams": [
+                {
+                    "host": "192.0.2.1",
+                    "port": 53,
+                    "timeout_ms": 1000,
+                    "transport": "tcp",
+                    "verify": True,
+                    "server_name": None,
+                    "ca_file": None,
+                    "tsig": None,
+                }
+            ],
+            "allow_no_dnssec": False,
+            "allow_private_upstreams": True,
+            "allow_public_upstreams": True,
+            "minimum_reload_time": 0,
+            "failure_backoff_initial_seconds": 0,
+            "failure_backoff_max_seconds": 0,
+        }
+    ]
+
+    def _fake_axfr(*_a, **_k):
+        return transferred
+
+    with caplog.at_level(logging.ERROR):
+        axfr_mod.overlay_axfr_zones(
+            mapping,
+            name_index,
+            zone_soa,
+            zones,
+            int(QTYPE.SOA),
+            classified,
+            axfr_fn=_fake_axfr,
+            zone_metadata=metadata,
+            force_reload=True,
+        )
+
+    assert mapping == {}
+    assert "unsigned.example" not in zone_soa
+    assert "rejecting zone" in caplog.text
+    assert "unsigned.example" in classified
+
+    # Same transfer is accepted when allow_no_dnssec=true.
+    zones[0]["allow_no_dnssec"] = True
+    mapping.clear()
+    zone_soa.clear()
+    classified.clear()
+    axfr_mod.overlay_axfr_zones(
+        mapping,
+        name_index,
+        zone_soa,
+        zones,
+        int(QTYPE.SOA),
+        classified,
+        axfr_fn=_fake_axfr,
+        zone_metadata=metadata,
+        force_reload=True,
+    )
+    assert (
+        "unsigned.example",
+        int(QTYPE.SOA),
+    ) in mapping or "unsigned.example" in zone_soa
+
+
+def test_update_zone_apex_config_rejects_psk() -> None:
+    """Brief: UpdateZoneApexConfig fails closed when psk is configured."""
+
+    import pytest
+
+    from foghorn.plugins.resolve.zone_records import UpdateZoneApexConfig
+
+    with pytest.raises(Exception) as exc:
+        UpdateZoneApexConfig(
+            zone="example.com",
+            psk={"tokens": [{"token": "x"}]},
+        )
+    assert "psk" in str(exc.value).lower()

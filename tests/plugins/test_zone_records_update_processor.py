@@ -938,3 +938,26 @@ def test_apply_update_operations_bumps_soa_serial_on_commit() -> None:
     assert err is None
     soa_after = plugin.records[("example.com", int(QTYPE.SOA))][1][0]
     assert " 2 " in f" {soa_after} "
+
+
+def test_process_update_message_refuses_when_psk_configured() -> None:
+    """Brief: process_update_message refuses zones that still declare psk."""
+
+    plugin = SimpleNamespace(
+        records={},
+        _records_lock=threading.RLock(),
+        _dns_update_config={"security": {}},
+        _dns_update_tsig_key_source_loaders={},
+    )
+    # Minimal UPDATE-shaped query is not required; PSK gate runs before parse auth.
+    wire = DNSRecord.question("example.com").pack()
+    resp = up.process_update_message(
+        wire,
+        "example.com",
+        {"zone": "example.com", "psk": {"tokens": [{"token": "x"}]}},
+        plugin=plugin,
+        client_ip="192.0.2.1",
+        listener="udp",
+    )
+    msg = DNSRecord.parse(resp)
+    assert int(msg.header.rcode) == int(RCODE.REFUSED)
