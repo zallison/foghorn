@@ -492,9 +492,9 @@ class AxfrZoneConfig(BaseModel):
       - zone: Zone apex (e.g. "example.com").
       - upstreams: List of upstream servers to transfer from.
       - masters: Legacy alias for upstreams (deprecated).
-      - allow_no_dnssec: Accept transfer even if DNSSEC is missing or invalid
-        (default True). When False, zones without valid DNSSEC will be rejected
-        once DNSSEC validation for AXFR is implemented.
+      - allow_no_dnssec: When true (default), accept AXFR even if apex DNSKEY/RRSIG
+        material is missing/incomplete. When false, reject dnssec_state=none/partial
+        transfers (material check only, not full DNSSEC validation).
       - minimum_reload_time: Minimum seconds between AXFR reloads. Reloads will
         only occur after this time has elapsed since the original load or since
         the last NOTIFY was received for the zone.
@@ -521,9 +521,10 @@ class AxfrZoneConfig(BaseModel):
     allow_no_dnssec: bool = Field(
         default=True,
         description=(
-            "Accept transfer even if DNSSEC is missing or invalid. When False, "
-            "zones without valid DNSSEC will be rejected once DNSSEC validation "
-            "for AXFR is implemented."
+            "When true (default), load AXFR zones even if apex DNSKEY/RRSIG "
+            "material is missing or incomplete. When false, reject transfers "
+            "classified as dnssec_state=none or partial (material completeness "
+            "check only; not full DNSSEC chain validation)."
         ),
     )
     minimum_reload_time: float = Field(

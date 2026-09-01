@@ -264,9 +264,13 @@ def overlay_axfr_zones(
                 update_axfr_metadata(zone_text, zone_metadata, failed=True)
             continue
 
-        _classify_axfr_zone_dnssec(
+        accepted = _classify_axfr_zone_dnssec(
             zone_text, transferred, zone_cfg, dnssec_classified_axfr
         )
+        if not accepted:
+            update_axfr_metadata(zone_text, zone_metadata, failed=True)
+            continue
+
         _merge_transferred_rrs_into_mappings(
             mapping,
             name_index,
@@ -474,8 +478,8 @@ def _classify_axfr_zone_dnssec(
     transferred: List[RR],
     zone_cfg: Dict[str, object],
     dnssec_classified_axfr: Set[str],
-) -> None:
-    """Brief: Classify DNSSEC state for an AXFR-backed zone.
+) -> bool:
+    """Brief: Classify DNSSEC state for an AXFR-backed zone and gate load.
 
     Inputs:
       - zone_text: Normalized zone apex.
@@ -484,7 +488,13 @@ def _classify_axfr_zone_dnssec(
       - dnssec_classified_axfr: Set of already-classified AXFR apexes.
 
     Outputs:
-      - None; logs dnssec_state and updates dnssec_classified_axfr.
+      - True when the transfer may be merged into ZoneRecords state.
+      - False when allow_no_dnssec is false and DNSSEC material is missing or
+        incomplete (dnssec_state none/partial); caller must not load the zone.
+
+    Notes:
+      - "present" means apex DNSKEY and at least one RRSIG owner match were seen.
+        This is a material completeness check, not full DNSSEC validation.
     """
 
     try:
@@ -519,31 +529,37 @@ def _classify_axfr_zone_dnssec(
         allow_no_dnssec = bool(zone_cfg.get("allow_no_dnssec", True))  # type: ignore[arg-type]
         if dnssec_state in {"none", "partial"}:
             if not allow_no_dnssec:
-                logger.warning(
-                    "ZoneRecords AXFR: zone %s has dnssec_state=%s with "
-                    "allow_no_dnssec=False; loading anyway",
+                logger.error(
+                    "ZoneRecords AXFR: rejecting zone %s with dnssec_state=%s "
+                    "because allow_no_dnssec=false",
                     zone_text,
                     dnssec_state,
                 )
-            else:
-                logger.info(
-                    "ZoneRecords AXFR: zone %s has dnssec_state=%s; "
-                    "proceeding (allow_no_dnssec=True)",
-                    zone_text,
-                    dnssec_state,
-                )
+                dnssec_classified_axfr.add(zone_text)
+                return False
+            logger.info(
+                "ZoneRecords AXFR: zone %s has dnssec_state=%s; "
+                "proceeding (allow_no_dnssec=true)",
+                zone_text,
+                dnssec_state,
+            )
         else:
             logger.info(
                 "ZoneRecords AXFR: zone %s has dnssec_state=present",
                 zone_text,
             )
         dnssec_classified_axfr.add(zone_text)
+        return True
     except Exception:  # pragma: no cover - defensive logging only
         logger.warning(
             "ZoneRecords AXFR: failed to classify DNSSEC state for %s",
             zone_text,
             exc_info=True,
         )
+        # Fail closed when classification itself fails and unsigned transfers
+        # are disallowed.
+        allow_no_dnssec = bool(zone_cfg.get("allow_no_dnssec", True))  # type: ignore[arg-type]
+        return bool(allow_no_dnssec)
 
 
 def _merge_transferred_rrs_into_mappings(
