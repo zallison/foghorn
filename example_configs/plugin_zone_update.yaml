@@ -87,28 +87,7 @@ plugins:
                 - type: file
                   path: ./example_configs/zone_update_tsig_key_source_file.yaml
 
-            # PSK authentication (restricted to DoT/DoH only)
-            psk:
-              tokens:
-                # Token 1: Single hostname via DoT (e.g., IoT device)
-                - token: "$2b$10$hashed-token-value"
-                  # Allow only this specific device hostname
-                  allow_names:
-                    - "thermostat.homelab.net"
-                  # Private IP only
-                  allow_update_ips:
-                    - "192.168.1.0/24"
-
-                # Token 2: Multiple services via DoH
-                - token: "$2b$10$another-hashed-token"
-                  # Wildcard pattern
-                  allow_names:
-                    - "*.svc.example.com"
-                  allow_names_files:
-                    - /etc/foghorn/psk-services.txt
-                  # Allow specific internal subnet
-                  allow_update_ips:
-                    - "10.0.0.0/8"
+            # Note: dns_update.zones[].psk is unsupported (TSIG-only auth).
 
             # Client authorization (who can send UPDATE)
             allow_clients:

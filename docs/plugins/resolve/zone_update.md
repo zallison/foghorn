@@ -7,9 +7,9 @@ ZoneRecords supports RFC 2136 UPDATE handling with:
 - persistent journal replay/compaction
 - replication and security limit controls
 
-Note: the active UPDATE request authorization flow is currently TSIG-only.
-`dns_update.zones[].psk` remains in the config schema but PSK verification is
-not currently applied when authorizing UPDATE requests.
+UPDATE request authorization is **TSIG-only**. Configuring
+`dns_update.zones[].psk` is rejected at config validation / plugin setup so the
+knob cannot imply an auth path that is not enforced.
 
 This document lists every `dns_update` key and default from the current config model.
 
@@ -25,7 +25,7 @@ This document lists every `dns_update` key and default from the current config m
 ### `dns_update.zones[]` (per zone)
 - `zone` (str, required)
 - `tsig` (object, default: `null`)
-- `psk` (object, default: `null`; currently not used by active request authentication path)
+- `psk` (**unsupported**; must be omitted/`null`. Present values fail closed.)
 - `allow_names` (list[str], default: `null`)
 - `allow_names_files` (list[str], default: `null`)
 - `block_names` (list[str], default: `null`)
@@ -55,16 +55,8 @@ This document lists every `dns_update` key and default from the current config m
 - For `type: file`:
   - `path` (str, required)
 
-### `dns_update.zones[].psk.tokens[]`
-- `token` (str, required; hashed token)
-- `allow_names` (list[str], default: `null`)
-- `allow_names_files` (list[str], default: `null`)
-- `block_names` (list[str], default: `null`)
-- `block_names_files` (list[str], default: `null`)
-- `allow_update_ips` (list[str], default: `null`)
-- `allow_update_ips_files` (list[str], default: `null`)
-- `block_update_ips` (list[str], default: `null`)
-- `block_update_ips_files` (list[str], default: `null`)
+### `dns_update.zones[].psk` (unsupported)
+Do not configure PSK. Historical token schema fields are not accepted; use TSIG.
 
 ### `dns_update.persistence` (defaults)
 - `enabled` (bool, default: `true`)
@@ -118,9 +110,7 @@ See:
 ```bash
 make gen-tsig-key NAME=dynamic-key.example.com
 make gen-tsig-key NAME=cdn-key.example.com ALGO=hmac-sha512
-make gen-psk-token
 ./scripts/generate_dns_update_keys.py --tsig --name "key.example.com" --config-snippet
-./scripts/generate_dns_update_keys.py --psk --config-snippet
 ```
-PSK token generation commands are kept for schema compatibility and provisioning
-workflows, but runtime UPDATE authorization currently validates TSIG keys.
+UPDATE authorization validates TSIG keys only. Do not generate or configure PSK
+tokens for Foghorn DNS UPDATE.

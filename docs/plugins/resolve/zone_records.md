@@ -276,11 +276,11 @@ Clients without DO=1 receive only the base RRsets without signatures.
   - Optional list of zones fetched via AXFR at startup. Each entry should include:
     - `zone: str` – zone apex (e.g. `"example.com"`, `"0.0.10.in-addr.arpa"`).
     - `upstreams: list[object]` – authoritative servers to AXFR from; each upstream supports at least `host`, `port` (default `53`), `timeout_ms` (default `5000`), optional DoT fields (`transport`, `server_name`, `verify`, `ca_file`), and optional TSIG (`tsig.name`, `tsig.secret`, `tsig.algorithm`).
-    - `allow_no_dnssec: bool` – hint for future DNSSEC policies. Currently all zones are
-      loaded regardless of DNSSEC state; Foghorn classifies each AXFR-backed
-      zone as having `dnssec_state=present|partial|none` and logs a warning when
-      DNSKEY/RRSIG data is missing or incomplete, especially when
-      `allow_no_dnssec` is `false`.
+    - `allow_no_dnssec: bool` – when `true` (default), load AXFR even if apex
+      DNSKEY/RRSIG material is missing or incomplete. When `false`, reject the
+      transfer for `dnssec_state=none|partial` (material completeness check only;
+      not full DNSSEC chain validation). Foghorn still classifies each AXFR-backed
+      zone as `dnssec_state=present|partial|none`.
     - `allow_private_upstreams: bool` – allow upstreams that resolve to
       non-public IPs (private/loopback/link-local). Defaults to `true`; set to
       `false` to block private upstreams.

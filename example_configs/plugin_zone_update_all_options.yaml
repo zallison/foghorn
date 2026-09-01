@@ -76,26 +76,7 @@ plugins:
                 - type: file
                   path: "./example_configs/zone_update_tsig_key_source_file.yaml"
 
-            # PSK auth (restricted to DoT/DoH listeners by implementation)
-            psk:
-              tokens:
-                - token: "$2b$10$replace.with.real.bcrypt.hash"
-                  allow_names:
-                    - "device1.example.com"
-                  allow_names_files:
-                    - "/etc/foghorn/psk-allow-names.txt"
-                  block_names:
-                    - "admin.example.com"
-                  block_names_files:
-                    - "/etc/foghorn/psk-block-names.txt"
-                  allow_update_ips:
-                    - "198.51.100.0/24"
-                  allow_update_ips_files:
-                    - "/etc/foghorn/psk-allow-ips.txt"
-                  block_update_ips:
-                    - "203.0.113.0/24"
-                  block_update_ips_files:
-                    - "/etc/foghorn/psk-block-ips.txt"
+            # Note: dns_update.zones[].psk is unsupported (TSIG-only auth).
 
             # Zone-level client/network and name/value constraints:
             allow_clients:

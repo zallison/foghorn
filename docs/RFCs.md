@@ -255,7 +255,7 @@ Foghorn implements a practical subset of zone transfer behavior around ZoneRecor
 - Reload timing via `minimum_reload_time` (honors elapsed time since last load or last inbound NOTIFY).
 - Transfer safety: `max_rrs_per_zone`, `max_bytes_per_zone`, retries/backoff, public/private upstream gating.
 - Optional TSIG on upstream pulls (`axfr_zones[*].upstreams[*].tsig`).
-- DNSSEC classification of transferred zones (`dnssec_state=present|partial|none`) with warnings when material is missing/incomplete; `allow_no_dnssec` defaults to `true` and currently acts as a policy hint/logging control rather than a hard reject of all unsigned transfers.
+- DNSSEC classification of transferred zones (`dnssec_state=present|partial|none`). `allow_no_dnssec` defaults to `true` (load anyway). When `false`, Foghorn **rejects** transfers classified as `none` or `partial` (apex DNSKEY/RRSIG material check only; not full chain validation).
 - No IXFR **client** (incremental pull) support yet.
 
 **AXFR/IXFR server:**
@@ -288,8 +288,8 @@ zone matches a configured `dns_update.zones[]` entry:
 - Prerequisite evaluation (RRset existence/nonexistence, name in use).
 - ADD/DELETE/REPLACE-style update operations with atomic commits.
 - Zone-boundary enforcement to the configured apex.
-- TSIG authentication (algorithm/fudge validation); active request authorization is **TSIG-based**.
-  - `dns_update.zones[].psk` remains in schema for compatibility/provisioning but is **not** applied on the active UPDATE auth path.
+- TSIG authentication (algorithm/fudge validation); request authorization is **TSIG-only**.
+  - `dns_update.zones[].psk` is **unsupported** and rejected at config validation / setup.
 - Per-zone and per-principal allow/block scopes for names and update IPs, plus client IP allowlists.
 - Optional persistence journal (replay/compaction), replication role gates, and security/rate limits.
 - Post-commit SOA serial bumps and optional NOTIFY fanout.
@@ -533,12 +533,12 @@ dnssec_signing:
 
 ### 9.3 AXFR with DNSSEC policy hints
 
-The `allow_no_dnssec` option controls AXFR acceptance messaging/policy for unsigned or incomplete DNSSEC zones:
+The `allow_no_dnssec` option controls whether incomplete/unsigned AXFR material is loaded:
 
 ```yaml
 axfr_zones:
   - zone: secure.example
-    allow_no_dnssec: false   # Prefer/require DNSSEC-complete transfers
+    allow_no_dnssec: false   # Reject dnssec_state=none|partial transfers
     upstreams:
       - host: 192.0.2.10
   - zone: legacy.example
@@ -547,10 +547,10 @@ axfr_zones:
       - host: 192.0.2.20
 ```
 
-Foghorn classifies each AXFR-backed zone as `dnssec_state=present|partial|none`
-and logs warnings when DNSKEY/RRSIG data is missing or incomplete, especially
-when `allow_no_dnssec` is `false`. Treat hard-fail behavior as evolving; verify
-current runtime behavior if you rely on reject-on-unsigned semantics.
+Foghorn classifies each AXFR-backed zone as `dnssec_state=present|partial|none`.
+With `allow_no_dnssec: false`, `none`/`partial` transfers are rejected and not
+merged. Classification is a material completeness check (apex DNSKEY + RRSIG),
+not full DNSSEC chain validation.
 
 ### 9.4 DNS UPDATE (RFC 2136) quick pointer
 
@@ -584,7 +584,7 @@ Full key map, persistence/replication/security defaults, and auth notes:
   `max_concurrent_transfers`, optional per-client rate limit and transfer pacing)
   to constrain exposure and transfer load.
 - Outbound NOTIFY targets are configured explicitly (`axfr_notify`); they are not learned from AXFR clients.
-- DNS UPDATE authorization on the active path is TSIG-based (PSK schema fields are not currently enforced for request auth).
+- DNS UPDATE authorization is TSIG-only (`dns_update.zones[].psk` is rejected).
 
 This document should be updated whenever Foghorn's DNS behavior meaningfully
 changes with respect to any of the listed RFCs.
