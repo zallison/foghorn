@@ -5,7 +5,18 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- ZoneRecords shared commit pipeline (`zone_records/commit.py`) for normalized record actions used by DNS UPDATE and admin apply/delete (journal, SOA bump, NOTIFY, conflict checks).
+- ZoneRecords admin apply/delete mutations now return `zone_apex` / `serial_before` / `serial_after` metadata and optionally journal when `dns_update.persistence` is enabled.
+- DockerHosts sticky condition-state logging helpers (`_note_condition_failure` / `_note_condition_ok`) with first-failure WARNING, quiet repeats, hourly reminder, and recovery INFO.
+
 ### Changed
+- DockerHosts endpoint/list/empty-map failures use sticky condition logging instead of simple interval rate-limits; recovery is logged once when the endpoint or mapping becomes healthy again.
+- `axfr_zones[].allow_no_dnssec: false` now **rejects** transfers classified as `dnssec_state=none|partial` (apex DNSKEY/RRSIG material check) instead of only warning and loading anyway.
+- DNS UPDATE auth is explicitly **TSIG-only**: `dns_update.zones[].psk` is unsupported and fails closed at Pydantic validation, plugin setup, and `process_update_message`.
+- SOA serial bumps in the shared commit path also refresh `_name_index` and `_zone_soa` so resolver/transfer views stay consistent.
+- Demoted noisy plugin-setup, admin uvicorn-limit, and config-diagram startup lines from INFO to DEBUG; RateLimit periodic stats log line tightened.
+- Package metadata in `pyproject.toml` set to version `0.7.1b` with a shorter project description.
 - Config schema (Pydantic), config dump (secret redaction), runtime feature flags, `RuntimeSnapshot`, `main` startup, and handler mapping now carry `server.features.tsig` settings.
 - Core configuration JSON Schema is generated from Pydantic models under `src/foghorn/config/models/` (`FoghornConfig` and section models) instead of circularly rewriting `assets/config-schema.json`.
 - `scripts/generate_foghorn_schema.py` is a thin emitter (model dump, plugin `$defs` catalog, light post-processing) and restores heuristic `description` enrichment for editor tooling.
@@ -18,8 +29,17 @@ All notable changes to this project will be documented in this file.
 - `tests/config/test_foghorn_config_models.py` for FoghornConfig and nested model defaults.
 
 ### Documentation
+- Documented DockerHosts sticky condition logging in `docs/plugins/resolve/docker_hosts.md`.
+- Documented TSIG-only UPDATE auth and rejected `psk` in `docs/plugins/resolve/zone_update.md`, RFCs notes, and zone-update example configs.
+- Documented hard `allow_no_dnssec=false` AXFR rejection semantics in `docs/plugins/resolve/zone_records.md` and `docs/RFCs.md`.
+- Expanded `docs/API.md` with secure HTTP enablement gates and corrected local admin base URL example port.
 - Documented `server.features.tsig` in example configs and updated `docs/RFCs.md` RFC 2845 status (downstream QUERY partial; upstream client TSIG still open).
 - `docs/README-DEV.md` and `CONTRIBUTING.md` describe the Pydantic-driven schema workflow and `make schema` regenerate step.
+
+### Tests
+- Added `tests/plugins/test_zone_records_commit.py` for shared commit helpers, admin apply/delete wiring, journal lock fallbacks, and SOA index sync.
+- Expanded DockerHosts tests for sticky condition transitions, hourly re-warn, recovery, and pre-setup lazy init.
+- Added AXFR `allow_no_dnssec=false` reject coverage and PSK fail-closed coverage for UpdateZoneApexConfig / process_update_message.
 
 ### Added
 - Added downstream DNS COOKIE (RFC 7873) support under `server.features.cookies` with `enabled` (default `true`), `mode` (`learn` | `require_udp`), optional `secret` / `secret_old`, and `lifetime_seconds` (default 86400).

@@ -13,7 +13,7 @@ All examples use dummy values; replace them with your real deployment values.
 
 ```bash
 # Admin webserver (FastAPI) base URL
-BASE_URL='http://127.0.0.1:8080'
+BASE_URL='http://127.0.0.1:5380'
 
 # DoH listener base URL (separate listener from the admin webserver)
 DOH_BASE_URL='https://127.0.0.1:8053'
@@ -47,6 +47,28 @@ production deployments.
 ### No-auth mode
 When `server.http.auth.mode` is not `token` (default: `none`), protected endpoints are not enforced.
 
+
+## Enablement gates
+Admin HTTP surface area is controlled by `server.http` flags:
+
+- `enable_api` (bool, default `false`): when false, many `/api/v1/*` data endpoints may be unavailable depending on deployment wiring; enable for machine API use.
+- `enable_admin` (bool, default `false`): required for control-plane mutations (config save/reload/restart and related admin write actions).
+- `enable_schema` / `enable_docs` (bool, default `false`): OpenAPI schema (`/openapi.json`) and Swagger UI (`/docs`) when using the FastAPI stack.
+
+Example config snippet:
+
+```yaml
+server:
+  http:
+    host: 127.0.0.1
+    port: 5380
+    enable_api: true
+    enable_admin: true
+    auth:
+      mode: token
+      token: example-token-123
+```
+
 ## Conventions
 - Many JSON responses include `server_time` as an ISO-8601 timestamp string.
 - Many “optional feature” endpoints return `{"status": "disabled" ...}` when the backing feature is not enabled/configured.
@@ -54,6 +76,9 @@ When `server.http.auth.mode` is not `token` (default: `none`), protected endpoin
 ---
 
 # Endpoint reference
+
+See also: [Complete endpoint index](#complete-endpoint-index) for every registered path.
+
 
 ## Health / About / Readiness
 
@@ -451,6 +476,130 @@ Example response:
   "server_time": "2026-02-24T05:36:03Z",
   "path": "/path/to/config.yaml",
   "backed_up_to": "/path/to/config.yaml.bak.2026-02-24T05-36-03+00-00"
+}
+```
+
+
+### GET `/api/v1/config/schema` (alias: `/config/schema`)
+Auth: protected when `server.http.auth.mode: token`
+
+Brief: returns the Foghorn configuration JSON Schema document used for validation/editor tooling (same content as `assets/config-schema.json` when shipped).
+
+Inputs:
+- Query: none
+
+Example:
+```bash
+curl -sS \
+  -H "Authorization: Bearer $TOKEN" \
+  "$BASE_URL/api/v1/config/schema" \
+  | head -c 200
+```
+
+### POST `/api/v1/config/save_and_reload` (alias: `/config/save_and_reload`)
+Auth: protected when `server.http.auth.mode: token`
+Requires: `server.http.enable_admin: true`
+
+Brief: write YAML to disk, then attempt an in-process reload. If a restart is required, returns HTTP 409 after save (no reload applied).
+
+Inputs:
+- JSON body (required):
+  - `raw_yaml` (string): full YAML document text
+
+Example:
+```bash
+curl -sS -X POST \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d "{\"raw_yaml\": \"$(sed 's/\\/\\\\/g;s/\"/\\\"/g' config/config.yaml | awk '{printf \"%s\\n\", $0}')\"}" \
+  "$BASE_URL/api/v1/config/save_and_reload"
+```
+
+Simpler form when YAML is small enough to inline:
+```bash
+curl -sS -X POST \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  --data-binary @- <<'EOF'
+{"raw_yaml":"server:\n  listen: {}\nupstreams:\n  endpoints:\n  - host: 1.1.1.1\n"}
+EOF
+  "$BASE_URL/api/v1/config/save_and_reload"
+```
+
+### POST `/api/v1/config/save_and_restart` (alias: `/config/save_and_restart`)
+Auth: protected when `server.http.auth.mode: token`
+Requires: `server.http.enable_admin: true`
+
+Brief: write YAML to disk and schedule a process restart via SIGHUP.
+
+Inputs:
+- JSON body (required):
+  - `raw_yaml` (string)
+
+Example:
+```bash
+curl -sS -X POST \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"raw_yaml":"server:\n  listen: {}\nupstreams:\n  endpoints:\n  - host: 1.1.1.1\n"}' \
+  "$BASE_URL/api/v1/config/save_and_restart"
+```
+
+### POST `/api/v1/config/reload` (aliases: `/config/reload`, `/api/v1/reload`, `/reload`)
+Auth: protected when `server.http.auth.mode: token`
+Requires: `server.http.enable_admin: true`
+
+Brief: reload runtime config from the on-disk YAML path without saving a new body. Refuses with HTTP 409 when analysis says restart is required.
+
+Inputs:
+- Body: none
+
+Example:
+```bash
+curl -sS -X POST \
+  -H "Authorization: Bearer $TOKEN" \
+  "$BASE_URL/api/v1/reload"
+```
+
+### POST `/api/v1/config/reload_reloadable` (aliases: `/config/reload_reloadable`, `/api/v1/reload_reloadable`, `/reload_reloadable`)
+Auth: protected when `server.http.auth.mode: token`
+Requires: `server.http.enable_admin: true`
+
+Brief: apply zero-downtime-safe/reloadable settings even when some changes would normally require restart. Never schedules restart itself; returns `restart_required` metadata when a later `/restart` is needed.
+
+Inputs:
+- Body: none
+
+Example:
+```bash
+curl -sS -X POST \
+  -H "Authorization: Bearer $TOKEN" \
+  "$BASE_URL/api/v1/reload_reloadable"
+```
+
+### POST `/api/v1/restart` (alias: `/restart`)
+Auth: protected when `server.http.auth.mode: token`
+Requires: `server.http.enable_admin: true`
+
+Brief: schedule a process restart (SIGHUP) after a short delay.
+
+Inputs:
+- Body: none
+
+Example:
+```bash
+curl -sS -X POST \
+  -H "Authorization: Bearer $TOKEN" \
+  "$BASE_URL/api/v1/restart"
+```
+
+Example response:
+```json
+{
+  "status": "ok",
+  "server_time": "2026-02-24T05:36:03Z",
+  "message": "restart scheduled via SIGHUP",
+  "restart": {"scheduled": true, "signal": "SIGHUP", "delay_seconds": 1.0}
 }
 ```
 
@@ -1193,12 +1342,127 @@ curl -sS \
   "$BASE_URL/api/v1/plugins/etc/etc_hosts"
 ```
 
-### GET `/api/v1/plugins/{plugin_name}/mdns` (Resolve plugin: MdnsBridge)
+### GET `/api/v1/plugins/{plugin_name}/snapshot`
+Auth: protected when `server.http.auth.mode: token`
+
+Brief: generic plugin snapshot. Preferred discovery path for plugin admin data; kind-specific paths below are compatibility aliases that return the same shape for matching plugins.
+
+Inputs:
+- Path (required):
+  - `plugin_name` (string): configured plugin **instance** name
+
+Example:
+```bash
+curl -sS \
+  -H "Authorization: Bearer $TOKEN" \
+  "$BASE_URL/api/v1/plugins/hosts/snapshot"
+```
+
+### GET `/api/v1/plugins/{plugin_name}/access_control` (Resolve plugin: AccessControl)
+Auth: protected when `server.http.auth.mode: token`
+
+Example:
+```bash
+curl -sS \
+  -H "Authorization: Bearer $TOKEN" \
+  "$BASE_URL/api/v1/plugins/acl/access_control"
+```
+
+### GET `/api/v1/plugins/{plugin_name}/access_control/rules`
+Auth: protected when `server.http.auth.mode: token`
+
+Brief: list allow/deny rule sets for an AccessControl plugin instance.
+
+Example:
+```bash
+curl -sS \
+  -H "Authorization: Bearer $TOKEN" \
+  "$BASE_URL/api/v1/plugins/acl/access_control/rules"
+```
+
+### GET `/api/v1/plugins/{plugin_name}/docker_hosts` (Resolve plugin: DockerHosts)
 Auth: protected when `server.http.auth.mode: token`
 
 Inputs:
 - Path (required):
-  - `plugin_name` (string, example: `mdns`)
+  - `plugin_name` (string, example: `docker`)
+
+Example:
+```bash
+curl -sS \
+  -H "Authorization: Bearer $TOKEN" \
+  "$BASE_URL/api/v1/plugins/docker/docker_hosts"
+```
+
+### GET `/api/v1/plugins/{plugin_name}/docker_hosts/containers/{name}`
+Auth: protected when `server.http.auth.mode: token`
+
+Brief: fetch one published DockerHosts container/alias entry by name.
+
+Example:
+```bash
+curl -sS \
+  -H "Authorization: Bearer $TOKEN" \
+  "$BASE_URL/api/v1/plugins/docker/docker_hosts/containers/web"
+```
+
+### POST `/api/v1/plugins/{plugin_name}/docker_hosts/reload`
+Auth: protected when `server.http.auth.mode: token`
+
+Brief: force a DockerHosts inventory reload.
+
+Example:
+```bash
+curl -sS -X POST \
+  -H "Authorization: Bearer $TOKEN" \
+  "$BASE_URL/api/v1/plugins/docker/docker_hosts/reload"
+```
+
+### GET `/api/v1/plugins/{plugin_name}/etc_hosts` (Resolve plugin: EtcHosts)
+Auth: protected when `server.http.auth.mode: token`
+
+Inputs:
+- Path (required):
+  - `plugin_name` (string, example: `hosts`)
+
+Example:
+```bash
+curl -sS \
+  -H "Authorization: Bearer $TOKEN" \
+  "$BASE_URL/api/v1/plugins/hosts/etc_hosts"
+```
+
+### GET `/api/v1/plugins/{plugin_name}/etc_hosts/lookup`
+Auth: protected when `server.http.auth.mode: token`
+
+Brief: look up a single hosts mapping by name.
+
+Inputs:
+- Path: `plugin_name`
+- Query (required for a useful lookup):
+  - `name` (string, example: `app.internal`)
+
+Example:
+```bash
+curl -sS \
+  -H "Authorization: Bearer $TOKEN" \
+  "$BASE_URL/api/v1/plugins/hosts/etc_hosts/lookup?name=app.internal"
+```
+
+### POST `/api/v1/plugins/{plugin_name}/etc_hosts/reload`
+Auth: protected when `server.http.auth.mode: token`
+
+Brief: reload hosts files from disk into the EtcHosts plugin.
+
+Example:
+```bash
+curl -sS -X POST \
+  -H "Authorization: Bearer $TOKEN" \
+  "$BASE_URL/api/v1/plugins/hosts/etc_hosts/reload"
+```
+
+### GET `/api/v1/plugins/{plugin_name}/mdns` (Resolve plugin: MdnsBridge)
+Auth: protected when `server.http.auth.mode: token`
 
 Example:
 ```bash
@@ -1206,6 +1470,137 @@ curl -sS \
   -H "Authorization: Bearer $TOKEN" \
   "$BASE_URL/api/v1/plugins/mdns/mdns"
 ```
+
+### GET `/api/v1/plugins/{plugin_name}/mdns/services`
+Auth: protected when `server.http.auth.mode: token`
+
+Brief: list discovered mDNS/DNS-SD services with optional filters.
+
+Inputs:
+- Query (optional):
+  - `status` (string)
+  - `type` (string): service type filter (example: `_http._tcp`)
+
+Example:
+```bash
+curl -sS \
+  -H "Authorization: Bearer $TOKEN" \
+  "$BASE_URL/api/v1/plugins/mdns/mdns/services?type=_http._tcp"
+```
+
+### GET `/api/v1/plugins/{plugin_name}/rate_limit` (Resolve plugin: RateLimit)
+Auth: protected when `server.http.auth.mode: token`
+
+Example:
+```bash
+curl -sS \
+  -H "Authorization: Bearer $TOKEN" \
+  "$BASE_URL/api/v1/plugins/rate/rate_limit"
+```
+
+### GET `/api/v1/plugins/{plugin_name}/rate_limit/profiles`
+Auth: protected when `server.http.auth.mode: token`
+
+Inputs:
+- Query (optional):
+  - `limit` (int)
+  - `sort` (string)
+
+Example:
+```bash
+curl -sS \
+  -H "Authorization: Bearer $TOKEN" \
+  "$BASE_URL/api/v1/plugins/rate/rate_limit/profiles?limit=50"
+```
+
+### GET `/api/v1/plugins/{plugin_name}/zone_records` (Resolve plugin: ZoneRecords)
+Auth: protected when `server.http.auth.mode: token`
+
+Example:
+```bash
+curl -sS \
+  -H "Authorization: Bearer $TOKEN" \
+  "$BASE_URL/api/v1/plugins/zone/zone_records"
+```
+
+### GET `/api/v1/plugins/{plugin_name}/zone_records/lookup`
+Auth: protected when `server.http.auth.mode: token`
+
+Inputs:
+- Query (optional but recommended):
+  - `owner` (string, example: `www.example.com`)
+  - `qtype` (string, example: `A`)
+
+Example:
+```bash
+curl -sS \
+  -H "Authorization: Bearer $TOKEN" \
+  "$BASE_URL/api/v1/plugins/zone/zone_records/lookup?owner=www.example.com&qtype=A"
+```
+
+### GET `/api/v1/plugins/{plugin_name}/zone_records/dns_update/zones/{zone}`
+Auth: protected when `server.http.auth.mode: token`
+
+Brief: DNS UPDATE / journal status for one zone apex configured on ZoneRecords.
+
+Example:
+```bash
+curl -sS \
+  -H "Authorization: Bearer $TOKEN" \
+  "$BASE_URL/api/v1/plugins/zone/zone_records/dns_update/zones/example.com"
+```
+
+### POST `/api/v1/plugins/{plugin_name}/zone_records/reload`
+Auth: protected when `server.http.auth.mode: token`
+
+Example:
+```bash
+curl -sS -X POST \
+  -H "Authorization: Bearer $TOKEN" \
+  "$BASE_URL/api/v1/plugins/zone/zone_records/reload"
+```
+
+### POST `/api/v1/plugins/{plugin_name}/zone_records/compact`
+Auth: protected when `server.http.auth.mode: token`
+
+Brief: compact DNS UPDATE journal/snapshot state for a zone (when persistence is enabled).
+
+Inputs:
+- JSON body (optional):
+  - `zone` (string): zone apex to compact; when omitted, plugin default behavior applies
+
+Example:
+```bash
+curl -sS -X POST \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"zone":"example.com"}' \
+  "$BASE_URL/api/v1/plugins/zone/zone_records/compact"
+```
+
+### GET `/api/v1/plugins/{plugin_name}/upstream_router/evaluate` (Resolve plugin: UpstreamRouter)
+Auth: protected when `server.http.auth.mode: token`
+
+Brief: evaluate which upstream candidates a qname would select.
+
+Inputs:
+- Query (recommended):
+  - `qname` (string, example: `api.internal.example`)
+
+Example:
+```bash
+curl -sS \
+  -H "Authorization: Bearer $TOKEN" \
+  "$BASE_URL/api/v1/plugins/router/upstream_router/evaluate?qname=api.internal.example"
+```
+
+### Host/record mutations for EtcHosts and ZoneRecords
+Use the admin records API (not `/plugins/...`):
+
+- `POST /api/v1/admin/records/etc_hosts/validate|apply|delete|list|purge_expired`
+- `POST /api/v1/admin/records/zone_records/validate|apply|delete|list|purge_expired`
+
+See [Admin actions](#admin-actions-apiv1admin) above for full curl examples.
 
 ---
 
@@ -1571,3 +1966,102 @@ RateLimit does not expose specific DNS owners; it enforces per-key rate limits o
 ## Resolve plugin: FileDownloader (`file_downloader.py`)
 
 FileDownloader does not expose DNS owners; it periodically downloads list files for other plugins (for example Filter).
+
+---
+
+# Complete endpoint index
+
+Canonical method + path pairs registered by the FastAPI webserver (legacy aliases included). Paths under `/api/v1/...` are preferred.
+
+## Admin
+- `GET /api/v1/admin/audit`
+- `POST /api/v1/admin/audit/clear`
+- `GET /api/v1/admin/capabilities`
+- `POST /api/v1/admin/config/diff`
+- `POST /api/v1/admin/config/lint`
+- `POST /api/v1/admin/config/verify`
+- `GET /api/v1/admin/diag/runtime-snapshot`
+- `POST /api/v1/admin/query_log/clear`
+- `POST /api/v1/admin/query_log/compact`
+- `POST /api/v1/admin/query_log/export`
+- `POST /api/v1/admin/rate_limit/clear`
+- `GET /api/v1/admin/rate_limit/hot_keys`
+- `GET /api/v1/admin/rate_limit/keys`
+- `POST /api/v1/admin/rate_limit/reset_counters`
+- `POST /api/v1/admin/records/{target}/apply`
+- `POST /api/v1/admin/records/{target}/delete`
+- `POST /api/v1/admin/records/{target}/list`
+- `POST /api/v1/admin/records/{target}/purge_expired`
+- `POST /api/v1/admin/records/{target}/validate`
+- `GET /api/v1/admin/restart/status`
+- `GET /api/v1/admin/status`
+- `GET /api/v1/admin/tasks`
+- `GET /api/v1/admin/version/compat`
+
+## Config / control plane
+- `GET /api/v1/config` (`/config`)
+- `GET /api/v1/config.json` (`/config.json`)
+- `GET /api/v1/config/raw` (`/config/raw`)
+- `GET /api/v1/config/raw.json` (`/config/raw.json`)
+- `GET /api/v1/config/schema` (`/config/schema`)
+- `GET /api/v1/config/diagram.dot` (`/config/diagram.dot`)
+- `GET /api/v1/config/diagram.png` (`/config/diagram.png`)
+- `GET /api/v1/config/diagram-dark.png` (`/config/diagram-dark.png`)
+- `POST /api/v1/config/diagram.png` (`/config/diagram.png`)
+- `POST /api/v1/config/save` (`/config/save`)
+- `POST /api/v1/config/save_and_reload` (`/config/save_and_reload`)
+- `POST /api/v1/config/save_and_restart` (`/config/save_and_restart`)
+- `POST /api/v1/config/reload` (`/config/reload`, `/api/v1/reload`, `/reload`)
+- `POST /api/v1/config/reload_reloadable` (`/config/reload_reloadable`, `/api/v1/reload_reloadable`, `/reload_reloadable`)
+- `POST /api/v1/restart` (`/restart`)
+
+## Stats / query log / traffic
+- `GET /api/v1/stats` (`/stats`)
+- `GET /api/v1/stats/table/{table_id}`
+- `POST /api/v1/stats/reset` (`/stats/reset`)
+- `GET /api/v1/query_log` (`/query_log`)
+- `GET /api/v1/query_log/aggregate` (`/query_log/aggregate`)
+- `GET /api/v1/traffic` (`/traffic`)
+- `GET /api/v1/ratelimit`
+- `GET /api/v1/upstream_status`
+- `GET /api/v1/cache`
+- `GET /api/v1/cache/table/{table_id}`
+- `GET /api/v1/logs` (`/logs`)
+
+## Health / meta
+- `GET /api/v1/health` (`/health`)
+- `GET /api/v1/ready` (`/ready`)
+- `GET /api/v1/about` (`/about`)
+
+## Plugins
+- `GET /api/v1/plugin_pages`
+- `GET /api/v1/plugin_pages/{plugin_name}/{page_slug}`
+- `GET /api/v1/plugins/ui`
+- `GET /api/v1/plugins/{plugin_name}/snapshot`
+- `GET /api/v1/plugins/{plugin_name}/table/{table_id}`
+- `GET /api/v1/plugins/{plugin_name}/access_control`
+- `GET /api/v1/plugins/{plugin_name}/access_control/rules`
+- `GET /api/v1/plugins/{plugin_name}/docker_hosts`
+- `GET /api/v1/plugins/{plugin_name}/docker_hosts/containers/{name}`
+- `POST /api/v1/plugins/{plugin_name}/docker_hosts/reload`
+- `GET /api/v1/plugins/{plugin_name}/etc_hosts`
+- `GET /api/v1/plugins/{plugin_name}/etc_hosts/lookup`
+- `POST /api/v1/plugins/{plugin_name}/etc_hosts/reload`
+- `GET /api/v1/plugins/{plugin_name}/mdns`
+- `GET /api/v1/plugins/{plugin_name}/mdns/services`
+- `GET /api/v1/plugins/{plugin_name}/rate_limit`
+- `GET /api/v1/plugins/{plugin_name}/rate_limit/profiles`
+- `GET /api/v1/plugins/{plugin_name}/zone_records`
+- `GET /api/v1/plugins/{plugin_name}/zone_records/lookup`
+- `GET /api/v1/plugins/{plugin_name}/zone_records/dns_update/zones/{zone}`
+- `POST /api/v1/plugins/{plugin_name}/zone_records/reload`
+- `POST /api/v1/plugins/{plugin_name}/zone_records/compact`
+- `GET /api/v1/plugins/{plugin_name}/upstream_router/evaluate`
+
+## UI / static
+- `GET /` (`/index.html`)
+- `GET /{path:path}`
+
+## DoH listener (separate base URL)
+- `GET /dns-query`
+- `POST /dns-query`

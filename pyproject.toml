@@ -4,9 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "foghorn"
-version = "0.7.1"
-description = "Foghorn is a fast, pluggable DNS server that caches, filters, routes, and bends DNS to your will. Up- and down-stream UDP, TCP, DoT, and DoH. DNSEC. Because DNS should do what you want."
-
+version = "0.7.1b"
+description = "Pluggable DNS server with caching, filtering, and routing. Supports UDP, TCP, DoT, and DoH upstream and downstream, plus DNSSEC."
 authors = [ { name = "Zack Allison", email = "zack@zackallison.com" } ]
 license = { file = "LICENSE.txt" }
 readme = "README.md"
