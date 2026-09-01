@@ -309,9 +309,18 @@ TSIG is implemented for zone-management paths and optional downstream QUERY auth
   - Shared helpers live in `src/foghorn/servers/tsig_utils.py`.
   - Optional `allow_clients` / `listeners` scope enforcement.
 - Upstream AXFR client transfers (`axfr_zones[*].upstreams[*].tsig`).
-- Downstream AXFR/IXFR serving (`server.axfr.require_tsig` + nested `server.axfr.tsig` keys/sources; legacy `tsig_keys` alias retained).
+- Downstream AXFR/IXFR serving (`server.axfr.require_tsig` + nested `server.axfr.tsig` keys/sources; legacy `tsig_keys` alias retained). When the AXFR block defines no keys, it auto-inherits `server.features.tsig.keys` / `key_sources`; AXFR-level keys always win when present.
 - DNS UPDATE authentication and best-effort signed error responses.
 - Best-effort MAC verification for signed non-QUERY opcodes before plugin dispatch; prefers `server.features.tsig` / snapshot keys, then ZoneRecords UPDATE keys; signed messages are refused when no keys are configured.
+
+Operational notes for `server.features.tsig`:
+
+- Start with `mode: optional` to identify signed clients via `tsig_key_name` in logs, then move internal clients to `require`.
+- `require` fails closed: missing/invalid TSIG gets NOTAUTH before cache/plugins/upstream. With an empty keyring, TSIG-present queries are rejected in both modes and `mode: require` refuses everything; a startup warning is emitted.
+- `allow_clients` (CIDR) and `listeners` (`udp|tcp|dot|doh|secure|insecure`) scope where verification/enforcement applies; clients outside the scope bypass TSIG entirely.
+- Share key material across AXFR/UPDATE/QUERY by pointing `key_sources: [{type: file, path: ...}]` at the same file; rotate by listing old and new keys together. AXFR/IXFR serving auto-inherits `server.features.tsig` keys when its own `tsig` block defines none (AXFR-level keys always win when present).
+- TSIG authenticates but does not encrypt; prefer DoT/DoH for confidentiality, and keep clients NTP-synchronized (`max_fudge_seconds` bounds skew, default 300).
+- Clients using both TSIG and DNS COOKIEs must satisfy both gates; cookie `require_udp` is evaluated before the TSIG gate.
 
 **Still missing:** upstream/client TSIG on ordinary forward QUERY traffic to resolvers/authoritatives.
 

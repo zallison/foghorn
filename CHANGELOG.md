@@ -17,18 +17,23 @@ All notable changes to this project will be documented in this file.
 - SOA serial bumps in the shared commit path also refresh `_name_index` and `_zone_soa` so resolver/transfer views stay consistent.
 - Demoted noisy plugin-setup, admin uvicorn-limit, and config-diagram startup lines from INFO to DEBUG; RateLimit periodic stats log line tightened.
 - Package metadata in `pyproject.toml` set to version `0.7.1b` with a shorter project description.
+- AXFR/IXFR serving now auto-inherits `server.features.tsig` keys (inline and `key_sources`) when `server.axfr.tsig` / legacy `tsig_keys` define none; AXFR-level keys always win when present.
+- QUERY TSIG now fails closed when enabled with an empty/unusable keyring: TSIG-present queries are rejected with NOTAUTH even in `optional` mode, and keyring build failures report `Failed to build TSIG keyring`.
+- TSIG response signing now passes the verified request message so RFC 2845 `original_id` is correct on cache-hit responses.
 - Config schema (Pydantic), config dump (secret redaction), runtime feature flags, `RuntimeSnapshot`, `main` startup, and handler mapping now carry `server.features.tsig` settings.
 - Core configuration JSON Schema is generated from Pydantic models under `src/foghorn/config/models/` (`FoghornConfig` and section models) instead of circularly rewriting `assets/config-schema.json`.
 - `scripts/generate_foghorn_schema.py` is a thin emitter (model dump, plugin `$defs` catalog, light post-processing) and restores heuristic `description` enrichment for editor tooling.
 
 ### Added
 - Added downstream QUERY TSIG (RFC 2845) under `server.features.tsig` (`enabled` default false, `mode` optional|require, `keys`/`key_sources`, `max_fudge_seconds`, optional `allow_clients`/`listeners`).
+- Startup security warnings for QUERY TSIG misconfigurations: `server.features.tsig` enabled with no resolved keys, and `mode: require` on a non-loopback UDP listener without `allow_clients`.
 - Shared TSIG helpers in `src/foghorn/servers/tsig_utils.py` (verify/sign/strip/error responses); ZoneRecords `verify_tsig_auth` delegates to the shared implementation.
 - QUERY path verifies TSIG near the cookies gate, signs successful responses, strips TSIG from cache payloads, and re-signs on cache hits; non-QUERY opcode verify prefers server snapshot keys.
 - `src/foghorn/config/models/` package as the source of truth for core config schema fields.
 - `tests/config/test_foghorn_config_models.py` for FoghornConfig and nested model defaults.
 
 ### Documentation
+- Added QUERY TSIG operational notes (optional vs require, shared key_sources files, NTP, cookies/DoT interaction, empty-keyring policy) to `docs/RFCs.md` §5.4.
 - Documented DockerHosts sticky condition logging in `docs/plugins/resolve/docker_hosts.md`.
 - Documented TSIG-only UPDATE auth and rejected `psk` in `docs/plugins/resolve/zone_update.md`, RFCs notes, and zone-update example configs.
 - Documented hard `allow_no_dnssec=false` AXFR rejection semantics in `docs/plugins/resolve/zone_records.md` and `docs/RFCs.md`.
@@ -37,6 +42,9 @@ All notable changes to this project will be documented in this file.
 - `docs/README-DEV.md` and `CONTRIBUTING.md` describe the Pydantic-driven schema workflow and `make schema` regenerate step.
 
 ### Tests
+- Added AXFR TSIG key-inheritance coverage (axfr-empty inherits `server.features.tsig`, axfr-level keys win, snapshot wiring) in `tests/test_runtime_config_comprehensive.py`; updated the AXFR require-TSIG error message text in transfer tests.
+- Fixed `test_run_setup_plugins_priority_and_fallback` to capture the per-plugin setup log at DEBUG after startup setup lines were demoted from INFO to DEBUG.
+- Expanded `tests/server/test_dns_tsig.py` with allow_clients/listeners scoping, fudge/algorithm-mismatch rejection, empty-keyring fail-closed behavior, and an explicit cached-body-has-no-TSIG assertion; added TSIG startup-warning coverage in `tests/test_main_security_warnings.py`.
 - Added `tests/plugins/test_zone_records_commit.py` for shared commit helpers, admin apply/delete wiring, journal lock fallbacks, and SOA index sync.
 - Expanded DockerHosts tests for sticky condition transitions, hourly re-warn, recovery, and pre-setup lazy init.
 - Added AXFR `allow_no_dnssec=false` reject coverage and PSK fail-closed coverage for UpdateZoneApexConfig / process_update_message.
