@@ -10,7 +10,7 @@ Outputs:
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any
 
 import pytest
 
@@ -24,8 +24,6 @@ except ModuleNotFoundError:  # pragma: no cover - environment dependent
     )
 
 from foghorn.servers.webserver import AdminPageSpec, create_app, start_webserver
-
-
 from tests.helpers.webserver_test_cfg import (
     normalize_web_cfg_layout as _normalize_web_cfg_layout,
 )
@@ -71,14 +69,14 @@ class _PluginWithPages:
     def __init__(self, name: str) -> None:
         self.name = name
 
-    def get_admin_pages(self) -> List[AdminPageSpec]:
+    def get_admin_pages(self) -> list[AdminPageSpec]:
         return [
             AdminPageSpec(slug="summary", title="Summary", description="d1"),
             # Invalid (no slug/title) should be ignored.
             AdminPageSpec(slug="", title=""),
         ]
 
-    def get_admin_ui_descriptor(self) -> Dict[str, Any]:
+    def get_admin_ui_descriptor(self) -> dict[str, Any]:
         # Include instance name in title so normalisation strips it.
         return {
             "name": self.name,
@@ -92,12 +90,12 @@ class _EtcHostsPlugin:
     def __init__(self, name: str) -> None:
         self.name = name
 
-    def get_http_snapshot(self) -> Dict[str, Any]:  # pragma: no cover - via handler
+    def get_http_snapshot(self) -> dict[str, Any]:  # pragma: no cover - via handler
         return {"plugin": self.name, "data": "ok"}
 
 
 @pytest.fixture
-def web_config(tmp_path: Path) -> Dict[str, Any]:
+def web_config(tmp_path: Path) -> dict[str, Any]:
     www_root = tmp_path / "html"
     www_root.mkdir()
     (www_root / "index.html").write_text("<html>ok</html>", encoding="utf-8")
@@ -117,8 +115,8 @@ def web_config(tmp_path: Path) -> Dict[str, Any]:
 
 
 @pytest.fixture
-def web_app(web_config: Dict[str, Any]) -> TestClient:
-    plugins: List[object] = [
+def web_app(web_config: dict[str, Any]) -> TestClient:
+    plugins: list[object] = [
         _PluginWithPages("docker"),
         _EtcHostsPlugin("docker_hosts"),
         _EtcHostsPlugin("etc_hosts"),
@@ -173,7 +171,7 @@ def test_list_plugin_ui_descriptors_and_title_normalisation(
 
 
 def test_cache_snapshot_404_and_success(
-    monkeypatch: pytest.MonkeyPatch, web_config: Dict[str, Any]
+    monkeypatch: pytest.MonkeyPatch, web_config: dict[str, Any]
 ) -> None:
     from foghorn.plugins.resolve import base as plugin_base
 
@@ -189,7 +187,7 @@ def test_cache_snapshot_404_and_success(
         def __init__(self) -> None:
             self.name = "dummy_cache"
 
-        def get_http_snapshot(self) -> Dict[str, Any]:  # pragma: no cover - via handler
+        def get_http_snapshot(self) -> dict[str, Any]:  # pragma: no cover - via handler
             return {"ok": True}
 
     monkeypatch.setattr(plugin_base, "DNS_CACHE", DummyCache(), raising=False)
@@ -232,7 +230,7 @@ def test_plugin_specific_snapshot_endpoints(web_app: TestClient) -> None:
 
 
 def test_index_and_static_www_serving(
-    tmp_path: Path, web_config: Dict[str, Any]
+    tmp_path: Path, web_config: dict[str, Any]
 ) -> None:
     # Ensure index.html exists in www_root from fixture.
     app = create_app(None, web_config, None, None, None, plugins=[])
@@ -259,7 +257,7 @@ def test_index_and_static_www_serving(
 
 
 def test_start_webserver_threaded_fallback(
-    monkeypatch: pytest.MonkeyPatch, web_config: Dict[str, Any]
+    monkeypatch: pytest.MonkeyPatch, web_config: dict[str, Any]
 ) -> None:
     """Brief: start_webserver falls back to minimal _start_admin_server_threaded call.
 
@@ -373,3 +371,38 @@ def test_admin_index_html_persists_paged_table_search_and_sort_state() -> None:
     )
     assert "sortKey: state.sortKey," in text
     assert "sortDir: state.sortDir," in text
+
+
+def test_admin_index_html_sends_stored_api_token_on_fetches() -> None:
+    """Brief: Shipped admin UI authenticates API calls with a stored bearer token.
+
+    Inputs:
+      - None; reads packaged html/index.html from resolve_www_root.
+
+    Outputs:
+      - Asserts localStorage token helpers, 401 prompt/retry via apiFetch,
+        Authorization bearer wiring, and API Token button/control exist so the
+        browser UI can talk to token-protected enable_api endpoints.
+    """
+
+    from foghorn.servers import webserver as ws
+
+    html_root = Path(ws.resolve_www_root({}))
+    index_path = html_root / "index.html"
+    text = index_path.read_text(encoding="utf-8")
+
+    assert "var API_TOKEN_STORAGE_KEY = 'foghorn-api-token';" in text
+    assert "function getStoredApiToken()" in text
+    assert "function setStoredApiToken(token)" in text
+    assert "function promptForApiToken(reason)" in text
+    assert "function buildApiFetchInit(init)" in text
+    assert "function apiFetch(path, init, allowPrompt)" in text
+    assert "headers.set('Authorization', 'Bearer ' + token);" in text
+    assert "resp.status !== 401 || !allowPrompt" in text
+    assert "return fetch(path, buildApiFetchInit(init));" in text
+    assert 'id="btn-api-token"' in text
+    assert "function loadDiagramPngBlob(pngUrl)" in text
+    assert "URL.createObjectURL(blob)" in text
+    assert "return apiFetch(path, { cache: 'no-store' })" in text
+    assert "return apiFetch(url, { cache: 'no-store' })" in text
+    assert "apiFetch('/api/v1/config/save'" in text

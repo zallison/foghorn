@@ -50,15 +50,18 @@
 					<h1 class="fh-title">Foghorn</h1>
 					<p class="fh-subtitle">Runtime statistics and configuration</p>
 				</div>
-				<div class="fh-theme-toggle" role="radiogroup" aria-label="Color theme">
-					<button id="btn-theme-dark" class="fh-theme-btn fh-theme-btn-active" type="button" role="radio"
-						aria-checked="true">
-						Dark
-					</button>
-					<button id="btn-theme-light" class="fh-theme-btn" type="button" role="radio" aria-checked="false">
-						Light
-					</button>
-				</div>
+			<div class="fh-theme-toggle" role="radiogroup" aria-label="Color theme">
+				<button id="btn-theme-dark" class="fh-theme-btn fh-theme-btn-active" type="button" role="radio"
+					aria-checked="true">
+					Dark
+				</button>
+				<button id="btn-theme-light" class="fh-theme-btn" type="button" role="radio" aria-checked="false">
+					Light
+				</button>
+				<button id="btn-api-token" class="fh-theme-btn" type="button" title="Set or clear the admin API token">
+					API Token
+				</button>
+			</div>
 			</div>
 		</div>
 	</header>
@@ -304,6 +307,7 @@
 			var actionsEdit = document.getElementById('config-actions-edit');
 			var btnThemeDark = document.getElementById('btn-theme-dark');
 			var btnThemeLight = document.getElementById('btn-theme-light');
+			var btnApiToken = document.getElementById('btn-api-token');
 			var page1 = document.getElementById('page1');
 			var page2 = document.getElementById('page2');
 			var pageQueryLog = document.getElementById('page-query-log');
@@ -321,6 +325,9 @@
 			var autoRefreshTimer = null;
 			var DEFAULT_REFRESH_SECONDS = '15';
 			var REFRESH_INTERVAL_STORAGE_KEY = 'foghorn-refresh-interval-seconds';
+			var API_TOKEN_STORAGE_KEY = 'foghorn-api-token';
+			var _apiTokenPromptInFlight = null;
+			var _diagramObjectUrl = null;
 			var queryLogFilters = {
 				qname: '',
 				qtype: '',
@@ -537,8 +544,115 @@
 				}
 			}
 
+			function getStoredApiToken() {
+				try {
+					if (!window.localStorage) {
+						return '';
+					}
+					return String(localStorage.getItem(API_TOKEN_STORAGE_KEY) || '').trim();
+				} catch (e) {
+					return '';
+				}
+			}
+
+			function setStoredApiToken(token) {
+				var next = token == null ? '' : String(token).trim();
+				try {
+					if (window.localStorage) {
+						if (next) {
+							localStorage.setItem(API_TOKEN_STORAGE_KEY, next);
+						} else {
+							localStorage.removeItem(API_TOKEN_STORAGE_KEY);
+						}
+					}
+				} catch (e) {}
+				return next;
+			}
+
+			function promptForApiToken(reason) {
+				if (_apiTokenPromptInFlight) {
+					return _apiTokenPromptInFlight;
+				}
+				_apiTokenPromptInFlight = Promise.resolve().then(function () {
+					var existing = getStoredApiToken();
+					var message =
+						'Foghorn API token required' +
+						(reason ? ' (' + reason + ')' : '') +
+						'.\n' +
+						'Enter server.http.auth.token (or the session token logged at startup).\n' +
+						'Leave blank to clear the stored token.';
+					var entered = null;
+					try {
+						entered = window.prompt(message, existing);
+					} catch (e) {
+						entered = null;
+					}
+					if (entered === null) {
+						return getStoredApiToken();
+					}
+					return setStoredApiToken(entered);
+				}).then(function (token) {
+					_apiTokenPromptInFlight = null;
+					return token;
+				}, function (err) {
+					_apiTokenPromptInFlight = null;
+					throw err;
+				});
+				return _apiTokenPromptInFlight;
+			}
+
+			function buildApiFetchInit(init) {
+				var next = {};
+				if (init && typeof init === 'object') {
+					Object.keys(init).forEach(function (key) {
+						next[key] = init[key];
+					});
+				}
+				var headers;
+				try {
+					headers = new Headers(next.headers || {});
+				} catch (e) {
+					headers = new Headers();
+					var raw = next.headers || {};
+					if (raw && typeof raw === 'object') {
+						Object.keys(raw).forEach(function (key) {
+							headers.set(key, raw[key]);
+						});
+					}
+				}
+				var token = getStoredApiToken();
+				if (token && !headers.has('Authorization') && !headers.has('X-API-Key')) {
+					headers.set('Authorization', 'Bearer ' + token);
+				}
+				next.headers = headers;
+				if (next.cache == null) {
+					next.cache = 'no-store';
+				}
+				return next;
+			}
+
+			function apiFetch(path, init, allowPrompt) {
+				if (allowPrompt === undefined) {
+					allowPrompt = true;
+				}
+				var firstInit = buildApiFetchInit(init);
+				return fetch(path, firstInit).then(function (resp) {
+					if (resp.status !== 401 || !allowPrompt) {
+						return resp;
+					}
+					// Token auth required: prompt once (shared across concurrent 401s),
+					// store in localStorage, and retry this request exactly once.
+					return promptForApiToken('HTTP 401 from ' + path).then(function (token) {
+						if (!token) {
+							return resp;
+						}
+						return fetch(path, buildApiFetchInit(init));
+					});
+				});
+			}
+
 			function fetchJson(path) {
-				return fetch(path, { cache: 'no-store' }).then(function (resp) {
+				return apiFetch(path, { cache: 'no-store' }).then(function (resp) {
 					if (!resp.ok) {
 						throw new Error('HTTP ' + resp.status + ' from ' + path);
 					}
@@ -2885,6 +2999,58 @@ textBtn.type = 'button';
 					configDiagramUploadStatusEl.textContent = '';
 				}
 
+				function revokeDiagramObjectUrl() {
+					if (!_diagramObjectUrl) {
+						return;
+					}
+					try {
+						URL.revokeObjectURL(_diagramObjectUrl);
+					} catch (e) {}
+					_diagramObjectUrl = null;
+				}
+
+				function showDiagramImageFromBlob(blob) {
+					revokeDiagramObjectUrl();
+					_diagramObjectUrl = URL.createObjectURL(blob);
+					configDiagramImgEl.src = _diagramObjectUrl;
+				}
+
+				function showDiagramDotFallback() {
+					if (configDiagramStatusEl) {
+						configDiagramStatusEl.textContent = 'PNG unavailable; showing GraphViz dot source.';
+					}
+					// Diagram missing (usually dot is not available on the server): keep the
+					// standard two-pane layout and show the dot output in the diagram
+					// area instead of collapsing to a single column.
+					configDiagramImgEl.style.display = 'none';
+					if (configDiagramFallbackEl) {
+						configDiagramFallbackEl.hidden = false;
+					}
+					if (!configDiagramDotEl) {
+						return;
+					}
+					configDiagramDotEl.textContent = 'Loading dot source...';
+					apiFetch('/api/v1/config/diagram.dot?ts=' + Date.now(), { cache: 'no-store' })
+						.then(function (resp) {
+							var warn = resp.headers.get('x-foghorn-warning');
+							if (warn && configDiagramStatusEl) {
+								configDiagramStatusEl.textContent = warn;
+							}
+							if (!resp.ok) {
+								throw new Error('HTTP ' + resp.status);
+							}
+							return resp.text();
+						})
+						.then(function (text) {
+							configDiagramDotEl.textContent = text || '';
+						})
+						.catch(function (err) {
+							configDiagramDotEl.textContent =
+								'Failed to load dot source: ' +
+								(err && err.message ? err.message : String(err));
+						});
+				}
+
 				configDiagramImgEl.onload = function () {
 					if (configDiagramStatusEl) {
 						configDiagramStatusEl.textContent = '';
@@ -2903,7 +3069,7 @@ textBtn.type = 'button';
 
 					// Best-effort: fetch only headers from /diagram.dot so we can surface
 					// staleness warnings even when the PNG loads successfully.
-					fetch('/api/v1/config/diagram.dot?meta=1&ts=' + Date.now(), { cache: 'no-store' })
+					apiFetch('/api/v1/config/diagram.dot?meta=1&ts=' + Date.now(), { cache: 'no-store' })
 						.then(function (resp) {
 							var warn = resp.headers.get('x-foghorn-warning');
 							if (warn && configDiagramStatusEl) {
@@ -2915,36 +3081,7 @@ textBtn.type = 'button';
 						});
 				};
 				configDiagramImgEl.onerror = function () {
-					if (configDiagramStatusEl) {
-						configDiagramStatusEl.textContent = 'PNG unavailable; showing GraphViz dot source.';
-					}
-					// Diagram missing (usually dot is not available on the server): keep the
-					// standard two-pane layout and show the dot output in the diagram
-					// area instead of collapsing to a single column.
-					configDiagramImgEl.style.display = 'none';
-					if (configDiagramFallbackEl) {
-						configDiagramFallbackEl.hidden = false;
-					}
-					if (configDiagramDotEl) {
-						configDiagramDotEl.textContent = 'Loading dot source...';
-						fetch('/api/v1/config/diagram.dot?ts=' + Date.now(), { cache: 'no-store' })
-							.then(function (resp) {
-								var warn = resp.headers.get('x-foghorn-warning');
-								if (warn && configDiagramStatusEl) {
-									configDiagramStatusEl.textContent = warn;
-								}
-								if (!resp.ok) {
-									throw new Error('HTTP ' + resp.status);
-								}
-								return resp.text();
-							})
-							.then(function (text) {
-								configDiagramDotEl.textContent = text || '';
-							})
-							.catch(function (err) {
-								configDiagramDotEl.textContent = 'Failed to load dot source: ' + (err && err.message ? err.message : String(err));
-							});
-					}
+					showDiagramDotFallback();
 				};
 
 				var ts = Date.now();
@@ -2970,8 +3107,20 @@ textBtn.type = 'button';
 				var primaryPng = isDarkThemeSelected() ? '/api/v1/config/diagram-dark.png' : '/api/v1/config/diagram.png';
 				var fallbackPng = '/api/v1/config/diagram.png';
 
+				function loadDiagramPngBlob(pngUrl) {
+					// <img src> cannot send Authorization headers, so load via apiFetch+blob.
+					return apiFetch(pngUrl + '?ts=' + ts, { cache: 'no-store' }).then(function (resp) {
+						if (!resp.ok) {
+							throw new Error('HTTP ' + resp.status);
+						}
+						return resp.blob();
+					}).then(function (blob) {
+						showDiagramImageFromBlob(blob);
+					});
+				}
+
 				function probeAndLoad(pngUrl, maybeFallbackUrl) {
-					fetch(pngUrl + '?meta=1&ts=' + ts, { cache: 'no-store' })
+					apiFetch(pngUrl + '?meta=1&ts=' + ts, { cache: 'no-store' })
 						.then(function (resp) {
 							if (!resp.ok) {
 								throw new Error('HTTP ' + resp.status);
@@ -2985,17 +3134,16 @@ textBtn.type = 'button';
 								if (maybeFallbackUrl) {
 									return probeAndLoad(maybeFallbackUrl, null);
 								}
-								if (typeof configDiagramImgEl.onerror === 'function') {
-									configDiagramImgEl.onerror();
-								}
+								showDiagramDotFallback();
 								return;
 							}
-							configDiagramImgEl.src = pngUrl + '?ts=' + ts;
+							return loadDiagramPngBlob(pngUrl);
 						})
 						.catch(function () {
-							// Older servers may not support the meta probe; fall back to
-							// the img load/onerror path.
-							configDiagramImgEl.src = pngUrl + '?ts=' + ts;
+							// Older servers may not support the meta probe; try the PNG body path.
+							return loadDiagramPngBlob(pngUrl).catch(function () {
+								showDiagramDotFallback();
+							});
 						});
 				}
 
@@ -3041,7 +3189,7 @@ textBtn.type = 'button';
 				setDiagramUploadStatus('Uploading...');
 				var form = new FormData();
 				form.append('file', file, file.name || 'diagram.png');
-				fetch('/api/v1/config/diagram.png', {
+				apiFetch('/api/v1/config/diagram.png', {
 					method: 'POST',
 					body: form,
 				})
@@ -5085,7 +5233,7 @@ textBtn.type = 'button';
 				if (raw !== 0 || isEditing) {
 					url += '/raw';
 				}
-				return fetch(url, { cache: 'no-store' })
+				return apiFetch(url, { cache: 'no-store' })
 					.then(function (resp) {
 						if (!resp.ok) {
 							throw new Error('HTTP ' + resp.status + ' from ' + url);
@@ -5182,7 +5330,7 @@ textBtn.type = 'button';
 					return;
 				}
 
-				fetch('/api/v1/config/save', {
+				apiFetch('/api/v1/config/save', {
 					method: 'POST',
 					headers: { 'Content-Type': 'application/json' },
 					body: JSON.stringify({ raw_yaml: yamlText }),
@@ -5213,7 +5361,7 @@ textBtn.type = 'button';
 						loadStats();
 
 						function doPost(url, payload) {
-							return fetch(url, {
+							return apiFetch(url, {
 								method: 'POST',
 								headers: { 'Content-Type': 'application/json' },
 								body: payload ? JSON.stringify(payload) : JSON.stringify({}),
@@ -5537,6 +5685,28 @@ textBtn.type = 'button';
 			btnThemeLight.addEventListener('click', function () {
 				applyTheme('light');
 			});
+			if (btnApiToken) {
+				btnApiToken.addEventListener('click', function () {
+					promptForApiToken('manual').then(function (token) {
+						if (token) {
+							setMessage('API token saved in this browser. Reloading data...', 'success');
+						} else {
+							setMessage('API token cleared for this browser.', 'info');
+						}
+						loadStats();
+						initPluginTabs();
+						if (!isEditing) {
+							refreshDiskConfigView();
+						}
+						if (page1 && page1.style && page1.style.display !== 'none') {
+							loadConfigDiagram();
+						}
+						if (activeTab === 'query-log') {
+							loadQueryLog();
+						}
+					});
+				});
+			}
 
 			// Tabs control
 			if (btnTabStats) {
