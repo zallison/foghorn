@@ -72,6 +72,65 @@ def _normalize_optional_path(value: Any) -> str | None:
     return text or None
 
 
+def resolve_tls_path(path: str, *, config_path: str | None = None) -> str:
+    """Brief: Resolve a TLS material path against config dir and CWD.
+
+    Inputs:
+      - path: Absolute or relative cert/key/keys_dir path from config.
+      - config_path: Optional active config file path.
+
+    Outputs:
+      - str: Resolved filesystem path.
+
+    Notes:
+      - Absolute paths are returned resolved.
+      - Relative paths prefer an existing file among:
+        1) <config_dir>/<path>
+        2) <config_dir>/<path without leading config/> (common when the
+           config file already lives under a directory named config/)
+        3) <cwd>/<path>
+      - When no candidate exists yet (generation), prefer placement under
+        the config directory, stripping a leading ``config/`` segment when
+        present so ``./config/keys/x.pem`` lands in ``<config_dir>/keys/``.
+    """
+
+    raw = str(path).strip()
+    candidate = Path(raw).expanduser()
+    if candidate.is_absolute():
+        return str(candidate.resolve(strict=False))
+
+    ordered: list[Path] = []
+    config_base: Path | None = None
+    if config_path and str(config_path).strip():
+        config_base = Path(config_path).expanduser().resolve(strict=False).parent
+        ordered.append((config_base / candidate).resolve(strict=False))
+        parts = candidate.parts
+        if parts and parts[0] == "config" and len(parts) > 1:
+            ordered.append((config_base.joinpath(*parts[1:])).resolve(strict=False))
+    ordered.append((Path.cwd() / candidate).resolve(strict=False))
+
+    # De-duplicate while preserving order.
+    unique: list[Path] = []
+    seen: set[str] = set()
+    for item in ordered:
+        key = str(item)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(item)
+
+    for item in unique:
+        if item.is_file():
+            return str(item)
+
+    if config_base is not None:
+        parts = candidate.parts
+        if parts and parts[0] == "config" and len(parts) > 1:
+            return str((config_base.joinpath(*parts[1:])).resolve(strict=False))
+        return str((config_base / candidate).resolve(strict=False))
+    return str(unique[-1]) if unique else str(candidate)
+
+
 def _config_base_dir(config_path: str | None) -> Path:
     """Brief: Resolve the base directory allowed for admin TLS material.
 
@@ -166,11 +225,86 @@ def default_admin_tls_paths(
     return str(base / "foghorn_admin.pem"), str(base / "foghorn_admin.key")
 
 
-def resolve_admin_tls_files(web_cfg: dict[str, Any]) -> tuple[str | None, str | None]:
-    """Brief: Resolve optional admin TLS cert/key paths from server.http.
+def format_missing_tls_files_message(
+    *,
+    location: str,
+    cert_file: str | None,
+    key_file: str | None,
+    detail: str | None = None,
+) -> str:
+    """Brief: Build a one-line operator message for missing TLS material.
 
     Inputs:
-      - web_cfg: server.http configuration mapping.
+      - location: Config path label (e.g. server.http, server.listen.dot).
+      - cert_file: Configured certificate path (may be missing).
+      - key_file: Configured private key path (may be missing).
+      - detail: Optional extra detail (exception text, errno, etc.).
+
+    Outputs:
+      - str: Single-line error message without a traceback.
+
+    Example:
+      >>> format_missing_tls_files_message(
+      ...     location="server.http",
+      ...     cert_file="keys/a.pem",
+      ...     key_file="keys/a.key",
+      ... )
+      "server.http TLS certificate/key not found ..."
+    """
+
+    cert_path = str(cert_file).strip() if cert_file else ""
+    key_path = str(key_file).strip() if key_file else ""
+    cert_exists = bool(cert_path and os.path.isfile(cert_path))
+    key_exists = bool(key_path and os.path.isfile(key_path))
+    parts = [
+        f"{location} TLS certificate/key not found",
+        f"cert_file={cert_path or '<unset>'} (exists={cert_exists})",
+        f"key_file={key_path or '<unset>'} (exists={key_exists})",
+    ]
+    if detail:
+        text = str(detail).strip()
+        if text:
+            parts.append(f"detail={text}")
+    parts.append(
+        f"Fix the paths, create the files, or set {location}.generate=maybe|yes "
+        "(requires openssl)."
+    )
+    return "; ".join(parts)
+
+
+def is_missing_tls_file_error(exc: BaseException) -> bool:
+    """Brief: Return True when an exception indicates missing TLS files.
+
+    Inputs:
+      - exc: Caught exception from TLS load/start paths.
+
+    Outputs:
+      - bool: True for FileNotFoundError / ENOENT-style OSError / path text.
+    """
+
+    import errno as _errno
+
+    if isinstance(exc, FileNotFoundError):
+        return True
+    if isinstance(exc, OSError) and getattr(exc, "errno", None) == _errno.ENOENT:
+        return True
+    lowered = str(exc).lower()
+    return (
+        "no such file" in lowered or "file not found" in lowered or "errno 2" in lowered
+    )
+
+
+def resolve_admin_tls_files(
+    web_cfg: dict[str, Any],
+    *,
+    location: str = "server.http",
+) -> tuple[str | None, str | None]:
+    """Brief: Resolve optional TLS cert/key paths from a config mapping.
+
+    Inputs:
+      - web_cfg: Mapping with optional cert_file/key_file (server.http or
+        listen.dot/doh).
+      - location: Config path label used in error messages.
 
     Outputs:
       - tuple[str | None, str | None]: (cert_file, key_file). Either both set
@@ -180,8 +314,14 @@ def resolve_admin_tls_files(web_cfg: dict[str, Any]) -> tuple[str | None, str | 
     cert_file = _normalize_optional_path(web_cfg.get("cert_file"))
     key_file = _normalize_optional_path(web_cfg.get("key_file"))
     if bool(cert_file) ^ bool(key_file):
+        # Same operator-facing format as missing-on-disk failures.
         raise ValueError(
-            "server.http TLS requires both cert_file and key_file (or neither)"
+            format_missing_tls_files_message(
+                location=location,
+                cert_file=cert_file,
+                key_file=key_file,
+                detail="TLS requires both cert_file and key_file (or neither)",
+            )
         )
     return cert_file, key_file
 
@@ -388,13 +528,21 @@ def ensure_admin_tls_files(
     *,
     host: str = "127.0.0.1",
     config_path: str | None = None,
+    location: str = "server.http",
+    allow_missing_without_tls: bool = True,
 ) -> tuple[str | None, str | None]:
-    """Brief: Resolve admin TLS paths and optionally auto-generate missing files.
+    """Brief: Resolve TLS paths and optionally auto-generate missing files.
 
     Inputs:
-      - web_cfg: server.http mapping (may be mutated with default paths).
+      - web_cfg: Mapping with optional cert_file/key_file/generate/keys_dir
+        (server.http or listen.dot/doh); may be mutated with resolved paths.
       - host: Bind host used for CN/SAN when generating.
-      - config_path: Optional config path for default key placement.
+      - config_path: Optional config path for default key placement and
+        relative-path resolution.
+      - location: Config path label used in error/warning messages.
+      - allow_missing_without_tls: When generate=maybe and openssl is missing,
+        return (None, None) instead of raising. Set False for listeners that
+        require TLS (e.g. DoT).
 
     Outputs:
       - tuple[str | None, str | None]: Effective (cert_file, key_file).
@@ -405,15 +553,26 @@ def ensure_admin_tls_files(
         missing, create a self-signed pair. If paths are unset, defaults under
         <config_dir>/keys or ./keys are used.
       - yes differs from maybe only in that missing openssl is an error when
-        generation is required; maybe logs and continues without TLS.
+        generation is required; maybe logs and continues without TLS when
+        allow_missing_without_tls is true.
     """
 
     if not isinstance(web_cfg, dict):
         return None, None
 
     policy = normalize_generate_policy(web_cfg.get("generate", "no"))
-    cert_file, key_file = resolve_admin_tls_files(web_cfg)
+    cert_file, key_file = resolve_admin_tls_files(web_cfg, location=location)
     keys_dir = _normalize_optional_path(web_cfg.get("keys_dir"))
+
+    if cert_file is not None:
+        cert_file = resolve_tls_path(cert_file, config_path=config_path)
+        web_cfg["cert_file"] = cert_file
+    if key_file is not None:
+        key_file = resolve_tls_path(key_file, config_path=config_path)
+        web_cfg["key_file"] = key_file
+    if keys_dir is not None:
+        keys_dir = resolve_tls_path(keys_dir, config_path=config_path)
+        web_cfg["keys_dir"] = keys_dir
 
     # Always constrain configured TLS paths to the config directory tree.
     enforce_admin_tls_path_allowlist(
@@ -429,7 +588,21 @@ def ensure_admin_tls_files(
                 config_path=config_path,
                 keys_dir=keys_dir,
             )
-        return cert_file, key_file
+            return cert_file, key_file
+
+        assert cert_file is not None and key_file is not None
+        cert_exists = os.path.isfile(cert_file)
+        key_exists = os.path.isfile(key_file)
+        if cert_exists and key_exists:
+            return cert_file, key_file
+        raise ValueError(
+            format_missing_tls_files_message(
+                location=location,
+                cert_file=cert_file,
+                key_file=key_file,
+                detail=("generate=no and TLS files are missing or incomplete on disk"),
+            )
+        )
 
     # Fill default paths when auto-generation is requested and none configured.
     if cert_file is None and key_file is None:
@@ -450,18 +623,29 @@ def ensure_admin_tls_files(
     # unless both missing.
     if cert_exists ^ key_exists:
         raise ValueError(
-            "server.http TLS files are incomplete "
-            f"(cert_exists={cert_exists}, key_exists={key_exists}); "
-            "provide both files or remove both and set generate=maybe"
+            format_missing_tls_files_message(
+                location=location,
+                cert_file=cert_file,
+                key_file=key_file,
+                detail=(
+                    "TLS pair is incomplete (one file exists, the other is missing); "
+                    "provide both files or remove both and set generate=maybe"
+                ),
+            )
         )
 
     openssl = _openssl_available()
     if not openssl:
-        msg = (
-            "server.http.generate=%s but openssl is unavailable and TLS files "
-            "are missing (cert_file=%s key_file=%s)" % (policy, cert_file, key_file)
+        msg = format_missing_tls_files_message(
+            location=location,
+            cert_file=cert_file,
+            key_file=key_file,
+            detail=(
+                f"{location}.generate={policy} but openssl is unavailable and "
+                "TLS files are missing"
+            ),
         )
-        if policy == "yes":
+        if policy == "yes" or not allow_missing_without_tls:
             raise RuntimeError(msg)
         logger.warning("%s; starting without TLS", msg)
         # Clear paths so callers do not attempt to load missing files.
