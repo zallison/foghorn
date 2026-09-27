@@ -828,6 +828,25 @@
           "description": "Types: boolean, null.",
           "title": "Enabled"
         },
+        "generate": {
+          "anyOf": [
+            {
+              "description": "Type: string.",
+              "type": "string"
+            },
+            {
+              "description": "Type: boolean.",
+              "type": "boolean"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": "no",
+          "description": "Optional self-signed TLS generation policy: no|maybe|yes (boolean aliases accepted). Same semantics as server.http.generate. Default: \"no\".",
+          "title": "Generate"
+        },
         "host": {
           "anyOf": [
             {
@@ -881,6 +900,21 @@
           "description": "Types: string, null.",
           "title": "Key File"
         },
+        "keys_dir": {
+          "anyOf": [
+            {
+              "description": "Type: string.",
+              "type": "string"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Types: string, null.",
+          "title": "Keys Dir"
+        },
         "max_connections": {
           "default": 1024,
           "description": "Type: integer. Default: 1024.",
@@ -932,6 +966,13 @@
           "default": null,
           "description": "Types: integer, null.",
           "title": "Port"
+        },
+        "tls_days": {
+          "default": 3650,
+          "description": "Type: integer. Default: 3650.",
+          "minimum": 1,
+          "title": "Tls Days",
+          "type": "integer"
         }
       },
       "title": "ListenerDot",
@@ -14022,6 +14063,25 @@
                   "description": "Types: boolean, null.",
                   "title": "Enabled"
                 },
+                "generate": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: boolean.",
+                      "type": "boolean"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": "no",
+                  "description": "Optional self-signed TLS generation policy: no|maybe|yes (boolean aliases accepted). Same semantics as server.http.generate. Default: \"no\".",
+                  "title": "Generate"
+                },
                 "host": {
                   "anyOf": [
                     {
@@ -14075,6 +14135,21 @@
                   "description": "Types: string, null.",
                   "title": "Key File"
                 },
+                "keys_dir": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Types: string, null.",
+                  "title": "Keys Dir"
+                },
                 "max_connections": {
                   "default": 1024,
                   "description": "Type: integer. Default: 1024.",
@@ -14126,6 +14201,13 @@
                   "default": null,
                   "description": "Types: integer, null.",
                   "title": "Port"
+                },
+                "tls_days": {
+                  "default": 3650,
+                  "description": "Type: integer. Default: 3650.",
+                  "minimum": 1,
+                  "title": "Tls Days",
+                  "type": "integer"
                 }
               },
               "type": [

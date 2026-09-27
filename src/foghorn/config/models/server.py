@@ -168,6 +168,15 @@ class ListenerDot(ListenerConnLimits):
     port: PortInt | None = None
     cert_file: str | None = None
     key_file: str | None = None
+    generate: str | bool | None = Field(
+        default="no",
+        description=(
+            "Optional self-signed TLS generation policy: no|maybe|yes "
+            "(boolean aliases accepted). Same semantics as server.http.generate."
+        ),
+    )
+    keys_dir: str | None = None
+    tls_days: int = Field(default=3650, ge=1)
 
 
 class ListenerDoh(OpenModel):
