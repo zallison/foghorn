@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-from hashlib import sha256
 import ipaddress
 import logging
 import os
@@ -13,7 +12,7 @@ import signal
 import socket
 import sys
 import threading
-from typing import List, Optional
+from hashlib import sha256
 
 # Backward-compatible export: some tests and third-party code monkeypatch
 # foghorn.main.DNSServer to avoid starting a real server.
@@ -29,13 +28,6 @@ from .config.config_parser import (
     parse_config_file,
 )
 from .config.logging_config import init_logging
-from .plugins.querylog import BaseStatsStore, load_stats_store_backend
-from .plugins.resolve.base import BasePlugin
-from .plugins.setup import (
-    _SetupDNSResolverContext,
-    run_setup_plugins,
-    run_shutdown_plugins,
-)
 from .main_config_helpers import (
     _apply_cache_overrides_from_config,
     _build_listener_configs,
@@ -50,6 +42,13 @@ from .main_config_helpers import (
     _resolve_web_config,
     _seed_listener_runtime_state,
 )
+from .plugins.querylog import BaseStatsStore, load_stats_store_backend
+from .plugins.resolve.base import BasePlugin
+from .plugins.setup import (
+    _SetupDNSResolverContext,
+    run_setup_plugins,
+    run_shutdown_plugins,
+)
 from .runtime_config import (
     RuntimeSnapshot,
     initialize_runtime,
@@ -61,7 +60,7 @@ from .servers.runtime_state import RingBuffer, RuntimeState
 from .stats import StatsCollector, StatsReporter
 
 
-def main(argv: List[str] | None = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     """
     Parses arguments, loads configuration, initializes plugins, and starts the server.
 
@@ -127,9 +126,9 @@ def main(argv: List[str] | None = None) -> int:
     # _apply_runtime_config) so they can adjust behaviour without restarting
     # the main process or DNS listeners.
     cfg_path: str = args.config
-    stats_collector: Optional[StatsCollector]
-    stats_reporter: Optional[StatsReporter]
-    stats_persistence_store: Optional[BaseStatsStore]
+    stats_collector: StatsCollector | None
+    stats_reporter: StatsReporter | None
+    stats_persistence_store: BaseStatsStore | None
 
     # web_handle is the admin HTTP/web UI handle returned by start_webserver().
     # It is allowed to be None when the webserver is disabled but is treated as
@@ -138,7 +137,7 @@ def main(argv: List[str] | None = None) -> int:
 
     # Shared in-memory log buffer passed into the FastAPI admin app; this is
     # also used when starting the threaded admin HTTP fallback.
-    web_log_buffer: Optional[RingBuffer] = None
+    web_log_buffer: RingBuffer | None = None
 
     # Runtime state used by /ready readiness probes exposed by the admin webserver.
     runtime_state = RuntimeState(startup_complete=False)
@@ -206,8 +205,7 @@ def main(argv: List[str] | None = None) -> int:
     upstream_strategy = str(upstream_cfg.get("strategy", "failover")).lower()
     upstream_health = parse_upstream_health_config(upstream_cfg)
     upstream_max_concurrent = int(upstream_cfg.get("max_concurrent", 1) or 1)
-    if upstream_max_concurrent < 1:
-        upstream_max_concurrent = 1
+    upstream_max_concurrent = max(upstream_max_concurrent, 1)
 
     # Global knob to disable asyncio-based listeners/admin servers in restricted
     # environments. When false, threaded fallbacks are used where available.
@@ -780,12 +778,11 @@ def main(argv: List[str] | None = None) -> int:
     loop_threads: list[threading.Thread] = []
 
     # Shared resolver adapter for UDP listener.
-    from .servers.server import resolve_query_bytes as _resolve_query_bytes
-
     # Optionally start TCP/DoT listeners based on listen config
-
     # Resolver adapter for TCP/DoT servers
     import asyncio
+
+    from .servers.server import resolve_query_bytes as _resolve_query_bytes
 
     def _resolve_udp(query_bytes: bytes, client_ip: str) -> bytes:
         """Brief: Resolve a DNS query received via UDP listener.
@@ -812,6 +809,7 @@ def main(argv: List[str] | None = None) -> int:
 
         try:
             from foghorn.runtime_config import get_runtime_snapshot
+
             from .servers.udp_server import enforce_udp_response_size_ceiling
 
             server_max = get_runtime_snapshot().udp_max_response_bytes
@@ -920,11 +918,45 @@ def main(argv: List[str] | None = None) -> int:
                     )
             except Exception as e:  # pragma: no cover - best-effort readiness tracking
                 _record_listener_error(listener_key, e)
-                logging.getLogger("foghorn.main").exception(
-                    "Asyncio listener %s failed to start or exited with an unhandled exception: %s",
-                    name,
-                    e,
-                )
+                _log = logging.getLogger("foghorn.main")
+                try:
+                    from .servers.webserver.tls_certs import (
+                        format_missing_tls_files_message,
+                        is_missing_tls_file_error,
+                    )
+
+                    if is_missing_tls_file_error(e):
+                        # Prefer a one-line operator message over a traceback dump
+                        # when TLS material is simply missing on disk.
+                        cert_hint = None
+                        key_hint = None
+                        if listener_key == "dot" and isinstance(dot_cfg, dict):
+                            cert_hint = dot_cfg.get("cert_file")
+                            key_hint = dot_cfg.get("key_file")
+                        elif listener_key == "doh" and isinstance(doh_cfg, dict):
+                            cert_hint = doh_cfg.get("cert_file")
+                            key_hint = doh_cfg.get("key_file")
+                        _log.error(
+                            "%s",
+                            format_missing_tls_files_message(
+                                location=f"server.listen.{listener_key}",
+                                cert_file=str(cert_hint) if cert_hint else None,
+                                key_file=str(key_hint) if key_hint else None,
+                                detail=f"{name}: {e}",
+                            ),
+                        )
+                    else:
+                        _log.exception(
+                            "Asyncio listener %s failed to start or exited with an unhandled exception: %s",
+                            name,
+                            e,
+                        )
+                except Exception:
+                    _log.exception(
+                        "Asyncio listener %s failed to start or exited with an unhandled exception: %s",
+                        name,
+                        e,
+                    )
 
         t = threading.Thread(target=runner, name=name, daemon=True)
         t.start()
@@ -1051,8 +1083,9 @@ def main(argv: List[str] | None = None) -> int:
                 )
                 return 1
 
-            from foghorn.servers.udp_server import DNSUDPHandler
             import socketserver as _socketserver
+
+            from foghorn.servers.udp_server import DNSUDPHandler
 
             server = _socketserver.ThreadingUDPServer((uhost, uport), DNSUDPHandler)
             server.daemon_threads = True
@@ -2061,7 +2094,7 @@ def _build_effective_persistence_cfg(
     return effective
 
 
-def _is_truthy_env(val: Optional[str]) -> bool:
+def _is_truthy_env(val: str | None) -> bool:
     """Return True if an environment variable string represents a truthy value.
 
     Inputs:
@@ -2089,7 +2122,7 @@ def _initialize_statistics_subsystem(
     logging_cfg: dict,
     args: argparse.Namespace,
     logger: logging.Logger,
-) -> tuple[Optional[StatsCollector], Optional[StatsReporter], Optional[BaseStatsStore]]:
+) -> tuple[StatsCollector | None, StatsReporter | None, BaseStatsStore | None]:
     """Brief: Initialize stats collector/reporter/store from configuration.
 
     Inputs:
@@ -2179,7 +2212,7 @@ def _initialize_statistics_subsystem(
                 stats_persistence_store = None
 
             if stats_persistence_store is None:
-                logger.warn(
+                logger.warning(
                     "Statistics persistence not configured; running in memory-only mode",
                 )
             else:
@@ -2367,7 +2400,7 @@ def _initialize_runtime_snapshot(
     qualify_non_proper_tld: object = False,
     non_proper_tld_mode: str = "suffix",
     min_cache_ttl: int = 0,
-    stats_collector: Optional[StatsCollector] = None,
+    stats_collector: StatsCollector | None = None,
     cache_plugin: object | None = None,
     udp_cfg: dict = None,  # type: ignore[assignment]
     axfr_enabled: bool = False,

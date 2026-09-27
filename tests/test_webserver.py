@@ -31,6 +31,8 @@ except ModuleNotFoundError:  # pragma: no cover - environment dependent
         allow_module_level=True,
     )
 
+from datetime import UTC
+
 from foghorn.servers.webserver import (
     RingBuffer,
     RuntimeState,
@@ -47,12 +49,9 @@ from foghorn.servers.webserver import (
     start_webserver,
 )
 from foghorn.stats import StatsCollector, StatsSQLiteStore
-
-
 from tests.helpers.webserver_test_cfg import (
     normalize_web_cfg_layout as _normalize_web_cfg_layout,
 )
-
 
 _create_app = create_app
 _start_webserver = start_webserver
@@ -692,7 +691,7 @@ def test_get_system_info_uses_meminfo_and_load(monkeypatch) -> None:
     def fake_getloadavg() -> tuple[float, float, float]:
         return (1.0, 2.0, 3.0)
 
-    def fake_meminfo(path: str = "/proc/meminfo") -> dict[str, int]:  # noqa: ARG001
+    def fake_meminfo(path: str = "/proc/meminfo") -> dict[str, int]:
         return {
             "MemTotal": 1024 * 1024 * 1024,
             "MemFree": 256 * 1024 * 1024,
@@ -1191,7 +1190,7 @@ def test_stats_snapshot_cache_avoids_multiple_snapshot_calls(monkeypatch) -> Non
     calls = {"n": 0}
     orig_snapshot = collector.snapshot
 
-    def wrapped_snapshot(reset: bool = False):  # noqa: D401
+    def wrapped_snapshot(reset: bool = False):
         """Increment call counter and delegate to original snapshot."""
 
         calls["n"] += 1
@@ -1363,7 +1362,7 @@ def test_config_yaml_cache_reuses_body_within_ttl(monkeypatch) -> None:
     cfg = {"webserver": {"enabled": True}}
     calls = {"dump": 0}
 
-    def fake_safe_dump(data, sort_keys=False):  # noqa: ARG001
+    def fake_safe_dump(data, sort_keys=False):
         calls["dump"] += 1
         # Include the call count so we can distinguish outputs if needed.
         return f"yaml-dump-{calls['dump']}"
@@ -1626,9 +1625,9 @@ def test_query_log_aggregate_fills_zero_buckets(tmp_path) -> None:
     collector = StatsCollector(stats_store=store)
 
     # Range: 2025-12-10 01:00:00Z to 02:00:00Z, 15-minute buckets.
-    from datetime import datetime, timezone
+    from datetime import datetime
 
-    start_dt = datetime(2025, 12, 10, 1, 0, 0, tzinfo=timezone.utc)
+    start_dt = datetime(2025, 12, 10, 1, 0, 0, tzinfo=UTC)
 
     # Two REFUSED events at 01:05 and 01:35.
     collector.record_query_result(
@@ -2629,12 +2628,12 @@ def test_utc_now_iso_returns_parseable_utc_timestamp() -> None:
       - A string that datetime.fromisoformat can parse and that represents UTC.
     """
 
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     ts = _utc_now_iso()
     parsed = datetime.fromisoformat(ts)
     assert parsed.tzinfo is not None
-    assert parsed.tzinfo.utcoffset(parsed) == timezone.utc.utcoffset(parsed)
+    assert parsed.tzinfo.utcoffset(parsed) == UTC.utcoffset(parsed)
 
 
 def test_get_system_info_handles_missing_psutil(monkeypatch) -> None:
@@ -2855,7 +2854,7 @@ def test_webserver_handle_is_running_and_stop_calls_shutdown_and_close() -> None
         def is_alive(self) -> bool:
             return True
 
-        def join(self, timeout: float) -> None:  # noqa: ARG002
+        def join(self, timeout: float) -> None:
             self.join_called = True
 
     class DummyServer:
@@ -2897,7 +2896,7 @@ def test_start_webserver_uvicorn_path_uses_dummy_server(monkeypatch) -> None:
     # Ensure asyncio loop creation succeeds and is exercised
     orig_new_loop = asyncio.new_event_loop
 
-    def tracking_new_loop(*a, **kw):  # noqa: ANN001, ANN002
+    def tracking_new_loop(*a, **kw):
         loop = orig_new_loop(*a, **kw)
         loop.close()
         return loop
@@ -2907,14 +2906,14 @@ def test_start_webserver_uvicorn_path_uses_dummy_server(monkeypatch) -> None:
     state: dict[str, object] = {}
 
     class DummyConfig:
-        def __init__(self, app, host, port, log_level):  # noqa: ANN001, ANN002
+        def __init__(self, app, host, port, log_level):
             self.app = app
             self.host = host
             self.port = port
             self.log_level = log_level
 
     class DummyServer:
-        def __init__(self, config):  # noqa: ANN001
+        def __init__(self, config):
             state["config"] = config
 
         def run(self) -> None:
@@ -2971,7 +2970,7 @@ def test_json_safe_handles_exceptions_and_custom_objects() -> None:
     import foghorn.servers.webserver as web_mod
 
     class Custom:
-        def __str__(self) -> str:  # noqa: D401
+        def __str__(self) -> str:
             """Return a simple marker string."""
 
             return "CUSTOM-OBJ"
@@ -3007,25 +3006,25 @@ def test_get_system_info_swallows_psutil_exceptions(monkeypatch) -> None:
         def memory_info(self) -> DummyMemInfo:
             return DummyMemInfo()
 
-        def cpu_times(self):  # noqa: D401
+        def cpu_times(self):
             """Always raise to exercise exception path."""
 
             raise RuntimeError("cpu_times boom")
 
-        def cpu_percent(self, interval: float = 0.0) -> float:  # noqa: ARG002
+        def cpu_percent(self, interval: float = 0.0) -> float:
             raise RuntimeError("cpu_percent boom")
 
-        def io_counters(self):  # noqa: D401
+        def io_counters(self):
             """Always raise to exercise io_counters exception path."""
 
             raise RuntimeError("io boom")
 
-        def open_files(self):  # noqa: D401
+        def open_files(self):
             """Always raise to exercise open_files exception path."""
 
             raise RuntimeError("open_files boom")
 
-        def connections(self):  # noqa: D401
+        def connections(self):
             """Always raise to exercise connections exception path."""
 
             raise RuntimeError("connections boom")
@@ -3337,7 +3336,7 @@ def test_webserver_handle_stop_logs_server_shutdown_error(caplog) -> None:
         def is_alive(self) -> bool:
             return True
 
-        def join(self, timeout: float) -> None:  # noqa: ARG002
+        def join(self, timeout: float) -> None:
             self.join_called = True
 
     class BadServer:
@@ -3375,7 +3374,7 @@ def test_webserver_handle_stop_logs_thread_join_error(caplog) -> None:
         def is_alive(self) -> bool:
             return True
 
-        def join(self, timeout: float) -> None:  # noqa: ARG002
+        def join(self, timeout: float) -> None:
             raise RuntimeError("boom-join")
 
     handle = WebServerHandle(BadThread(), server=None)
@@ -3414,9 +3413,7 @@ def test_start_webserver_permission_error_uses_threaded_fallback(monkeypatch) ->
 
     calls: dict[str, object] = {}
 
-    def fake_threaded(
-        stats, config, log_buffer, config_path=None
-    ):  # noqa: ANN001, ANN201
+    def fake_threaded(stats, config, log_buffer, config_path=None):
         calls["args"] = (stats, config, log_buffer, config_path)
         return WebServerHandle(threading.Thread())
 
@@ -3456,14 +3453,14 @@ def test_start_webserver_other_asyncio_error_keeps_async_path(monkeypatch) -> No
     state2: dict[str, object] = {}
 
     class DummyConfig2:
-        def __init__(self, app, host, port, log_level):  # noqa: ANN001, ANN002
+        def __init__(self, app, host, port, log_level):
             self.app = app
             self.host = host
             self.port = port
             self.log_level = log_level
 
     class DummyServer2:
-        def __init__(self, config):  # noqa: ANN001
+        def __init__(self, config):
             state2["config"] = config
 
         def run(self) -> None:
@@ -3508,13 +3505,13 @@ def test_start_webserver_sets_uvicorn_limits_from_nofile(monkeypatch) -> None:
     class DummyConfig:
         def __init__(
             self,
-            app,  # noqa: ANN001
-            host,  # noqa: ANN001
-            port,  # noqa: ANN001
-            log_level,  # noqa: ANN001
-            limit_concurrency=None,  # noqa: ANN001
-            backlog=None,  # noqa: ANN001
-            timeout_keep_alive=None,  # noqa: ANN001
+            app,
+            host,
+            port,
+            log_level,
+            limit_concurrency=None,
+            backlog=None,
+            timeout_keep_alive=None,
         ) -> None:
             self.app = app
             self.host = host
@@ -3525,7 +3522,7 @@ def test_start_webserver_sets_uvicorn_limits_from_nofile(monkeypatch) -> None:
             self.timeout_keep_alive = timeout_keep_alive
 
     class DummyServer:
-        def __init__(self, config):  # noqa: ANN001
+        def __init__(self, config):
             state["config"] = config
 
         def run(self) -> None:
@@ -3563,14 +3560,14 @@ def test_start_webserver_refuses_public_host_without_auth(monkeypatch, caplog) -
     import types
 
     class DummyConfig3:
-        def __init__(self, app, host, port, log_level):  # noqa: ANN001, ANN002
+        def __init__(self, app, host, port, log_level):
             self.app = app
             self.host = host
             self.port = port
             self.log_level = log_level
 
     class DummyServer3:
-        def __init__(self, config):  # noqa: ANN001
+        def __init__(self, config):
             self.config = config
 
         def run(self) -> None:
@@ -3620,14 +3617,14 @@ def test_start_webserver_warns_for_public_plaintext_admin_bind(
     import types
 
     class DummyConfig:
-        def __init__(self, app, host, port, log_level):  # noqa: ANN001, ANN002
+        def __init__(self, app, host, port, log_level):
             self.app = app
             self.host = host
             self.port = port
             self.log_level = log_level
 
     class DummyServer:
-        def __init__(self, config):  # noqa: ANN001
+        def __init__(self, config):
             self.config = config
 
         def run(self) -> None:
@@ -3709,15 +3706,15 @@ def test_start_webserver_passes_tls_files_to_uvicorn(monkeypatch, tmp_path) -> N
     class DummyConfig:
         def __init__(
             self,
-            app,  # noqa: ANN001
-            host,  # noqa: ANN001
-            port,  # noqa: ANN001
-            log_level,  # noqa: ANN001
-            ssl_certfile=None,  # noqa: ANN001
-            ssl_keyfile=None,  # noqa: ANN001
-            limit_concurrency=None,  # noqa: ANN001
-            backlog=None,  # noqa: ANN001
-            timeout_keep_alive=None,  # noqa: ANN001
+            app,
+            host,
+            port,
+            log_level,
+            ssl_certfile=None,
+            ssl_keyfile=None,
+            limit_concurrency=None,
+            backlog=None,
+            timeout_keep_alive=None,
         ) -> None:
             self.app = app
             self.host = host
@@ -3727,7 +3724,7 @@ def test_start_webserver_passes_tls_files_to_uvicorn(monkeypatch, tmp_path) -> N
             self.ssl_keyfile = ssl_keyfile
 
     class DummyServer:
-        def __init__(self, config):  # noqa: ANN001
+        def __init__(self, config):
             state["config"] = config
 
         def run(self) -> None:
@@ -3783,9 +3780,10 @@ def test_start_webserver_rejects_partial_tls_config(caplog) -> None:
     with caplog.at_level("ERROR", logger="foghorn.webserver"):
         handle = start_webserver(stats=None, config=cfg, log_buffer=RingBuffer())
     assert handle is None
-    assert any(
-        "Invalid admin TLS configuration" in rec.getMessage() for rec in caplog.records
-    )
+    msgs = [rec.getMessage() for rec in caplog.records]
+    assert any("TLS certificate/key not found" in m for m in msgs)
+    assert any("cert_file" in m and "key_file" in m for m in msgs)
+    assert any("both cert_file and key_file" in m for m in msgs)
 
 
 def test_start_webserver_no_plaintext_warning_when_tls_enabled(
@@ -3809,9 +3807,7 @@ def test_start_webserver_no_plaintext_warning_when_tls_enabled(
     key.write_text("KEY", encoding="utf-8")
 
     class DummyConfig:
-        def __init__(
-            self, app, host, port, log_level, **kwargs
-        ):  # noqa: ANN001, ANN003
+        def __init__(self, app, host, port, log_level, **kwargs):
             self.app = app
             self.host = host
             self.port = port
@@ -3819,7 +3815,7 @@ def test_start_webserver_no_plaintext_warning_when_tls_enabled(
             self.kwargs = kwargs
 
     class DummyServer:
-        def __init__(self, config):  # noqa: ANN001
+        def __init__(self, config):
             self.config = config
 
         def run(self) -> None:
@@ -3874,15 +3870,15 @@ def test_threaded_admin_webserver_wraps_socket_for_tls(monkeypatch, tmp_path) ->
         pass
 
     class FakeContext:
-        def __init__(self, protocol):  # noqa: ANN001
+        def __init__(self, protocol):
             self.protocol = protocol
             self.minimum_version = None
             self.loaded = None
 
-        def load_cert_chain(self, certfile=None, keyfile=None):  # noqa: ANN001
+        def load_cert_chain(self, certfile=None, keyfile=None):
             self.loaded = (certfile, keyfile)
 
-        def wrap_socket(self, sock, server_side=False):  # noqa: ANN001
+        def wrap_socket(self, sock, server_side=False):
             wrapped["sock"] = sock
             wrapped["server_side"] = server_side
             return FakeSocket()
@@ -3925,14 +3921,14 @@ def test_start_webserver_warns_for_public_openapi_and_docs_exposure(
     import types
 
     class DummyConfig:
-        def __init__(self, app, host, port, log_level):  # noqa: ANN001, ANN002
+        def __init__(self, app, host, port, log_level):
             self.app = app
             self.host = host
             self.port = port
             self.log_level = log_level
 
     class DummyServer:
-        def __init__(self, config):  # noqa: ANN001
+        def __init__(self, config):
             self.config = config
 
         def run(self) -> None:
@@ -3986,14 +3982,14 @@ def test_start_webserver_warns_for_permissive_public_cors(monkeypatch, caplog) -
     import types
 
     class DummyConfig:
-        def __init__(self, app, host, port, log_level):  # noqa: ANN001, ANN002
+        def __init__(self, app, host, port, log_level):
             self.app = app
             self.host = host
             self.port = port
             self.log_level = log_level
 
     class DummyServer:
-        def __init__(self, config):  # noqa: ANN001
+        def __init__(self, config):
             self.config = config
 
         def run(self) -> None:
@@ -4051,12 +4047,10 @@ def test_start_webserver_warns_for_public_threaded_fallback(
         def is_alive(self) -> bool:
             return True
 
-        def join(self, timeout: float) -> None:  # noqa: ARG002
+        def join(self, timeout: float) -> None:
             return None
 
-    def fake_threaded(  # noqa: ANN001, ANN201
-        stats, config, log_buffer, config_path=None
-    ):
+    def fake_threaded(stats, config, log_buffer, config_path=None):
         return WebServerHandle(DummyThread())
 
     monkeypatch.setattr(
@@ -4371,7 +4365,7 @@ def test_config_cache_ttl_overridden_by_web_cfg(monkeypatch) -> None:
     import foghorn.servers.webserver as web_mod
     import foghorn.servers.webserver.core as web_core
 
-    original_ttl = getattr(web_core, "_CONFIG_TEXT_CACHE_TTL_SECONDS")
+    original_ttl = web_core._CONFIG_TEXT_CACHE_TTL_SECONDS
     try:
         monkeypatch.setattr(
             web_mod, "_CONFIG_TEXT_CACHE_TTL_SECONDS", 2.0, raising=False
@@ -4427,7 +4421,7 @@ def test_rate_limit_endpoint_wraps_collect_rate_limit_stats(monkeypatch) -> None
     def fake_collect(
         config: dict | None,
         plugins: list[object] | None = None,
-    ) -> dict:  # noqa: ANN001
+    ) -> dict:
         called["config"] = config
         called["plugins"] = plugins
         return {"databases": []}
@@ -4578,12 +4572,12 @@ def test_query_log_fastapi_defensive_parsing_by_direct_calls() -> None:
     from foghorn.stats import StatsCollector
 
     class DummyStore:
-        def select_query_log(self, **_kw):  # noqa: ANN003
+        def select_query_log(self, **_kw):
             # Intentionally omit page/page_size so the endpoint's defensive parsing
             # and defaults are reflected in the response.
             return {"items": [{"ts": 0.0}], "total": 1, "total_pages": 1}
 
-        def aggregate_query_log_counts(self, **_kw):  # noqa: ANN003
+        def aggregate_query_log_counts(self, **_kw):
             return {"items": []}
 
     collector = StatsCollector(track_uniques=False)

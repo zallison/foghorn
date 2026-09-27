@@ -9,8 +9,8 @@ This module contains server startup and management functions including:
 from __future__ import annotations
 
 import http.server
-import ipaddress
 import inspect
+import ipaddress
 import logging
 import os
 import socket
@@ -29,7 +29,12 @@ from .http_helpers import ensure_web_auth_token
 from .logging_utils import RingBuffer
 from .runtime import RuntimeState
 from .threaded_handlers import _ThreadedAdminRequestHandler
-from .tls_certs import ensure_admin_tls_files, resolve_admin_tls_files
+from .tls_certs import (
+    ensure_admin_tls_files,
+    format_missing_tls_files_message,
+    is_missing_tls_file_error,
+    resolve_admin_tls_files,
+)
 from .types_and_buffers import WebServerHandle
 
 if TYPE_CHECKING:
@@ -84,7 +89,7 @@ def _get_soft_nofile_limit() -> int | None:
         return None
 
 
-def _derive_uvicorn_limit_concurrency(web_cfg: Dict[str, Any]) -> int:
+def _derive_uvicorn_limit_concurrency(web_cfg: dict[str, Any]) -> int:
     """Brief: Derive a safe uvicorn concurrency cap for admin HTTP.
 
     Inputs:
@@ -117,10 +122,10 @@ _resolve_admin_tls_files = resolve_admin_tls_files
 def _build_uvicorn_config(
     *,
     uvicorn_module: Any,
-    app: "FastAPI",
+    app: FastAPI,
     host: str,
     port: int,
-    web_cfg: Dict[str, Any],
+    web_cfg: dict[str, Any],
     ssl_cert: str | None = None,
     ssl_key: str | None = None,
 ) -> Any:
@@ -139,7 +144,7 @@ def _build_uvicorn_config(
       - uvicorn.Config instance.
     """
 
-    config_kwargs: Dict[str, Any] = {
+    config_kwargs: dict[str, Any] = {
         "app": app,
         "host": host,
         "port": port,
@@ -202,9 +207,9 @@ class _AdminHTTPServer(http.server.ThreadingHTTPServer):
         self,
         server_address: tuple[str, int],
         RequestHandlerClass: type[http.server.BaseHTTPRequestHandler],
-        stats: Optional[StatsCollector],
-        config: Dict[str, Any],
-        log_buffer: Optional[RingBuffer],
+        stats: StatsCollector | None,
+        config: dict[str, Any],
+        log_buffer: RingBuffer | None,
         config_path: str | None = None,
         runtime_state: RuntimeState | None = None,
         plugins: list[object] | None = None,
@@ -256,15 +261,15 @@ class _AdminHTTPServer(http.server.ThreadingHTTPServer):
 
 
 def _start_admin_server_threaded(
-    stats: Optional[StatsCollector],
-    config: Dict[str, Any],
-    log_buffer: Optional[RingBuffer],
+    stats: StatsCollector | None,
+    config: dict[str, Any],
+    log_buffer: RingBuffer | None,
     config_path: str | None = None,
     runtime_state: RuntimeState | None = None,
     plugins: list[object] | None = None,
-) -> Optional[
-    "WebServerHandle"
-]:  # pragma: no cover - environment-dependent threaded fallback; exercised via start_webserver tests
+) -> (
+    WebServerHandle | None
+):  # pragma: no cover - environment-dependent threaded fallback; exercised via start_webserver tests
     """Brief: Start threaded admin HTTP server without using asyncio.
 
     Inputs:
@@ -330,9 +335,20 @@ def _start_admin_server_threaded(
             context.load_cert_chain(certfile=cert_file, keyfile=key_file)
             httpd.socket = context.wrap_socket(httpd.socket, server_side=True)
         except Exception as exc:  # pragma: no cover - TLS misconfig
-            logger.error(
-                "Failed to configure TLS for threaded admin webserver: %s", exc
-            )
+            if is_missing_tls_file_error(exc):
+                logger.error(
+                    "%s",
+                    format_missing_tls_files_message(
+                        location="server.http",
+                        cert_file=cert_file,
+                        key_file=key_file,
+                        detail=str(exc),
+                    ),
+                )
+            else:
+                logger.error(
+                    "Failed to configure TLS for threaded admin webserver: %s", exc
+                )
             try:
                 httpd.server_close()
             except Exception:
@@ -366,13 +382,13 @@ def _start_admin_server_threaded(
 
 
 def start_webserver(
-    stats: Optional[StatsCollector],
-    config: Dict[str, Any],
-    log_buffer: Optional[RingBuffer] = None,
+    stats: StatsCollector | None,
+    config: dict[str, Any],
+    log_buffer: RingBuffer | None = None,
     config_path: str | None = None,
     runtime_state: RuntimeState | None = None,
     plugins: list[object] | None = None,
-) -> Optional[WebServerHandle]:
+) -> WebServerHandle | None:
     """Start admin HTTP server, preferring uvicorn and falling back to threaded HTTP."""
 
     if isinstance(config, dict):
@@ -403,9 +419,26 @@ def start_webserver(
             config_path=config_path,
         )
     except (ValueError, RuntimeError) as exc:
-        logger.error("Invalid admin TLS configuration: %s", exc)
+        # ensure_admin_tls_files already emits the unified one-line message for
+        # missing/incomplete TLS material; log it as-is (no traceback, no prefix).
+        logger.error("%s", exc)
         return None
     tls_enabled = bool(cert_file and key_file)
+    if tls_enabled and not (
+        os.path.isfile(str(cert_file)) and os.path.isfile(str(key_file))
+    ):
+        # Defensive: never hand missing paths to uvicorn (it raises a noisy
+        # FileNotFoundError traceback in the background thread).
+        logger.error(
+            "%s",
+            format_missing_tls_files_message(
+                location="server.http",
+                cert_file=cert_file,
+                key_file=key_file,
+                detail="TLS files disappeared after configuration resolve",
+            ),
+        )
+        return None
 
     # When auth.mode=token and token is missing, generate a temporary token and
     # log it so operators can still access the admin API.
@@ -510,13 +543,13 @@ def start_webserver(
     # plugin instances.
     def _call_threaded(
         *,
-        stats_obj: Optional[StatsCollector],
-        cfg_obj: Dict[str, Any],
-        buf_obj: Optional[RingBuffer],
+        stats_obj: StatsCollector | None,
+        cfg_obj: dict[str, Any],
+        buf_obj: RingBuffer | None,
         cfg_path_obj: str | None,
         rt_state: RuntimeState | None,
         plugins_obj: list[object] | None,
-    ) -> Optional["WebServerHandle"]:
+    ) -> WebServerHandle | None:
         try:
             import inspect as _inspect  # local import to avoid module-level cost
             import sys
@@ -525,13 +558,13 @@ def start_webserver(
             # Tests may patch foghorn.servers.webserver._start_admin_server_threaded.
             core_mod = sys.modules.get("foghorn.servers.webserver.core")
             if core_mod and hasattr(core_mod, "_start_admin_server_threaded"):
-                fn = getattr(core_mod, "_start_admin_server_threaded")
+                fn = core_mod._start_admin_server_threaded
             else:
                 fn = _start_admin_server_threaded
 
             sig = _inspect.signature(fn)
             params = sig.parameters
-            kwargs: Dict[str, Any] = {}
+            kwargs: dict[str, Any] = {}
             if "config_path" in params:
                 kwargs["config_path"] = cfg_path_obj
             if rt_state is not None and "runtime_state" in params:
@@ -546,7 +579,7 @@ def start_webserver(
 
             core_mod = sys.modules.get("foghorn.servers.webserver.core")
             if core_mod and hasattr(core_mod, "_start_admin_server_threaded"):
-                fn = getattr(core_mod, "_start_admin_server_threaded")
+                fn = core_mod._start_admin_server_threaded
             else:
                 fn = _start_admin_server_threaded
             return fn(
@@ -681,8 +714,20 @@ def start_webserver(
             )
         except (
             Exception
-        ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-            logger.exception("Unhandled exception in webserver thread")
+        ) as exc:  # pragma: no cover - defensive background-thread failures
+            if is_missing_tls_file_error(exc):
+                # Keep this operator-facing and one line; avoid a full traceback dump.
+                logger.error(
+                    "%s",
+                    format_missing_tls_files_message(
+                        location="server.http",
+                        cert_file=cert_file,
+                        key_file=key_file,
+                        detail=str(exc),
+                    ),
+                )
+            else:
+                logger.exception("Unhandled exception in webserver thread")
 
     thread = threading.Thread(target=_runner, name="foghorn-webserver", daemon=True)
     thread.start()
