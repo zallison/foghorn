@@ -25,8 +25,8 @@ LISTEN_PORT ?= 53
 FH_PRIORITY ?= 100
 # Default ports
 ADMINPORT ?= 5380
-UDPPORT ?= 53
-TCPPORT ?= 53
+UDPPORT ?= ${LISTEN_PORT}
+TCPPORT ?= ${LISTEN_PORT}
 
 ## :SSL:
 ######
@@ -47,7 +47,6 @@ SERVER_PEM ?= ${SERVER}.pem
 # Build the project: create a venv, install the package in editable mode
 # Name of the virtual-env directory
 VENV ?= ./venv
-
 
 ## :Variables:Helpers:
 ##################
@@ -294,7 +293,8 @@ docker-clean:
 
 .PHONY: docker-run
 docker-run: docker-build
-	docker rm -f ${CONTAINER_NAME}
+	docker rm -f ${CONTAINER_NAME} || true
+	echo "using ${UDPPORT} and ${TCPPORT} from ${LISTEN_PORT}"
 	docker run -d --net=host --name foghorn -v ${CONTAINER_DATA}:/foghorn/config/ \
         --privileged \
 		--name "${CONTAINER_NAME}" \
@@ -308,8 +308,9 @@ docker-run: docker-build
 # Port forwarding
 .PHONY: docker-run-not-host
 docker-run-not-host: docker-build
-	docker rm -f foghorn
-	docker run -d --name foghorn \
+	docker rm -f foghorn || true
+	echo "using ${UDPPORT} and ${TCPPORT} from ${LISTEN_PORT}"
+	run -d --name foghorn \
         --privileged \
 		--name "${CONTAINER_NAME}" \
 	    -v ${CONTAINER_DATA}:/foghorn/config/ \
