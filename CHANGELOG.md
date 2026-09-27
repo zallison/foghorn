@@ -6,11 +6,17 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Admin UI browser API auth: stores `server.http.auth.token` in `localStorage` (`foghorn-api-token`), sends `Authorization: Bearer ...` via shared `apiFetch`, prompts once on HTTP 401, and exposes an **API Token** header control; diagram PNGs load through authenticated blob URLs.
+- `server.listen.dot` TLS auto-generation knobs (`generate`, `keys_dir`, `tls_days`), matching `server.http` semantics so DoT can create a self-signed cert/key pair when material is missing.
+- TLS path resolver that places relative `cert_file`/`key_file` under the config directory (and treats a leading `config/` segment as already-inside-config-dir).
 - ZoneRecords shared commit pipeline (`zone_records/commit.py`) for normalized record actions used by DNS UPDATE and admin apply/delete (journal, SOA bump, NOTIFY, conflict checks).
 - ZoneRecords admin apply/delete mutations now return `zone_apex` / `serial_before` / `serial_after` metadata and optionally journal when `dns_update.persistence` is enabled.
 - DockerHosts sticky condition-state logging helpers (`_note_condition_failure` / `_note_condition_ok`) with first-failure WARNING, quiet repeats, hourly reminder, and recovery INFO.
 
 ### Changed
+- Missing TLS cert/key failures now use one shared operator-facing line (`format_missing_tls_files_message`) across HTTP ensure, uvicorn/threaded admin start, and DoT/asyncio listeners—no traceback dump for simple missing files.
+- Upstream failover logs at most one WARNING per upstream set while all endpoints remain failed; the warning re-arms after a successful query (recovery).
+- Makefile `docker-run` / `docker-run-not-host` derive UDP/TCP publish ports from `LISTEN_PORT` and tolerate a missing container on recreate.
 - DockerHosts endpoint/list/empty-map failures use sticky condition logging instead of simple interval rate-limits; recovery is logged once when the endpoint or mapping becomes healthy again.
 - `axfr_zones[].allow_no_dnssec: false` now **rejects** transfers classified as `dnssec_state=none|partial` (apex DNSKEY/RRSIG material check) instead of only warning and loading anyway.
 - DNS UPDATE auth is explicitly **TSIG-only**: `dns_update.zones[].psk` is unsupported and fails closed at Pydantic validation, plugin setup, and `process_update_message`.
@@ -33,6 +39,7 @@ All notable changes to this project will be documented in this file.
 - `tests/config/test_foghorn_config_models.py` for FoghornConfig and nested model defaults.
 
 ### Documentation
+- Documented browser admin UI token storage/`apiFetch` behavior under Authentication in `docs/API.md`.
 - Added QUERY TSIG operational notes (optional vs require, shared key_sources files, NTP, cookies/DoT interaction, empty-keyring policy) to `docs/RFCs.md` §5.4.
 - Documented DockerHosts sticky condition logging in `docs/plugins/resolve/docker_hosts.md`.
 - Documented TSIG-only UPDATE auth and rejected `psk` in `docs/plugins/resolve/zone_update.md`, RFCs notes, and zone-update example configs.
@@ -42,6 +49,9 @@ All notable changes to this project will be documented in this file.
 - `docs/README-DEV.md` and `CONTRIBUTING.md` describe the Pydantic-driven schema workflow and `make schema` regenerate step.
 
 ### Tests
+- Added TLS generate/path-resolve/missing-cert message coverage in `tests/test_webserver_tls_generate.py` and partial-TLS start coverage in `tests/test_webserver.py`.
+- Added upstream all-failed warning throttle coverage in `tests/server/test_send_query_with_failover_all_failed_throttle.py`.
+- Added admin UI regression coverage for API token localStorage/`apiFetch`/401-retry wiring in shipped `index.html` (`tests/servers/test_webserver_admin_ui.py`).
 - Added AXFR TSIG key-inheritance coverage (axfr-empty inherits `server.features.tsig`, axfr-level keys win, snapshot wiring) in `tests/test_runtime_config_comprehensive.py`; updated the AXFR require-TSIG error message text in transfer tests.
 - Fixed `test_run_setup_plugins_priority_and_fallback` to capture the per-plugin setup log at DEBUG after startup setup lines were demoted from INFO to DEBUG.
 - Expanded `tests/server/test_dns_tsig.py` with allow_clients/listeners scoping, fudge/algorithm-mismatch rejection, empty-keyring fail-closed behavior, and an explicit cached-body-has-no-TSIG assertion; added TSIG startup-warning coverage in `tests/test_main_security_warnings.py`.
@@ -100,6 +110,7 @@ All notable changes to this project will be documented in this file.
 - Admin webserver startup now warns for non-loopback plaintext binds, public OpenAPI/Swagger exposure, permissive public CORS settings, and non-loopback threaded fallback usage.
 - API request audit startup now warns when enabled with implicit defaults for `db_path` or retention configuration.
 ### Fixed
+- Admin web UI can authenticate to token-protected `/api/v1/*` endpoints (previously fetches sent no credentials, so `enable_api` + default token auth made the UI unable to load stats/config).
 - Runtime snapshot initialization in `main` now passes `cookies_enabled` / `cookies_mode` / `cookies_secret` / `cookies_secret_old` / `cookies_lifetime_seconds` into `RuntimeSnapshot`, fixing startup after DNS COOKIE support was added.
 - RateLimit webserver stats now resolve runtime reader callbacks by `db_path` using exact, absolute, and normalized suffix matching, preventing missed current-window/profile metrics when configured paths and plugin runtime paths differ.
 - Admin plugin/cache paged tables now retain active search text, sort selection, page size, and enabled filters across auto-refresh cycles, preventing view resets while monitoring mDNS and other plugin pages.
