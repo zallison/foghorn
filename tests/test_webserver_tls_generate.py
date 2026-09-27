@@ -9,9 +9,119 @@ import pytest
 from foghorn.servers.webserver.tls_certs import (
     default_admin_tls_paths,
     ensure_admin_tls_files,
+    format_missing_tls_files_message,
     generate_self_signed_admin_tls,
+    is_missing_tls_file_error,
     normalize_generate_policy,
+    resolve_tls_path,
 )
+
+
+def test_format_missing_tls_files_message_is_one_line() -> None:
+    """Brief: missing-cert helper produces a readable single-line message.
+
+    Inputs:
+      - location plus missing cert/key paths.
+
+    Outputs:
+      - Message names both paths, reports exists=False, and mentions generate.
+    """
+
+    msg = format_missing_tls_files_message(
+        location="server.http",
+        cert_file="keys/missing.pem",
+        key_file="keys/missing.key",
+        detail="[Errno 2] No such file or directory",
+    )
+    assert "server.http TLS certificate/key not found" in msg
+    assert "keys/missing.pem" in msg
+    assert "keys/missing.key" in msg
+    assert "exists=False" in msg
+    assert "generate=maybe|yes" in msg
+    assert "\n" not in msg
+
+
+def test_is_missing_tls_file_error_detects_enoent() -> None:
+    """Brief: missing-file detector accepts FileNotFoundError and ENOENT OSError.
+
+    Inputs:
+      - Representative exception objects.
+
+    Outputs:
+      - True for missing-file errors; False for unrelated ValueError.
+    """
+
+    assert is_missing_tls_file_error(FileNotFoundError(2, "No such file or directory"))
+    assert is_missing_tls_file_error(OSError(2, "No such file or directory"))
+    assert not is_missing_tls_file_error(ValueError("unrelated"))
+
+
+def test_start_webserver_missing_cert_logs_without_traceback(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog
+) -> None:
+    """Brief: missing TLS files log a clean error instead of a traceback dump.
+
+    Inputs:
+      - Config with cert/key paths that do not exist and generate=no.
+
+    Outputs:
+      - start_webserver returns None; ERROR log is one readable line; no
+        'Unhandled exception in webserver thread' traceback path is taken.
+    """
+
+    import sys
+    import types
+
+    from foghorn.servers.webserver import RingBuffer, start_webserver
+
+    class DummyConfig:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("uvicorn.Config should not be constructed")
+
+    class DummyServer:
+        def __init__(self, config):
+            raise AssertionError("uvicorn.Server should not be constructed")
+
+        def run(self) -> None:
+            raise AssertionError("uvicorn.Server.run should not be called")
+
+    monkeypatch.setitem(
+        sys.modules,
+        "uvicorn",
+        types.SimpleNamespace(Config=DummyConfig, Server=DummyServer),
+    )
+
+    cfg_path = tmp_path / "c.yaml"
+    cfg_path.write_text("server: {}\n", encoding="utf-8")
+    cfg = {
+        "server": {
+            "http": {
+                "enabled": True,
+                "host": "127.0.0.1",
+                "port": 0,
+                "generate": "no",
+                "cert_file": str(tmp_path / "nope.pem"),
+                "key_file": str(tmp_path / "nope.key"),
+            }
+        }
+    }
+    with caplog.at_level("ERROR", logger="foghorn.webserver"):
+        handle = start_webserver(
+            stats=None,
+            config=cfg,
+            log_buffer=RingBuffer(),
+            config_path=str(cfg_path),
+        )
+    assert handle is None
+    msgs = [r.getMessage() for r in caplog.records if r.levelname == "ERROR"]
+    assert msgs, "expected an ERROR log for missing TLS files"
+    assert any(
+        ("TLS" in m and ("not found" in m.lower() or "missing" in m.lower()))
+        for m in msgs
+    )
+    assert not any("Unhandled exception in webserver thread" in m for m in msgs)
+    # No traceback payload attached to the operator-facing error path.
+    assert all(r.exc_info is None for r in caplog.records if r.levelname == "ERROR")
 
 
 def test_normalize_generate_policy_aliases() -> None:
@@ -57,18 +167,96 @@ def test_default_admin_tls_paths_use_config_dir(tmp_path: Path) -> None:
     )
 
 
-def test_ensure_admin_tls_files_generate_no_is_passthrough(tmp_path: Path) -> None:
-    """Brief: generate=no never creates files and keeps explicit paths.
+def test_resolve_tls_path_strips_config_prefix_under_config_dir(tmp_path: Path) -> None:
+    """Brief: ./config/keys paths resolve into <config_dir>/keys when missing.
 
     Inputs:
-      - web_cfg with generate=no and explicit cert/key paths.
+      - tmp_path config file and a relative path starting with config/.
 
     Outputs:
-      - Same paths returned; no files created.
+      - Resolved path under tmp_path/keys (not tmp_path/config/keys).
+    """
+
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text("server: {}\n", encoding="utf-8")
+    # Use a unique basename so CWD/config symlink leftovers cannot satisfy
+    # the "existing file" candidate search.
+    resolved = resolve_tls_path(
+        "./config/keys/foghorn_path_resolve_unique.pem",
+        config_path=str(cfg_path),
+    )
+    assert resolved == str(
+        (tmp_path / "keys" / "foghorn_path_resolve_unique.pem").resolve()
+    )
+
+
+def test_ensure_admin_tls_files_generate_maybe_relative_to_config_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Brief: generate=maybe writes relative keys under the config directory.
+
+    Inputs:
+      - tmp_path config and generate=maybe with keys/foghorn_x paths.
+
+    Outputs:
+      - Cert/key created under tmp_path/keys.
+    """
+
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text("server: {}\n", encoding="utf-8")
+
+    def fake_generate(
+        *,
+        cert_file: str,
+        key_file: str,
+        host: str = "localhost",
+        days: int = 3650,
+        openssl_bin: str | None = None,
+    ) -> None:
+        Path(cert_file).parent.mkdir(parents=True, exist_ok=True)
+        Path(cert_file).write_text("CERT", encoding="utf-8")
+        Path(key_file).write_text("KEY", encoding="utf-8")
+
+    monkeypatch.setattr(
+        "foghorn.servers.webserver.tls_certs.generate_self_signed_admin_tls",
+        fake_generate,
+    )
+    monkeypatch.setattr(
+        "foghorn.servers.webserver.tls_certs._openssl_available",
+        lambda: "/usr/bin/openssl",
+    )
+
+    cert, key = ensure_admin_tls_files(
+        {
+            "generate": "maybe",
+            "cert_file": "keys/foghorn_x.pem",
+            "key_file": "keys/foghorn_x.key",
+        },
+        host="127.0.0.1",
+        config_path=str(cfg_path),
+        location="server.listen.dot",
+        allow_missing_without_tls=False,
+    )
+    assert cert is not None and key is not None
+    assert Path(cert).is_file()
+    assert Path(key).is_file()
+    assert Path(cert).parent == tmp_path / "keys"
+
+
+def test_ensure_admin_tls_files_generate_no_is_passthrough(tmp_path: Path) -> None:
+    """Brief: generate=no keeps existing explicit paths and never creates files.
+
+    Inputs:
+      - web_cfg with generate=no and existing cert/key paths.
+
+    Outputs:
+      - Same paths returned; no additional files created.
     """
 
     cert = tmp_path / "a.pem"
     key = tmp_path / "a.key"
+    cert.write_text("CERT", encoding="utf-8")
+    key.write_text("KEY", encoding="utf-8")
     cfg = {
         "generate": "no",
         "cert_file": str(cert),
@@ -76,6 +264,34 @@ def test_ensure_admin_tls_files_generate_no_is_passthrough(tmp_path: Path) -> No
     }
     out = ensure_admin_tls_files(cfg, host="127.0.0.1")
     assert out == (str(cert), str(key))
+    assert cert.read_text(encoding="utf-8") == "CERT"
+    assert key.read_text(encoding="utf-8") == "KEY"
+
+
+def test_ensure_admin_tls_files_generate_no_missing_files_raise(
+    tmp_path: Path,
+) -> None:
+    """Brief: generate=no fails clearly when configured TLS files are missing.
+
+    Inputs:
+      - web_cfg with generate=no and missing cert/key paths.
+
+    Outputs:
+      - ValueError using the unified missing-TLS one-line message.
+    """
+
+    cert = tmp_path / "missing.pem"
+    key = tmp_path / "missing.key"
+    cfg = {
+        "generate": "no",
+        "cert_file": str(cert),
+        "key_file": str(key),
+    }
+    with pytest.raises(ValueError, match="TLS certificate/key not found") as excinfo:
+        ensure_admin_tls_files(cfg, host="127.0.0.1")
+    msg = str(excinfo.value)
+    assert "generate=maybe|yes" in msg
+    assert str(cert) in msg and str(key) in msg
     assert not cert.exists()
     assert not key.exists()
 
@@ -206,7 +422,7 @@ def test_ensure_admin_tls_files_incomplete_pair_errors(tmp_path: Path) -> None:
       - cert exists, key missing, generate=maybe.
 
     Outputs:
-      - ValueError mentioning incomplete TLS files.
+      - ValueError using the unified missing-TLS one-line message.
     """
 
     cert = tmp_path / "only.pem"
@@ -217,8 +433,9 @@ def test_ensure_admin_tls_files_incomplete_pair_errors(tmp_path: Path) -> None:
         "cert_file": str(cert),
         "key_file": str(key),
     }
-    with pytest.raises(ValueError, match="incomplete"):
+    with pytest.raises(ValueError, match="TLS certificate/key not found") as excinfo:
         ensure_admin_tls_files(cfg, host="127.0.0.1")
+    assert "incomplete" in str(excinfo.value).lower()
 
 
 def test_generate_self_signed_admin_tls_invokes_openssl(
@@ -239,9 +456,7 @@ def test_generate_self_signed_admin_tls_invokes_openssl(
     key = tmp_path / "k.key"
     seen: dict[str, object] = {}
 
-    def fake_run(
-        cmd, check=False, capture_output=False, text=False, timeout=None
-    ):  # noqa: ANN001
+    def fake_run(cmd, check=False, capture_output=False, text=False, timeout=None):
         seen["cmd"] = list(cmd)
         Path(cmd[cmd.index("-out") + 1]).write_text("CERT", encoding="utf-8")
         Path(cmd[cmd.index("-keyout") + 1]).write_text("KEY", encoding="utf-8")
@@ -313,9 +528,7 @@ def test_start_webserver_generate_maybe_enables_tls(
     state: dict[str, object] = {}
 
     class DummyConfig:
-        def __init__(
-            self, app, host, port, log_level, **kwargs
-        ):  # noqa: ANN001, ANN003
+        def __init__(self, app, host, port, log_level, **kwargs):
             self.app = app
             self.host = host
             self.port = port
@@ -325,7 +538,7 @@ def test_start_webserver_generate_maybe_enables_tls(
             self.ssl_keyfile = kwargs.get("ssl_keyfile")
 
     class DummyServer:
-        def __init__(self, config):  # noqa: ANN001
+        def __init__(self, config):
             state["config"] = config
 
         def run(self) -> None:
@@ -471,11 +684,11 @@ def test_start_webserver_refuses_public_api_without_auth_even_with_tls(
     cfg_path.write_text("server: {}\n", encoding="utf-8")
 
     class DummyConfig:
-        def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003
+        def __init__(self, *args, **kwargs):
             pass
 
     class DummyServer:
-        def __init__(self, config):  # noqa: ANN001
+        def __init__(self, config):
             self.config = config
 
         def run(self) -> None:
