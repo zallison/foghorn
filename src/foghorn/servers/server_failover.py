@@ -3,21 +3,21 @@
 from __future__ import annotations
 
 import errno
-import re
-import time
-
 import logging
+import re
 import threading
+import time
 from collections import OrderedDict
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
-from typing import Dict, List, Optional, Set, Tuple, Final
+from typing import Final
 
 from dnslib import QTYPE, RCODE, DNSRecord
-from foghorn.security_limits import MAX_DOH_DNS_MESSAGE_BYTES
 
+from foghorn.security_limits import MAX_DOH_DNS_MESSAGE_BYTES
 from foghorn.servers.transports.dot import DoTError, get_dot_pool
 from foghorn.servers.transports.tcp import TCPError, get_tcp_pool, tcp_query
 from foghorn.utils import dns_names
+
 from .dns_runtime_state import DNSRuntimeState
 
 logger = logging.getLogger("foghorn.server")
@@ -26,8 +26,14 @@ logger = logging.getLogger("foghorn.server")
 # skipped. This prevents log spam when an upstream is repeatedly failing.
 # The "warned" state is cleared the next time the upstream succeeds.
 _MAX_SKIP_WARNED_ENTRIES = 1024
-_UPSTREAM_SKIP_WARNED: "OrderedDict[str, bool]" = OrderedDict()
+_UPSTREAM_SKIP_WARNED: OrderedDict[str, bool] = OrderedDict()
 _UPSTREAM_SKIP_LOCK = threading.Lock()
+
+# Track whether we've already emitted the aggregate "All upstreams failed"
+# warning for a given upstream set. Cleared when any upstream in that set
+# succeeds again so a later outage is still visible.
+_MAX_ALL_FAILED_WARNED_ENTRIES = 256
+_ALL_UPSTREAMS_FAILED_WARNED: OrderedDict[str, bool] = OrderedDict()
 
 # Shared executor used only for per-query upstream fanout when failover is in
 # concurrent mode. This avoids per-query thread pool creation/destruction.
@@ -89,7 +95,7 @@ def _get_failover_executor() -> ThreadPoolExecutor:
 
 
 def _upstream_key_for_skip_warning(
-    upstream: Dict, host: str, port: int, transport: str
+    upstream: dict, host: str, port: int, transport: str
 ) -> str:
     """Brief: Compute a stable identifier for upstream skip warning de-duplication.
 
@@ -136,7 +142,7 @@ def _upstream_key_for_skip_warning(
 
 
 def _upstream_identity_label(
-    upstream: Dict,
+    upstream: dict,
     host: str,
     port: int,
     transport: str,
@@ -177,7 +183,7 @@ def _upstream_identity_label(
     return f"transport={transport}"
 
 
-def _upstream_summary_label(upstream: Dict, host: str, port: int) -> str:
+def _upstream_summary_label(upstream: dict, host: str, port: int) -> str:
     """Brief: Build a compact upstream label for aggregate failure logs.
 
     Inputs:
@@ -262,7 +268,7 @@ def _is_connection_refused_error(exc: Exception) -> bool:
     return "connection refused" in str(exc).lower()
 
 
-def _upstream_fail_count(upstream: Dict) -> float:
+def _upstream_fail_count(upstream: dict) -> float:
     """Brief: Read best-effort fail_count for an upstream.
 
     Inputs:
@@ -298,7 +304,7 @@ def _upstream_fail_count(upstream: Dict) -> float:
         return 0.0
 
 
-def _upstream_health_state(upstream: Dict, now_ts: Optional[float] = None) -> str:
+def _upstream_health_state(upstream: dict, now_ts: float | None = None) -> str:
     """Brief: Return coarse upstream health state for aggregate failure summaries.
 
     Inputs:
@@ -367,7 +373,7 @@ def _should_show_in_log(fail_count: float) -> bool:
     return fc > 0 and (fc % 25) == 0
 
 
-def _upstream_health_context(upstream: Dict, now_ts: Optional[float] = None) -> str:
+def _upstream_health_context(upstream: dict, now_ts: float | None = None) -> str:
     """Brief: Format best-effort health context for an upstream warning log.
 
     Inputs:
@@ -502,9 +508,95 @@ def _reset_upstream_skip_warning(upstream_key: str) -> None:
         pass
 
 
+def _all_upstreams_failed_key(upstreams: list[dict]) -> str:
+    """Brief: Build a stable key for aggregate all-upstreams-failed de-duplication.
+
+    Inputs:
+      - upstreams: Upstream configuration mappings attempted for this query.
+
+    Outputs:
+      - str: Sorted, pipe-joined per-upstream skip keys for the set.
+    """
+
+    keys: list[str] = []
+    for upstream in upstreams or []:
+        try:
+            host = str(upstream.get("host", "") or "")
+        except Exception:
+            host = ""
+        try:
+            port = int(upstream.get("port", 0) or 0)
+        except Exception:
+            port = 0
+        try:
+            transport = str(upstream.get("transport", "udp") or "udp").lower()
+        except Exception:
+            transport = "udp"
+        try:
+            keys.append(_upstream_key_for_skip_warning(upstream, host, port, transport))
+        except Exception:
+            keys.append(f"{transport}:{host}:{port}")
+    if not keys:
+        return "none"
+    return "|".join(sorted(keys))
+
+
+def _warn_all_upstreams_failed_once(all_failed_key: str, fmt: str, *args) -> bool:
+    """Brief: Log aggregate all-failed warning once per upstream set until recovery.
+
+    Inputs:
+      - all_failed_key: Identifier from _all_upstreams_failed_key.
+      - fmt: Logger format string.
+      - *args: Logger formatting arguments.
+
+    Outputs:
+      - bool: True when a WARNING was emitted; False when suppressed.
+    """
+    try:
+        with _UPSTREAM_SKIP_LOCK:
+            if _ALL_UPSTREAMS_FAILED_WARNED.get(all_failed_key):
+                try:
+                    _ALL_UPSTREAMS_FAILED_WARNED.move_to_end(all_failed_key, last=True)
+                except Exception:  # pragma: no cover - defensive
+                    pass
+                return False
+            while len(_ALL_UPSTREAMS_FAILED_WARNED) >= int(
+                _MAX_ALL_FAILED_WARNED_ENTRIES
+            ):
+                _ALL_UPSTREAMS_FAILED_WARNED.popitem(last=False)
+            _ALL_UPSTREAMS_FAILED_WARNED[all_failed_key] = True
+    except Exception:  # pragma: no cover - defensive
+        logger.debug(fmt, *args)
+        logger.debug(
+            "All-upstreams-failed de-duplication bookkeeping failed; "
+            "continuing without de-dupe",
+            exc_info=True,
+        )
+        return False
+
+    logger.warning(fmt, *args)
+    return True
+
+
+def _reset_all_upstreams_failed_warning(all_failed_key: str) -> None:
+    """Brief: Clear aggregate all-failed de-dupe state after a successful query.
+
+    Inputs:
+      - all_failed_key: Identifier from _all_upstreams_failed_key.
+
+    Outputs:
+      - None. Removes prior warning state so the next outage is logged once.
+    """
+    try:
+        with _UPSTREAM_SKIP_LOCK:
+            _ALL_UPSTREAMS_FAILED_WARNED.pop(all_failed_key, None)
+    except Exception:  # pragma: no cover - defensive
+        pass
+
+
 def _send_query_with_failover_impl(
     query: DNSRecord,
-    upstreams: List[Dict],
+    upstreams: list[dict],
     timeout_ms: int,
     qname: str,
     qtype: int,
@@ -515,7 +607,7 @@ def _send_query_with_failover_impl(
     tcp_query_fn=tcp_query,
     dot_error_cls=DoTError,
     tcp_error_cls=TCPError,
-) -> Tuple[Optional[bytes], Optional[Dict], str]:
+) -> tuple[bytes | None, dict | None, str]:
     """Brief: Send a DNS query with upstream failover and optional fan-out.
 
     Inputs:
@@ -540,11 +632,12 @@ def _send_query_with_failover_impl(
     if not upstreams:
         return None, None, "no_upstreams"
 
+    all_failed_key = _all_upstreams_failed_key(upstreams)
     timeout_sec = timeout_ms / 1000.0
-    last_exception: Optional[Exception] = None
+    last_exception: Exception | None = None
     last_exception_lock = threading.Lock()
     attempted_upstream_labels: list[str] = []
-    attempted_upstream_label_set: Set[str] = set()
+    attempted_upstream_label_set: set[str] = set()
     attempted_upstream_states: dict[str, str] = {}
     attempted_upstream_fail_counts: dict[str, float] = {}
     attempted_upstreams_lock = threading.Lock()
@@ -598,7 +691,7 @@ def _send_query_with_failover_impl(
         query_header = getattr(query, "header", None)
         if query_header is not None:
             try:
-                expected_id = int(getattr(query_header, "id"))
+                expected_id = int(query_header.id)
             except Exception:
                 logger.debug(
                     "TXID validation failed due to missing/invalid query header id"
@@ -650,8 +743,8 @@ def _send_query_with_failover_impl(
         return True
 
     def _upstream_attempt_context(
-        upstream: Dict,
-    ) -> Tuple[str, int, str, str, Optional[str], str]:
+        upstream: dict,
+    ) -> tuple[str, int, str, str, str | None, str]:
         """Brief: Build immutable context used by a single upstream attempt.
 
         Inputs:
@@ -689,7 +782,7 @@ def _send_query_with_failover_impl(
         return host, port, transport, upstream_key, tls_ca_file_hint, upstream_label
 
     def _send_transport_query(
-        upstream: Dict,
+        upstream: dict,
         host: str,
         port: int,
         transport: str,
@@ -792,7 +885,7 @@ def _send_query_with_failover_impl(
         # udp (default)
         # Use transport impl for consistency, but preserve legacy path for tests/mocks
         try:
-            pack = getattr(query, "pack")
+            pack = query.pack
         except Exception:
             pack = None
         if callable(pack):
@@ -804,13 +897,13 @@ def _send_query_with_failover_impl(
 
     def _classify_response(
         response_wire: bytes,
-        upstream: Dict,
+        upstream: dict,
         host: str,
         port: int,
         transport: str,
         upstream_key: str,
         upstream_label: str,
-    ) -> Tuple[Optional[bytes], Optional[Dict], str]:
+    ) -> tuple[bytes | None, dict | None, str]:
         """Brief: Parse and classify a transport response with fallback behavior.
 
         Inputs:
@@ -1042,7 +1135,7 @@ def _send_query_with_failover_impl(
         return response_wire, upstream, "ok"
 
     def _format_transport_error_file_info(
-        exc: Exception, tls_ca_file_hint: Optional[str]
+        exc: Exception, tls_ca_file_hint: str | None
     ) -> str:
         """Brief: Build optional filename context for transport exceptions.
 
@@ -1092,7 +1185,7 @@ def _send_query_with_failover_impl(
         safe = re.sub(r"(https?://[^\s\?]+)\?[^\s)]*", r"\1?...", safe)
         return safe
 
-    def _format_last_error_compact(exc: Optional[Exception]) -> str:
+    def _format_last_error_compact(exc: Exception | None) -> str:
         """Brief: Build compact last-error text for aggregate failure logging.
 
         Inputs:
@@ -1106,7 +1199,7 @@ def _send_query_with_failover_impl(
             return "unknown"
 
         err_msg = _sanitize_error_message(str(exc)).strip()
-        errno_code: Optional[int] = None
+        errno_code: int | None = None
         try:
             raw_errno = getattr(exc, "errno", None)
             if raw_errno is not None:
@@ -1154,7 +1247,7 @@ def _send_query_with_failover_impl(
             items.append(f"{label}{suffix} ({fail_count})")
         return ", ".join(items) or "none"
 
-    def _try_single(upstream: Dict) -> Tuple[Optional[bytes], Optional[Dict], str]:
+    def _try_single(upstream: dict) -> tuple[bytes | None, dict | None, str]:
         """Send query to a single upstream and classify the result.
 
         Inputs:
@@ -1285,6 +1378,7 @@ def _send_query_with_failover_impl(
         for upstream in upstreams:
             resp, used, reason = _try_single(upstream)
             if resp is not None:
+                _reset_all_upstreams_failed_warning(all_failed_key)
                 return resp, used, reason
     else:
         # Concurrency path: keep at most max_c attempts in-flight at a time and
@@ -1293,7 +1387,7 @@ def _send_query_with_failover_impl(
         # even when an earlier attempt succeeds).
         workers = min(max_c, len(upstreams))
         executor = _get_failover_executor()
-        pending: Dict[Future, int] = {}
+        pending: dict[Future, int] = {}
         next_index = 0
         try:
             # Prime the first in-flight window.
@@ -1321,6 +1415,7 @@ def _send_query_with_failover_impl(
                             fut.cancel()
                         except Exception:
                             pass
+                    _reset_all_upstreams_failed_warning(all_failed_key)
                     return resp, used, reason
 
                 if next_index < len(upstreams):
@@ -1342,14 +1437,22 @@ def _send_query_with_failover_impl(
     except Exception:
         all_failed_should_warn = False
 
-    all_failed_logger = logger.warning if all_failed_should_warn else logger.debug
     with last_exception_lock:
         last_error_snapshot = last_exception
-    all_failed_logger(
-        "All upstreams failed. Last error %s [%s] qtype: %s",
+    all_failed_args = (
         _format_last_error_compact(last_error_snapshot),
         attempted_summary,
         qtype,
     )
+    all_failed_fmt = "All upstreams failed. Last error %s [%s] qtype: %s"
+    if all_failed_should_warn:
+        # Once-until-success de-dupe matches per-upstream skip warnings so an
+        # outage (e.g. no internet) does not flood the log on every query.
+        if not _warn_all_upstreams_failed_once(
+            all_failed_key, all_failed_fmt, *all_failed_args
+        ):
+            logger.debug(all_failed_fmt, *all_failed_args)
+    else:
+        logger.debug(all_failed_fmt, *all_failed_args)
 
     return None, None, "all_failed"
