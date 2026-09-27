@@ -1,8 +1,9 @@
 import asyncio
 import logging
 import ssl
+from collections.abc import Callable
 from concurrent.futures import Executor
-from typing import Callable, Optional
+
 from foghorn.security_limits import MAX_DNS_TCP_MESSAGE_BYTES
 from foghorn.servers.overload_response import (
     OVERLOAD_RESPONSE_DROP,
@@ -215,7 +216,7 @@ async def _handle_conn(
                 break
 
             is_transfer = False
-            req: Optional[DNSRecord]
+            req: DNSRecord | None
             try:
                 req = DNSRecord.parse(query)
                 if getattr(req, "questions", None):
@@ -248,7 +249,7 @@ async def _handle_conn(
             query_count += 1
             writer.write(len(response).to_bytes(2, "big") + response)
             await writer.drain()
-    except asyncio.TimeoutError:
+    except TimeoutError:
         pass  # pragma: no cover - defensive: idle timeout closes connection
     except (ConnectionError, OSError, ssl.SSLError):
         pass  # pragma: no cover - defensive: expected transport disconnect path
@@ -279,7 +280,7 @@ async def serve_dot(
     *,
     cert_file: str,
     key_file: str,
-    ca_file: Optional[str] = None,
+    ca_file: str | None = None,
     min_version: ssl.TLSVersion = ssl.TLSVersion.TLSv1_2,
     max_connections: int = 1024,
     max_connections_per_ip: int = 64,
@@ -329,7 +330,35 @@ async def serve_dot(
 
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.minimum_version = min_version
-    ctx.load_cert_chain(certfile=cert_file, keyfile=key_file)
+    try:
+        ctx.load_cert_chain(certfile=cert_file, keyfile=key_file)
+    except FileNotFoundError as exc:
+        from foghorn.servers.webserver.tls_certs import format_missing_tls_files_message
+
+        raise FileNotFoundError(
+            format_missing_tls_files_message(
+                location="server.listen.dot",
+                cert_file=str(cert_file),
+                key_file=str(key_file),
+                detail=str(exc),
+            )
+        ) from None
+    except OSError as exc:
+        from foghorn.servers.webserver.tls_certs import (
+            format_missing_tls_files_message,
+            is_missing_tls_file_error,
+        )
+
+        if is_missing_tls_file_error(exc):
+            raise FileNotFoundError(
+                format_missing_tls_files_message(
+                    location="server.listen.dot",
+                    cert_file=str(cert_file),
+                    key_file=str(key_file),
+                    detail=str(exc),
+                )
+            ) from None
+        raise
     server = await asyncio.start_server(
         lambda r, w: _handle_conn(
             r,

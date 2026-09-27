@@ -1174,13 +1174,35 @@ def main(argv: List[str] | None = None) -> int:
 
     if bool(dot_cfg.get("enabled", False)):
         from .servers.dot_server import serve_dot
+        from .servers.webserver.tls_certs import ensure_admin_tls_files
 
         dhost = str(dot_cfg.get("host", default_host))
         dport = int(dot_cfg.get("port", 853))
-        cert_file = dot_cfg.get("cert_file")
-        key_file = dot_cfg.get("key_file")
+        try:
+            # Honor listen.dot.generate the same way server.http does. DoT always
+            # requires TLS material, so missing openssl with generate=maybe fails.
+            cert_file, key_file = ensure_admin_tls_files(
+                dot_cfg if isinstance(dot_cfg, dict) else {},
+                host=dhost,
+                config_path=cfg_path,
+                location="server.listen.dot",
+                allow_missing_without_tls=False,
+            )
+        except (ValueError, RuntimeError) as exc:
+            # ensure_admin_tls_files already formats missing-file errors uniformly.
+            msg = str(exc)
+            _record_listener_error("dot", msg)
+            logger.error("%s; refusing to start", msg)
+            return 1
         if not cert_file or not key_file:
-            msg = "listen.dot.enabled=true but cert_file/key_file not provided"
+            from .servers.webserver.tls_certs import format_missing_tls_files_message
+
+            msg = format_missing_tls_files_message(
+                location="server.listen.dot",
+                cert_file=cert_file,
+                key_file=key_file,
+                detail=("listen.dot.enabled=true but cert_file/key_file not available"),
+            )
             _record_listener_error("dot", msg)
             logger.error(
                 "%s; refusing to start",
