@@ -427,23 +427,27 @@ class Filter(BasePlugin):
         self._db_init()
 
         # Load domains from files and inline with defined precedence (last write wins):
-        # 1) allowlist files, 2) blocklist files, 3) inline allowed_domains, 4) inline blocked_domains
+        # 1) blocklist files, 2) allowlist files, 3) inline blocked_domains, 4) inline allowed_domains
+        # Allow entries intentionally load after block entries so allowlists act as
+        # exceptions to blocklists when the same domain appears in both.
+        #
+        # Reload both file groups whenever either group changes so last-write-wins
+        # ordering stays consistent across partial file updates.
         allow_changed = self._any_list_file_changed(self.allowlist_files, "allow")
-        if allow_changed:
-            for file in self.allowlist_files:
-                self.load_list_from_file(file, "allow")
         block_changed = self._any_list_file_changed(self.blocklist_files, "deny")
-        if block_changed:
+        if allow_changed or block_changed:
             for file in self.blocklist_files:
                 self.load_list_from_file(file, "deny")
+            for file in self.allowlist_files:
+                self.load_list_from_file(file, "allow")
 
         # Inline allow/deny domains from config: batch into a single transaction
         if self.allowlist or self.blocklist:
             with self.conn:
-                for domain in self.allowlist:
-                    self._db_insert_domain(domain, "config", "allow")
                 for domain in self.blocklist:
                     self._db_insert_domain(domain, "config", "deny")
+                for domain in self.allowlist:
+                    self._db_insert_domain(domain, "config", "allow")
 
         # Load patterns/keywords/IPs from files (additive to inline config)
         for patfile in self._expand_globs(
