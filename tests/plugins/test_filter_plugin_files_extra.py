@@ -70,6 +70,37 @@ def test_domains_files_allow_and_block(tmp_path):
         assert p.is_allowed("unknown.com") is False
 
 
+def test_allow_domains_override_block_files_and_inline(tmp_path):
+    """Brief: Allow lists load after block lists so shared domains stay allowed.
+
+    Inputs:
+      - Same domain present in blocked and allowed files.
+      - Same domain present in inline blocked_domains and allowed_domains.
+
+    Outputs:
+      - None: Asserts allow entries win over block entries for conflicts.
+    """
+    allowf = tmp_path / "allows.txt"
+    blockf = tmp_path / "blocks.txt"
+    allowf.write_text("overlap.example\n")
+    blockf.write_text("overlap.example\nonly-blocked.example\n")
+
+    p = Filter(
+        db_path=str(tmp_path / "bl.db"),
+        allowed_domains_files=[str(allowf)],
+        blocked_domains_files=[str(blockf)],
+        blocked_domains=["inline-overlap.example"],
+        allowed_domains=["inline-overlap.example"],
+        default="deny",
+    )
+    p.setup()
+
+    with closing(p.conn):
+        assert p.is_allowed("overlap.example") is True
+        assert p.is_allowed("only-blocked.example") is False
+        assert p.is_allowed("inline-overlap.example") is True
+
+
 def test_load_list_from_file_json_error_and_missing_domain(tmp_path, caplog):
     """Brief: load_list_from_file handles invalid JSON, non-dict, and missing domain.
 
