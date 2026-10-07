@@ -14,6 +14,7 @@ All notable changes to this project will be documented in this file.
 - DockerHosts sticky condition-state logging helpers (`_note_condition_failure` / `_note_condition_ok`) with first-failure WARNING, quiet repeats, hourly reminder, and recovery INFO.
 
 ### Changed
+- Filter now loads allow domain lists after block lists (files then inline), so allow entries act as exceptions when the same domain appears in both; either file group change reloads both groups in that order.
 - Missing TLS cert/key failures now use one shared operator-facing line (`format_missing_tls_files_message`) across HTTP ensure, uvicorn/threaded admin start, and DoT/asyncio listeners—no traceback dump for simple missing files.
 - Upstream failover logs at most one WARNING per upstream set while all endpoints remain failed; the warning re-arms after a successful query (recovery).
 - Makefile `docker-run` / `docker-run-not-host` derive UDP/TCP publish ports from `LISTEN_PORT` and tolerate a missing container on recreate.

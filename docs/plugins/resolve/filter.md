@@ -190,9 +190,15 @@ plugins:
     - `deny` → entire response denied according to `deny_response`.
     - `remove` → record removed; if all are removed, response is denied.
     - `replace` → rdata changed to `replace_with` (same IP family required).
-- List file ordering:
-  - When any allowlist or blocklist file changes, the plugin reloads all files
-    in that group to preserve ordering semantics.
+- List load precedence (last write wins):
+  1. `blocked_domains_files`
+  2. `allowed_domains_files`
+  3. inline `blocked_domains`
+  4. inline `allowed_domains`
+  - Allow entries therefore act as exceptions to block entries when the same
+    domain appears in both.
+  - When any allowlist or blocklist file changes, the plugin reloads both file
+    groups in that order so precedence stays consistent.
 
 ### Common BasePlugin options
 
