@@ -11,13 +11,15 @@ import re
 import sqlite3
 import threading
 import time
-from typing import Dict, Iterator, List, Optional, Set, Tuple, Union
+from datetime import UTC, datetime
+from typing import Dict, Iterator, List, Literal, Optional, Set, Tuple, Union
+from zoneinfo import ZoneInfo
 
 from dnslib import AAAA as RDATA_AAAA
 from dnslib import QTYPE, RCODE, RR
 from dnslib import A as RDATA_A
 from dnslib import DNSHeader, DNSRecord
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, Field, ConfigDict, field_validator, model_validator
 
 from foghorn.utils.current_cache import get_current_namespaced_cache, module_namespace
 from foghorn.utils import ip_networks
@@ -25,6 +27,284 @@ from foghorn.utils import ip_networks
 from .base import BasePlugin, PluginContext, PluginDecision, plugin_aliases
 
 logger = logging.getLogger(__name__)
+
+# Matches "H:MM" or "HH:MM"; the hour range is validated numerically below.
+_HHMM_RE = re.compile(r"^(\d{1,2}):([0-5]\d)$")
+
+# ISO weekdays: Monday=1 .. Sunday=7 (datetime.isoweekday()).
+_DAY_NAME_TO_ISO: dict[str, int] = {
+    "mon": 1,
+    "monday": 1,
+    "tue": 2,
+    "tues": 2,
+    "tuesday": 2,
+    "wed": 3,
+    "weds": 3,
+    "wednesday": 3,
+    "thu": 4,
+    "thur": 4,
+    "thurs": 4,
+    "thursday": 4,
+    "fri": 5,
+    "friday": 5,
+    "sat": 6,
+    "saturday": 6,
+    "sun": 7,
+    "sunday": 7,
+}
+_DAY_GROUP_TO_ISO: dict[str, tuple[int, ...]] = {
+    "weekday": (1, 2, 3, 4, 5),
+    "weekdays": (1, 2, 3, 4, 5),
+    "weekend": (6, 7),
+    "weekends": (6, 7),
+    "daily": (1, 2, 3, 4, 5, 6, 7),
+    "all": (1, 2, 3, 4, 5, 6, 7),
+}
+
+# Internal time-rule shape: (domains, windows, days, action).
+# windows are (start_minutes, end_minutes) pairs; days is a frozenset of ISO
+# weekdays (empty means every day).
+CompiledTimeRule = tuple[
+    tuple[str, ...], tuple[tuple[int, int], ...], frozenset[int], str
+]
+
+
+def _hhmm_to_minutes(value: object) -> int:
+    """Brief: Parse an "HH:MM" string (or raw minute count) into minutes.
+
+    Inputs:
+      - value: "HH:MM" 24-hour time string or integer minutes since midnight.
+
+    Outputs:
+      - int: Minutes since midnight in [0, 1439].
+
+    Raises:
+      - TypeError: When the value is not an "HH:MM" string or integer.
+      - ValueError: When a string cannot be parsed or is out of range.
+    """
+    if isinstance(value, bool):
+        raise TypeError(f"Invalid time {value!r}; expected 'HH:MM'")
+    if isinstance(value, int):
+        minutes = value
+    elif isinstance(value, str):
+        match = _HHMM_RE.match(value.strip())
+        if not match:
+            raise ValueError(f"Invalid time {value!r}; expected 'HH:MM'")
+        minutes = int(match.group(1)) * 60 + int(match.group(2))
+    else:
+        raise TypeError(f"Invalid time {value!r}; expected 'HH:MM'")
+    if not 0 <= minutes <= 1439:
+        raise ValueError(f"Time out of range (00:00-23:59): {value!r}")
+    return minutes
+
+
+def _normalize_time_rule_domain(value: object) -> str:
+    """Brief: Normalize a configured time-rule domain for suffix matching.
+
+    Inputs:
+      - value: Domain name-like value; may include case and trailing dot.
+
+    Outputs:
+      - str: Lower-cased name without trailing dot.
+
+    Raises:
+      - ValueError: When the value normalizes to an empty string.
+    """
+    from foghorn.utils import dns_names
+
+    name = dns_names.normalize_name(value)
+    if not name:
+        raise ValueError(f"Empty domain in filter time rule: {value!r}")
+    return name
+
+
+def _parse_day_token(value: object) -> frozenset[int]:
+    """Brief: Parse one day name, group, or ISO number into ISO weekdays.
+
+    Inputs:
+      - value: Day token such as "mon", "monday", "weekdays", 1..7, or "1".."7".
+
+    Outputs:
+      - frozenset[int]: One or more ISO weekdays (Monday=1 .. Sunday=7).
+
+    Raises:
+      - TypeError / ValueError: When the token is not a recognized day.
+    """
+    if isinstance(value, bool):
+        raise TypeError(f"Invalid day {value!r}; expected weekday name or 1-7")
+    if isinstance(value, int):
+        if not 1 <= value <= 7:
+            raise ValueError(f"Invalid day number {value!r}; expected 1-7 (Mon-Sun)")
+        return frozenset({value})
+    if isinstance(value, str):
+        token = value.strip().lower()
+        if not token:
+            raise ValueError("Empty day token in filter time rule")
+        if token in _DAY_GROUP_TO_ISO:
+            return frozenset(_DAY_GROUP_TO_ISO[token])
+        if token in _DAY_NAME_TO_ISO:
+            return frozenset({_DAY_NAME_TO_ISO[token]})
+        if token.isdigit():
+            number = int(token)
+            if not 1 <= number <= 7:
+                raise ValueError(
+                    f"Invalid day number {value!r}; expected 1-7 (Mon-Sun)"
+                )
+            return frozenset({number})
+        raise ValueError(
+            f"Invalid day {value!r}; expected mon..sun, weekdays/weekend, or 1-7"
+        )
+    raise TypeError(f"Invalid day {value!r}; expected weekday name or 1-7")
+
+
+def _parse_days(value: object) -> frozenset[int]:
+    """Brief: Parse a days field into a frozenset of ISO weekdays.
+
+    Inputs:
+      - value: None/empty (all days), a single day/group string, or a list of
+        day tokens.
+
+    Outputs:
+      - frozenset[int]: Selected ISO weekdays. Empty means every day.
+
+    Raises:
+      - TypeError / ValueError: When any token is invalid.
+    """
+    if value is None:
+        return frozenset()
+    if isinstance(value, str):
+        value = [value]
+    if isinstance(value, (int, bool)):
+        value = [value]
+    if not isinstance(value, (list, tuple, set, frozenset)):
+        raise TypeError(
+            f"Invalid days {value!r}; expected day name/list or weekdays/weekend"
+        )
+    if len(value) == 0:
+        return frozenset()
+    days: set[int] = set()
+    for item in value:
+        days.update(_parse_day_token(item))
+    return frozenset(days)
+
+
+class TimeWindow(BaseModel):
+    """Brief: Typed model for one time-of-day window.
+
+    Inputs:
+      - start: Window start as "HH:MM" (24-hour clock), inclusive.
+      - end: Window end as "HH:MM" (24-hour clock), exclusive. When later
+        than ``start`` the window is a plain daytime span; when earlier it
+        wraps across midnight (owned by the start day for ``days`` matching);
+        when equal it matches the full day. Note end is exclusive, so
+        ``00:00``-``23:59`` is not all day — use equal start/end (or omit
+        windows) for a full-day match.
+
+    Outputs:
+      - TimeWindow with start/end normalized to integer minutes since
+        midnight.
+    """
+
+    start: int = Field(description="Window start as 'HH:MM' (24-hour clock).")
+    end: int = Field(description="Window end as 'HH:MM' (24-hour clock).")
+
+    @field_validator("start", "end", mode="before")
+    @classmethod
+    def _parse_time(cls, value: object) -> int:
+        """Brief: Convert "HH:MM" strings to integer minutes.
+
+        Inputs:
+          - value: Raw start/end value from configuration.
+
+        Outputs:
+          - int: Minutes since midnight.
+        """
+        return _hhmm_to_minutes(value)
+
+
+class TimeRule(BaseModel):
+    """Brief: Typed model for one time-of-day / day-of-week filtering rule.
+
+    Inputs:
+      - domains: One or more domain names (suffix match: the name itself and
+        all subdomains).
+      - windows: Optional TimeWindow entries; any matching window triggers the
+        action. When omitted or empty, the rule matches the full day on the
+        selected days.
+      - days: Optional weekdays the rule applies to (names, 1-7 ISO, or groups
+        like "weekdays"/"weekend"). Empty/omitted means every day. For windows
+        that wrap midnight, the start day owns the overnight span (Mon 22:00-
+        06:00 still matches Tue 03:00 when days includes Monday).
+      - action: "deny" (configured deny response, NXDOMAIN by default) or
+        "drop" (no reply).
+
+    Outputs:
+      - TimeRule with normalized domains, days, and parsed windows.
+    """
+
+    domains: list[str] = Field(min_length=1)
+    windows: list[TimeWindow] = Field(default_factory=list)
+    days: frozenset[int] = Field(default_factory=frozenset)
+    action: Literal["deny", "drop"] = "deny"
+
+    @model_validator(mode="after")
+    def _ensure_windows(self) -> TimeRule:
+        """Brief: Default empty windows to a full-day match.
+
+        Inputs:
+          - self: Partially constructed TimeRule.
+
+        Outputs:
+          - TimeRule: Same instance with at least one full-day window when
+            windows was omitted or empty.
+        """
+        if not self.windows:
+            object.__setattr__(self, "windows", [TimeWindow(start=0, end=0)])
+        return self
+
+    @field_validator("domains", mode="before")
+    @classmethod
+    def _parse_domains(cls, value: object) -> list[str]:
+        """Brief: Accept a single domain string or a list and normalize it.
+
+        Inputs:
+          - value: Domain name or list of domain names.
+
+        Outputs:
+          - list[str]: Normalized lower-case domains without trailing dots.
+        """
+        if isinstance(value, str):
+            value = [value]
+        return [_normalize_time_rule_domain(item) for item in value]
+
+    @field_validator("days", mode="before")
+    @classmethod
+    def _parse_days_field(cls, value: object) -> frozenset[int]:
+        """Brief: Normalize days to a frozenset of ISO weekdays.
+
+        Inputs:
+          - value: Raw days config (name, list, group, or empty).
+
+        Outputs:
+          - frozenset[int]: ISO weekdays; empty means every day.
+        """
+        return _parse_days(value)
+
+    @field_validator("windows", mode="before")
+    @classmethod
+    def _default_windows(cls, value: object) -> object:
+        """Brief: Treat missing/empty windows as a full-day window.
+
+        Inputs:
+          - value: Raw windows list or None.
+
+        Outputs:
+          - object: Original value, or one full-day {"start": "00:00",
+            "end": "00:00"} window when empty/None.
+        """
+        if value is None or value == []:
+            return [{"start": "00:00", "end": "00:00"}]
+        return value
 
 
 class FilterConfig(BaseModel):
@@ -46,6 +326,11 @@ class FilterConfig(BaseModel):
       - blocked_patterns / blocked_patterns_files: Regexes.
       - blocked_keywords / blocked_keywords_files: Keywords.
       - blocked_ips / blocked_ips_files: IP rules.
+      - timezone: Optional IANA timezone name used by time_rules (default:
+        system local time).
+      - time_rules: Optional list of {domains, windows, days, action} entries
+        that deny or drop matching domains only while the current local time
+        (and optional weekday filter) matches one of their windows.
 
     Outputs:
       - FilterConfig instance with normalized field types.
@@ -74,6 +359,9 @@ class FilterConfig(BaseModel):
     blocked_ips: List[Union[str, Dict[str, object]]] = Field(default_factory=list)
     blocked_ips_files: List[str] = Field(default_factory=list)
 
+    timezone: str | None = Field(default=None)
+    time_rules: list[TimeRule] = Field(default_factory=list)
+
     clear: int = Field(default=0, ge=0)
     strict_file_loading: bool = Field(default=False)
     max_domain_labels: int = Field(default=32, ge=1)
@@ -92,6 +380,9 @@ class Filter(BasePlugin):
     - Exact domain matches
     - Domain patterns (regex or substring matching)
     - Keyword filtering (e.g., blocking domains containing certain words)
+    - Time-of-day / day-of-week windows for specific domains (``time_rules``
+      with an optional ``timezone``; a rule denies or drops its domains only
+      while the current time and optional weekday filter match)
 
     Post-resolve filtering blocks or modifies responses based on:
     - Specific IP addresses with per-IP actions
@@ -271,6 +562,21 @@ class Filter(BasePlugin):
         self._deny_qtypes: Set[int] = _qtype_names_to_ints(
             self.config.get("deny_qtypes")
         )
+
+        # Time-of-day / day-of-week domain rules (pre-resolve). Outcomes depend
+        # on the clock, so they are evaluated fresh on every query and never
+        # written to the TTL decision cache.
+        self._time_tz = self._resolve_time_timezone(self.config.get("timezone"))
+        self._time_rules: list[CompiledTimeRule] = [
+            self._compile_time_rule(raw_rule)
+            for raw_rule in (self.config.get("time_rules") or [])
+        ]
+        if self._time_rules:
+            logger.debug(
+                "filter time rules ready: %d rule(s) (timezone=%s)",
+                len(self._time_rules),
+                getattr(self._time_tz, "key", None) or self._time_tz,
+            )
 
         valid_deny_responses = {
             "nxdomain",
@@ -632,8 +938,9 @@ class Filter(BasePlugin):
         Returns:
             A PluginDecision signalling a deny for blocked domains (mapped to
             NXDOMAIN, REFUSED, SERVFAIL, NOERROR, or a synthetic IP answer
-            depending on configuration) or a PluginDecision with action "skip"
-            when no pre-resolve filtering applies.
+            depending on configuration), a deny/drop decision when an active
+            time rule matches, or a PluginDecision with action "skip" when no
+            pre-resolve filtering applies.
         """
         if not self.targets(ctx):
             return None
@@ -652,6 +959,13 @@ class Filter(BasePlugin):
         if self._deny_qtypes and int(qtype) in self._deny_qtypes:
             self.add_to_cache(qtype_key, False)
             return self._build_deny_decision_pre(qname, qtype, req, ctx)
+
+        # Time/day rules run before the decision cache and take precedence over
+        # it: a domain allowed earlier must still be denied once its window
+        # opens, and vice versa.
+        time_decision = self._time_rule_decision(domain, qname, qtype, req, ctx)
+        if time_decision is not None:
+            return time_decision
 
         cached = self._domain_cache.get(qtype_key)
         if cached is None:
@@ -702,6 +1016,158 @@ class Filter(BasePlugin):
         self.add_to_cache(domain_key, True)
 
         return PluginDecision(action="skip")
+
+    def _time_rule_decision(
+        self,
+        domain: str,
+        qname: str,
+        qtype: int,
+        raw_req: bytes,
+        ctx: PluginContext,
+    ) -> PluginDecision | None:
+        """Brief: Return a deny/drop decision when an active time rule matches.
+
+        Inputs:
+          - domain: Normalized query name (lower-case, no trailing dot).
+          - qname: Original queried name (for response synthesis and logs).
+          - qtype: DNS query type integer.
+          - raw_req: Original DNS request wire bytes.
+          - ctx: PluginContext for the current request.
+
+        Outputs:
+          - PluginDecision when a rule matches the name and the current
+            time/day is inside one of its windows, else None to let normal
+            processing continue.
+        """
+        if not self._time_rules or not domain:
+            return None
+
+        now = self._now()
+        weekday = now.isoweekday()
+        minutes = now.hour * 60 + now.minute
+        for domains, windows, days, action in self._time_rules:
+            if not any(domain == d or domain.endswith("." + d) for d in domains):
+                continue
+            if any(
+                self._window_matches(weekday, minutes, start, end, days)
+                for start, end in windows
+            ):
+                logger.debug(
+                    "Domain '%s' blocked by time rule (action=%s)", qname, action
+                )
+                if action == "drop":
+                    return PluginDecision(action="drop")
+                return self._build_deny_decision_pre(qname, qtype, raw_req, ctx)
+        return None
+
+    def _now(self) -> datetime:
+        """Brief: Return the current time in the configured rule timezone.
+
+        Inputs:
+          - None (uses self._time_tz resolved during setup()).
+
+        Outputs:
+          - datetime: Timezone-aware current time.
+
+        Notes:
+          - Isolated as a method so tests can substitute a fixed instant.
+        """
+        return datetime.now(UTC).astimezone(self._time_tz)
+
+    @staticmethod
+    def _resolve_time_timezone(tz_name: object):
+        """Brief: Resolve the IANA/system timezone used by time rules.
+
+        Inputs:
+          - tz_name: Optional IANA timezone string from config.
+
+        Outputs:
+          - tzinfo: ZoneInfo for a named zone, else the system local tzinfo.
+
+        Raises:
+          - ValueError: When a non-empty name is not a valid IANA zone.
+        """
+        if tz_name is not None and str(tz_name).strip():
+            try:
+                return ZoneInfo(str(tz_name).strip())
+            except Exception as exc:
+                raise ValueError(
+                    f"Invalid timezone {tz_name!r} for filter time rules: {exc}"
+                ) from exc
+        return datetime.now(UTC).astimezone().tzinfo
+
+    @staticmethod
+    def _prev_isoweekday(weekday: int) -> int:
+        """Brief: Return the previous ISO weekday, wrapping Sunday to Saturday.
+
+        Inputs:
+          - weekday: ISO weekday in 1..7 (Monday=1).
+
+        Outputs:
+          - int: Previous ISO weekday in 1..7.
+        """
+        return 7 if weekday == 1 else weekday - 1
+
+    @staticmethod
+    def _window_matches(
+        weekday: int,
+        minutes: int,
+        start: int,
+        end: int,
+        days: frozenset[int],
+    ) -> bool:
+        """Brief: Check whether weekday+minute fall inside a timed window.
+
+        Inputs:
+          - weekday: Current ISO weekday (Monday=1 .. Sunday=7).
+          - minutes: Current minutes since midnight in [0, 1439].
+          - start: Window start minute (inclusive).
+          - end: Window end minute (exclusive); earlier than start wraps across
+            midnight and is owned by the start day; equal to start is full day.
+          - days: Allowed ISO weekdays; empty means every day.
+
+        Outputs:
+          - bool: True when the instant is inside the window on an allowed day.
+
+        Notes:
+          - Overnight example: days={Mon}, start=22:00, end=06:00 matches Monday
+            22:00-23:59 and Tuesday 00:00-05:59 (start day owns the wrap).
+        """
+        if start == end:
+            return (not days) or weekday in days
+        if start < end:
+            if days and weekday not in days:
+                return False
+            return start <= minutes < end
+        # Wrap across midnight: start day owns evening + following early morning.
+        if minutes >= start:
+            return (not days) or weekday in days
+        if minutes < end:
+            return (not days) or Filter._prev_isoweekday(weekday) in days
+        return False
+
+    def _compile_time_rule(self, raw_rule: object) -> CompiledTimeRule:
+        """Brief: Compile one raw time-rule entry into its internal form.
+
+        Inputs:
+          - raw_rule: Mapping or TimeRule with domains/windows/days/action.
+
+        Outputs:
+          - CompiledTimeRule tuple of (domains, windows, days, action).
+
+        Raises:
+          - ValidationError / TypeError / ValueError: When the rule is invalid.
+        """
+        if isinstance(raw_rule, TimeRule):
+            rule = raw_rule
+        else:
+            # Single validation path for dict configs and already-parsed models.
+            rule = TimeRule.model_validate(raw_rule)
+
+        domains = tuple(rule.domains)
+        windows = tuple((w.start, w.end) for w in rule.windows) or ((0, 0),)
+        days = frozenset(rule.days)
+        return (domains, windows, days, rule.action)
 
     def post_resolve(
         self, qname: str, qtype: int, response_wire: bytes, ctx: PluginContext
