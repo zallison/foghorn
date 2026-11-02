@@ -5,8 +5,8 @@
 The `filter` resolve plugin provides flexible domain and IP filtering. It has
 both:
 
-- **pre-resolve** logic to allow/deny queries based on domain lists, patterns
-  and keywords; and
+- **pre-resolve** logic to allow/deny queries based on domain lists, patterns,
+  keywords, and time-of-day / day-of-week windows; and
 - **post-resolve** logic to inspect A/AAAA answers and remove, deny or replace
   specific IPs or subnets.
 
@@ -20,6 +20,8 @@ Typical use cases:
 - Ad-blocking or privacy filtering for home and lab networks.
 - Security filtering for known malware, phishing, or tracking domains.
 - Enforcing simple policy allow/deny rules for specific domains or IP ranges.
+- Time-of-day / day-of-week blocking (for example, streaming on school nights,
+  or games all weekend).
 
 ## Basic configuration
 
@@ -98,6 +100,21 @@ plugins:
       blocked_keywords_files:
         - ./config/keywords/*.txt
 
+      # Time-of-day / day-of-week rules (pre-resolve): deny or drop domains
+      # only while the current time (and optional weekday filter) matches.
+      timezone: America/Chicago         # IANA zone for windows (default: system local)
+      time_rules:
+        - domains:
+            - streaming.example.com     # matches the domain and all subdomains
+          days: [mon, tue, wed, thu]    # school nights; omit for every day
+          windows:
+            - { start: '22:00', end: '06:00' }  # overnight; start day owns wrap
+          action: deny                  # deny (default) or drop (no reply)
+        - domains: [games.example.com]
+          days: weekend                 # sat+sun; also accepts weekdays/daily
+          # omitted windows => full day on selected days
+          action: drop
+
       # IP / subnet rules for post-resolve filtering
       blocked_ips:
         # Simple form: all use default action 'deny'
@@ -175,14 +192,44 @@ plugins:
     qtype not in that set is immediately denied. When `deny_qtypes` contains the
     qtype, it is also denied even if otherwise allowed.
 
+### Time-of-day / day-of-week options
+
+- `timezone: str | null`
+  - IANA timezone name used to evaluate `time_rules` windows (for example
+    `"America/Chicago"`). When omitted or empty, the system local timezone is
+    used. Unknown names fail plugin setup.
+- `time_rules: list[object]`
+  - Optional list of rules that deny or drop matching domains only while the
+    current time (and optional weekday filter) matches. Each entry has:
+    - `domains: str | list[str]` – Domain name(s); a rule matches the domain
+      itself and all subdomains (suffix semantics, case-insensitive).
+    - `days: str | list[str|int] | null` – Weekdays the rule applies to.
+      Accepts `mon`..`sun` (or full names), ISO numbers `1`..`7` (Monday=1),
+      and groups `weekdays` / `weekend` / `daily`. Empty/omitted means every
+      day. For windows that wrap midnight, the **start day owns** the overnight
+      span (`days: [mon]`, `22:00`–`06:00` still matches Tuesday 03:00).
+    - `windows: list[object]` – Optional `{start: "HH:MM", end: "HH:MM"}`
+      24-hour windows. The start minute is inclusive and the end minute
+      exclusive. A window whose start is later than its end wraps across
+      midnight; a window whose start equals its end matches the full day.
+      Empty/omitted windows default to a full-day match on the selected days.
+      Note: `00:00`–`23:59` is **not** all day (end is exclusive) — use equal
+      start/end or omit `windows`. Any matching window triggers the rule.
+    - `action: "deny" | "drop"` (default `"deny"`) – `"deny"` produces the
+      configured `deny_response` (NXDOMAIN by default); `"drop"` sends no reply.
+
 ### Behaviour
 
 - Pre-resolve:
   1. Enforce qtype policy.
-  2. Consult cache by `(domain, qtype)` / `(domain, 0)` key.
-  3. Check exact allow/deny lists.
-  4. Check keyword and regex patterns.
-  5. Cache and return either `PluginDecision(action="skip")` (allowed) or a
+  2. Evaluate active time/day rules (`time_rules`). These are checked before
+     the decision cache and take precedence over it, because their outcome
+     changes with the clock; a matching rule denies (per `deny_response`) or
+     drops the query.
+  3. Consult cache by `(domain, qtype)` / `(domain, 0)` key.
+  4. Check exact allow/deny lists.
+  5. Check keyword and regex patterns.
+  6. Cache and return either `PluginDecision(action="skip")` (allowed) or a
      deny decision according to `deny_response`.
 - Post-resolve:
   - Only A/AAAA records are inspected. For each address, the best-matching
