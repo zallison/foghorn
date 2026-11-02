@@ -126,6 +126,57 @@ def test_load_records_across_multiple_files_order_and_dedup(
     assert values == ["1.1.1.1", "2.2.2.2", "3.3.3.3"]
 
 
+def test_load_records_default_replace_mode_rebuilds_on_reload(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Brief: default load_mode=replace rebuilds mapping and drops old values.
+
+    Inputs:
+      - tmp_path: pytest temporary directory fixture.
+
+    Outputs:
+      - Asserts that a subsequent reload without an explicit load_mode drops
+        removed owners and replaces changed RRset values instead of appending.
+    """
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
+    ZoneRecords = mod.ZoneRecords
+
+    records_file = tmp_path / "records.txt"
+    records_file.write_text(
+        "\n".join(
+            [
+                "keep.example|A|300|10.0.0.1",
+                "gone.example|A|300|10.0.0.2",
+                "monkey.example|A|300|10.0.0.3",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    plugin = ZoneRecords(file_paths=[str(records_file)])
+    plugin.setup()
+    assert plugin.config.get("load_mode", "replace") == "replace"
+
+    records_file.write_text(
+        "\n".join(
+            [
+                "keep.example|A|300|10.0.0.1",
+                "monkey.example|A|300|10.0.0.9",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    plugin._load_records()
+
+    assert ("keep.example", int(QTYPE.A)) in plugin.records
+    assert ("gone.example", int(QTYPE.A)) not in plugin.records
+    ttl, values, _ = plugin.records[("monkey.example", int(QTYPE.A))]
+    assert ttl == 300
+    assert values == ["10.0.0.9"]
+
+
 def test_load_records_merge_mode_preserves_existing_records(
     tmp_path: pathlib.Path,
 ) -> None:
