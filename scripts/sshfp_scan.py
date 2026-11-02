@@ -233,8 +233,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         )
 
         if not records:
-            print(f"No SSHFP records found for {host}", file=sys.stderr)
+            print(f"\rno ssh host keys for {host}", end="    ", file=sys.stderr)
             continue
+
+        rec_count = len(records)
+
+        print(f"\r{rec_count} SSH host keys found for {host}", file=sys.stderr)
 
         any_records = True
         ptr_hostnames: List[str] = []
