@@ -51,7 +51,7 @@ plugins:
           ttl: 300
       records:
         - 'seed.example.net|A|300|192.0.2.55'
-      load_mode: merge
+      load_mode: replace
       merge_policy: add
       watchdog_enabled: true
       watchdog_min_interval_seconds: 1.0

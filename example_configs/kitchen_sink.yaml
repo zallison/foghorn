@@ -191,7 +191,7 @@ plugins:
       - 'www.example.com|A|300|192.0.2.10'
 
     # Optional: load/reload behaviour
-    load_mode: merge     # replace | merge | first
+    load_mode: replace   # replace | merge | first
     merge_policy: add    # add | overwrite
 
     # Automatic reload control

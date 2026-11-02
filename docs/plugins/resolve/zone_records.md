@@ -239,9 +239,10 @@ Clients without DO=1 receive only the base RRsets without signatures.
   - Inline pipe-delimited records with the same syntax as `file_paths` entries.
   - Processed after file-backed records so they can override entries from files.
 - `load_mode: str`
-  - `merge` (default) preserves any existing in-memory records and overlays newly
-    loaded records on top (no deletions).
-  - `replace` rebuilds the in-memory mapping on each load/reload.
+  - `replace` (default) rebuilds the in-memory mapping on each load/reload so
+    configured sources are the full source of truth (edits and deletions apply).
+  - `merge` preserves any existing in-memory records and overlays newly loaded
+    records on top (no deletions).
   - `first` uses the first configured source group in this order:
     records (inline) → axfr_zones → file_paths → bind_paths, and ignores the others.
 - `merge_policy: str`

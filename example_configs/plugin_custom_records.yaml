@@ -54,7 +54,7 @@ plugins:
       records:
         - 'example.com|SOA|300|ns1.example.com. hostmaster.example.com. 1 3600 600 604800 300'
         - 'www.example.com|A|300|192.0.2.10'
-      load_mode: merge
+      load_mode: replace
       merge_policy: add
       max_file_size_bytes: 16777216
       max_records: 500000
