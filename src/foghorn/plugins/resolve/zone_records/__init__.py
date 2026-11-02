@@ -12,8 +12,8 @@ import socket
 import threading
 import time
 from typing import Dict, List, Optional, Set, Tuple
-from cachetools import TTLCache
 
+from cachetools import TTLCache
 from dnslib import OPCODE, QTYPE, RCODE, DNSHeader, DNSRecord
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -778,8 +778,8 @@ class ZoneRecordsConfig(BaseModel):
       - records: Optional list of inline records using
         ``<domain>|<qtype>|<ttl>|<value>`` format.
       - load_mode: Controls load/reload behaviour:
-        - "merge" (default): preserve existing records and overlay newly loaded ones.
-        - "replace": rebuild records from configured sources on each load.
+        - "replace" (default): rebuild records from configured sources on each load.
+        - "merge": preserve existing records and overlay newly loaded ones.
         - "first": use the first configured source group in this order:
           records (inline) → axfr_zones → file_paths → bind_paths, and ignore the others.
       - merge_policy: "add" (default) to append unique values into existing
@@ -824,11 +824,12 @@ class ZoneRecordsConfig(BaseModel):
     bind_paths: Optional[List[str | BindZoneFileConfig]] = None
     records: Optional[List[str]] = None
     load_mode: str = Field(
-        default="merge",
+        default="replace",
         description=(
-            "Controls record loading strategy: 'merge' preserves existing records "
-            "and overlays new data; 'replace' rebuilds the in-memory mapping each "
-            "time; 'first' uses the first configured source group and ignores the rest."
+            "Controls record loading strategy: 'replace' (default) rebuilds the "
+            "in-memory mapping each time; 'merge' preserves existing records and "
+            "overlays new data; 'first' uses the first configured source group and "
+            "ignores the rest."
         ),
     )
     merge_policy: str = Field(

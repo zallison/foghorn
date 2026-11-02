@@ -13,9 +13,9 @@ from typing import Dict, List, Optional, Set, Tuple
 
 from dnslib import QTYPE, RR
 
+from foghorn.dnssec import zone_helpers as _zone_helpers
 from foghorn.servers.transports.axfr import axfr_transfer
 from foghorn.utils import dns_names
-from foghorn.dnssec import zone_helpers as _zone_helpers
 
 from . import axfr_dnssec as _axfr_dnssec
 from . import helpers
@@ -499,7 +499,7 @@ def process_record_line(
         name_index=name_index,
         zone_soa=zone_soa,
         soa_code=soa_code,
-        load_mode=str(load_mode or "merge").lower(),
+        load_mode=str(load_mode or "replace").lower(),
         merge_policy=str(merge_policy or "add").lower(),
         seen_rrsets=seen_rrsets,
         overwritten_by_source=overwritten_by_source,
@@ -642,9 +642,9 @@ def load_records(plugin: object) -> None:
     cfg = getattr(plugin, "config", {}) if hasattr(plugin, "config") else {}
 
     try:
-        load_mode = str(cfg.get("load_mode", "merge") or "merge").lower()
+        load_mode = str(cfg.get("load_mode", "replace") or "replace").lower()
     except Exception:  # pragma: no cover - defensive
-        load_mode = "merge"
+        load_mode = "replace"
 
     try:
         merge_policy = str(cfg.get("merge_policy", "add") or "add").lower()
@@ -707,7 +707,7 @@ def load_records(plugin: object) -> None:
             "ZoneRecords: invalid load_mode=%r; expected 'replace', 'merge', or 'first'",
             load_mode,
         )
-        load_mode = "merge"
+        load_mode = "replace"
 
     if merge_policy not in {"add", "overwrite"}:
         logger.warning(
@@ -968,7 +968,7 @@ def load_records(plugin: object) -> None:
                     name_index=name_index,
                     zone_soa=zone_soa,
                     soa_code=soa_code,
-                    load_mode=str(load_mode or "merge").lower(),
+                    load_mode=str(load_mode or "replace").lower(),
                     merge_policy=str(merge_policy or "add").lower(),
                     seen_rrsets=seen_rrsets,
                     overwritten_by_source=overwritten_by_source,
