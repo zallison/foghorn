@@ -1074,8 +1074,9 @@ Operational guidance:
 Optional merge controls:
 
 - `load_mode`:
-  - `merge` (default) preserves any existing in-memory records and overlays new data.
-  - `replace` rebuilds the mapping on each load/reload.
+  - `replace` (default) rebuilds the mapping on each load/reload so configured
+    sources are the full source of truth (edits and deletions apply).
+  - `merge` preserves any existing in-memory records and overlays new data.
   - `first` uses the first configured source group in this order:
 	file_paths → bind_paths → axfr_zones → records (inline), and ignores the others.
 - `merge_policy`: `add` (default) appends distinct values into an RRset;
@@ -1107,7 +1108,7 @@ plugins:
 		- 'printer.lan|A|300|192.168.1.50'
 		- 'files.lan|AAAA|300|2001:db8::50'
 	  # Optional: load/reload behaviour
-	  load_mode: merge     # replace | merge | first
+	  load_mode: replace   # replace | merge | first
 	  merge_policy: add    # add | overwrite
 	  ttl: 300
 ```

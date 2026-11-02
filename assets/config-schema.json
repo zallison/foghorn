@@ -2110,8 +2110,79 @@
           "filter"
         ],
         "config_schema": {
+          "$defs": {
+            "TimeRule": {
+              "description": "Brief: Typed model for one time-of-day / day-of-week filtering rule.\n\nInputs:\n  - domains: One or more domain names (suffix match: the name itself and\n    all subdomains).\n  - windows: Optional TimeWindow entries; any matching window triggers the\n    action. When omitted or empty, the rule matches the full day on the\n    selected days.\n  - days: Optional weekdays the rule applies to (names, 1-7 ISO, or groups\n    like \"weekdays\"/\"weekend\"). Empty/omitted means every day. For windows\n    that wrap midnight, the start day owns the overnight span (Mon 22:00-\n    06:00 still matches Tue 03:00 when days includes Monday).\n  - action: \"deny\" (configured deny response, NXDOMAIN by default) or\n    \"drop\" (no reply).\n\nOutputs:\n  - TimeRule with normalized domains, days, and parsed windows.",
+              "properties": {
+                "action": {
+                  "default": "deny",
+                  "description": "Type: string. Valid values: \"deny\", \"drop\". Default: \"deny\".",
+                  "enum": [
+                    "deny",
+                    "drop"
+                  ],
+                  "title": "Action",
+                  "type": "string"
+                },
+                "days": {
+                  "description": "Type: array.",
+                  "items": {
+                    "description": "Type: integer.",
+                    "type": "integer"
+                  },
+                  "title": "Days",
+                  "type": "array",
+                  "uniqueItems": true
+                },
+                "domains": {
+                  "description": "Type: array.",
+                  "items": {
+                    "description": "Type: string.",
+                    "type": "string"
+                  },
+                  "minItems": 1,
+                  "title": "Domains",
+                  "type": "array"
+                },
+                "windows": {
+                  "description": "Type: array.",
+                  "items": {
+                    "$ref": "#/$defs/TimeWindow"
+                  },
+                  "title": "Windows",
+                  "type": "array"
+                }
+              },
+              "required": [
+                "domains"
+              ],
+              "title": "TimeRule",
+              "type": "object"
+            },
+            "TimeWindow": {
+              "description": "Brief: Typed model for one time-of-day window.\n\nInputs:\n  - start: Window start as \"HH:MM\" (24-hour clock), inclusive.\n  - end: Window end as \"HH:MM\" (24-hour clock), exclusive. When later\n    than ``start`` the window is a plain daytime span; when earlier it\n    wraps across midnight (owned by the start day for ``days`` matching);\n    when equal it matches the full day. Note end is exclusive, so\n    ``00:00``-``23:59`` is not all day \u2014 use equal start/end (or omit\n    windows) for a full-day match.\n\nOutputs:\n  - TimeWindow with start/end normalized to integer minutes since\n    midnight.",
+              "properties": {
+                "end": {
+                  "description": "Window end as 'HH:MM' (24-hour clock).",
+                  "title": "End",
+                  "type": "integer"
+                },
+                "start": {
+                  "description": "Window start as 'HH:MM' (24-hour clock).",
+                  "title": "Start",
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "start",
+                "end"
+              ],
+              "title": "TimeWindow",
+              "type": "object"
+            }
+          },
           "additionalProperties": true,
-          "description": "Brief: Typed configuration model for Filter.\n\nInputs:\n  - cache_ttl_seconds: TTL for domain cache.\n  - db_path: Optional path to blocklist SQLite DB. When omitted or empty,\n    the plugin uses a per-instance in-memory database so that multiple\n    Filter instances do not share state by default.\n  - default: Default policy (\"allow\" or \"deny\").\n  - ttl: TTL for synthesized responses.\n  - deny_response: Policy for deny responses ('nxdomain', 'refused', 'servfail',\n    'noerror_empty'/'nodata', 'ip', or 'drop').\n  - deny_response_ip4 / deny_response_ip6: Optional IPs for IP-mode denies.\n  - allow_qtypes / deny_qtypes: Optional lists of DNS qtype names to allow or deny.\n  - *_domains_files: List paths for loading allow/block lists from files.\n  - blocked_domains / allowed_domains: Inline domain lists.\n  - blocked_patterns / blocked_patterns_files: Regexes.\n  - blocked_keywords / blocked_keywords_files: Keywords.\n  - blocked_ips / blocked_ips_files: IP rules.\n\nOutputs:\n  - FilterConfig instance with normalized field types.",
+          "description": "Brief: Typed configuration model for Filter.\n\nInputs:\n  - cache_ttl_seconds: TTL for domain cache.\n  - db_path: Optional path to blocklist SQLite DB. When omitted or empty,\n    the plugin uses a per-instance in-memory database so that multiple\n    Filter instances do not share state by default.\n  - default: Default policy (\"allow\" or \"deny\").\n  - ttl: TTL for synthesized responses.\n  - deny_response: Policy for deny responses ('nxdomain', 'refused', 'servfail',\n    'noerror_empty'/'nodata', 'ip', or 'drop').\n  - deny_response_ip4 / deny_response_ip6: Optional IPs for IP-mode denies.\n  - allow_qtypes / deny_qtypes: Optional lists of DNS qtype names to allow or deny.\n  - *_domains_files: List paths for loading allow/block lists from files.\n  - blocked_domains / allowed_domains: Inline domain lists.\n  - blocked_patterns / blocked_patterns_files: Regexes.\n  - blocked_keywords / blocked_keywords_files: Keywords.\n  - blocked_ips / blocked_ips_files: IP rules.\n  - timezone: Optional IANA timezone name used by time_rules (default:\n    system local time).\n  - time_rules: Optional list of {domains, windows, days, action} entries\n    that deny or drop matching domains only while the current local time\n    (and optional weekday filter) matches one of their windows.\n\nOutputs:\n  - FilterConfig instance with normalized field types.",
           "properties": {
             "allowed_domains": {
               "description": "Type: array.",
@@ -2309,6 +2380,29 @@
               "description": "Type: boolean. Default: false.",
               "title": "Strict File Loading",
               "type": "boolean"
+            },
+            "time_rules": {
+              "description": "Type: array.",
+              "items": {
+                "$ref": "#/$defs/TimeRule"
+              },
+              "title": "Time Rules",
+              "type": "array"
+            },
+            "timezone": {
+              "anyOf": [
+                {
+                  "description": "Type: string.",
+                  "type": "string"
+                },
+                {
+                  "description": "Type: null.",
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Types: string, null.",
+              "title": "Timezone"
             },
             "ttl": {
               "default": 300,
@@ -4104,7 +4198,7 @@
             }
           },
           "additionalProperties": true,
-          "description": "Brief: Typed configuration model for ZoneRecords.\n\nInputs:\n  - file_paths: Preferred list of records file paths.\n  - path_allowlist: Optional list of allowed directory prefixes for file_paths\n    and bind_paths; paths outside these prefixes are ignored with a warning.\n  - bind_paths: Optional list of RFC-1035 style BIND zone files. Entries may\n    be plain strings (paths) or objects with per-file origin/ttl overrides.\n  - records: Optional list of inline records using\n    ``<domain>|<qtype>|<ttl>|<value>`` format.\n  - load_mode: Controls load/reload behaviour:\n    - \"merge\" (default): preserve existing records and overlay newly loaded ones.\n    - \"replace\": rebuild records from configured sources on each load.\n    - \"first\": use the first configured source group in this order:\n      records (inline) \u2192 axfr_zones \u2192 file_paths \u2192 bind_paths, and ignore the others.\n  - merge_policy: \"add\" (default) to append unique values into existing\n    RRsets, or \"overwrite\" to replace RRsets when the same (name,qtype)\n    appears in a later source.\n  - max_file_size_bytes: Maximum bytes allowed for any file_path/bind_path.\n  - max_records: Maximum total record values accepted during one load cycle.\n  - max_record_value_length: Maximum allowed rdata value length in characters.\n  - auto_ptr_enabled: Enables/disables automatic PTR synthesis from A/AAAA.\n  - max_auto_ptr_records: Maximum number of auto-generated PTR values.\n  - soa_synthesis_enabled: Enables/disables fallback SOA synthesis when absent.\n  - watchdog_enabled: Enable watchdog-based reloads.\n  - watchdog_min_interval_seconds: Minimum seconds between reloads.\n  - watchdog_poll_interval_seconds: Optional polling interval.\n  - watchdog_data_directories: Optional allowed directory prefixes used by\n    watchdog/polling filesystem operations.\n  - watchdog_reject_absolute_paths: Reject absolute paths for watcher files.\n  - watchdog_max_files: Maximum number of watched files.\n  - watchdog_max_directories: Maximum number of watched parent directories.\n  - watchdog_snapshot_max_entries: Maximum stat snapshot entries retained.\n  - ttl: Default TTL in seconds.\n  - nxdomain_zones: Optional list of zone suffixes for which ZoneRecords\n    should return NXDOMAIN/NODATA instead of falling through to upstream.\n  - any_query_enabled: Allow QTYPE=ANY responses (default False).\n  - any_answer_rrset_limit: Max RRsets returned for QTYPE=ANY responses.\n  - any_answer_record_limit: Max total records returned for QTYPE=ANY responses.\n  - axfr_zones: Optional list of AXFR-backed zones.\n- axfr_poll_min_interval_seconds: Minimum poll interval enforced for AXFR polling.\n\nOutputs:\n  - ZoneRecordsConfig instance with normalized field types.",
+          "description": "Brief: Typed configuration model for ZoneRecords.\n\nInputs:\n  - file_paths: Preferred list of records file paths.\n  - path_allowlist: Optional list of allowed directory prefixes for file_paths\n    and bind_paths; paths outside these prefixes are ignored with a warning.\n  - bind_paths: Optional list of RFC-1035 style BIND zone files. Entries may\n    be plain strings (paths) or objects with per-file origin/ttl overrides.\n  - records: Optional list of inline records using\n    ``<domain>|<qtype>|<ttl>|<value>`` format.\n  - load_mode: Controls load/reload behaviour:\n    - \"replace\" (default): rebuild records from configured sources on each load.\n    - \"merge\": preserve existing records and overlay newly loaded ones.\n    - \"first\": use the first configured source group in this order:\n      records (inline) \u2192 axfr_zones \u2192 file_paths \u2192 bind_paths, and ignore the others.\n  - merge_policy: \"add\" (default) to append unique values into existing\n    RRsets, or \"overwrite\" to replace RRsets when the same (name,qtype)\n    appears in a later source.\n  - max_file_size_bytes: Maximum bytes allowed for any file_path/bind_path.\n  - max_records: Maximum total record values accepted during one load cycle.\n  - max_record_value_length: Maximum allowed rdata value length in characters.\n  - auto_ptr_enabled: Enables/disables automatic PTR synthesis from A/AAAA.\n  - max_auto_ptr_records: Maximum number of auto-generated PTR values.\n  - soa_synthesis_enabled: Enables/disables fallback SOA synthesis when absent.\n  - watchdog_enabled: Enable watchdog-based reloads.\n  - watchdog_min_interval_seconds: Minimum seconds between reloads.\n  - watchdog_poll_interval_seconds: Optional polling interval.\n  - watchdog_data_directories: Optional allowed directory prefixes used by\n    watchdog/polling filesystem operations.\n  - watchdog_reject_absolute_paths: Reject absolute paths for watcher files.\n  - watchdog_max_files: Maximum number of watched files.\n  - watchdog_max_directories: Maximum number of watched parent directories.\n  - watchdog_snapshot_max_entries: Maximum stat snapshot entries retained.\n  - ttl: Default TTL in seconds.\n  - nxdomain_zones: Optional list of zone suffixes for which ZoneRecords\n    should return NXDOMAIN/NODATA instead of falling through to upstream.\n  - any_query_enabled: Allow QTYPE=ANY responses (default False).\n  - any_answer_rrset_limit: Max RRsets returned for QTYPE=ANY responses.\n  - any_answer_record_limit: Max total records returned for QTYPE=ANY responses.\n  - axfr_zones: Optional list of AXFR-backed zones.\n- axfr_poll_min_interval_seconds: Minimum poll interval enforced for AXFR polling.\n\nOutputs:\n  - ZoneRecordsConfig instance with normalized field types.",
           "properties": {
             "any_answer_record_limit": {
               "default": 64,
@@ -4303,8 +4397,8 @@
               "title": "File Paths"
             },
             "load_mode": {
-              "default": "merge",
-              "description": "Controls record loading strategy: 'merge' preserves existing records and overlays new data; 'replace' rebuilds the in-memory mapping each time; 'first' uses the first configured source group and ignores the rest. Default: \"merge\".",
+              "default": "replace",
+              "description": "Controls record loading strategy: 'replace' (default) rebuilds the in-memory mapping each time; 'merge' preserves existing records and overlays new data; 'first' uses the first configured source group and ignores the rest. Default: \"replace\".",
               "title": "Load Mode",
               "type": "string"
             },
@@ -8061,8 +8155,79 @@
           "filter"
         ],
         "config_schema": {
+          "$defs": {
+            "TimeRule": {
+              "description": "Brief: Typed model for one time-of-day / day-of-week filtering rule.\n\nInputs:\n  - domains: One or more domain names (suffix match: the name itself and\n    all subdomains).\n  - windows: Optional TimeWindow entries; any matching window triggers the\n    action. When omitted or empty, the rule matches the full day on the\n    selected days.\n  - days: Optional weekdays the rule applies to (names, 1-7 ISO, or groups\n    like \"weekdays\"/\"weekend\"). Empty/omitted means every day. For windows\n    that wrap midnight, the start day owns the overnight span (Mon 22:00-\n    06:00 still matches Tue 03:00 when days includes Monday).\n  - action: \"deny\" (configured deny response, NXDOMAIN by default) or\n    \"drop\" (no reply).\n\nOutputs:\n  - TimeRule with normalized domains, days, and parsed windows.",
+              "properties": {
+                "action": {
+                  "default": "deny",
+                  "description": "Type: string. Valid values: \"deny\", \"drop\". Default: \"deny\".",
+                  "enum": [
+                    "deny",
+                    "drop"
+                  ],
+                  "title": "Action",
+                  "type": "string"
+                },
+                "days": {
+                  "description": "Type: array.",
+                  "items": {
+                    "description": "Type: integer.",
+                    "type": "integer"
+                  },
+                  "title": "Days",
+                  "type": "array",
+                  "uniqueItems": true
+                },
+                "domains": {
+                  "description": "Type: array.",
+                  "items": {
+                    "description": "Type: string.",
+                    "type": "string"
+                  },
+                  "minItems": 1,
+                  "title": "Domains",
+                  "type": "array"
+                },
+                "windows": {
+                  "description": "Type: array.",
+                  "items": {
+                    "$ref": "#/$defs/TimeWindow"
+                  },
+                  "title": "Windows",
+                  "type": "array"
+                }
+              },
+              "required": [
+                "domains"
+              ],
+              "title": "TimeRule",
+              "type": "object"
+            },
+            "TimeWindow": {
+              "description": "Brief: Typed model for one time-of-day window.\n\nInputs:\n  - start: Window start as \"HH:MM\" (24-hour clock), inclusive.\n  - end: Window end as \"HH:MM\" (24-hour clock), exclusive. When later\n    than ``start`` the window is a plain daytime span; when earlier it\n    wraps across midnight (owned by the start day for ``days`` matching);\n    when equal it matches the full day. Note end is exclusive, so\n    ``00:00``-``23:59`` is not all day \u2014 use equal start/end (or omit\n    windows) for a full-day match.\n\nOutputs:\n  - TimeWindow with start/end normalized to integer minutes since\n    midnight.",
+              "properties": {
+                "end": {
+                  "description": "Window end as 'HH:MM' (24-hour clock).",
+                  "title": "End",
+                  "type": "integer"
+                },
+                "start": {
+                  "description": "Window start as 'HH:MM' (24-hour clock).",
+                  "title": "Start",
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "start",
+                "end"
+              ],
+              "title": "TimeWindow",
+              "type": "object"
+            }
+          },
           "additionalProperties": true,
-          "description": "Brief: Typed configuration model for Filter.\n\nInputs:\n  - cache_ttl_seconds: TTL for domain cache.\n  - db_path: Optional path to blocklist SQLite DB. When omitted or empty,\n    the plugin uses a per-instance in-memory database so that multiple\n    Filter instances do not share state by default.\n  - default: Default policy (\"allow\" or \"deny\").\n  - ttl: TTL for synthesized responses.\n  - deny_response: Policy for deny responses ('nxdomain', 'refused', 'servfail',\n    'noerror_empty'/'nodata', 'ip', or 'drop').\n  - deny_response_ip4 / deny_response_ip6: Optional IPs for IP-mode denies.\n  - allow_qtypes / deny_qtypes: Optional lists of DNS qtype names to allow or deny.\n  - *_domains_files: List paths for loading allow/block lists from files.\n  - blocked_domains / allowed_domains: Inline domain lists.\n  - blocked_patterns / blocked_patterns_files: Regexes.\n  - blocked_keywords / blocked_keywords_files: Keywords.\n  - blocked_ips / blocked_ips_files: IP rules.\n\nOutputs:\n  - FilterConfig instance with normalized field types.",
+          "description": "Brief: Typed configuration model for Filter.\n\nInputs:\n  - cache_ttl_seconds: TTL for domain cache.\n  - db_path: Optional path to blocklist SQLite DB. When omitted or empty,\n    the plugin uses a per-instance in-memory database so that multiple\n    Filter instances do not share state by default.\n  - default: Default policy (\"allow\" or \"deny\").\n  - ttl: TTL for synthesized responses.\n  - deny_response: Policy for deny responses ('nxdomain', 'refused', 'servfail',\n    'noerror_empty'/'nodata', 'ip', or 'drop').\n  - deny_response_ip4 / deny_response_ip6: Optional IPs for IP-mode denies.\n  - allow_qtypes / deny_qtypes: Optional lists of DNS qtype names to allow or deny.\n  - *_domains_files: List paths for loading allow/block lists from files.\n  - blocked_domains / allowed_domains: Inline domain lists.\n  - blocked_patterns / blocked_patterns_files: Regexes.\n  - blocked_keywords / blocked_keywords_files: Keywords.\n  - blocked_ips / blocked_ips_files: IP rules.\n  - timezone: Optional IANA timezone name used by time_rules (default:\n    system local time).\n  - time_rules: Optional list of {domains, windows, days, action} entries\n    that deny or drop matching domains only while the current local time\n    (and optional weekday filter) matches one of their windows.\n\nOutputs:\n  - FilterConfig instance with normalized field types.",
           "properties": {
             "allowed_domains": {
               "description": "Type: array.",
@@ -8260,6 +8425,29 @@
               "description": "Type: boolean. Default: false.",
               "title": "Strict File Loading",
               "type": "boolean"
+            },
+            "time_rules": {
+              "description": "Type: array.",
+              "items": {
+                "$ref": "#/$defs/TimeRule"
+              },
+              "title": "Time Rules",
+              "type": "array"
+            },
+            "timezone": {
+              "anyOf": [
+                {
+                  "description": "Type: string.",
+                  "type": "string"
+                },
+                {
+                  "description": "Type: null.",
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Types: string, null.",
+              "title": "Timezone"
             },
             "ttl": {
               "default": 300,
@@ -10055,7 +10243,7 @@
             }
           },
           "additionalProperties": true,
-          "description": "Brief: Typed configuration model for ZoneRecords.\n\nInputs:\n  - file_paths: Preferred list of records file paths.\n  - path_allowlist: Optional list of allowed directory prefixes for file_paths\n    and bind_paths; paths outside these prefixes are ignored with a warning.\n  - bind_paths: Optional list of RFC-1035 style BIND zone files. Entries may\n    be plain strings (paths) or objects with per-file origin/ttl overrides.\n  - records: Optional list of inline records using\n    ``<domain>|<qtype>|<ttl>|<value>`` format.\n  - load_mode: Controls load/reload behaviour:\n    - \"merge\" (default): preserve existing records and overlay newly loaded ones.\n    - \"replace\": rebuild records from configured sources on each load.\n    - \"first\": use the first configured source group in this order:\n      records (inline) \u2192 axfr_zones \u2192 file_paths \u2192 bind_paths, and ignore the others.\n  - merge_policy: \"add\" (default) to append unique values into existing\n    RRsets, or \"overwrite\" to replace RRsets when the same (name,qtype)\n    appears in a later source.\n  - max_file_size_bytes: Maximum bytes allowed for any file_path/bind_path.\n  - max_records: Maximum total record values accepted during one load cycle.\n  - max_record_value_length: Maximum allowed rdata value length in characters.\n  - auto_ptr_enabled: Enables/disables automatic PTR synthesis from A/AAAA.\n  - max_auto_ptr_records: Maximum number of auto-generated PTR values.\n  - soa_synthesis_enabled: Enables/disables fallback SOA synthesis when absent.\n  - watchdog_enabled: Enable watchdog-based reloads.\n  - watchdog_min_interval_seconds: Minimum seconds between reloads.\n  - watchdog_poll_interval_seconds: Optional polling interval.\n  - watchdog_data_directories: Optional allowed directory prefixes used by\n    watchdog/polling filesystem operations.\n  - watchdog_reject_absolute_paths: Reject absolute paths for watcher files.\n  - watchdog_max_files: Maximum number of watched files.\n  - watchdog_max_directories: Maximum number of watched parent directories.\n  - watchdog_snapshot_max_entries: Maximum stat snapshot entries retained.\n  - ttl: Default TTL in seconds.\n  - nxdomain_zones: Optional list of zone suffixes for which ZoneRecords\n    should return NXDOMAIN/NODATA instead of falling through to upstream.\n  - any_query_enabled: Allow QTYPE=ANY responses (default False).\n  - any_answer_rrset_limit: Max RRsets returned for QTYPE=ANY responses.\n  - any_answer_record_limit: Max total records returned for QTYPE=ANY responses.\n  - axfr_zones: Optional list of AXFR-backed zones.\n- axfr_poll_min_interval_seconds: Minimum poll interval enforced for AXFR polling.\n\nOutputs:\n  - ZoneRecordsConfig instance with normalized field types.",
+          "description": "Brief: Typed configuration model for ZoneRecords.\n\nInputs:\n  - file_paths: Preferred list of records file paths.\n  - path_allowlist: Optional list of allowed directory prefixes for file_paths\n    and bind_paths; paths outside these prefixes are ignored with a warning.\n  - bind_paths: Optional list of RFC-1035 style BIND zone files. Entries may\n    be plain strings (paths) or objects with per-file origin/ttl overrides.\n  - records: Optional list of inline records using\n    ``<domain>|<qtype>|<ttl>|<value>`` format.\n  - load_mode: Controls load/reload behaviour:\n    - \"replace\" (default): rebuild records from configured sources on each load.\n    - \"merge\": preserve existing records and overlay newly loaded ones.\n    - \"first\": use the first configured source group in this order:\n      records (inline) \u2192 axfr_zones \u2192 file_paths \u2192 bind_paths, and ignore the others.\n  - merge_policy: \"add\" (default) to append unique values into existing\n    RRsets, or \"overwrite\" to replace RRsets when the same (name,qtype)\n    appears in a later source.\n  - max_file_size_bytes: Maximum bytes allowed for any file_path/bind_path.\n  - max_records: Maximum total record values accepted during one load cycle.\n  - max_record_value_length: Maximum allowed rdata value length in characters.\n  - auto_ptr_enabled: Enables/disables automatic PTR synthesis from A/AAAA.\n  - max_auto_ptr_records: Maximum number of auto-generated PTR values.\n  - soa_synthesis_enabled: Enables/disables fallback SOA synthesis when absent.\n  - watchdog_enabled: Enable watchdog-based reloads.\n  - watchdog_min_interval_seconds: Minimum seconds between reloads.\n  - watchdog_poll_interval_seconds: Optional polling interval.\n  - watchdog_data_directories: Optional allowed directory prefixes used by\n    watchdog/polling filesystem operations.\n  - watchdog_reject_absolute_paths: Reject absolute paths for watcher files.\n  - watchdog_max_files: Maximum number of watched files.\n  - watchdog_max_directories: Maximum number of watched parent directories.\n  - watchdog_snapshot_max_entries: Maximum stat snapshot entries retained.\n  - ttl: Default TTL in seconds.\n  - nxdomain_zones: Optional list of zone suffixes for which ZoneRecords\n    should return NXDOMAIN/NODATA instead of falling through to upstream.\n  - any_query_enabled: Allow QTYPE=ANY responses (default False).\n  - any_answer_rrset_limit: Max RRsets returned for QTYPE=ANY responses.\n  - any_answer_record_limit: Max total records returned for QTYPE=ANY responses.\n  - axfr_zones: Optional list of AXFR-backed zones.\n- axfr_poll_min_interval_seconds: Minimum poll interval enforced for AXFR polling.\n\nOutputs:\n  - ZoneRecordsConfig instance with normalized field types.",
           "properties": {
             "any_answer_record_limit": {
               "default": 64,
@@ -10254,8 +10442,8 @@
               "title": "File Paths"
             },
             "load_mode": {
-              "default": "merge",
-              "description": "Controls record loading strategy: 'merge' preserves existing records and overlays new data; 'replace' rebuilds the in-memory mapping each time; 'first' uses the first configured source group and ignores the rest. Default: \"merge\".",
+              "default": "replace",
+              "description": "Controls record loading strategy: 'replace' (default) rebuilds the in-memory mapping each time; 'merge' preserves existing records and overlays new data; 'first' uses the first configured source group and ignores the rest. Default: \"replace\".",
               "title": "Load Mode",
               "type": "string"
             },

@@ -12,8 +12,10 @@ All notable changes to this project will be documented in this file.
 - ZoneRecords shared commit pipeline (`zone_records/commit.py`) for normalized record actions used by DNS UPDATE and admin apply/delete (journal, SOA bump, NOTIFY, conflict checks).
 - ZoneRecords admin apply/delete mutations now return `zone_apex` / `serial_before` / `serial_after` metadata and optionally journal when `dns_update.persistence` is enabled.
 - DockerHosts sticky condition-state logging helpers (`_note_condition_failure` / `_note_condition_ok`) with first-failure WARNING, quiet repeats, hourly reminder, and recovery INFO.
+- `filter` plugin time-of-day / day-of-week rules: `time_rules` (+ optional IANA `timezone`) deny or drop configured domains while the current time matches an `"HH:MM"` window and optional `days` filter (`mon`..`sun`, ISO 1-7, or `weekdays`/`weekend`/`daily`; empty = every day). Window start is inclusive and end exclusive; midnight wraparound is owned by the start day; equal start/end or omitted windows = full day. Rule decisions are evaluated before the decision cache and take precedence over allow/deny lists.
 
 ### Changed
+- ZoneRecords default `load_mode` is now `replace` (was `merge`), so file/zone reloads rebuild the in-memory mapping from configured sources instead of accumulating old RRset values. Set `load_mode: merge` to keep the previous overlay behaviour.
 - Filter now loads allow domain lists after block lists (files then inline), so allow entries act as exceptions when the same domain appears in both; either file group change reloads both groups in that order.
 - Missing TLS cert/key failures now use one shared operator-facing line (`format_missing_tls_files_message`) across HTTP ensure, uvicorn/threaded admin start, and DoT/asyncio listeners—no traceback dump for simple missing files.
 - Upstream failover logs at most one WARNING per upstream set while all endpoints remain failed; the warning re-arms after a successful query (recovery).
@@ -40,6 +42,8 @@ All notable changes to this project will be documented in this file.
 - `tests/config/test_foghorn_config_models.py` for FoghornConfig and nested model defaults.
 
 ### Documentation
+- Documented ZoneRecords default `load_mode: replace` in README, `docs/plugins/resolve/zone_records.md`, and zone example configs.
+- Documented Filter time-of-day / day-of-week options (`timezone`, `time_rules` with `days`/`windows`) including overnight start-day ownership and precedence in `docs/plugins/resolve/filter.md`.
 - Documented browser admin UI token storage/`apiFetch` behavior under Authentication in `docs/API.md`.
 - Added QUERY TSIG operational notes (optional vs require, shared key_sources files, NTP, cookies/DoT interaction, empty-keyring policy) to `docs/RFCs.md` §5.4.
 - Documented DockerHosts sticky condition logging in `docs/plugins/resolve/docker_hosts.md`.
@@ -50,6 +54,8 @@ All notable changes to this project will be documented in this file.
 - `docs/README-DEV.md` and `CONTRIBUTING.md` describe the Pydantic-driven schema workflow and `make schema` regenerate step.
 
 ### Tests
+- Added ZoneRecords coverage that default `load_mode=replace` drops removed owners and replaces changed RRset values on reload.
+- Added `tests/plugins/test_filter_time_rules.py` covering config validation, window semantics (boundaries, midnight wraparound, full day), day-of-week filters (aliases/groups, overnight start-day ownership), suffix/case/trailing-dot matching, drop action, timezone conversion, targets interplay, decision-cache bypass, and allowlist precedence.
 - Added TLS generate/path-resolve/missing-cert message coverage in `tests/test_webserver_tls_generate.py` and partial-TLS start coverage in `tests/test_webserver.py`.
 - Added upstream all-failed warning throttle coverage in `tests/server/test_send_query_with_failover_all_failed_throttle.py`.
 - Added admin UI regression coverage for API token localStorage/`apiFetch`/401-retry wiring in shipped `index.html` (`tests/servers/test_webserver_admin_ui.py`).
