@@ -15,6 +15,8 @@ All notable changes to this project will be documented in this file.
 - `filter` plugin time-of-day / day-of-week rules: `time_rules` (+ optional IANA `timezone`) deny or drop configured domains while the current time matches an `"HH:MM"` window and optional `days` filter (`mon`..`sun`, ISO 1-7, or `weekdays`/`weekend`/`daily`; empty = every day). Window start is inclusive and end exclusive; midnight wraparound is owned by the start day; equal start/end or omitted windows = full day. Rule decisions are evaluated before the decision cache and take precedence over allow/deny lists.
 
 ### Changed
+- Shared DNS resolve pipeline (`_resolve_core`) is split into staged modules under `src/foghorn/servers/server_resolve_*.py` (context/gates/enrich/plugins/cache/upstream/finalize) while `server.py` remains the orchestrator and compatibility re-export surface.
+- Query-log backend interface now types `select_query_log` / `aggregate_query_log_counts` results with `QueryLogSelectResult` and `QueryLogAggregateResult` TypedDicts.
 - ZoneRecords default `load_mode` is now `replace` (was `merge`), so file/zone reloads rebuild the in-memory mapping from configured sources instead of accumulating old RRset values. Set `load_mode: merge` to keep the previous overlay behaviour.
 - Filter now loads allow domain lists after block lists (files then inline), so allow entries act as exceptions when the same domain appears in both; either file group change reloads both groups in that order.
 - Missing TLS cert/key failures now use one shared operator-facing line (`format_missing_tls_files_message`) across HTTP ensure, uvicorn/threaded admin start, and DoT/asyncio listeners—no traceback dump for simple missing files.
@@ -54,6 +56,8 @@ All notable changes to this project will be documented in this file.
 - `docs/README-DEV.md` and `CONTRIBUTING.md` describe the Pydantic-driven schema workflow and `make schema` regenerate step.
 
 ### Tests
+- Added `tests/plugins/contract_tests.py` helpers for resolve-plugin and stats-store interface contracts (hooks, priorities, return types).
+- Updated main DoT startup tests to mock `ensure_admin_tls_files` where needed and to assert the shared missing cert/key operator message.
 - Added ZoneRecords coverage that default `load_mode=replace` drops removed owners and replaces changed RRset values on reload.
 - Added `tests/plugins/test_filter_time_rules.py` covering config validation, window semantics (boundaries, midnight wraparound, full day), day-of-week filters (aliases/groups, overnight start-day ownership), suffix/case/trailing-dot matching, drop action, timezone conversion, targets interplay, decision-cache bypass, and allowlist precedence.
 - Added TLS generate/path-resolve/missing-cert message coverage in `tests/test_webserver_tls_generate.py` and partial-TLS start coverage in `tests/test_webserver.py`.
