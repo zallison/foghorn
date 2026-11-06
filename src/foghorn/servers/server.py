@@ -2,9 +2,9 @@
 
 import ipaddress
 import logging
-import random
+import random  # noqa: F401
 import threading
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 from dnslib import (  # noqa: F401  (re-exported for udp_server._ensure_edns)
     EDNS0,
@@ -17,46 +17,64 @@ from dnslib import (  # noqa: F401  (re-exported for udp_server._ensure_edns)
     EDNSOption,
 )
 
-from foghorn.plugins.resolve import base as plugin_base
-from foghorn.plugins.resolve.base import PluginContext, PluginDecision
-from foghorn.plugins.resolve.zone_records import _client_allowed_for_axfr  # noqa: F401
-from foghorn.plugins.resolve.zone_records import iter_axfr_messages  # noqa: F401
-from foghorn.servers.recursive_resolver import RecursiveResolver
-from foghorn.servers.transports.dot import DoTError, get_dot_pool  # noqa: F401
-from foghorn.servers.transports.tcp import (  # noqa: F401
+from foghorn.plugins.resolve import base as plugin_base  # noqa: F401
+from foghorn.plugins.resolve.base import PluginContext, PluginDecision  # noqa: F401
+from foghorn.plugins.resolve.zone_records import (
+    _client_allowed_for_axfr,  # noqa: F401
+    iter_axfr_messages,  # noqa: F401
+)
+from foghorn.servers.recursive_resolver import RecursiveResolver  # noqa: F401
+from foghorn.servers.transports.dot import DoTError, get_dot_pool
+from foghorn.servers.transports.tcp import (
     TCPError,
     get_tcp_pool,
     tcp_query,
 )
 from foghorn.utils.register_caches import registered_lru_cache
 
-from .dns_runtime_state import DNSRuntimeState
+from .dns_runtime_state import DNSRuntimeState  # noqa: F401
 from .edns_utils import (
-    parse_ecs_from_request,
-    strip_ecs_options_from_request,
     synthesize_ecs_from_client_ip,
-    upsert_ecs_option,
 )
-from .server_failover import _UPSTREAM_SKIP_LOCK  # noqa: F401
-from .server_failover import _UPSTREAM_SKIP_WARNED  # noqa: F401
-from .server_failover import _reset_upstream_skip_warning  # noqa: F401
-from .server_failover import _upstream_key_for_skip_warning  # noqa: F401
-from .server_failover import _warn_upstream_skip_once  # noqa: F401
 from .server_failover import (
+    _UPSTREAM_SKIP_LOCK,  # noqa: F401
+    _UPSTREAM_SKIP_WARNED,  # noqa: F401
+    _reset_upstream_skip_warning,  # noqa: F401
     _send_query_with_failover_impl,
+    _upstream_key_for_skip_warning,  # noqa: F401
+    _warn_upstream_skip_once,  # noqa: F401
 )
 from .server_opcode import _handle_non_query_opcode, _ResolveCoreResult
-from .server_response_utils import _ensure_edns_request  # noqa: F401
-from .server_response_utils import compute_effective_ttl  # noqa: F401
-from .server_response_utils import (
+from .server_resolve_cache import _try_cache_hit
+from .server_resolve_context import (  # noqa: F401
+    ResolutionContext,
+    _build_handler_from_snapshot,
+    _finish_early_result,
+)
+from .server_resolve_enrich import (
+    _apply_ecs_processing,
+    _apply_search_domain_qualification,
+)
+from .server_resolve_finalize import _finalize_resolved_response
+from .server_resolve_gates import (
+    _handle_dns_cookies,
+    _handle_local_blocked,
+    _handle_refuse_any,
+    _handle_tsig,
+)
+from .server_resolve_plugins import _run_post_plugins, _run_pre_plugins
+from .server_resolve_upstream import _resolve_upstream
+from .server_response_utils import (  # noqa: F401
     _attach_ede_option,
     _bind_response_cookie_to_request,
     _build_badcookie_response,
     _classify_request_cookie,
     _compute_negative_ttl,
     _echo_client_edns,
+    _ensure_edns_request,
     _set_response_id,
     _strip_response_cookie_options,
+    compute_effective_ttl,
 )
 from .server_runtime import DNSServer  # noqa: F401
 from .server_upstream_health import _UPSTREAM_HEALTH, _UpstreamHealth  # noqa: F401
@@ -170,7 +188,7 @@ def _is_forward_local_blocked_query(qname: str, qtype: int) -> bool:
 
 
 @registered_lru_cache(maxsize=4096)
-def _parse_trusted_ecs_network(cidr_text: str) -> Optional[ipaddress._BaseNetwork]:
+def _parse_trusted_ecs_network(cidr_text: str) -> ipaddress._BaseNetwork | None:
     """Brief: Parse a trusted ECS CIDR string into an ipaddress network object.
 
     Inputs:
@@ -193,8 +211,8 @@ def _parse_trusted_ecs_network(cidr_text: str) -> Optional[ipaddress._BaseNetwor
 
 
 def _is_listener_trusted_for_ecs(
-    listener: Optional[str],
-    secure: Optional[bool],
+    listener: str | None,
+    secure: bool | None,
     trusted_listeners: list[str],
 ) -> bool:
     """Brief: Determine whether inbound listener metadata qualifies ECS as trusted.
@@ -264,7 +282,7 @@ def _synthesize_ecs_for_source_ip(
     source_prefix_v6: int,
     scope_prefix_v4: int,
     scope_prefix_v6: int,
-) -> Optional[Dict[str, Any]]:
+) -> dict[str, Any] | None:
     """Brief: Synthesize an ECS mapping from transport source IP.
 
     Inputs:
@@ -298,13 +316,13 @@ def _build_request_result_meta(
     *,
     source_ip: str,
     effective_target_ip: str,
-    listener: Optional[str],
-    secure: Optional[bool],
-    inbound_ecs: Optional[Dict[str, Any]],
+    listener: str | None,
+    secure: bool | None,
+    inbound_ecs: dict[str, Any] | None,
     inbound_ecs_trusted: bool,
-    outbound_ecs: Optional[Dict[str, Any]],
+    outbound_ecs: dict[str, Any] | None,
     ecs_cache_bypass: bool,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Brief: Build per-query source/ECS metadata for query_log result payloads.
 
     Inputs:
@@ -321,7 +339,7 @@ def _build_request_result_meta(
       - dict: Metadata safe to merge into result context payloads.
     """
 
-    meta: Dict[str, Any] = {
+    meta: dict[str, Any] = {
         "source_ip": str(source_ip or ""),
         "effective_target_ip": str(effective_target_ip or source_ip or ""),
     }
@@ -330,7 +348,7 @@ def _build_request_result_meta(
     if secure is not None:
         meta["secure"] = bool(secure)
 
-    ecs_meta: Dict[str, Any] = {}
+    ecs_meta: dict[str, Any] = {}
     if inbound_ecs is not None:
         ecs_meta["inbound"] = dict(inbound_ecs)
         ecs_meta["inbound_trusted"] = bool(inbound_ecs_trusted)
@@ -369,7 +387,7 @@ def _prune_plugin_order_cache_locked() -> None:
     """
 
     snap_tokens = sorted(
-        token for (kind, token) in _PLUGIN_ORDER_CACHE.keys() if kind == "snap"
+        token for (kind, token) in _PLUGIN_ORDER_CACHE if kind == "snap"
     )
     snap_overflow = len(snap_tokens) - int(_PLUGIN_ORDER_CACHE_MAX_SNAP_GENERATIONS)
     if snap_overflow > 0:
@@ -378,7 +396,7 @@ def _prune_plugin_order_cache_locked() -> None:
             if key[0] == "snap" and int(key[1]) < min_keep_token:
                 _PLUGIN_ORDER_CACHE.pop(key, None)
 
-    state_keys = [key for key in _PLUGIN_ORDER_CACHE.keys() if key[0] == "state"]
+    state_keys = [key for key in _PLUGIN_ORDER_CACHE if key[0] == "state"]
     state_overflow = len(state_keys) - int(_PLUGIN_ORDER_CACHE_MAX_STATE_KEYS)
     if state_overflow > 0:
         for key in state_keys[:state_overflow]:
@@ -451,8 +469,8 @@ def _bg_submit(key: object, fn) -> bool:
 def _record_suppressed_query_log_drop_candidate(
     stats_obj: object,
     *,
-    rcode: Optional[str],
-    status: Optional[str],
+    rcode: str | None,
+    status: str | None,
 ) -> None:
     """Brief: Forward suppressed query-log candidates to stats drop accounting.
 
@@ -477,7 +495,7 @@ def _record_suppressed_query_log_drop_candidate(
         pass
 
 
-def _schedule_notify_axfr_refresh(zone_name: str, upstream: Dict) -> None:
+def _schedule_notify_axfr_refresh(zone_name: str, upstream: dict) -> None:
     """Backward-compat wrapper for ZoneRecords-owned NOTIFY refresh scheduling."""
     from foghorn.plugins.resolve.zone_records import (
         _schedule_notify_axfr_refresh as _impl,
@@ -501,13 +519,13 @@ def _schedule_cache_refresh(data: bytes, client_ip: str) -> None:
 
     def _worker() -> None:
         try:
-            setattr(_CACHE_LOCAL, "bypass_cache", True)
+            _CACHE_LOCAL.bypass_cache = True
             try:
                 # Use the shared resolver so cache, plugins, and stats are all
                 # kept consistent with normal query handling.
                 resolve_query_bytes(data, client_ip)
             finally:
-                setattr(_CACHE_LOCAL, "bypass_cache", False)
+                _CACHE_LOCAL.bypass_cache = False
         except Exception:
             # Background refresh failures must never impact the caller; log
             # at debug level only.
@@ -545,7 +563,7 @@ def _schedule_cache_refresh(data: bytes, client_ip: str) -> None:
 
 
 @registered_lru_cache(maxsize=1024)
-def _resolve_notify_sender_upstream(sender_ip: str) -> Optional[Dict]:
+def _resolve_notify_sender_upstream(sender_ip: str) -> dict | None:
     """Backward-compat wrapper for ZoneRecords-owned NOTIFY sender lookup."""
     from foghorn.plugins.resolve.zone_records import (
         _resolve_notify_sender_upstream as _impl,
@@ -556,12 +574,12 @@ def _resolve_notify_sender_upstream(sender_ip: str) -> Optional[Dict]:
 
 def send_query_with_failover(
     query: DNSRecord,
-    upstreams: List[Dict],
+    upstreams: list[dict],
     timeout_ms: int,
     qname: str,
     qtype: int,
     max_concurrent: int = 1,
-) -> Tuple[Optional[bytes], Optional[Dict], str]:
+) -> tuple[bytes | None, dict | None, str]:
     """Compatibility wrapper preserving server-module patch points for transports.
 
     Inputs:
@@ -698,7 +716,7 @@ def _resolve_plugin_label(decision: object, plugin: object) -> str:
         plugin_name = getattr(plugin_cls, "__name__", "plugin").lower()
         aliases: list[str] = []
         try:
-            aliases = list(getattr(plugin_cls, "get_aliases", lambda: [])())
+            aliases = list(getattr(plugin_cls, "get_aliases", list)())
         except Exception:
             aliases = []
         if aliases:
@@ -714,7 +732,7 @@ def _classify_dnssec_status_for_response(
     qname: str,
     qtype: int,
     response_wire: bytes,
-) -> Optional[str]:
+) -> str | None:
     """Brief: Classify DNSSEC status for a prepared response wire payload.
 
     Inputs:
@@ -747,7 +765,7 @@ def _classify_dnssec_status_for_response(
 
 def _apply_dnssec_ad_bit(
     handler: object,
-    dnssec_status: Optional[str],
+    dnssec_status: str | None,
     response_wire: bytes,
 ) -> bytes:
     """Brief: Set/clear AD on a DNS response when dnssec.mode is validate.
@@ -812,8 +830,8 @@ def _is_signed_authoritative_response(response_wire: bytes) -> bool:
 def _resolve_core(
     data: bytes,
     client_ip: str,
-    listener: Optional[str] = None,
-    secure: Optional[bool] = None,
+    listener: str | None = None,
+    secure: bool | None = None,
 ) -> _ResolveCoreResult:
     """Shared resolution pipeline used by UDP and non-UDP callers.
 
@@ -827,9 +845,7 @@ def _resolve_core(
       - _ResolveCoreResult with final wire bytes and metadata.
     """
     import time as _time  # Local import to avoid impacting module import time
-    from types import SimpleNamespace
 
-    handler = DNSRuntimeState
     try:
         from foghorn.runtime_config import get_runtime_snapshot
 
@@ -837,80 +853,7 @@ def _resolve_core(
     except Exception:
         snap = None
 
-    if snap is not None:
-        handler = SimpleNamespace(
-            stats_collector=snap.stats_collector,
-            plugins=list(snap.plugins or []),
-            upstream_addrs=list(snap.upstream_addrs or []),
-            upstream_backup_addrs=list(snap.upstream_backup_addrs or []),
-            upstream_health=snap.upstream_health,
-            timeout_ms=int(snap.timeout_ms),
-            upstream_strategy=str(snap.upstream_strategy or "failover").lower(),
-            upstream_max_concurrent=max(1, int(snap.upstream_max_concurrent or 1)),
-            resolver_mode=str(snap.resolver_mode or "forward").lower(),
-            recursive_max_depth=int(snap.recursive_max_depth),
-            recursive_timeout_ms=int(snap.recursive_timeout_ms),
-            recursive_per_try_timeout_ms=int(snap.recursive_per_try_timeout_ms),
-            dnssec_mode=str(snap.dnssec_mode or "ignore"),
-            dnssec_validation=str(snap.dnssec_validation or "upstream_ad"),
-            edns_udp_payload=max(512, int(snap.edns_udp_payload)),
-            enable_ede=bool(snap.enable_ede),
-            forward_local=bool(snap.forward_local),
-            refuse_any=bool(getattr(snap, "refuse_any", False)),
-            cookies_enabled=bool(getattr(snap, "cookies_enabled", True)),
-            cookies_mode=str(getattr(snap, "cookies_mode", "learn") or "learn"),
-            cookies_secret=getattr(snap, "cookies_secret", None),
-            cookies_secret_old=getattr(snap, "cookies_secret_old", None),
-            cookies_lifetime_seconds=int(
-                getattr(snap, "cookies_lifetime_seconds", 86400) or 86400
-            ),
-            tsig_enabled=bool(getattr(snap, "tsig_enabled", False)),
-            tsig_mode=str(getattr(snap, "tsig_mode", "optional") or "optional"),
-            tsig_keys=list(getattr(snap, "tsig_keys", []) or []),
-            tsig_max_fudge_seconds=int(
-                getattr(snap, "tsig_max_fudge_seconds", 300) or 300
-            ),
-            tsig_allow_clients=list(getattr(snap, "tsig_allow_clients", []) or []),
-            tsig_listeners=list(getattr(snap, "tsig_listeners", []) or []),
-            ecs_enabled=bool(getattr(snap, "ecs_enabled", False)),
-            ecs_forward_inbound=bool(getattr(snap, "ecs_forward_inbound", False)),
-            ecs_synthesize_from_client_ip=bool(
-                getattr(snap, "ecs_synthesize_from_client_ip", False)
-            ),
-            ecs_source_prefix_v4=max(
-                0, min(32, int(getattr(snap, "ecs_source_prefix_v4", 24)))
-            ),
-            ecs_source_prefix_v6=max(
-                0, min(128, int(getattr(snap, "ecs_source_prefix_v6", 56)))
-            ),
-            ecs_scope_prefix_v4=max(
-                0, min(32, int(getattr(snap, "ecs_scope_prefix_v4", 0)))
-            ),
-            ecs_scope_prefix_v6=max(
-                0, min(128, int(getattr(snap, "ecs_scope_prefix_v6", 0)))
-            ),
-            ecs_trusted_listeners=list(
-                getattr(snap, "ecs_trusted_listeners", []) or []
-            ),
-            ecs_trusted_client_cidrs=list(
-                getattr(snap, "ecs_trusted_client_cidrs", []) or []
-            ),
-            ecs_use_for_plugin_targeting=bool(
-                getattr(snap, "ecs_use_for_plugin_targeting", False)
-            ),
-            min_cache_ttl=max(0, int(snap.min_cache_ttl)),
-            cache_prefetch_enabled=bool(snap.cache_prefetch_enabled),
-            cache_prefetch_min_ttl=max(0, int(snap.cache_prefetch_min_ttl)),
-            cache_prefetch_max_ttl=max(0, int(snap.cache_prefetch_max_ttl)),
-            cache_prefetch_refresh_before_expiry=max(
-                0.0, float(snap.cache_prefetch_refresh_before_expiry)
-            ),
-            cache_prefetch_allow_stale_after_expiry=max(
-                0.0, float(snap.cache_prefetch_allow_stale_after_expiry)
-            ),
-            _upstream_id=DNSRuntimeState._upstream_id,
-            _ensure_edns=getattr(DNSRuntimeState, "_ensure_edns", None),
-        )
+    handler = _build_handler_from_snapshot(snap)
 
     stats = getattr(handler, "stats_collector", None)
     t0 = _time.perf_counter() if stats is not None else None
@@ -918,8 +861,8 @@ def _resolve_core(
     # Extended DNS Errors (RFC 8914). This is populated in specific branches
     # (for example, DNSSEC bogus classification) and mirrored into stats and
     # query_log result payloads when present.
-    ede_code_for_logs: Optional[int] = None
-    ede_text_for_logs: Optional[str] = None
+    ede_code_for_logs: int | None = None
+    ede_text_for_logs: str | None = None
     request_result_meta = _build_request_result_meta(
         source_ip=str(client_ip or ""),
         effective_target_ip=str(client_ip or ""),
@@ -932,8 +875,6 @@ def _resolve_core(
     )
 
     try:
-        rcode_name = "UNKNOWN"
-
         # Compute opcode from header bits without parsing the full message. This
         # allows us to handle UPDATE messages containing empty RRs (used for
         # prerequisites/deletes) which dnslib cannot parse.
@@ -971,295 +912,31 @@ def _resolve_core(
 
         # Downstream DNS COOKIE (RFC 7873) require_udp short-circuit.
         # Runs before cache/plugins/upstream so invalid UDP cookies are cheap.
-        try:
-            cookies_enabled = bool(getattr(handler, "cookies_enabled", True))
-        except Exception:
-            cookies_enabled = True
-        try:
-            cookies_mode = str(
-                getattr(handler, "cookies_mode", "learn") or "learn"
-            ).lower()
-        except Exception:
-            cookies_mode = "learn"
-        cookies_secret = getattr(handler, "cookies_secret", None)
-        cookies_secret_old = getattr(handler, "cookies_secret_old", None)
-        try:
-            cookies_lifetime_seconds = int(
-                getattr(handler, "cookies_lifetime_seconds", 86400) or 86400
-            )
-        except Exception:
-            cookies_lifetime_seconds = 86400
-        if not isinstance(cookies_secret, (bytes, bytearray)):
-            cookies_secret = None
-        else:
-            cookies_secret = bytes(cookies_secret)
-        if not isinstance(cookies_secret_old, (bytes, bytearray)):
-            cookies_secret_old = None
-        else:
-            cookies_secret_old = bytes(cookies_secret_old)
-
-        if (
-            cookies_enabled
-            and cookies_mode == "require_udp"
-            and str(listener or "").lower() == "udp"
-        ):
-            cookie_status = _classify_request_cookie(
-                req,
-                client_ip=client_ip,
-                secret=cookies_secret,
-                secret_old=cookies_secret_old,
-                lifetime_seconds=cookies_lifetime_seconds,
-            )
-            if cookie_status != "valid":
-                wire = _build_badcookie_response(
-                    req,
-                    client_ip=client_ip,
-                    secret=cookies_secret or b"",
-                )
-                wire = _set_response_id(wire, req.header.id)
-                if stats is not None:
-                    try:
-                        # qname may not be normalized yet; best-effort from wire.
-                        qn = ""
-                        try:
-                            qn = str(req.questions[0].qname).rstrip(".")
-                        except Exception:
-                            qn = ""
-                        stats.record_response_rcode("BADCOOKIE", qn)
-                        stats.record_query_result(
-                            client_ip=client_ip,
-                            qname=qn,
-                            qtype="UNKNOWN",
-                            rcode="BADCOOKIE",
-                            upstream_id=None,
-                            status="cookie_required",
-                            error=None,
-                            first=None,
-                            result={
-                                "source": "cookies",
-                                "action": "badcookie",
-                                "cookie_status": str(cookie_status),
-                            },
-                        )
-                    except Exception:
-                        pass
-                if stats is not None and t0 is not None:
-                    try:
-                        t1 = _time.perf_counter()
-                        stats.record_latency(t1 - t0)
-                    except Exception:
-                        pass
-                return _ResolveCoreResult(
-                    wire=wire,
-                    dnssec_status=None,
-                    upstream_id=None,
-                    rcode_name="BADCOOKIE",
-                )
+        cookie_result = _handle_dns_cookies(
+            req=req,
+            handler=handler,
+            client_ip=client_ip,
+            listener=listener,
+            stats=stats,
+            t0=t0,
+        )
+        if cookie_result is not None:
+            return cookie_result
 
         # Downstream QUERY TSIG (RFC 2845) gate.
         # After cookies require_udp; before cache/plugins/upstream.
-        tsig_ctx = {
-            "ok": False,
-            "keyname": None,
-            "algorithm": None,
-            "had_tsig": False,
-            "request_msg": None,
-        }
-        try:
-            tsig_enabled = bool(getattr(handler, "tsig_enabled", False))
-        except Exception:
-            tsig_enabled = False
-        tsig_keys = list(getattr(handler, "tsig_keys", []) or [])
-        try:
-            tsig_mode = str(
-                getattr(handler, "tsig_mode", "optional") or "optional"
-            ).lower()
-        except Exception:
-            tsig_mode = "optional"
-        if tsig_mode not in {"optional", "require"}:
-            tsig_mode = "optional"
-        try:
-            tsig_max_fudge = int(getattr(handler, "tsig_max_fudge_seconds", 300) or 300)
-        except Exception:
-            tsig_max_fudge = 300
-        tsig_allow_clients = list(getattr(handler, "tsig_allow_clients", []) or [])
-        tsig_listeners = list(getattr(handler, "tsig_listeners", []) or [])
-        listener_l = str(listener or "").lower()
-        tsig_applies = True
-        if tsig_listeners:
-            tsig_applies = listener_l in {str(x).lower() for x in tsig_listeners}
-        if tsig_enabled and tsig_applies:
-            from foghorn.servers import tsig_utils as _tsig
-            from foghorn.utils import ip_networks as _ipn
-
-            data_bytes = data if isinstance(data, (bytes, bytearray)) else b""
-            may_tsig = _tsig.wire_may_contain_tsig(data_bytes)
-            need_check = bool(may_tsig) or tsig_mode == "require"
-            if need_check:
-                if tsig_allow_clients:
-                    if not _ipn.ip_string_in_cidrs(
-                        str(client_ip or "").strip(), tsig_allow_clients
-                    ):
-                        # Outside allowlist: ignore TSIG feature for this client.
-                        need_check = False
-                        tsig_enabled = False
-            if need_check:
-                if not may_tsig:
-                    # require + no additional section => missing TSIG
-                    if tsig_mode == "require":
-                        wire = _tsig.build_tsig_error_response(
-                            bytes(data_bytes),
-                            key_configs=tsig_keys,
-                            sign=False,
-                        )
-                        wire = _set_response_id(wire, req.header.id)
-                        if stats is not None:
-                            try:
-                                qn = ""
-                                try:
-                                    qn = str(req.questions[0].qname).rstrip(".")
-                                except Exception:
-                                    qn = ""
-                                stats.record_response_rcode("NOTAUTH", qn)
-                                stats.record_query_result(
-                                    client_ip=client_ip,
-                                    qname=qn,
-                                    qtype="UNKNOWN",
-                                    rcode="NOTAUTH",
-                                    upstream_id=None,
-                                    status="tsig_required",
-                                    error=None,
-                                    first=None,
-                                    result={
-                                        "source": "tsig",
-                                        "action": "missing",
-                                        "tsig_mode": tsig_mode,
-                                    },
-                                )
-                            except Exception:
-                                pass
-                        if stats is not None and t0 is not None:
-                            try:
-                                t1 = _time.perf_counter()
-                                stats.record_latency(t1 - t0)
-                            except Exception:
-                                pass
-                        return _ResolveCoreResult(
-                            wire=wire,
-                            dnssec_status=None,
-                            upstream_id=None,
-                            rcode_name="NOTAUTH",
-                        )
-                else:
-                    vr = _tsig.verify_request_tsig(
-                        bytes(data_bytes),
-                        tsig_keys,
-                        max_fudge_seconds=tsig_max_fudge,
-                    )
-                    tsig_ctx["had_tsig"] = bool(vr.had_tsig)
-                    if vr.ok:
-                        tsig_ctx["ok"] = True
-                        tsig_ctx["keyname"] = vr.keyname
-                        tsig_ctx["algorithm"] = vr.algorithm
-                        tsig_ctx["request_msg"] = vr.request_msg
-                        request_result_meta["tsig_ok"] = True
-                        request_result_meta["tsig_key_name"] = vr.keyname
-                    else:
-                        # optional + no_tsig is fine (ARCOUNT may be EDNS-only)
-                        if vr.error_code == "no_tsig" and tsig_mode == "optional":
-                            pass
-                        elif vr.error_code == "no_tsig" and tsig_mode == "require":
-                            wire = _tsig.build_tsig_error_response(
-                                bytes(data_bytes),
-                                key_configs=tsig_keys,
-                                sign=False,
-                            )
-                            wire = _set_response_id(wire, req.header.id)
-                            if stats is not None:
-                                try:
-                                    qn = ""
-                                    try:
-                                        qn = str(req.questions[0].qname).rstrip(".")
-                                    except Exception:
-                                        qn = ""
-                                    stats.record_response_rcode("NOTAUTH", qn)
-                                    stats.record_query_result(
-                                        client_ip=client_ip,
-                                        qname=qn,
-                                        qtype="UNKNOWN",
-                                        rcode="NOTAUTH",
-                                        upstream_id=None,
-                                        status="tsig_required",
-                                        error=vr.error_text,
-                                        first=None,
-                                        result={
-                                            "source": "tsig",
-                                            "action": "missing",
-                                            "tsig_error": vr.error_code,
-                                        },
-                                    )
-                                except Exception:
-                                    pass
-                            if stats is not None and t0 is not None:
-                                try:
-                                    t1 = _time.perf_counter()
-                                    stats.record_latency(t1 - t0)
-                                except Exception:
-                                    pass
-                            return _ResolveCoreResult(
-                                wire=wire,
-                                dnssec_status=None,
-                                upstream_id=None,
-                                rcode_name="NOTAUTH",
-                            )
-                        else:
-                            # bad sig/key/time/etc or optional with present bad TSIG
-                            if vr.had_tsig or tsig_mode == "require":
-                                wire = _tsig.build_tsig_error_response(
-                                    bytes(data_bytes),
-                                    key_configs=tsig_keys,
-                                    keyname=vr.keyname,
-                                    algorithm=vr.algorithm,
-                                    sign=bool(vr.keyname and tsig_keys),
-                                )
-                                wire = _set_response_id(wire, req.header.id)
-                                if stats is not None:
-                                    try:
-                                        qn = ""
-                                        try:
-                                            qn = str(req.questions[0].qname).rstrip(".")
-                                        except Exception:
-                                            qn = ""
-                                        stats.record_response_rcode("NOTAUTH", qn)
-                                        stats.record_query_result(
-                                            client_ip=client_ip,
-                                            qname=qn,
-                                            qtype="UNKNOWN",
-                                            rcode="NOTAUTH",
-                                            upstream_id=None,
-                                            status="tsig_failed",
-                                            error=vr.error_text,
-                                            first=None,
-                                            result={
-                                                "source": "tsig",
-                                                "action": "reject",
-                                                "tsig_error": vr.error_code,
-                                            },
-                                        )
-                                    except Exception:
-                                        pass
-                                if stats is not None and t0 is not None:
-                                    try:
-                                        t1 = _time.perf_counter()
-                                        stats.record_latency(t1 - t0)
-                                    except Exception:
-                                        pass
-                                return _ResolveCoreResult(
-                                    wire=wire,
-                                    dnssec_status=None,
-                                    upstream_id=None,
-                                    rcode_name="NOTAUTH",
-                                )
+        tsig_ctx, tsig_result = _handle_tsig(
+            data=data,
+            req=req,
+            handler=handler,
+            client_ip=client_ip,
+            listener=listener,
+            stats=stats,
+            t0=t0,
+            request_result_meta=request_result_meta,
+        )
+        if tsig_result is not None:
+            return tsig_result
 
         q = req.questions[0]
         # Normalize the parsed qname by stripping the wire/root trailing dot.
@@ -1269,159 +946,37 @@ def _resolve_core(
         qname = str(q.qname).rstrip(".")
         qtype = q.qtype
 
-        # Search-domain qualification: when a search domain is configured and
-        # the qname matches one of the configured gates, append the suffix.
-        # Applied before cache key, stats, plugins, and forwarding so everything
-        # downstream sees the effective (qualified) name consistently.
-        try:
-            if snap is not None:
-                _search = str(getattr(snap, "search_domain", "") or "")
-                if _search:
-                    try:
-                        _qtype_num = int(qtype)
-                    except Exception:
-                        _qtype_num = int(qtype or 0)
-                    if _qtype_num in _DNSSEC_SEARCH_QUALIFICATION_EXCLUDED_QTYPES:
-                        _search = ""
-                if _search:
-                    from foghorn.utils.dns_names import qualify_name, should_qualify
-
-                    _qual = should_qualify(
-                        qname,
-                        qualify_single_label=bool(
-                            getattr(snap, "qualify_single_label", True)
-                        ),
-                        qualify_non_proper_tld=getattr(
-                            snap, "qualify_non_proper_tld", False
-                        ),
-                        non_proper_tld_mode=str(
-                            getattr(snap, "non_proper_tld_mode", "suffix") or "suffix"
-                        ),
-                    )
-                    if _qual:
-                        _qualified = qualify_name(qname, _search)
-                        if _qualified is not None:
-                            qname = _qualified
-        except (
-            Exception
-        ):  # pragma: no cover - defensive: qualification failure is non-fatal
-            pass
-        ecs_enabled = bool(getattr(handler, "ecs_enabled", False))
-        ecs_forward_inbound = bool(getattr(handler, "ecs_forward_inbound", False))
-        ecs_synthesize_from_client_ip = bool(
-            getattr(handler, "ecs_synthesize_from_client_ip", False)
+        # Search-domain qualification and ECS enrichment.
+        qname = _apply_search_domain_qualification(
+            qname=qname,
+            qtype=qtype,
+            snap=snap,
+            excluded_qtypes=_DNSSEC_SEARCH_QUALIFICATION_EXCLUDED_QTYPES,
         )
-        ecs_source_prefix_v4 = max(
-            0,
-            min(32, int(getattr(handler, "ecs_source_prefix_v4", 24))),
-        )
-        ecs_source_prefix_v6 = max(
-            0,
-            min(128, int(getattr(handler, "ecs_source_prefix_v6", 56))),
-        )
-        ecs_scope_prefix_v4 = max(
-            0,
-            min(32, int(getattr(handler, "ecs_scope_prefix_v4", 0))),
-        )
-        ecs_scope_prefix_v6 = max(
-            0,
-            min(128, int(getattr(handler, "ecs_scope_prefix_v6", 0))),
-        )
-        ecs_trusted_listeners = list(
-            getattr(handler, "ecs_trusted_listeners", []) or []
-        )
-        ecs_trusted_client_cidrs = list(
-            getattr(handler, "ecs_trusted_client_cidrs", []) or []
-        )
-        ecs_use_for_plugin_targeting = bool(
-            getattr(handler, "ecs_use_for_plugin_targeting", False)
-        )
-
-        inbound_ecs: Optional[Dict[str, Any]] = None
-        inbound_ecs_trusted = False
-        trusted_inbound_ecs: Optional[Dict[str, Any]] = None
-        outbound_ecs: Optional[Dict[str, Any]] = None
-        effective_target_ip = str(client_ip or "")
-
-        resolver_mode_for_ecs = str(
-            getattr(handler, "resolver_mode", "forward")
-        ).lower()
-        if resolver_mode_for_ecs == "none":
-            resolver_mode_for_ecs = "master"
-
-        if ecs_enabled:
-            inbound_ecs = parse_ecs_from_request(req)
-            if inbound_ecs is not None:
-                inbound_ecs_trusted = bool(
-                    _is_listener_trusted_for_ecs(
-                        listener=listener,
-                        secure=secure,
-                        trusted_listeners=ecs_trusted_listeners,
-                    )
-                    or _is_source_ip_trusted_for_ecs(
-                        client_ip=client_ip,
-                        trusted_cidrs=ecs_trusted_client_cidrs,
-                    )
-                )
-                if inbound_ecs_trusted:
-                    trusted_inbound_ecs = dict(inbound_ecs)
-
-            if (
-                resolver_mode_for_ecs == "forward"
-                and ecs_forward_inbound
-                and trusted_inbound_ecs is not None
-            ):
-                outbound_ecs = dict(trusted_inbound_ecs)
-            elif resolver_mode_for_ecs == "forward" and ecs_synthesize_from_client_ip:
-                outbound_ecs = _synthesize_ecs_for_source_ip(
-                    client_ip=client_ip,
-                    source_prefix_v4=ecs_source_prefix_v4,
-                    source_prefix_v6=ecs_source_prefix_v6,
-                    scope_prefix_v4=ecs_scope_prefix_v4,
-                    scope_prefix_v6=ecs_scope_prefix_v6,
-                )
-
-            if resolver_mode_for_ecs == "forward" and inbound_ecs is not None:
-                try:
-                    strip_ecs_options_from_request(req)
-                except Exception:
-                    pass
-
-            if outbound_ecs is not None:
-                try:
-                    if not upsert_ecs_option(
-                        req,
-                        outbound_ecs,
-                        create_opt_if_missing=False,
-                        edns_udp_payload=int(
-                            getattr(handler, "edns_udp_payload", 1232)
-                        ),
-                        preserve_do_bit=True,
-                    ):
-                        outbound_ecs = None
-                except Exception:
-                    outbound_ecs = None
-
-            if ecs_use_for_plugin_targeting and trusted_inbound_ecs is not None:
-                target_ip = str(trusted_inbound_ecs.get("address") or "").strip()
-                if target_ip:
-                    effective_target_ip = target_ip
-
-        if not effective_target_ip:
-            effective_target_ip = str(client_ip or "")
-        ecs_cache_bypass = bool(
-            outbound_ecs is not None or effective_target_ip != str(client_ip or "")
-        )
-        request_result_meta = _build_request_result_meta(
-            source_ip=str(client_ip or ""),
-            effective_target_ip=str(effective_target_ip or client_ip or ""),
+        (
+            inbound_ecs,
+            inbound_ecs_trusted,
+            trusted_inbound_ecs,
+            outbound_ecs,
+            effective_target_ip,
+            ecs_cache_bypass,
+            request_result_meta,
+        ) = _apply_ecs_processing(
+            req=req,
+            handler=handler,
+            client_ip=client_ip,
             listener=listener,
             secure=secure,
-            inbound_ecs=inbound_ecs,
-            inbound_ecs_trusted=inbound_ecs_trusted,
-            outbound_ecs=outbound_ecs,
-            ecs_cache_bypass=ecs_cache_bypass,
+            is_listener_trusted_for_ecs=_is_listener_trusted_for_ecs,
+            is_source_ip_trusted_for_ecs=_is_source_ip_trusted_for_ecs,
+            synthesize_ecs_for_source_ip=_synthesize_ecs_for_source_ip,
+            build_request_result_meta=_build_request_result_meta,
         )
+        # Preserve TSIG metadata set by the earlier gate when present.
+        if tsig_ctx.get("ok"):
+            request_result_meta["tsig_ok"] = True
+            if tsig_ctx.get("keyname") is not None:
+                request_result_meta["tsig_key_name"] = tsig_ctx.get("keyname")
 
         cache_key = (qname.lower(), qtype)
 
@@ -1436,1450 +991,165 @@ def _resolve_core(
                 pass
 
         # Optional amplification mitigation: refuse QTYPE ANY (255).
-        try:
-            refuse_any = bool(getattr(handler, "refuse_any", False))
-        except Exception:
-            refuse_any = False
-        if refuse_any:
-            try:
-                qtype_num = int(qtype)
-            except Exception:
-                qtype_num = int(qtype or 0)
-            if qtype_num == int(getattr(QTYPE, "ANY", 255)):
-                r = req.reply()
-                r.header.rcode = RCODE.REFUSED
-                _echo_client_edns(req, r)
-                _attach_ede_option(
-                    req,
-                    r,
-                    21,
-                    "QTYPE ANY refused",
-                )
-                wire = _set_response_id(r.pack(), req.header.id)
-                if stats is not None:
-                    try:
-                        stats.record_response_rcode("REFUSED", qname)
-                        qtype_name = _qtype_label_for_stats(qtype)
-                        result_ctx = {"source": "refuse_any", "action": "refuse"}
-                        result_ctx.update(request_result_meta)
-                        stats.record_query_result(
-                            client_ip=client_ip,
-                            qname=qname,
-                            qtype=qtype_name,
-                            rcode="REFUSED",
-                            upstream_id=None,
-                            status="refuse_any",
-                            error=None,
-                            first=None,
-                            result=result_ctx,
-                        )
-                    except Exception:
-                        pass
-                if stats is not None and t0 is not None:
-                    try:
-                        t1 = _time.perf_counter()
-                        stats.record_latency(t1 - t0)
-                    except Exception:
-                        pass
-                return _ResolveCoreResult(
-                    wire=wire,
-                    dnssec_status=None,
-                    upstream_id=None,
-                    rcode_name="REFUSED",
-                )
+        refuse_result = _handle_refuse_any(
+            req=req,
+            handler=handler,
+            client_ip=client_ip,
+            qname=qname,
+            qtype=qtype,
+            qtype_label_fn=_qtype_label_for_stats,
+            stats=stats,
+            t0=t0,
+            request_result_meta=request_result_meta,
+        )
+        if refuse_result is not None:
+            return refuse_result
 
         # Pre plugins
-        ctx = PluginContext(client_ip=client_ip, listener=listener, secure=secure)
-        # Attach qname so BasePlugin domain-targeting helpers can use it.
-        try:
-            ctx.qname = qname
-        except Exception:  # pragma: no cover - defensive
-            pass
-        try:
-            ctx.ecs = (
-                dict(trusted_inbound_ecs) if trusted_inbound_ecs is not None else None
-            )
-            ctx.effective_target_ip = str(effective_target_ip or client_ip or "")
-            ctx.source_ip = str(client_ip or "")
-        except Exception:  # pragma: no cover - defensive
-            pass
-        plugins_list = list(getattr(handler, "plugins", []) or [])
-        if snap is not None and hasattr(snap, "generation"):
-            pre_plugins, post_plugins = _get_ordered_plugins(
-                plugins=plugins_list,
-                token_kind="snap",
-                token=int(getattr(snap, "generation", 0) or 0),
-            )
-        else:
-            pre_plugins, post_plugins = _get_ordered_plugins(
-                plugins=plugins_list,
-                token_kind="state",
-                token=int(id(getattr(handler, "plugins", plugins_list))),
-            )
-
-        for p in pre_plugins:
-            # Skip plugins that do not target this qtype when they opt in via
-            # BasePlugin.target_qtypes.
-            try:
-                if hasattr(p, "targets_qtype") and not p.targets_qtype(
-                    qtype
-                ):  # pragma: no cover - defensive/metrics path excluded from coverage
-                    continue
-            except (
-                Exception
-            ):  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
-                # On failure, fall back to running the plugin to avoid hiding
-                # errors behind targeting decisions.
-                pass
-
-            try:
-                decision = p.pre_resolve(qname, qtype, data, ctx)
-            except Exception:
-                logger.error(
-                    "pre_resolve failed for plugin %s", type(p).__name__, exc_info=True
-                )
-                decision = None
-            if isinstance(decision, PluginDecision):
-                if decision.action == "drop":
-                    if stats is not None:
-                        _record_suppressed_query_log_drop_candidate(
-                            stats,
-                            rcode="DROP",
-                            status="drop",
-                        )
-                    # Pre-plugin timeout/drop: return sentinel empty wire so UDP
-                    # handlers and othefoghorn.servers.transports can choose not to reply.
-                    return _ResolveCoreResult(
-                        wire=b"",
-                        dnssec_status=None,
-                        upstream_id=None,
-                        rcode_name="DROP",
-                    )
-                if decision.action == "deny":
-                    # NXDOMAIN deny path
-                    r = req.reply()
-                    r.header.rcode = RCODE.NXDOMAIN
-                    # Echo client EDNS(0) OPT, when present, into synthetic NXDOMAIN
-                    # and, when enabled, attach an EDE option describing the
-                    # policy-based deny.
-                    _echo_client_edns(req, r)
-                    # Allow plugins to override the EDE info-code/text via
-                    # optional PluginDecision.ede_code / ede_text attributes,
-                    # falling back to a default mapping based on stat when
-                    # they are not provided.
-                    try:
-                        ede_code_hint = getattr(
-                            decision, "ede_code", None
-                        )  # pragma: no cover - defensive/metrics path excluded from coverage
-                    except (
-                        Exception
-                    ):  # pragma: no cover - defensive/metrics path excluded from coverage
-                        ede_code_hint = None
-                    try:
-                        ede_text_hint = getattr(
-                            decision, "ede_text", None
-                        )  # pragma: no cover - defensive/metrics path excluded from coverage
-                    except (
-                        Exception
-                    ):  # pragma: no cover - defensive/metrics path excluded from coverage
-                        ede_text_hint = None
-                    if ede_code_hint is not None:
-                        ede_code = int(ede_code_hint)
-                        ede_text = (
-                            str(ede_text_hint)
-                            if ede_text_hint is not None
-                            else "policy deny"
-                        )
-                    else:
-                        try:
-                            stat_label = getattr(
-                                decision, "stat", None
-                            )  # pragma: no cover - defensive/metrics path excluded from coverage
-                        except (
-                            Exception
-                        ):  # pragma: no cover - defensive/metrics path excluded from coverage
-                            stat_label = None
-                        # Use "Not Ready" (14) for explicit rate limiting when
-                        # decision.stat == "rate_limit"; otherwise treat this as a
-                        # generic policy block (15).
-                        if stat_label == "rate_limit":
-                            ede_code = 14  # Not Ready
-                            ede_text = "rate limit exceeded"
-                        else:
-                            ede_code = 15  # Blocked
-                            ede_text = "blocked by policy"
-                    _attach_ede_option(req, r, ede_code, ede_text)
-                    wire = _set_response_id(r.pack(), req.header.id)
-                    if stats is not None:
-                        try:
-                            qtype_name = _qtype_label_for_stats(qtype)
-                            # Track the EDE info-code used for this synthetic
-                            # NXDOMAIN so metrics and warm-loaded aggregates can
-                            # expose EDE volumes alongside rcodes.
-                            deny_source = "pre_plugin"
-                            try:
-                                if hasattr(stats, "record_ede_code"):
-                                    stats.record_ede_code(ede_code)
-                            except (
-                                Exception
-                            ):  # pragma: no cover - defensive metrics hook
-                                pass
-                            try:
-                                # Pre-plugin deny bypasses cache; count it as
-                                # a cache_null response and bump the
-                                # cache_deny_pre total for live counters.
-                                stats.record_cache_null(qname, status="deny_pre")
-                            except (
-                                Exception
-                            ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-                                pass
-                            # When plugins provide a decision.stat label,
-                            # mirror it into cache statistics so the HTML
-                            # dashboard can expose per-decision tallies.
-                            try:
-                                stat_label = getattr(decision, "stat", None)
-                                if (
-                                    stat_label
-                                ):  # pragma: no cover - defensive/metrics path excluded from coverage
-                                    stats.record_cache_stat(str(stat_label))
-                            except (
-                                Exception
-                            ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-                                pass
-                            # Also record per-plugin pre-deny totals so
-                            # stats.totals exposes pre_deny_<name> keys. Prefer
-                            # the originating plugin instance label when
-                            # available, falling back to alias/class naming.
-                            try:
-                                short = _resolve_plugin_label(decision, p)
-                                label = (
-                                    f"pre_deny_{short}" if short else "pre_deny_plugin"
-                                )
-                                if short:
-                                    deny_source = short
-                                stats.record_cache_pre_plugin(label)
-                            except Exception:  # pragma: no cover - defensive
-                                pass
-                            stats.record_response_rcode("NXDOMAIN", qname)
-                            # Skip persistent query-log insert when the
-                            # plugin signals suppress_query_log (e.g.
-                            # rate-limit denies under flood).
-                            _suppress_qlog = bool(
-                                getattr(decision, "suppress_query_log", False)
-                            )
-                            if not _suppress_qlog:
-                                result_ctx = {
-                                    "source": deny_source,
-                                    "action": "deny",
-                                    "ede_code": int(ede_code),
-                                    "ede_text": str(ede_text),
-                                }
-                                if deny_source != "pre_plugin":
-                                    result_ctx["plugin"] = deny_source
-                                result_ctx.update(request_result_meta)
-                                stats.record_query_result(
-                                    client_ip=client_ip,
-                                    qname=qname,
-                                    qtype=qtype_name,
-                                    rcode="NXDOMAIN",
-                                    upstream_id=None,
-                                    status="deny_pre",
-                                    error=None,
-                                    first=None,
-                                    result=result_ctx,
-                                )
-                            else:
-                                _record_suppressed_query_log_drop_candidate(
-                                    stats,
-                                    rcode="NXDOMAIN",
-                                    status="deny_pre",
-                                )
-                        except (
-                            Exception
-                        ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-                            pass
-                    if stats is not None and t0 is not None:
-                        try:
-                            t1 = _time.perf_counter()
-                            stats.record_latency(t1 - t0)
-                        except (
-                            Exception
-                        ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-                            pass
-                    return _ResolveCoreResult(
-                        wire=wire,
-                        dnssec_status=None,
-                        upstream_id=None,
-                        rcode_name="NXDOMAIN",
-                    )
-                if decision.action == "override" and decision.response is not None:
-                    # Allow plugins to supply a full wire response, but ensure we
-                    # still echo client EDNS(0) when the override does not carry
-                    # its own OPT record.
-                    resp_wire = decision.response
-                    try:
-                        override_msg = DNSRecord.parse(resp_wire)
-                        _echo_client_edns(req, override_msg)
-                        resp_wire = override_msg.pack()
-                    except Exception:  # pragma: no cover - defensive: parse failure
-                        pass
-                    dnssec_status = _classify_dnssec_status_for_response(
-                        handler=handler,
-                        qname=qname,
-                        qtype=qtype,
-                        response_wire=resp_wire,
-                    )
-                    if stats is not None and dnssec_status is not None:
-                        try:
-                            stats.record_dnssec_status(dnssec_status)
-                        except (
-                            Exception
-                        ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-                            pass
-                    try:
-                        dnssec_mode = str(
-                            getattr(handler, "dnssec_mode", "ignore")
-                        ).lower()
-                    except Exception:
-                        dnssec_mode = "ignore"
-                    if (
-                        dnssec_mode == "validate"
-                        and dnssec_status in (None, "dnssec_unsigned", "dnssec_bogus")
-                        and _is_signed_authoritative_response(resp_wire)
-                    ):
-                        dnssec_status = "dnssec_zone_secure"
-                    resp_wire = _apply_dnssec_ad_bit(
-                        handler=handler,
-                        dnssec_status=dnssec_status,
-                        response_wire=resp_wire,
-                    )
-                    wire = _set_response_id(resp_wire, req.header.id)
-                    if stats is not None:
-                        try:
-                            parsed = DNSRecord.parse(wire)
-                            rcode_name = RCODE.get(
-                                parsed.header.rcode, str(parsed.header.rcode)
-                            )
-                            try:
-                                # Pre-plugin override also bypasses cache; count
-                                # it as a cache_null response and bump the
-                                # cache_override_pre total for live counters.
-                                stats.record_cache_null(qname, status="override_pre")
-                            except (
-                                Exception
-                            ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-                                pass
-                            # Mirror any decision.stat label into cache stats
-                            # so per-decision tallies are available in Totals.
-                            try:
-                                stat_label = getattr(decision, "stat", None)
-                                if (
-                                    stat_label
-                                ):  # pragma: no cover - defensive/metrics path excluded from coverage
-                                    stats.record_cache_stat(str(stat_label))
-                            except (
-                                Exception
-                            ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-                                pass
-                            # Also record per-plugin pre-override totals so
-                            # stats.totals exposes pre_override_<name>. Prefer
-                            # the originating plugin instance label when
-                            # available, falling back to alias/class naming.
-                            override_source = "pre_plugin_override"
-                            try:
-                                short = _resolve_plugin_label(decision, p)
-                                if short:
-                                    label = f"pre_override_{short}"
-                                    override_source = short
-                                else:
-                                    label = "pre_override_plugin"
-                                stats.record_cache_pre_plugin(label)
-                            except Exception:  # pragma: no cover - defensive
-                                pass
-                            stats.record_response_rcode(rcode_name, qname)
-
-                            # Skip persistent query-log insert when the
-                            # plugin signals suppress_query_log.
-                            _suppress_qlog = bool(
-                                getattr(decision, "suppress_query_log", False)
-                            )
-                            if not _suppress_qlog:
-                                answers = [
-                                    {
-                                        "name": str(rr.rname),
-                                        "type": QTYPE.get(rr.rtype, str(rr.rtype)),
-                                        "ttl": int(getattr(rr, "ttl", 0)),
-                                        "rdata": str(rr.rdata),
-                                    }
-                                    for rr in (parsed.rr or [])
-                                ]
-                                first = answers[0]["rdata"] if answers else None
-                                result_ctx = {
-                                    "source": override_source,
-                                    "answers": answers,
-                                }
-                                if override_source != "pre_plugin_override":
-                                    result_ctx["plugin"] = override_source
-                                result_ctx.update(request_result_meta)
-                                qtype_name = _qtype_label_for_stats(qtype)
-                                stats.record_query_result(
-                                    client_ip=client_ip,
-                                    qname=qname,
-                                    qtype=qtype_name,
-                                    rcode=rcode_name,
-                                    upstream_id=None,
-                                    status="override_pre",
-                                    error=None,
-                                    first=str(first) if first is not None else None,
-                                    result=result_ctx,
-                                )
-                            else:
-                                _record_suppressed_query_log_drop_candidate(
-                                    stats,
-                                    rcode=rcode_name,
-                                    status="override_pre",
-                                )
-                        except (
-                            Exception
-                        ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-                            pass
-                    if stats is not None and t0 is not None:
-                        try:
-                            t1 = _time.perf_counter()
-                            stats.record_latency(t1 - t0)
-                        except (
-                            Exception
-                        ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-                            pass
-                    return _ResolveCoreResult(
-                        wire=wire,
-                        dnssec_status=dnssec_status,
-                        upstream_id=None,
-                        rcode_name=rcode_name,
-                    )
-                if decision.action == "allow":
-                    # Explicit allow: stop evaluating further pre plugins but
-                    # continue normal resolution (cache/upstream).
-                    break
+        pre_plugins, post_plugins, pre_result = _run_pre_plugins(
+            data=data,
+            req=req,
+            client_ip=client_ip,
+            listener=listener,
+            secure=secure,
+            qname=qname,
+            qtype=qtype,
+            trusted_inbound_ecs=trusted_inbound_ecs,
+            effective_target_ip=effective_target_ip,
+            handler=handler,
+            snap=snap,
+            stats=stats,
+            t0=t0,
+            request_result_meta=request_result_meta,
+            get_ordered_plugins=_get_ordered_plugins,
+            resolve_plugin_label=_resolve_plugin_label,
+            qtype_label_fn=_qtype_label_for_stats,
+            record_suppressed_query_log_drop_candidate=_record_suppressed_query_log_drop_candidate,
+            classify_dnssec_status_for_response=_classify_dnssec_status_for_response,
+            apply_dnssec_ad_bit=_apply_dnssec_ad_bit,
+            is_signed_authoritative_response=_is_signed_authoritative_response,
+        )
+        if pre_result is not None:
+            return pre_result
 
         # Cache lookup (with optional stale-while-revalidate prefetch).
-        cache = getattr(plugin_base, "DNS_CACHE", None)
-        cached: Optional[bytes] = None
-        seconds_remaining: Optional[float] = None
-        ttl_original: Optional[int] = None
-        bypass_cache = bool(
-            getattr(_CACHE_LOCAL, "bypass_cache", False) or ecs_cache_bypass
+        cache_hit = _try_cache_hit(
+            data=data,
+            req=req,
+            client_ip=client_ip,
+            qname=qname,
+            qtype=qtype,
+            cache_key=cache_key,
+            handler=handler,
+            stats=stats,
+            t0=t0,
+            request_result_meta=request_result_meta,
+            tsig_ctx=tsig_ctx,
+            ecs_cache_bypass=ecs_cache_bypass,
+            cache_local=_CACHE_LOCAL,
+            schedule_cache_refresh=_schedule_cache_refresh,
+            qtype_label_fn=_qtype_label_for_stats,
         )
-        prefetch_enabled = bool(getattr(handler, "cache_prefetch_enabled", False))
-        window_after = float(
-            getattr(
-                handler,
-                "cache_prefetch_allow_stale_after_expiry",
-                0.0,
-            )
-            or 0.0
-        )
-
-        if cache is not None and not bypass_cache:
-            # Prefer get_with_meta() for stale-while-revalidate behavior. Allow a
-            # fallback to get() for transitional/custom cache implementations.
-            try:
-                value, remaining, ttl_val = cache.get_with_meta(cache_key)
-                if value is not None:
-                    cached = value
-                    seconds_remaining = remaining
-                    ttl_original = ttl_val  # pragma: no cover - defensive/metrics path excluded from coverage
-            except (
-                NotImplementedError
-            ):  # pragma: no cover - defensive/metrics path excluded from coverage
-                try:  # pragma: no cover - defensive/metrics path excluded from coverage
-                    cached = cache.get(
-                        cache_key
-                    )  # pragma: no cover - defensive/metrics path excluded from coverage
-                except (
-                    NotImplementedError
-                ):  # pragma: no cover - defensive/metrics path excluded from coverage
-                    cached = None
-            except (
-                Exception
-            ):  # pragma: no cover - defensive: cache implementation detail
-                cached = None
-        if (
-            cached is not None
-            and seconds_remaining is not None
-            and seconds_remaining < 0.0
-            and not (
-                prefetch_enabled
-                and window_after > 0.0
-                and (-window_after <= seconds_remaining < 0.0)
-            )
-        ):
-            cached = None
-
-        if cached is not None:
-            # Record cache hit statistics
-            if stats is not None:
-                try:
-                    stats.record_cache_hit(qname)
-                    parsed_cached = DNSRecord.parse(cached)
-                    rcode_name = RCODE.get(
-                        parsed_cached.header.rcode,
-                        str(parsed_cached.header.rcode),
-                    )
-                    stats.record_response_rcode(rcode_name, qname)
-
-                    answers = [
-                        {
-                            "name": str(rr.rname),
-                            "type": QTYPE.get(rr.rtype, str(rr.rtype)),
-                            "ttl": int(getattr(rr, "ttl", 0)),
-                            "rdata": str(rr.rdata),
-                        }
-                        for rr in (parsed_cached.rr or [])
-                    ]
-                    first = answers[0]["rdata"] if answers else None
-                    result_ctx = {"source": "cache", "answers": answers}
-                    result_ctx.update(request_result_meta)
-                    qtype_name = _qtype_label_for_stats(qtype)
-                    stats.record_query_result(
-                        client_ip=client_ip,
-                        qname=qname,
-                        qtype=qtype_name,
-                        rcode=rcode_name,
-                        upstream_id=None,
-                        status="cache_hit",
-                        error=None,
-                        first=str(first) if first is not None else None,
-                        result=result_ctx,
-                    )
-                except (
-                    Exception
-                ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-                    pass
-
-            # Decide whether to schedule a background refresh for this cache hit
-            min_ttl = int(getattr(handler, "cache_prefetch_min_ttl", 0) or 0)
-            max_ttl = int(getattr(handler, "cache_prefetch_max_ttl", 0) or 0)
-            window_before = float(
-                getattr(
-                    handler,
-                    "cache_prefetch_refresh_before_expiry",
-                    0.0,
-                )
-                or 0.0
-            )
-
-            should_refresh = False
-            if (
-                prefetch_enabled
-                and seconds_remaining is not None
-                and ttl_original is not None
-            ):  # pragma: no cover - defensive/metrics path excluded from coverage
-                ttl_ok = True  # pragma: no cover - defensive/metrics path excluded from coverage
-                if (
-                    ttl_original < min_ttl
-                ):  # pragma: no cover - defensive/metrics path excluded from coverage
-                    ttl_ok = False  # pragma: no cover - defensive/metrics path excluded from coverage
-                if (
-                    max_ttl > 0 and ttl_original > max_ttl
-                ):  # pragma: no cover - defensive/metrics path excluded from coverage
-                    ttl_ok = False  # pragma: no cover - defensive/metrics path excluded from coverage
-                if (
-                    ttl_ok
-                ):  # pragma: no cover - defensive/metrics path excluded from coverage
-                    if (
-                        0.0 <= seconds_remaining <= window_before
-                    ):  # pragma: no cover - defensive/metrics path excluded from coverage
-                        should_refresh = True  # pragma: no cover - defensive/metrics path excluded from coverage
-                    elif (
-                        window_after > 0.0 and -window_after <= seconds_remaining < 0.0
-                    ):  # pragma: no cover - defensive/metrics path excluded from coverage
-                        should_refresh = True
-
-            if (
-                should_refresh and not bypass_cache
-            ):  # pragma: no cover - defensive/metrics path excluded from coverage
-                _schedule_cache_refresh(data, client_ip)
-
-            try:
-                from foghorn.servers.tsig_utils import (
-                    sign_response_tsig,
-                    strip_tsig_from_wire,
-                )
-
-                cached = strip_tsig_from_wire(cached)
-                if tsig_ctx.get("ok") and tsig_ctx.get("keyname"):
-                    cached = sign_response_tsig(
-                        cached,
-                        key_configs=list(getattr(handler, "tsig_keys", []) or []),
-                        keyname=tsig_ctx.get("keyname"),
-                        algorithm=tsig_ctx.get("algorithm"),
-                        request_msg=tsig_ctx.get("request_msg"),
-                    )
-            except Exception:
-                pass
-            cached = _bind_response_cookie_to_request(
-                req,
-                cached,
-                client_ip=client_ip,
-                cookies_enabled=bool(getattr(handler, "cookies_enabled", True)),
-                secret=getattr(handler, "cookies_secret", None),
-            )
-            wire = _set_response_id(cached, req.header.id)
-            if stats is not None and t0 is not None:
-                try:
-                    t1 = _time.perf_counter()
-                    stats.record_latency(t1 - t0)
-                except (
-                    Exception
-                ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-                    pass
-            return _ResolveCoreResult(
-                wire=wire,
-                dnssec_status=None,
-                upstream_id=None,
-                rcode_name=rcode_name,
-            )
-
-        # Cache miss
-        if stats is not None:
-            try:
-                stats.record_cache_miss(qname)
-            except (
-                Exception
-            ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-                pass
+        if cache_hit is not None:
+            return cache_hit
 
         # Block forwarding of .local queries and RFC1918 reverse PTRs unless
         # forward_local is True.
         # RFC 6762 reserves .local for mDNS; forwarding to upstream resolvers
         # can cause delays and incorrect answers. RFC1918 reverse PTRs are
         # often locally-served and should follow the same gate.
-        forward_local = bool(getattr(handler, "forward_local", False))
-        qname_lower = qname.lower()
-        is_rfc1918_ptr_query = qtype == QTYPE.PTR and _is_rfc1918_ptr_query_name(
-            qname_lower
-        )
-        if not forward_local and _is_forward_local_blocked_query(qname_lower, qtype):
-            r = req.reply()
-            r.header.rcode = RCODE.NXDOMAIN
-            _echo_client_edns(req, r)
-            ede_text = ".local not forwarded (RFC 6762)"
-            if is_rfc1918_ptr_query:
-                ede_text = "RFC1918 PTR not forwarded"
-            _attach_ede_option(req, r, 21, ede_text)  # Not Authoritative
-            wire = _set_response_id(r.pack(), req.header.id)
-            if stats is not None:
-                try:
-                    qtype_name = _qtype_label_for_stats(qtype)
-                    stats.record_response_rcode("NXDOMAIN", qname)
-                    result_ctx = {"source": "local_blocked"}
-                    result_ctx.update(request_result_meta)
-                    stats.record_query_result(
-                        client_ip=client_ip,
-                        qname=qname,
-                        qtype=qtype_name,
-                        rcode="NXDOMAIN",
-                        upstream_id=None,
-                        status="local_blocked",
-                        error=None,
-                        first=None,
-                        result=result_ctx,
-                    )
-                except Exception:  # pragma: no cover - defensive
-                    pass
-            if stats is not None and t0 is not None:
-                try:
-                    t1 = _time.perf_counter()
-                    stats.record_latency(t1 - t0)
-                except Exception:  # pragma: no cover - defensive
-                    pass
-            return _ResolveCoreResult(
-                wire=wire,
-                dnssec_status=None,
-                upstream_id=None,
-                rcode_name="NXDOMAIN",
-            )
-
-        reply: Optional[bytes] = None
-        used_upstream: Optional[Dict] = None
-        reason: Optional[str] = None
-        upstream_url = ""
-
-        # Decide between forwarding, recursion, and authoritative-only (no
-        # forwarding) based on resolver_mode.
-        resolver_mode = str(getattr(handler, "resolver_mode", "forward")).lower()
-        # Backward-compatible alias: "none" historically meant authoritative-only
-        # mode (no forwarding), which is now called "master".
-        if resolver_mode == "none":
-            resolver_mode = "master"
-
-        if resolver_mode == "recursive":
-            # In recursive mode we bypass configured upstreams and instead walk
-            # from the root using RecursiveResolver. We still honour the
-            # dnssec_mode when constructing the query (RD bit and EDNS DO bit
-            # are already handled earlier in the pipeline) and we reuse
-            # DNSUDPHandler's recursion knobs.
-            try:
-                max_depth = int(getattr(handler, "recursive_max_depth", 12) or 12)
-            except Exception:  # pragma: no cover - defensive
-                max_depth = 12
-            try:
-                recursion_timeout_ms = int(
-                    getattr(
-                        handler,
-                        "recursive_timeout_ms",
-                        getattr(handler, "timeout_ms", 2000),
-                    )
-                    or getattr(handler, "timeout_ms", 2000)
-                )
-            except Exception:  # pragma: no cover - defensive
-                recursion_timeout_ms = int(getattr(handler, "timeout_ms", 2000) or 2000)
-            try:
-                per_try_ms = int(
-                    getattr(
-                        handler,
-                        "recursive_per_try_timeout_ms",
-                        recursion_timeout_ms,
-                    )
-                    or recursion_timeout_ms
-                )
-            except Exception:  # pragma: no cover - defensive
-                per_try_ms = recursion_timeout_ms
-
-            allow_private_destinations = True
-            destination_allowlist: list[str] = []
-            try:
-                if snap is not None:
-                    resolver_cfg_snap = (
-                        (snap.cfg.get("server") or {}).get("resolver")
-                        if isinstance(getattr(snap, "cfg", None), dict)
-                        else {}
-                    )
-                    if not isinstance(resolver_cfg_snap, dict):
-                        resolver_cfg_snap = {}
-                    allow_private_destinations = bool(
-                        resolver_cfg_snap.get("allow_private_destinations", True)
-                    )
-                    raw_allow = resolver_cfg_snap.get("destination_allowlist") or []
-                    if isinstance(raw_allow, list):
-                        destination_allowlist = [
-                            str(x).strip() for x in raw_allow if str(x).strip()
-                        ]
-            except Exception:
-                allow_private_destinations = True
-                destination_allowlist = []
-
-            resolver = RecursiveResolver(
-                cache=getattr(plugin_base, "DNS_CACHE", None),
-                stats=stats,
-                max_depth=max_depth,
-                timeout_ms=recursion_timeout_ms,
-                per_try_timeout_ms=per_try_ms,
-                allow_private_destinations=allow_private_destinations,
-                destination_allowlist=destination_allowlist,
-            )
-
-            # Perform iterative resolution. RecursiveResolver is responsible for
-            # talking to upstream authorities; we only receive the final wire
-            # and an optional upstream identifier for stats.
-            reply, upstream_id = resolver.resolve(req)
-            reason = "ok" if reply is not None else "all_failed"
-        elif resolver_mode == "master":
-            # Authoritative-only mode: do not forward or recurse. Plugins still
-            # run (pre/post), but any cache miss falls through to REFUSED.
-            upstream_id = None
-            r = req.reply()
-            r.header.rcode = RCODE.REFUSED
-            # Echo client EDNS(0) OPT and attach an EDE explaining the policy
-            # when enabled.
-            _echo_client_edns(req, r)
-            ede_code_for_logs = 15
-            ede_text_for_logs = "forwarding disabled (resolver.mode=master)"
-            _attach_ede_option(req, r, ede_code_for_logs, ede_text_for_logs)  # Blocked
-            reply = r.pack()
-            reason = "no_forwarding"
-        else:
-            # Classic forwarding: EDNS/DNSSEC adjustments (mirror
-            # DNSUDPHandler behaviour) followed by send_query_with_failover.
-            # When no upstreams are configured we skip EDNS normalization so that
-            # synthesized SERVFAIL responses can echo the client's original OPT
-            # record unchanged.
-            primary_upstreams = list(getattr(handler, "upstream_addrs", []) or [])
-            backup_upstreams = list(getattr(handler, "upstream_backup_addrs", []) or [])
-            probe_percent = 1.0
-            probe_min_percent = 1.0
-            probe_max_percent = 50.0
-            probe_increase = 1.0
-            probe_decrease = 2.0
-            max_recheck = 300.0
-            try:
-                health_cfg = getattr(handler, "upstream_health", None)
-                probe_percent = float(getattr(health_cfg, "probe_percent", 1.0) or 1.0)
-                probe_min_percent = float(
-                    getattr(health_cfg, "probe_min_percent", 1.0) or 1.0
-                )
-                probe_max_percent = float(
-                    getattr(health_cfg, "probe_max_percent", 50.0) or 50.0
-                )
-                probe_increase = float(
-                    getattr(health_cfg, "probe_increase", 1.0) or 1.0
-                )
-                probe_decrease = float(
-                    getattr(health_cfg, "probe_decrease", 2.0) or 2.0
-                )
-                max_recheck = float(getattr(health_cfg, "max_recheck", 300.0) or 300.0)
-            except Exception:
-                probe_percent = 1.0
-                probe_min_percent = 1.0
-                probe_max_percent = 50.0
-                probe_increase = 1.0
-                probe_decrease = 2.0
-                max_recheck = 300.0
-            if probe_min_percent > probe_max_percent:
-                probe_min_percent, probe_max_percent = (
-                    probe_max_percent,
-                    probe_min_percent,
-                )
-            probe_min_percent = max(0.0, min(100.0, probe_min_percent))
-            probe_max_percent = max(probe_min_percent, min(100.0, probe_max_percent))
-            probe_increase = max(0.0, probe_increase)
-            probe_decrease = max(0.0, probe_decrease)
-            max_recheck = max(0.0, min(86400.0, max_recheck))
-            DNSRuntimeState.upstream_max_recheck = max_recheck
-            probe_percent = max(
-                probe_min_percent, min(probe_max_percent, probe_percent)
-            )
-            current_probe_percent = DNSRuntimeState.upstream_probe_percent
-            if current_probe_percent is None:
-                current_probe_percent = probe_percent
-            current_probe_percent = max(
-                probe_min_percent,
-                min(probe_max_percent, float(current_probe_percent)),
-            )
-
-            def _select_upstreams_with_probe(
-                candidates: List[Dict],
-            ) -> tuple[List[Dict], int]:
-                now = _time.time()
-                selected: List[Dict] = []
-                healthy_count = 0
-                for upstream in candidates or []:
-                    if not isinstance(upstream, dict):
-                        continue
-                    up_id = DNSRuntimeState._upstream_id(upstream)
-                    if not up_id:
-                        selected.append(upstream)
-                        healthy_count += 1
-                        continue
-                    entry = DNSRuntimeState.upstream_health.get(up_id)
-                    down_until = (
-                        float(entry.get("down_until", 0.0))
-                        if isinstance(entry, dict)
-                        else 0.0
-                    )
-                    if down_until > now:
-                        if current_probe_percent > 0.0:
-                            try:
-                                if random.random() * 100.0 < current_probe_percent:
-                                    selected.append(upstream)
-                            except Exception:
-                                pass
-                        continue
-                    selected.append(upstream)
-                    healthy_count += 1
-                return selected, healthy_count
-
-            def _all_primaries_degraded(candidates: List[Dict]) -> bool:
-                """Brief: True when all primary upstreams are degraded/down.
-
-                Inputs:
-                  - candidates: List of primary upstream mappings.
-
-                Outputs:
-                  - bool: True when no primary is fully healthy.
-                """
-                now = _time.time()
-                saw_primary = False
-                for upstream in candidates or []:
-                    if not isinstance(upstream, dict):
-                        continue
-                    saw_primary = True
-                    up_id = DNSRuntimeState._upstream_id(upstream)
-                    if not up_id:
-                        return False
-                    entry = DNSRuntimeState.upstream_health.get(up_id)
-                    if not isinstance(entry, dict):
-                        return False
-                    try:
-                        down_until = float(entry.get("down_until", 0.0) or 0.0)
-                    except Exception:
-                        down_until = 0.0
-                    if down_until <= now:
-                        return False
-                return True if saw_primary else True
-
-            primary_selected, primary_healthy_count = _select_upstreams_with_probe(
-                primary_upstreams
-            )
-            backup_selected, _backup_healthy_count = _select_upstreams_with_probe(
-                backup_upstreams
-            )
-            # Backup upstreams are only considered when all primaries are
-            # degraded (or none configured). Otherwise failover stays within
-            # the primary list order.
-            primaries_degraded = _all_primaries_degraded(primary_upstreams)
-            if (
-                primary_selected
-                and primary_healthy_count > 0
-                and not primaries_degraded
-            ):
-                upstreams = primary_selected
-            elif backup_selected:
-                upstreams = backup_selected
-            else:
-                upstreams = primary_selected
-            try:
-                strategy = str(
-                    getattr(handler, "upstream_strategy", "failover")
-                ).lower()
-            except Exception:
-                strategy = "failover"
-            if strategy == "round_robin" and upstreams:
-                try:
-                    idx = int(getattr(DNSRuntimeState, "_upstream_rr_index", 0) or 0)
-                except Exception:
-                    idx = 0
-                offset = idx % len(upstreams)
-                upstreams = upstreams[offset:] + upstreams[:offset]
-                DNSRuntimeState._upstream_rr_index = (idx + 1) % len(upstreams)
-            elif strategy == "random" and len(upstreams) > 1:
-                upstreams = list(upstreams)
-                try:
-                    random.shuffle(upstreams)
-                except Exception:
-                    pass
-            try:
-                mode = str(getattr(handler, "dnssec_mode", "ignore")).lower()
-                if mode in ("ignore", "passthrough", "validate") and upstreams:
-                    edns_helper = type("_H", (), {})()
-                    edns_helper.dnssec_mode = getattr(handler, "dnssec_mode", "ignore")
-                    edns_helper.edns_udp_payload = getattr(
-                        handler, "edns_udp_payload", 1232
-                    )
-                    ensure = getattr(handler, "_ensure_edns", None)
-                    if callable(ensure):
-                        ensure(edns_helper, req)
-            except (
-                Exception
-            ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-                pass  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-
-            # Forward with failover using the same helper as UDP handlers. Tests
-            # frequently monkeypatch send_query_with_failover directly, so we call
-            # it here rather than DNSUDPHandler._forward_with_failover_helper.
-            upstream_id = None
-            timeout_ms = getattr(handler, "timeout_ms", 2000)
-            try:
-                max_concurrent = int(
-                    getattr(handler, "upstream_max_concurrent", 1) or 1
-                )  # pragma: no cover - defensive/metrics path excluded from coverage
-            except (
-                Exception
-            ):  # pragma: no cover - defensive/metrics path excluded from coverage
-                max_concurrent = 1
-            if (
-                max_concurrent < 1
-            ):  # pragma: no cover - defensive/metrics path excluded from coverage
-                max_concurrent = 1
-            reply, used_upstream, reason = send_query_with_failover(
-                req,
-                upstreams,
-                timeout_ms,
-                qname,
-                qtype,
-                max_concurrent=max_concurrent,
-            )
-            upstream_url = ""
-            if isinstance(used_upstream, dict):
-                try:
-                    raw_upstream_url = str(used_upstream.get("url", "")).strip()
-                except Exception:
-                    raw_upstream_url = ""
-                if raw_upstream_url:
-                    upstream_url = _sanitize_upstream_url(raw_upstream_url)
-            # Keep upstream health state in sync for admin/status payloads.
-            # The UDP handler delegates to this shared resolver path, so health
-            # updates must happen here as well.
-            if reply is None:
-                DNSRuntimeState._mark_upstreams_down(
-                    upstreams,
-                    reason,
-                    max_recheck=max_recheck,
-                )
-                DNSRuntimeState.upstream_probe_percent = min(
-                    probe_max_percent,
-                    max(
-                        probe_min_percent,
-                        float(current_probe_percent) + float(probe_increase),
-                    ),
-                )
-            else:
-                DNSRuntimeState._mark_upstream_ok(used_upstream)
-                DNSRuntimeState.upstream_probe_percent = min(
-                    probe_max_percent,
-                    max(
-                        probe_min_percent,
-                        float(current_probe_percent) - float(probe_decrease),
-                    ),
-                )
-
-        # Record upstream result, even when all upstreams ultimately fail.
-        if stats is not None and used_upstream:
-            try:
-                host = str(used_upstream.get("host", ""))
-                port = int(used_upstream.get("port", 0))
-                # For DoH-style upstreams identified by URL, prefer that as the
-                # upstream_id so stats can distinguish endpoints consistently.
-                url = str(upstream_url or "").strip()
-                if url:
-                    upstream_id = url
-                else:
-                    upstream_id = (
-                        f"{host}:{port}" if host or port else host or "unknown"
-                    )
-                outcome = "success" if reason == "ok" else str(reason)
-                stats.record_upstream_result(upstream_id, outcome)
-            except (
-                Exception
-            ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-                pass
-
-        if reply is None:
-            r = req.reply()
-            r.header.rcode = RCODE.SERVFAIL
-
-            # When synthesizing SERVFAIL (for example, when there are no
-            # upstreams or all upstreams fail), echo any client EDNS(0) OPT RR
-            # into the response so payload size and flags are preserved, and
-            # attach an EDE option describing the upstream/network failure when
-            # enabled.
-            _echo_client_edns(req, r)
-            ede_code = 23
-            ede_text = "all upstreams failed"
-            _attach_ede_option(req, r, ede_code, ede_text)  # Network Error
-
-            wire = _set_response_id(r.pack(), req.header.id)
-            if stats is not None:
-                try:
-                    # Record both rcode and EDE info-code for this synthetic
-                    # SERVFAIL so that metrics and query_log consumers can
-                    # distinguish upstream/network failures from other errors.
-                    if hasattr(stats, "record_ede_code"):
-                        try:
-                            stats.record_ede_code(ede_code)
-                        except Exception:  # pragma: no cover - defensive metrics hook
-                            pass
-                    stats.record_response_rcode("SERVFAIL", qname)
-                    if upstream_id:
-                        try:
-                            stats.record_upstream_rcode(upstream_id, "SERVFAIL")
-                        except (
-                            Exception
-                        ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-                            pass
-                    qtype_name = _qtype_label_for_stats(qtype)
-                    status = str(reason or "all_failed")
-                    result_ctx = {
-                        "source": "upstream",
-                        "status": status,
-                        "error": "all_upstreams_failed",
-                        "ede_code": int(ede_code),
-                        "ede_text": str(ede_text),
-                    }
-                    if upstream_id:
-                        result_ctx["upstream"] = str(upstream_id)
-                    if upstream_url:
-                        result_ctx["upstream_url"] = str(upstream_url)
-                    result_ctx.update(request_result_meta)
-                    stats.record_query_result(
-                        client_ip=client_ip,
-                        qname=qname,
-                        qtype=qtype_name,
-                        rcode="SERVFAIL",
-                        upstream_id=upstream_id,
-                        status=status,
-                        error="all_upstreams_failed",
-                        first=None,
-                        result=result_ctx,
-                    )
-                except (
-                    Exception
-                ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-                    pass
-                # Record latency for the all-upstreams-failed path as well so
-                # stats callers see a duration for every resolved query.
-                if t0 is not None:
-                    try:
-                        t1 = _time.perf_counter()
-                        stats.record_latency(t1 - t0)
-                    except (
-                        Exception
-                    ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-                        pass
-            return _ResolveCoreResult(
-                wire=wire,
-                dnssec_status=None,
-                upstream_id=upstream_id,
-                rcode_name="SERVFAIL",
-            )
-
-        # Post plugins
-        ctx2 = PluginContext(client_ip=client_ip, listener=listener, secure=secure)
-        try:
-            ctx2.qname = qname
-        except Exception:  # pragma: no cover - defensive
-            pass
-        try:
-            ctx2.ecs = (
-                dict(trusted_inbound_ecs) if trusted_inbound_ecs is not None else None
-            )
-            ctx2.effective_target_ip = str(effective_target_ip or client_ip or "")
-            ctx2.source_ip = str(client_ip or "")
-        except Exception:  # pragma: no cover - defensive
-            pass
-        out = reply
-        for p in post_plugins:
-            # Skip plugins that do not target this qtype when they opt in via
-            # BasePlugin.target_qtypes.
-            try:
-                if hasattr(p, "targets_qtype") and not p.targets_qtype(
-                    qtype
-                ):  # pragma: no cover - defensive/metrics path excluded from coverage
-                    continue
-            except (
-                Exception
-            ):  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
-                pass
-
-            try:
-                decision = p.post_resolve(qname, qtype, out, ctx2)
-            except Exception:
-                logger.error(
-                    "post_resolve failed for plugin %s", type(p).__name__, exc_info=True
-                )
-                decision = None
-            if isinstance(decision, PluginDecision):
-                if decision.action == "drop":
-                    if stats is not None:
-                        _record_suppressed_query_log_drop_candidate(
-                            stats,
-                            rcode="DROP",
-                            status="drop",
-                        )
-                    # Post-plugin timeout/drop: do not send a response.
-                    return _ResolveCoreResult(
-                        wire=b"",
-                        dnssec_status=None,
-                        upstream_id=upstream_id,
-                        rcode_name="DROP",
-                    )
-                if decision.action == "deny":
-                    r = req.reply()
-                    r.header.rcode = RCODE.NXDOMAIN
-                    # Echo client EDNS(0) OPT into post-plugin NXDOMAIN replies
-                    # and, when enabled, attach an EDE option describing the
-                    # post-resolve policy deny.
-                    _echo_client_edns(req, r)
-                    # Allow plugins to override the EDE info-code/text via
-                    # optional PluginDecision.ede_code / ede_text attributes,
-                    # falling back to a default mapping based on stat when
-                    # they are not provided.
-                    try:
-                        ede_code_hint = getattr(
-                            decision, "ede_code", None
-                        )  # pragma: no cover - defensive/metrics path excluded from coverage
-                    except (
-                        Exception
-                    ):  # pragma: no cover - defensive/metrics path excluded from coverage
-                        ede_code_hint = None
-                    try:
-                        ede_text_hint = getattr(
-                            decision, "ede_text", None
-                        )  # pragma: no cover - defensive/metrics path excluded from coverage
-                    except (
-                        Exception
-                    ):  # pragma: no cover - defensive/metrics path excluded from coverage
-                        ede_text_hint = None
-                    if ede_code_hint is not None:
-                        ede_code = int(ede_code_hint)
-                        ede_text = (
-                            str(ede_text_hint)
-                            if ede_text_hint is not None
-                            else "policy deny"
-                        )
-                    else:
-                        try:
-                            stat_label = getattr(
-                                decision, "stat", None
-                            )  # pragma: no cover - defensive/metrics path excluded from coverage
-                        except (
-                            Exception
-                        ):  # pragma: no cover - defensive/metrics path excluded from coverage
-                            stat_label = None
-                        if (
-                            stat_label == "rate_limit"
-                        ):  # pragma: no cover - defensive/metrics path excluded from coverage
-                            ede_code = 14  # Not Ready  # pragma: no cover - defensive/metrics path excluded from coverage
-                            ede_text = "rate limit exceeded"
-                        else:
-                            ede_code = 15  # Blocked
-                            ede_text = "blocked by policy"
-                    _attach_ede_option(req, r, ede_code, ede_text)
-                    out = r.pack()
-                    break
-                if decision.action == "override" and decision.response is not None:
-                    # Allow plugins to override the wire response while still
-                    # echoing client EDNS(0) when the override does not carry an
-                    # OPT RR of its own.
-                    resp_wire = decision.response
-                    try:
-                        override_msg = DNSRecord.parse(resp_wire)
-                        _echo_client_edns(req, override_msg)
-                        out = override_msg.pack()
-                    except Exception:  # pragma: no cover - defensive: parse failure
-                        out = resp_wire
-                    break  # pragma: no cover - defensive/metrics path excluded from coverage
-                if decision.action == "allow":
-                    # Explicit allow: stop evaluating further post plugins but
-                    # leave the upstream response unchanged.
-                    break
-
-        # Cache store positive answers, negative responses (NXDOMAIN/NODATA), and
-        # delegations/referrals using TTLs derived from SOA/NS records where
-        # possible, following RFC 2308 guidance.
-
-        # DNSSEC classification for non-UDP transports (TCP/DoT/DoH) shares the
-        # same helper as UDP handlers so stats/query_log carry consistent status.
-        dnssec_status = _classify_dnssec_status_for_response(
+        local_blocked_result = _handle_local_blocked(
+            req=req,
             handler=handler,
+            client_ip=client_ip,
             qname=qname,
             qtype=qtype,
-            response_wire=out,
+            qtype_label_fn=_qtype_label_for_stats,
+            is_forward_local_blocked_query=_is_forward_local_blocked_query,
+            is_rfc1918_ptr_query_name=_is_rfc1918_ptr_query_name,
+            stats=stats,
+            t0=t0,
+            request_result_meta=request_result_meta,
         )
-        if stats is not None and dnssec_status is not None:
-            try:
-                stats.record_dnssec_status(dnssec_status)
-            except (
-                Exception
-            ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-                pass
-        # When DNSSEC validation classifies a response as bogus under
-        # dnssec_mode='validate', attach an RFC 8914 EDE code 6 (DNSSEC Bogus)
-        # so clients and metrics can distinguish these failures.
-        if dnssec_status == "dnssec_bogus":
-            ede_code_for_logs = 6
-            ede_text_for_logs = "DNSSEC validation failed (bogus)"
-        try:
-            dnssec_mode = str(getattr(handler, "dnssec_mode", "ignore")).lower()
-        except Exception:
-            dnssec_mode = "ignore"
-        if (
-            dnssec_mode == "validate"
-            and upstream_id is None
-            and dnssec_status in (None, "dnssec_unsigned", "dnssec_bogus")
-            and _is_signed_authoritative_response(out)
-        ):
-            dnssec_status = "dnssec_zone_secure"
-        out = _apply_dnssec_ad_bit(
-            handler=handler,
-            dnssec_status=dnssec_status,
-            response_wire=out,
-        )
+        if local_blocked_result is not None:
+            return local_blocked_result
 
-        try:
-            r = DNSRecord.parse(out)
-            rcode = r.header.rcode
-            ttl: Optional[int] = None
+        reply: bytes | None = None
+        used_upstream: dict | None = None
+        reason: str | None = None
+        upstream_url = ""
 
-            # Positive answers: cache when we have an answer RRset.
-            if rcode == RCODE.NOERROR and r.rr:
-                ttls = [
-                    int(getattr(rr, "ttl", 0))
-                    for rr in r.rr
-                    if isinstance(getattr(rr, "ttl", None), (int, float))
-                ]
-                ttl = min(ttls) if ttls else 300
-
-                # Apply cache TTL floor and cap.
-                min_cache_ttl = max(0, int(getattr(handler, "min_cache_ttl", 0) or 0))
-                ttl = max(int(ttl), int(min_cache_ttl))
-                try:
-                    cache_obj = getattr(plugin_base, "DNS_CACHE", None)
-                    raw_max = getattr(cache_obj, "max_cache_ttl", None)
-                    max_cache_ttl = int(raw_max) if raw_max is not None else 86400
-                except Exception:
-                    max_cache_ttl = 86400
-                if int(max_cache_ttl) > 0:
-                    ttl = min(int(ttl), int(max_cache_ttl))
-            else:
-                auth_rrs = getattr(r, "auth", None) or []
-                has_soa = any(rr.rtype == QTYPE.SOA for rr in auth_rrs)
-                has_ns = any(rr.rtype == QTYPE.NS for rr in auth_rrs)
-
-                # Negative caching per RFC 2308: NXDOMAIN or NODATA responses
-                # with an SOA in the authority section.
-                if has_soa and (
-                    rcode == RCODE.NXDOMAIN or (rcode == RCODE.NOERROR and not r.rr)
-                ):
-                    ttl = _compute_negative_ttl(r, getattr(handler, "min_cache_ttl", 0))
-                # Delegation / referral caching: NOERROR with no answers but NS
-                # in the authority section.
-                elif has_ns and rcode == RCODE.NOERROR and not r.rr:
-                    ttl = _compute_negative_ttl(r, getattr(handler, "min_cache_ttl", 0))
-
-            if ttl is not None and ttl > 0 and not ecs_cache_bypass:
-                cache = getattr(plugin_base, "DNS_CACHE", None)
-                if cache is not None:
-                    cache_payload = _strip_response_cookie_options(out)
-                    try:
-                        from foghorn.servers.tsig_utils import strip_tsig_from_wire
-
-                        cache_payload = strip_tsig_from_wire(cache_payload)
-                    except Exception:
-                        pass
-                    cache.set(cache_key, int(ttl), cache_payload)
-
-            # Attach a DNSSEC-related EDE only for explicitly bogus
-            # classifications. This is done after caching decisions so TTL
-            # handling remains unchanged.
-            if dnssec_status == "dnssec_bogus" and ede_code_for_logs is not None:
-                try:
-                    _attach_ede_option(
-                        req,
-                        r,
-                        int(ede_code_for_logs),
-                        str(ede_text_for_logs or "DNSSEC validation failed (bogus)"),
-                    )
-                    out = r.pack()
-                except Exception:  # pragma: no cover - defensive: best-effort only
-                    pass
-        except (
-            Exception
-        ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-            pass  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-
-        try:
-            from foghorn.servers.tsig_utils import (
-                sign_response_tsig,
-                strip_tsig_from_wire,
-            )
-
-            out = strip_tsig_from_wire(out)
-            if tsig_ctx.get("ok") and tsig_ctx.get("keyname"):
-                out = sign_response_tsig(
-                    out,
-                    key_configs=list(getattr(handler, "tsig_keys", []) or []),
-                    keyname=tsig_ctx.get("keyname"),
-                    algorithm=tsig_ctx.get("algorithm"),
-                    request_msg=tsig_ctx.get("request_msg"),
-                )
-        except Exception:
-            pass
-        out = _bind_response_cookie_to_request(
-            req,
-            out,
+        (
+            reply,
+            used_upstream,
+            reason,
+            upstream_url,
+            upstream_id,
+            ede_code_for_logs,
+            ede_text_for_logs,
+            upstream_early,
+        ) = _resolve_upstream(
+            req=req,
+            data=data,
             client_ip=client_ip,
-            cookies_enabled=bool(getattr(handler, "cookies_enabled", True)),
-            secret=getattr(handler, "cookies_secret", None),
+            qname=qname,
+            qtype=qtype,
+            handler=handler,
+            snap=snap,
+            stats=stats,
+            t0=t0,
+            request_result_meta=request_result_meta,
+            ede_code_for_logs=ede_code_for_logs,
+            ede_text_for_logs=ede_text_for_logs,
+            send_query_with_failover=send_query_with_failover,
+            ensure_edns_request=_ensure_edns_request,
+            sanitize_upstream_url=_sanitize_upstream_url,
+            qtype_label_fn=_qtype_label_for_stats,
         )
-        wire = _set_response_id(out, req.header.id)
+        if upstream_early is not None:
+            return upstream_early
 
-        # Record response rcode and append to persistent query_log when enabled.
-        rcode_name = "UNKNOWN"
-        if stats is not None:
-            try:
-                parsed = DNSRecord.parse(wire)
-                rcode_name = RCODE.get(parsed.header.rcode, str(parsed.header.rcode))
-                # Mirror any attached EDE info-code into stats totals when
-                # available so that EDE volumes can be graphed alongside rcodes.
-                if ede_code_for_logs is not None and hasattr(
-                    stats, "record_ede_code"
-                ):  # pragma: no cover - defensive/metrics path excluded from coverage
-                    try:  # pragma: no cover - defensive/metrics path excluded from coverage
-                        stats.record_ede_code(ede_code_for_logs)
-                    except Exception:  # pragma: no cover - defensive metrics hook
-                        pass
-                stats.record_response_rcode(rcode_name, qname)
-                if upstream_id:
-                    try:
-                        stats.record_upstream_rcode(upstream_id, rcode_name)
-                    except (
-                        Exception
-                    ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-                        pass
-
-                answers = [
-                    {
-                        "name": str(rr.rname),
-                        "type": QTYPE.get(rr.rtype, str(rr.rtype)),
-                        "ttl": int(getattr(rr, "ttl", 0)),
-                        "rdata": str(rr.rdata),
-                    }
-                    for rr in (parsed.rr or [])
-                ]
-                first = answers[0]["rdata"] if answers else None
-                result_ctx = {"source": "upstream", "answers": answers}
-                if upstream_id:
-                    result_ctx["upstream"] = str(upstream_id)
-                if upstream_url:
-                    result_ctx["upstream_url"] = str(upstream_url)
-                if dnssec_status is not None:
-                    result_ctx["dnssec_status"] = dnssec_status
-                if (
-                    ede_code_for_logs is not None
-                ):  # pragma: no cover - defensive/metrics path excluded from coverage
-                    result_ctx["ede_code"] = int(
-                        ede_code_for_logs
-                    )  # pragma: no cover - defensive/metrics path excluded from coverage
-                    if (
-                        ede_text_for_logs is not None
-                    ):  # pragma: no cover - defensive/metrics path excluded from coverage
-                        result_ctx["ede_text"] = str(ede_text_for_logs)
-                result_ctx.update(request_result_meta)
-                qtype_name = _qtype_label_for_stats(qtype)
-                status = "ok" if rcode_name == "NOERROR" else "error"
-                stats.record_query_result(
-                    client_ip=client_ip,
-                    qname=qname,
-                    qtype=qtype_name,
-                    rcode=rcode_name,
-                    upstream_id=upstream_id,
-                    status=status,
-                    error=None,
-                    first=str(first) if first is not None else None,
-                    result=result_ctx,
-                )
-            except (
-                Exception
-            ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-                pass
-
-        # Latency tracking shared across alfoghorn.servers.transports
-        if stats is not None and t0 is not None:
-            try:
-                t1 = _time.perf_counter()
-                stats.record_latency(t1 - t0)
-            except (
-                Exception
-            ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-                pass
-
-        return _ResolveCoreResult(
-            wire=wire,
-            dnssec_status=dnssec_status,
+        # Post plugins
+        out, post_early = _run_post_plugins(
+            reply=reply,
+            req=req,
+            client_ip=client_ip,
+            listener=listener,
+            secure=secure,
+            qname=qname,
+            qtype=qtype,
+            trusted_inbound_ecs=trusted_inbound_ecs,
+            effective_target_ip=effective_target_ip,
+            post_plugins=post_plugins,
             upstream_id=upstream_id,
-            rcode_name=rcode_name,
+            stats=stats,
+            record_suppressed_query_log_drop_candidate=_record_suppressed_query_log_drop_candidate,
+        )
+        if post_early is not None:
+            return post_early
+
+        # Cache store, DNSSEC, TSIG/cookie bind, and stats finalize.
+        return _finalize_resolved_response(
+            out=out,
+            req=req,
+            client_ip=client_ip,
+            qname=qname,
+            qtype=qtype,
+            cache_key=cache_key,
+            handler=handler,
+            stats=stats,
+            t0=t0,
+            request_result_meta=request_result_meta,
+            tsig_ctx=tsig_ctx,
+            ecs_cache_bypass=ecs_cache_bypass,
+            upstream_id=upstream_id,
+            upstream_url=upstream_url,
+            ede_code_for_logs=ede_code_for_logs,
+            ede_text_for_logs=ede_text_for_logs,
+            classify_dnssec_status_for_response=_classify_dnssec_status_for_response,
+            apply_dnssec_ad_bit=_apply_dnssec_ad_bit,
+            is_signed_authoritative_response=_is_signed_authoritative_response,
+            qtype_label_fn=_qtype_label_for_stats,
         )
     except Exception as e:
         logger.exception(
@@ -2966,8 +1236,8 @@ def resolve_query_bytes(
     data: bytes,
     client_ip: str,
     *,
-    listener: Optional[str] = None,
-    secure: Optional[bool] = None,
+    listener: str | None = None,
+    secure: bool | None = None,
 ) -> bytes:
     """Resolve a single DNS wire query and return wire response.
 
