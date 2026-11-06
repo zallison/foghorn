@@ -22,9 +22,28 @@ import math
 import queue
 import threading
 import time
-from typing import Any, Callable, Dict, Iterable, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, TypedDict
 
 from pydantic import BaseModel, ConfigDict, Field
+
+
+class QueryLogSelectResult(TypedDict):
+    """Result of a query-log selection with filtering and pagination."""
+
+    total: int
+    page: int
+    page_size: int
+    total_pages: int
+    items: List[Dict[str, Any]]
+
+
+class QueryLogAggregateResult(TypedDict):
+    """Result of a query-log aggregation into time buckets."""
+
+    start_ts: float
+    end_ts: float
+    interval_seconds: int
+    items: List[Dict[str, Any]]
 
 
 class StatsStoreBackendConfig(BaseModel):
@@ -997,7 +1016,7 @@ class BaseStatsStore:
         end_ts: Optional[float] = None,
         page: int = 1,
         page_size: int = 100,
-    ) -> Dict[str, Any]:  # pragma: no cover - interface only
+    ) -> QueryLogSelectResult:  # pragma: no cover - interface only
         """Brief: Select query-log rows with basic filtering and pagination.
 
         Inputs:
@@ -1036,7 +1055,7 @@ class BaseStatsStore:
         qname: Optional[str] = None,
         rcode: Optional[str] = None,
         group_by: Optional[str] = None,
-    ) -> Dict[str, Any]:  # pragma: no cover - interface only
+    ) -> QueryLogAggregateResult:  # pragma: no cover - interface only
         """Brief: Aggregate query-log counts into fixed time buckets.
 
         Inputs:
