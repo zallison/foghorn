@@ -1711,6 +1711,11 @@ def test_dot_permission_error_logs_without_fallback(monkeypatch, caplog):
     monkeypatch.setattr(
         main_mod, "start_webserver", lambda *a, **k: SimpleNamespace(stop=lambda: None)
     )
+    # Bypass TLS material checks so the test reaches asyncio loop creation.
+    monkeypatch.setattr(
+        "foghorn.servers.webserver.tls_certs.ensure_admin_tls_files",
+        lambda *a, **k: ("cert.pem", "key.pem"),
+    )
     # Patch asyncio's global new_event_loop so that the instance imported in
     # foghorn.main sees the PermissionError.
     monkeypatch.setattr(_asyncio, "new_event_loop", fake_new_event_loop)
@@ -1779,6 +1784,11 @@ def test_dot_startup_exception_logs_unhandled_listener_error(monkeypatch, caplog
     monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
     monkeypatch.setattr(
         main_mod, "start_webserver", lambda *a, **k: SimpleNamespace(stop=lambda: None)
+    )
+    # Bypass TLS material checks so the test reaches serve_dot startup failure.
+    monkeypatch.setattr(
+        "foghorn.servers.webserver.tls_certs.ensure_admin_tls_files",
+        lambda *a, **k: ("cert.pem", "key.pem"),
     )
     monkeypatch.setattr("foghorn.servers.dot_server.serve_dot", boom_serve_dot)
     monkeypatch.setattr(main_mod.threading, "Thread", DummyThread)
@@ -1852,6 +1862,11 @@ def test_dot_start_logs_info(monkeypatch, caplog):
     monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
     monkeypatch.setattr(
         main_mod, "start_webserver", lambda *a, **k: SimpleNamespace(stop=lambda: None)
+    )
+    # Provide resolved TLS paths so startup proceeds to the DoT info/debug logs.
+    monkeypatch.setattr(
+        "foghorn.servers.webserver.tls_certs.ensure_admin_tls_files",
+        lambda *a, **k: ("cert.pem", "key.pem"),
     )
     monkeypatch.setattr(main_mod.threading, "Thread", DummyThread)
 

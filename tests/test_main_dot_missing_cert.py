@@ -80,6 +80,9 @@ def test_main_dot_missing_cert_logs_error(monkeypatch, caplog):
         with caplog.at_level(logging.ERROR, logger="foghorn.main"):
             rc = main_mod.main(["--config", "x.yaml"])
             assert rc == 1
+            # ensure_admin_tls_files formats missing cert/key uniformly for DoT.
             assert any(
-                "cert_file/key_file not provided" in r.message for r in caplog.records
+                "TLS certificate/key not found" in r.message
+                and "server.listen.dot" in r.message
+                for r in caplog.records
             )
