@@ -2765,6 +2765,38 @@ def test_admin_api_auth_enforced_by_default_when_mode_unset() -> None:
     assert body["detail"] == "unauthorized"
 
 
+def test_auth_mode_basic_without_credentials_fails_closed() -> None:
+    """Brief: auth.mode=basic without username/password returns HTTP 500.
+
+    Inputs:
+      - server.http.auth.mode=basic with no username/password configured.
+
+    Outputs:
+      - /stats responds with 500 and a missing-credentials detail.
+    """
+
+    cfg = {
+        "server": {
+            "http": {
+                "enabled": True,
+                "auth": {"mode": "basic"},
+            }
+        }
+    }
+    collector = StatsCollector(track_uniques=False)
+
+    app = create_app(stats=collector, config=cfg, log_buffer=RingBuffer())
+    client = TestClient(app)
+
+    resp = client.get("/stats")
+    assert resp.status_code == 500
+    detail = str((resp.json() or {}).get("detail", ""))
+    assert (
+        "webserver.auth.username and webserver.auth.password must be set "
+        "when auth.mode=basic"
+    ) in detail
+
+
 def test_auth_mode_unsupported_fails_closed() -> None:
     """Brief: Unsupported web auth mode returns HTTP 500 on protected endpoints.
 
@@ -2779,7 +2811,7 @@ def test_auth_mode_unsupported_fails_closed() -> None:
         "server": {
             "http": {
                 "enabled": True,
-                "auth": {"mode": "basic"},
+                "auth": {"mode": "not-a-real-mode", "token": "x" * 32},
             }
         }
     }
