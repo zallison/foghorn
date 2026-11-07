@@ -32,28 +32,40 @@ from .main_config_helpers import (
     _apply_cache_overrides_from_config,
     _build_listener_configs,
     _build_main_arg_parser,
+    _configure_bg_executor_from_limits,
     _configure_resolver_executor,
     _extract_server_and_logging_cfg,
     _get_min_cache_ttl,
     _install_cache_plugin_global,
     _load_cache_plugin_from_cfg,
     _normalize_upstreams_for_mode,
+    _parse_axfr_settings,
+    _parse_dnssec_settings,
     _parse_resolver_cfg,
+    _parse_search_domain_settings,
+    _parse_upstream_selection_cfg,
     _resolve_web_config,
     _seed_listener_runtime_state,
 )
+from .main_lifecycle_helpers import (
+    _resolve_doh,
+    _resolve_dot,
+    _resolve_tcp,
+    _resolve_udp,
+    _run_keepalive_loop,
+    _start_asyncio_server,
+    _teardown_main_process,
+)
 from .plugins.querylog import BaseStatsStore, load_stats_store_backend
 from .plugins.resolve.base import BasePlugin
+from .plugins.setup import run_shutdown_plugins  # re-exported for tests/callers
 from .plugins.setup import (
     _SetupDNSResolverContext,
     run_setup_plugins,
-    run_shutdown_plugins,
 )
 from .runtime_config import (
     RuntimeSnapshot,
     initialize_runtime,
-    parse_upstream_health_config,
-    resolve_axfr_tsig_keys,
     resolve_server_feature_flags,
 )
 from .servers.runtime_state import RingBuffer, RuntimeState
@@ -126,6 +138,14 @@ def main(argv: list[str] | None = None) -> int:
     # _apply_runtime_config) so they can adjust behaviour without restarting
     # the main process or DNS listeners.
     cfg_path: str = args.config
+    # Record config path early so plugins can resolve relative TLS/file paths
+    # during setup() before initialize_runtime() runs.
+    try:
+        from .runtime_config import set_config_path
+
+        set_config_path(cfg_path)
+    except Exception:
+        pass
     stats_collector: StatsCollector | None
     stats_reporter: StatsReporter | None
     stats_persistence_store: BaseStatsStore | None
@@ -199,13 +219,9 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     # Upstream selection strategy and concurrency controls (v2 upstreams block).
-    upstream_cfg = cfg.get("upstreams") or {}
-    if not isinstance(upstream_cfg, dict):
-        raise ValueError("config.upstreams must be a mapping when present")
-    upstream_strategy = str(upstream_cfg.get("strategy", "failover")).lower()
-    upstream_health = parse_upstream_health_config(upstream_cfg)
-    upstream_max_concurrent = int(upstream_cfg.get("max_concurrent", 1) or 1)
-    upstream_max_concurrent = max(upstream_max_concurrent, 1)
+    _upstream_cfg, upstream_strategy, upstream_health, upstream_max_concurrent = (
+        _parse_upstream_selection_cfg(cfg=cfg)
+    )
 
     # Global knob to disable asyncio-based listeners/admin servers in restricted
     # environments. When false, threaded fallbacks are used where available.
@@ -221,22 +237,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # Configure bounded background executor used for best-effort work triggered
     # by untrusted network events (cache refresh / NOTIFY scheduling).
-    try:
-        from .servers.bg_executor import configure_bg_executor
-
-        raw_workers = limits_cfg.get("bg_executor_workers")
-        raw_pending = limits_cfg.get("bg_executor_max_pending")
-        try:
-            bg_workers = int(raw_workers) if raw_workers is not None else None
-        except Exception:
-            bg_workers = None
-        try:
-            bg_pending = int(raw_pending) if raw_pending is not None else None
-        except Exception:
-            bg_pending = None
-        configure_bg_executor(max_workers=bg_workers, max_pending=bg_pending)
-    except Exception:
-        logger.warning("Failed to configure background executor", exc_info=True)
+    _configure_bg_executor_from_limits(limits_cfg=limits_cfg, logger=logger)
 
     cache_plugin = _load_cache_plugin_from_cfg(
         cfg=cfg, server_cfg=server_cfg, logger=logger
@@ -327,7 +328,8 @@ def main(argv: list[str] | None = None) -> int:
     # desired process exit status back to the main() return value.
     shutdown_event = threading.Event()
     shutdown_complete = threading.Event()
-    exit_code = 0
+    # Mutable box so signal handlers and the keepalive loop share one exit code.
+    exit_code_state: list[int] = [0]
     hard_kill_timer: threading.Timer | None = None
 
     # --- Signal handling (SIGUSR1/SIGUSR2) ---
@@ -468,13 +470,13 @@ def main(argv: list[str] | None = None) -> int:
             issued to avoid hanging indefinitely.
         """
 
-        nonlocal exit_code, hard_kill_timer
+        nonlocal hard_kill_timer
         log = logging.getLogger("foghorn.main")
 
         if shutdown_event.is_set():
             return
 
-        exit_code = code
+        exit_code_state[0] = code
         shutdown_event.set()
         log.info("Received %s, initiating shutdown (exit code=%d)", reason, code)
 
@@ -549,12 +551,9 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     # DNSSEC config (ignore|passthrough|validate).
-    dnssec_cfg = server_cfg.get("dnssec") or {}
-    if not isinstance(dnssec_cfg, dict):
-        dnssec_cfg = {}
-    dnssec_mode = str(dnssec_cfg.get("mode", "ignore")).lower()
-    edns_payload = int(dnssec_cfg.get("udp_payload_size", 1232))
-    dnssec_validation = str(dnssec_cfg.get("validation", "upstream_ad")).lower()
+    dnssec_mode, edns_payload, dnssec_validation = _parse_dnssec_settings(
+        server_cfg=server_cfg
+    )
 
     # Canonical feature gates live under server.features with legacy fallback.
     features = resolve_server_feature_flags(server_cfg)
@@ -586,91 +585,26 @@ def main(argv: list[str] | None = None) -> int:
     ecs_use_for_plugin_targeting = bool(features["ecs_use_for_plugin_targeting"])
 
     # Resolver search-domain qualification settings.
-    _search_cfg_main = resolver_cfg.get("search") or {}
-    if not isinstance(_search_cfg_main, dict):
-        _search_cfg_main = {}
-    search_domain_main = (
-        str(_search_cfg_main.get("domain", "") or "").strip().rstrip(".")
-    )
-    qualify_single_label_main = bool(_search_cfg_main.get("qualify_single_label", True))
-    _raw_npt_main = _search_cfg_main.get("qualify_non_proper_tld", False)
-    if isinstance(_raw_npt_main, list):
-        qualify_non_proper_tld_main: object = [
-            str(e).strip().rstrip(".") for e in _raw_npt_main if str(e).strip()
-        ]
-    elif isinstance(_raw_npt_main, str):
-        _s_main = _raw_npt_main.strip().lower()
-        qualify_non_proper_tld_main = True if _s_main in ("true", "yes", "1") else False
-    else:
-        qualify_non_proper_tld_main = bool(_raw_npt_main)
-    _raw_tld_mode_main = _search_cfg_main.get("non_proper_tld_mode", "suffix")
-    non_proper_tld_mode_main = str(_raw_tld_mode_main or "suffix").strip().lower()
-    if non_proper_tld_mode_main not in {"suffix", "exact"}:
-        non_proper_tld_mode_main = "suffix"
+    (
+        search_domain_main,
+        qualify_single_label_main,
+        qualify_non_proper_tld_main,
+        non_proper_tld_mode_main,
+    ) = _parse_search_domain_settings(resolver_cfg=resolver_cfg)
 
     # AXFR/IXFR transfer policy (applies to TCP/DoT listeners).
-    axfr_cfg = server_cfg.get("axfr") or {}
-    if not isinstance(axfr_cfg, dict):
-        axfr_cfg = {}
-    axfr_enabled = bool(axfr_cfg.get("enabled", False))
-    axfr_allow_clients = axfr_cfg.get("allow_clients") or []
-    if not isinstance(axfr_allow_clients, list):
-        axfr_allow_clients = []
-    axfr_allow_clients = [str(x) for x in axfr_allow_clients if x]
-    try:
-        raw_axfr_max_zone_rrs = axfr_cfg.get("max_zone_rrs")
-        axfr_max_zone_rrs = (
-            int(raw_axfr_max_zone_rrs)
-            if raw_axfr_max_zone_rrs is not None
-            and str(raw_axfr_max_zone_rrs).strip() != ""
-            else None
-        )
-    except Exception:
-        axfr_max_zone_rrs = None
-    if axfr_max_zone_rrs is not None and axfr_max_zone_rrs <= 0:
-        axfr_max_zone_rrs = None
-    try:
-        axfr_max_concurrent_transfers = int(axfr_cfg.get("max_concurrent_transfers", 4))
-    except Exception:
-        axfr_max_concurrent_transfers = 4
-    axfr_max_concurrent_transfers = max(1, int(axfr_max_concurrent_transfers))
-    try:
-        axfr_rate_limit_per_client_per_second = float(
-            axfr_cfg.get("rate_limit_per_client_per_second", 0.0)
-        )
-    except Exception:
-        axfr_rate_limit_per_client_per_second = 0.0
-    axfr_rate_limit_per_client_per_second = max(
-        0.0, float(axfr_rate_limit_per_client_per_second)
-    )
-    try:
-        axfr_rate_limit_burst = float(axfr_cfg.get("rate_limit_burst", 2.0))
-    except Exception:
-        axfr_rate_limit_burst = 2.0
-    axfr_rate_limit_burst = max(1.0, float(axfr_rate_limit_burst))
-    try:
-        raw_axfr_max_transfer_rate = axfr_cfg.get("max_transfer_rate_bytes_per_second")
-        axfr_max_transfer_rate_bytes_per_second = (
-            int(raw_axfr_max_transfer_rate)
-            if raw_axfr_max_transfer_rate is not None
-            and str(raw_axfr_max_transfer_rate).strip() != ""
-            else None
-        )
-    except Exception:
-        axfr_max_transfer_rate_bytes_per_second = None
-    if (
-        axfr_max_transfer_rate_bytes_per_second is not None
-        and axfr_max_transfer_rate_bytes_per_second <= 0
-    ):
-        axfr_max_transfer_rate_bytes_per_second = None
-    try:
-        axfr_message_max_bytes = int(axfr_cfg.get("message_max_bytes", 64000))
-    except Exception:
-        axfr_message_max_bytes = 64000
-    axfr_message_max_bytes = max(512, min(65535, int(axfr_message_max_bytes)))
-    axfr_require_tsig = bool(axfr_cfg.get("require_tsig", False))
-    # AXFR inherits server.features.tsig keys when its own block has none.
-    axfr_tsig_keys = resolve_axfr_tsig_keys(axfr_cfg, feature_keys=tsig_keys)
+    (
+        axfr_enabled,
+        axfr_allow_clients,
+        axfr_max_zone_rrs,
+        axfr_max_concurrent_transfers,
+        axfr_rate_limit_per_client_per_second,
+        axfr_rate_limit_burst,
+        axfr_max_transfer_rate_bytes_per_second,
+        axfr_message_max_bytes,
+        axfr_require_tsig,
+        axfr_tsig_keys,
+    ) = _parse_axfr_settings(server_cfg=server_cfg, tsig_keys=tsig_keys)
 
     _log_startup_security_warnings(
         logger=logger,
@@ -777,192 +711,37 @@ def main(argv: list[str] | None = None) -> int:
     # keepalive loop does not treat UDP as a special case.
     loop_threads: list[threading.Thread] = []
 
-    # Shared resolver adapter for UDP listener.
-    # Optionally start TCP/DoT listeners based on listen config
-    # Resolver adapter for TCP/DoT servers
-    import asyncio
-
-    from .servers.server import resolve_query_bytes as _resolve_query_bytes
-
-    def _resolve_udp(query_bytes: bytes, client_ip: str) -> bytes:
-        """Brief: Resolve a DNS query received via UDP listener.
-
-        Inputs:
-          - query_bytes: Wire-format DNS query bytes.
-          - client_ip: Client IP address string.
-
-        Outputs:
-          - bytes: Wire-format DNS response produced by the shared resolver.
-
-        Notes:
-          - Enforces the UDP response size ceiling (TC=1) after resolution so
-            both asyncio and threaded UDP paths share consistent truncation
-            behavior.
-        """
-
-        wire = _resolve_query_bytes(
-            query_bytes,
-            client_ip,
-            listener="udp",
-            secure=False,
-        )
-
-        try:
-            from foghorn.runtime_config import get_runtime_snapshot
-
-            from .servers.udp_server import enforce_udp_response_size_ceiling
-
-            server_max = get_runtime_snapshot().udp_max_response_bytes
-            wire = enforce_udp_response_size_ceiling(
-                query_wire=query_bytes,
-                response_wire=wire,
-                server_max_bytes=server_max,
-            )
-        except Exception as exc:
-            logger.warning(
-                "UDP response size ceiling enforcement failed (returning original wire bytes): %s",
-                exc,
-                exc_info=True,
-            )
-
-        return wire
-
-    def _resolve_tcp(query_bytes: bytes, client_ip: str) -> bytes:
-        """Brief: Resolve a DNS query received via TCP listener.
-
-        Inputs:
-          - query_bytes: Wire-format DNS query bytes.
-          - client_ip: Client IP address string.
-
-        Outputs:
-          - bytes: Wire-format DNS response produced by the shared resolver.
-        """
-
-        return _resolve_query_bytes(
-            query_bytes,
-            client_ip,
-            listener="tcp",
-            secure=False,
-        )
-
-    def _resolve_dot(query_bytes: bytes, client_ip: str) -> bytes:
-        """Brief: Resolve a DNS query received via DoT (TLS) listener.
-
-        Inputs:
-          - query_bytes: Wire-format DNS query bytes.
-          - client_ip: Client IP address string.
-
-        Outputs:
-          - bytes: Wire-format DNS response produced by the shared resolver.
-        """
-
-        return _resolve_query_bytes(
-            query_bytes,
-            client_ip,
-            listener="dot",
-            secure=True,
-        )
-
-    def _resolve_doh(query_bytes: bytes, client_ip: str) -> bytes:
-        """Brief: Resolve a DNS query received via DoH (HTTPS) listener.
-
-        Inputs:
-          - query_bytes: Wire-format DNS query bytes.
-          - client_ip: Client IP address string.
-
-        Outputs:
-          - bytes: Wire-format DNS response produced by the shared resolver.
-        """
-
-        return _resolve_query_bytes(
-            query_bytes,
-            client_ip,
-            listener="doh",
-            secure=True,
-        )
-
-    def _start_asyncio_server(
+    def _start_listener_asyncio_server(
         coro_factory,
         name: str,
         *,
         listener_key: str,
         on_permission_error=None,
     ):
-        def runner():
-            try:
-                asyncio.set_event_loop(asyncio.new_event_loop())
-                loop = asyncio.get_event_loop()
-                try:
-                    loop.run_until_complete(coro_factory())
-                finally:
-                    loop.close()
-            except PermissionError as e:
-                # Environment forbids creating asyncio self-pipe/socketpair (e.g., restricted seccomp).
-                # When a fallback is provided, treat it as a successful start and
-                # do not mark the listener as failed.
-                if callable(on_permission_error):
-                    try:
-                        on_permission_error()
-                    except Exception as fallback_exc:
-                        _record_listener_error(listener_key, fallback_exc)
-                        logging.getLogger("foghorn.main").exception(
-                            "Asyncio listener %s failed while handling PermissionError fallback: %s",
-                            name,
-                            fallback_exc,
-                        )
-                else:
-                    _record_listener_error(listener_key, e)
-                    logging.getLogger("foghorn.main").error(
-                        "Asyncio loop creation failed with PermissionError for %s; no fallback provided",
-                        name,
-                    )
-            except Exception as e:  # pragma: no cover - best-effort readiness tracking
-                _record_listener_error(listener_key, e)
-                _log = logging.getLogger("foghorn.main")
-                try:
-                    from .servers.webserver.tls_certs import (
-                        format_missing_tls_files_message,
-                        is_missing_tls_file_error,
-                    )
+        """Brief: Thin wrapper around shared asyncio listener starter.
 
-                    if is_missing_tls_file_error(e):
-                        # Prefer a one-line operator message over a traceback dump
-                        # when TLS material is simply missing on disk.
-                        cert_hint = None
-                        key_hint = None
-                        if listener_key == "dot" and isinstance(dot_cfg, dict):
-                            cert_hint = dot_cfg.get("cert_file")
-                            key_hint = dot_cfg.get("key_file")
-                        elif listener_key == "doh" and isinstance(doh_cfg, dict):
-                            cert_hint = doh_cfg.get("cert_file")
-                            key_hint = doh_cfg.get("key_file")
-                        _log.error(
-                            "%s",
-                            format_missing_tls_files_message(
-                                location=f"server.listen.{listener_key}",
-                                cert_file=str(cert_hint) if cert_hint else None,
-                                key_file=str(key_hint) if key_hint else None,
-                                detail=f"{name}: {e}",
-                            ),
-                        )
-                    else:
-                        _log.exception(
-                            "Asyncio listener %s failed to start or exited with an unhandled exception: %s",
-                            name,
-                            e,
-                        )
-                except Exception:
-                    _log.exception(
-                        "Asyncio listener %s failed to start or exited with an unhandled exception: %s",
-                        name,
-                        e,
-                    )
+        Inputs:
+          - coro_factory: Zero-arg callable returning the awaitable server coroutine.
+          - name: Thread name.
+          - listener_key: Runtime-state listener key.
+          - on_permission_error: Optional PermissionError fallback.
 
-        t = threading.Thread(target=runner, name=name, daemon=True)
-        t.start()
-        loop_threads.append(t)
-        runtime_state.set_listener(listener_key, enabled=True, thread=t)
-        return t
+        Outputs:
+          - threading.Thread: Started listener thread.
+        """
+
+        return _start_asyncio_server(
+            coro_factory,
+            name,
+            listener_key=listener_key,
+            on_permission_error=on_permission_error,
+            record_listener_error=_record_listener_error,
+            loop_threads=loop_threads,
+            runtime_state=runtime_state,
+            threading_module=threading,
+            dot_cfg=dot_cfg if isinstance(dot_cfg, dict) else None,
+            doh_cfg=doh_cfg if isinstance(doh_cfg, dict) else None,
+        )
 
     if bool(udp_cfg.get("enabled", True)):
         uhost = str(udp_cfg.get("host", default_host))
@@ -1163,7 +942,7 @@ def main(argv: list[str] | None = None) -> int:
 
         if use_asyncio:
             logger.info("Starting TCP listener on %s:%d (asyncio)", thost, tport)
-            _start_asyncio_server(
+            _start_listener_asyncio_server(
                 lambda: serve_tcp(
                     thost,
                     tport,
@@ -1249,7 +1028,7 @@ def main(argv: list[str] | None = None) -> int:
                 cert_file,
                 key_file,
             )
-            _start_asyncio_server(
+            _start_listener_asyncio_server(
                 lambda: serve_dot(
                     dhost,
                     dport,
@@ -1363,207 +1142,34 @@ def main(argv: list[str] | None = None) -> int:
     logger.info("Startup Completed")
 
     try:
-        # Keep the main thread in a lightweight keepalive loop while UDP/TCP/DoT
-        # listeners run in the background. This ensures alfoghorn.servers.transports are
-        # treated consistently and that shutdown is always driven by
-        # shutdown_event/termination signals rather than a blocking
-        # serve_forever() call.
-        import time as _time
-
-        def _listener_thread_is_dead(t: threading.Thread) -> bool:
-            """Best-effort liveness check for background listener threads.
-
-            Inputs:
-              - t: Thread instance (or test stub) representing a listener.
-
-            Outputs:
-              - bool: True when the thread is known to have exited.
-
-            Notes:
-              - Test stubs may not implement is_alive(); in that case we
-                treat the thread as already exited so tests can terminate the
-                keepalive loop promptly.
-            """
-
-            try:
-                return not t.is_alive()
-            except AttributeError:
-                # Test doubles used in unit tests may not implement is_alive();
-                # treat them as already exited so the keepalive loop can
-                # terminate promptly.
-                return True
-            except (
-                Exception
-            ):  # pragma: nocover - defensive: mocked thread objects may raise unexpectedly in liveness probes
-                logger.debug(
-                    "Failed to check listener thread liveness; treating thread as dead",
-                    exc_info=True,
-                )
-                return True
-
-        while not shutdown_event.is_set():
-            # Drain SIGUSR1/SIGUSR2 work outside of the signal handler context.
-            if _sigusr1_pending.is_set():
-                _sigusr1_pending.clear()
-                try:
-                    _process_usr_signal("SIGUSR1")
-                except Exception:
-                    logger.exception("SIGUSR1: unhandled error while processing signal")
-
-            if _sigusr2_pending.is_set():
-                _sigusr2_pending.clear()
-                try:
-                    _process_usr_signal("SIGUSR2")
-                except Exception:
-                    logger.exception("SIGUSR2: unhandled error while processing signal")
-
-            # If the UDP server thread has reported an unhandled exception,
-            # mirror the legacy behaviour by logging it and treating it as a
-            # server-level failure for main()'s exit code.
-            if udp_error is not None:
-                logger.exception(
-                    "Unhandled exception during UDP server operation %s", udp_error
-                )
-                if exit_code == 0:
-                    exit_code = 1
-                break
-
-            fatal_listener_errors = [
-                f"{name}: {error}"
-                for name, error in listener_failures.items()
-                if enabled_listeners.get(name, False)
-            ]
-            if fatal_listener_errors:
-                logger.error(
-                    "Fatal listener failure detected: %s",
-                    "; ".join(fatal_listener_errors),
-                )
-                if exit_code == 0:
-                    exit_code = 1
-                break
-
-            # When any background listener threads (UDP, TCP, DoT, etc.) have
-            # all exited—for example because their serve_forever loops
-            # returned—break out of the loop so coordinated shutdown can
-            # proceed. This avoids treating the UDP listener as a special case
-            # for keepalive behaviour.
-            if loop_threads and all(_listener_thread_is_dead(t) for t in loop_threads):
-                break
-
-            _time.sleep(1.0)
-    except KeyboardInterrupt:
-        logger.info("Received interrupt, shutting down")
-        if not shutdown_event.is_set():
-            # KeyboardInterrupt maps to a clean shutdown and exit code 0 unless
-            # an explicit termination-like signal has already set a code.
-            shutdown_event.set()
-            exit_code = 0
-    except (
-        Exception
-    ) as e:  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-        logger.exception(
-            f"Unhandled exception during server operation {e}"
-        )  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-        # Preserve a non-zero exit when an unhandled exception occurs unless a
-        # stronger exit code (e.g., from SIGTERM) is already in place.
-        if exit_code == 0:
-            exit_code = 1
+        exit_code_state[0] = _run_keepalive_loop(
+            logger=logger,
+            shutdown_event=shutdown_event,
+            exit_code_state=exit_code_state,
+            sigusr1_pending=_sigusr1_pending,
+            sigusr2_pending=_sigusr2_pending,
+            process_usr_signal=_process_usr_signal,
+            get_udp_error=lambda: udp_error,
+            listener_failures=listener_failures,
+            enabled_listeners=enabled_listeners,
+            loop_threads=loop_threads,
+        )
     finally:
-        # Request UDP server shutdown and close sockets before tearing down
-        # statistics and web components so that no new requests are processed
-        # during shutdown.
-        if udp_handle is not None:
-            try:
-                udp_handle.stop()
-            except Exception:
-                logger.exception("Unexpected error while stopping asyncio UDP listener")
+        _teardown_main_process(
+            logger=logger,
+            udp_handle=udp_handle,
+            server=server,
+            udp_thread=udp_thread,
+            stats_reporter=stats_reporter,
+            stats_persistence_store=stats_persistence_store,
+            web_handle=web_handle,
+            cache_plugin=cache_plugin,
+            plugins=plugins,
+            shutdown_complete=shutdown_complete,
+            shutdown_plugins=run_shutdown_plugins,
+        )
 
-        if server is not None:
-            try:
-                if hasattr(server, "stop"):
-                    # Preferred path: delegate shutdown/close to the UDP server
-                    # abstraction so all UDP-specific details live in the UDP
-                    # module.
-                    server.stop()
-                elif hasattr(server, "shutdown") and hasattr(server, "server_close"):
-                    # socketserver.ThreadingUDPServer and compatible servers.
-                    try:
-                        server.shutdown()
-                    except Exception:
-                        logger.exception("Error while shutting down UDP server")
-                    try:
-                        server.server_close()
-                    except Exception:
-                        logger.exception("Error while closing UDP server socket")
-                else:
-                    # Backwards-compatible path for legacy server stubs that
-                    # expose a .server attribute with shutdown/server_close
-                    # methods (used in tests and older call sites).
-                    inner = getattr(server, "server", None)
-                    if inner is not None:
-                        try:
-                            inner.shutdown()
-                        except Exception:
-                            logger.exception("Error while shutting down UDP server")
-                        try:
-                            inner.server_close()
-                        except Exception:
-                            logger.exception("Error while closing UDP server socket")
-            except Exception:
-                logger.exception("Unexpected error during UDP server teardown")
-
-        if udp_thread is not None:
-            try:
-                udp_thread.join(timeout=5.0)
-            except Exception:
-                logger.exception("Error while waiting for UDP server thread to exit")
-
-        # Stop statistics reporter on shutdown so background reporting threads
-        # never outlive the main process and do not keep it alive.
-        if stats_reporter is not None:
-            logger.info("Stopping statistics reporter")
-            stats_reporter.stop()
-
-        if stats_persistence_store is not None:
-            logger.info("Closing statistics persistence store")
-            stats_persistence_store.close()
-        # Stop webserver thread on shutdown. The handle abstraction lets both
-        # the FastAPI-based web UI and the threaded admin HTTP server share the
-        # same shutdown semantics (is_running/stop).
-        if web_handle is not None:
-            logger.info("Stopping webserver")
-            web_handle.stop()
-
-        # Shutdown best-effort background executor so pending refresh/notify
-        # tasks do not outlive controlled process termination.
-        try:
-            from .servers.bg_executor import shutdown_bg_executor
-
-            shutdown_bg_executor(wait=False)
-        except Exception:
-            logger.exception("Unexpected error while shutting down background executor")
-
-        # Best-effort lifecycle teardown for loaded resolver plugins, optional
-        # query-log backend, and cache plugin. Errors are logged inside the
-        # helper and must not abort process shutdown.
-        run_shutdown_plugins([cache_plugin, stats_persistence_store, *plugins])
-
-        # Clear in-process runtime snapshot state. This is mostly relevant for
-        # unit tests that call main() multiple times in one Python process.
-        try:
-            from foghorn import runtime_config as _runtime_config
-
-            _runtime_config.clear_runtime()
-        except (
-            Exception
-        ):  # pragma: nocover - best effort: runtime cleanup should not block shutdown
-            pass
-
-        # Mark shutdown as complete so any pending hard-kill timers can detect
-        # successful termination and avoid forcing an unnecessary SIGKILL.
-        shutdown_complete.set()
-
-    return exit_code
+    return exit_code_state[0]
 
 
 def start_doh_server(
