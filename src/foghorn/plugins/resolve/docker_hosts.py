@@ -15,10 +15,10 @@ import logging
 import re
 import threading
 import time
-from typing import Dict, Iterable, List, Optional, Tuple
+from collections.abc import Iterable
 
 from dnslib import AAAA, PTR, QTYPE, RR, TXT, A, DNSHeader, DNSRecord
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 try:  # cachetools is an optional dependency; fall back to shim when missing.
     from cachetools import Cache, LRUCache, TTLCache  # type: ignore[import]
@@ -29,7 +29,7 @@ except (
 ):  # pragma: nocover defensive: optional cachetools dependency may be absent in some environments
 
     class TTLCache(dict):  # type: ignore[override]
-        def __init__(self, *args, **kwargs) -> None:  # noqa: D401 - simple shim
+        def __init__(self, *args, **kwargs) -> None:
             """Lightweight TTLCache shim when cachetools is unavailable."""
             super().__init__()
 
@@ -51,8 +51,9 @@ from foghorn.plugins.resolve.base import (
 )
 
 try:  # docker SDK is optional at import time; plugin degrades gracefully.
-    import docker
     from docker.errors import DockerException
+
+    import docker
 except (
     Exception
 ):  # pragma: nocover defensive: allow import in environments without docker SDK installed
@@ -60,8 +61,6 @@ except (
 
     class DockerException(Exception):  # type: ignore[no-redef]
         """Fallback DockerException used when docker SDK is unavailable."""
-
-        pass
 
 
 logger = logging.getLogger(__name__)
@@ -104,14 +103,14 @@ class DockerEndpointConfig(BaseModel):
 
     url: str
     reload_interval_second: float = Field(default=60.0, ge=0)
-    use_ipv4: Optional[str] = None
-    use_ipv6: Optional[str] = None
-    ttl: Optional[int] = Field(default=None, ge=0)
-    suffix: Optional[str] = None
+    use_ipv4: str | None = None
+    use_ipv6: str | None = None
+    ttl: int | None = Field(default=None, ge=0)
+    suffix: str | None = None
     tls_verify: bool = False
-    tls_cert: Optional[str] = None
-    tls_key: Optional[str] = None
-    tls_ca: Optional[str] = None
+    tls_cert: str | None = None
+    tls_key: str | None = None
+    tls_ca: str | None = None
 
 
 class DockerHostsConfig(BaseModel):
@@ -147,9 +146,9 @@ class DockerHostsConfig(BaseModel):
       - DockerHostsConfig instance with normalized field types.
     """
 
-    endpoints: List[DockerEndpointConfig] = Field(default_factory=list)
+    endpoints: list[DockerEndpointConfig] = Field(default_factory=list)
     ttl: int = Field(default=300, ge=0)
-    health: List[str] = Field(default_factory=lambda: ["healthy", "running"])
+    health: list[str] = Field(default_factory=lambda: ["healthy", "running"])
     discovery: bool = Field(default=False)
     expose_txt_in_additional: bool = Field(default=False)
 
@@ -301,7 +300,7 @@ class DockerHosts(BasePlugin):
     def _note_condition_ok(
         self,
         key: str,
-        recovery_message: Optional[str] = None,
+        recovery_message: str | None = None,
         *args: object,
     ) -> None:
         """Brief: Clear a sticky failure condition and log recovery once.
@@ -361,16 +360,16 @@ class DockerHosts(BasePlugin):
         # Sticky condition logging: warn on first failure, hourly while still
         # failing, info once on recovery.
         self._condition_log_lock = threading.Lock()
-        self._condition_failed_by_key: Dict[str, bool] = {}
-        self._condition_suppressed_by_key: Dict[str, int] = {}
-        self._condition_last_warned_by_key: Dict[str, float] = {}
+        self._condition_failed_by_key: dict[str, bool] = {}
+        self._condition_suppressed_by_key: dict[str, int] = {}
+        self._condition_last_warned_by_key: dict[str, float] = {}
         self._condition_rewarn_interval_seconds = 3600.0
 
         # Health/status allowlist. Containers whose effective health/status is
         # not in this list are skipped.
         raw_health = self.config.get("health")
         if raw_health is None:
-            health_items: List[str] = ["healthy", "running"]
+            health_items: list[str] = ["healthy", "running"]
         elif isinstance(raw_health, str):
             health_items = [raw_health]
         elif isinstance(raw_health, list):
@@ -379,7 +378,7 @@ class DockerHosts(BasePlugin):
             health_items = [str(raw_health)]
 
         allowed = {"starting", "healthy", "running", "unhealthy"}
-        health_norm: List[str] = []
+        health_norm: list[str] = []
         for item in health_items:
             key = str(item).strip().lower()
             if not key:
@@ -430,7 +429,7 @@ class DockerHosts(BasePlugin):
         # resolves for a container, only those custom fields are emitted in the
         # TXT line; otherwise they are appended to the default summary.
         raw_txt_fields = self.config.get("txt_fields") or []
-        txt_fields: List[Tuple[str, str]] = []
+        txt_fields: list[tuple[str, str]] = []
         if isinstance(raw_txt_fields, list):
             for item in raw_txt_fields:
                 if not isinstance(item, dict):
@@ -453,7 +452,7 @@ class DockerHosts(BasePlugin):
                 type(raw_txt_fields),
             )
 
-        self._txt_fields: List[Tuple[str, str]] = txt_fields
+        self._txt_fields: list[tuple[str, str]] = txt_fields
         self._txt_fields_replace: bool = bool(
             self.config.get("txt_fields_replace", False)
         )
@@ -463,7 +462,7 @@ class DockerHosts(BasePlugin):
         # listed keys are only kept when they exist for the container; missing
         # ones are silently ignored.
         raw_txt_keep = self.config.get("txt_fields_keep") or []
-        txt_fields_keep: List[str] = []
+        txt_fields_keep: list[str] = []
         if isinstance(raw_txt_keep, list):
             for item in raw_txt_keep:
                 text = str(item or "").strip()
@@ -476,10 +475,10 @@ class DockerHosts(BasePlugin):
                 type(raw_txt_keep),
             )
 
-        self._txt_fields_keep: List[str] = txt_fields_keep
+        self._txt_fields_keep: list[str] = txt_fields_keep
 
         raw_endpoints = self.config.get("endpoints") or []
-        endpoints_cfg: List[Dict[str, object]] = []
+        endpoints_cfg: list[dict[str, object]] = []
 
         # Normalize endpoint mappings; each must be a dict with a "url" key.
         for item in raw_endpoints:
@@ -511,8 +510,8 @@ class DockerHosts(BasePlugin):
                 interval = 0.0
 
             # Per-endpoint host IP overrides
-            host_ipv4: Optional[str] = None
-            host_ipv6: Optional[str] = None
+            host_ipv4: str | None = None
+            host_ipv6: str | None = None
             raw_v4 = item.get("use_ipv4")
             if raw_v4:
                 try:
@@ -539,7 +538,7 @@ class DockerHosts(BasePlugin):
                     logger.warning("DockerHosts: invalid use_ipv6 %r; ignoring", raw_v6)
 
             # Per-endpoint TTL override
-            ttl_override: Optional[int]
+            ttl_override: int | None
             ttl_raw = item.get("ttl")
             if ttl_raw is None:
                 ttl_override = None
@@ -612,26 +611,26 @@ class DockerHosts(BasePlugin):
                 }
             )
 
-        self._endpoints: List[Dict[str, object]] = endpoints_cfg
+        self._endpoints: list[dict[str, object]] = endpoints_cfg
 
         # Shared state protected by a re-entrant lock so future refresh hooks can
         # safely update mappings.
         self._lock = threading.RLock()
-        self._forward_v4: Dict[str, List[str]] = {}
-        self._forward_v6: Dict[str, List[str]] = {}
-        self._reverse: Dict[str, str] = {}
+        self._forward_v4: dict[str, list[str]] = {}
+        self._forward_v6: dict[str, list[str]] = {}
+        self._reverse: dict[str, str] = {}
         # Per-name TTL maps populated by _reload_from_docker.
-        self._ttl_v4: Dict[str, int] = {}
-        self._ttl_v6: Dict[str, int] = {}
-        self._ttl_ptr: Dict[str, int] = {}
-        self._aggregate_txt: Dict[str, List[str]] = {}
-        self._ttl_txt: Dict[str, int] = {}
+        self._ttl_v4: dict[str, int] = {}
+        self._ttl_v6: dict[str, int] = {}
+        self._ttl_ptr: dict[str, int] = {}
+        self._aggregate_txt: dict[str, list[str]] = {}
+        self._ttl_txt: dict[str, int] = {}
         # Per-host exported ports (hostports) for admin UI display.
-        self._hostports: Dict[str, List[str]] = {}
+        self._hostports: dict[str, list[str]] = {}
         self._stop_event = threading.Event()
 
         # Docker clients per endpoint URL (when docker SDK is available)
-        self._clients: Dict[str, object] = {}
+        self._clients: dict[str, object] = {}
         if docker is not None:
             for ep in self._endpoints:
                 url = str(ep["url"])
@@ -646,6 +645,7 @@ class DockerHosts(BasePlugin):
                     )
                     continue
                 self._clients[url] = client
+                logger.info("DockerHosts: connected to endpoint %s", url)
         else:
             logger.warning(
                 "DockerHosts: docker SDK is not installed; plugin will be inert until it is available"
@@ -720,11 +720,11 @@ class DockerHosts(BasePlugin):
         try:
             self._stop_event.set()
         except Exception:
-            return None
+            return
 
     def _iter_containers_for_endpoint(
-        self, endpoint: Dict[str, object]
-    ) -> Iterable[Dict]:
+        self, endpoint: dict[str, object]
+    ) -> Iterable[dict]:
         """Brief: Yield docker inspect-style dicts for containers on an endpoint.
 
         Inputs:
@@ -758,6 +758,7 @@ class DockerHosts(BasePlugin):
                 return []
             else:
                 self._clients[url] = client
+                logger.info("DockerHosts: connected to endpoint %s", url)
         elif client is None:
             # docker SDK is unavailable; nothing to do for this endpoint.
             return []
@@ -788,7 +789,45 @@ class DockerHosts(BasePlugin):
         return result
 
     @staticmethod
-    def _build_tls_config(endpoint: Dict[str, object]) -> Optional[object]:
+    def _resolve_tls_path(path: str) -> str:
+        """Brief: Resolve a Docker TLS path relative to config dir / CWD.
+
+        Inputs:
+          - path: Absolute or relative cert/key/CA path from endpoint config.
+
+        Outputs:
+          - str: Resolved filesystem path (may not exist yet).
+
+        Notes:
+          - Matches server.http / listen.dot path resolution via
+            resolve_tls_path so relative keys/ paths work under Docker
+            (CWD=/foghorn, config=/foghorn/config/config.yaml).
+        """
+
+        import os
+
+        from foghorn.servers.webserver.tls_certs import resolve_tls_path
+
+        config_path = None
+        try:
+            from foghorn.runtime_config import get_config_path
+
+            config_path = get_config_path()
+        except Exception:
+            config_path = None
+        if not config_path:
+            for candidate in (
+                os.environ.get("FOGHORN_CONFIG"),
+                "config/config.yaml",
+                "/foghorn/config/config.yaml",
+            ):
+                if candidate and os.path.isfile(candidate):
+                    config_path = candidate
+                    break
+        return resolve_tls_path(path, config_path=config_path)
+
+    @staticmethod
+    def _build_tls_config(endpoint: dict[str, object]) -> object | None:
         """Brief: Build docker TLSConfig from endpoint settings.
 
         Inputs:
@@ -796,14 +835,20 @@ class DockerHosts(BasePlugin):
 
         Outputs:
           - Optional TLSConfig object for docker.DockerClient.
+
+        Raises:
+          - DockerException: When tls_cert/tls_key/tls_ca paths are set but
+            missing/empty on disk (the Docker SDK error is otherwise opaque).
         """
 
         if docker is None:
             return None
+        import os
+
         tls_verify = bool(endpoint.get("tls_verify", False))
-        tls_cert = endpoint.get("tls_cert")
-        tls_key = endpoint.get("tls_key")
-        tls_ca = endpoint.get("tls_ca")
+        tls_cert = str(endpoint.get("tls_cert") or "").strip() or None
+        tls_key = str(endpoint.get("tls_key") or "").strip() or None
+        tls_ca = str(endpoint.get("tls_ca") or "").strip() or None
         if not (tls_verify or tls_cert or tls_key or tls_ca):
             return None
 
@@ -811,6 +856,55 @@ class DockerHosts(BasePlugin):
         tls_cls = getattr(tls_mod, "TLSConfig", None) if tls_mod is not None else None
         if tls_cls is None:
             return None
+
+        # Resolve relative paths against the config directory (same as DoT/HTTP).
+        if tls_cert:
+            tls_cert = DockerHosts._resolve_tls_path(tls_cert)
+        if tls_key:
+            tls_key = DockerHosts._resolve_tls_path(tls_key)
+        if tls_ca:
+            tls_ca = DockerHosts._resolve_tls_path(tls_ca)
+
+        # Stash resolved paths so _build_docker_client mounts the same files.
+        endpoint["tls_cert"] = tls_cert
+        endpoint["tls_key"] = tls_key
+        endpoint["tls_ca"] = tls_ca
+
+        missing: list[str] = []
+        empty: list[str] = []
+        for label, path in (
+            ("tls_cert", tls_cert),
+            ("tls_key", tls_key),
+            ("tls_ca", tls_ca),
+        ):
+            if not path:
+                continue
+            if not os.path.isfile(path):
+                missing.append(f"{label}={path}")
+                continue
+            try:
+                if os.path.getsize(path) <= 0:
+                    empty.append(f"{label}={path}")
+            except OSError:
+                missing.append(f"{label}={path}")
+        if missing or empty:
+            parts: list[str] = []
+            if missing:
+                parts.append("not found on disk: " + ", ".join(missing))
+            if empty:
+                parts.append("empty (0 bytes): " + ", ".join(empty))
+            raise DockerException(
+                "Docker TLS files "
+                + "; ".join(parts)
+                + ". Provide readable paths via endpoint tls_cert/tls_key/tls_ca."
+            )
+
+        # Docker SDK requires both cert and key together when either is set.
+        if bool(tls_cert) ^ bool(tls_key):
+            raise DockerException(
+                "Docker TLS client auth requires both tls_cert and tls_key; "
+                f"got tls_cert={tls_cert!r} tls_key={tls_key!r}"
+            )
 
         client_cert = None
         if tls_cert and tls_key:
@@ -822,7 +916,77 @@ class DockerHosts(BasePlugin):
             ca_cert=str(tls_ca) if tls_ca else None,
         )
 
-    def _build_docker_client(self, url: str, endpoint: Dict[str, object]) -> object:
+    @staticmethod
+    def _mount_tls_adapter(
+        client: object,
+        *,
+        ca_cert: str | None,
+        client_cert: tuple[str, str] | None,
+        verify: bool,
+    ) -> None:
+        """Brief: Mount a TLS HTTP adapter with OpenSSL-3-friendly CA flags.
+
+        Inputs:
+          - client: docker.DockerClient instance.
+          - ca_cert: Optional CA bundle path used when verify is true.
+          - client_cert: Optional (cert_path, key_path) for mTLS.
+          - verify: Whether to verify the daemon certificate chain.
+
+        Outputs:
+          - None. Mutates client.api session mounts when requests is available.
+
+        Notes:
+          - OpenSSL 3 may reject private CAs missing keyUsage with
+            CERTIFICATE_VERIFY_FAILED. Clearing VERIFY_X509_STRICT keeps CA
+            path verification while tolerating that common homelab CA shape.
+        """
+
+        try:
+            import ssl
+
+            from requests.adapters import HTTPAdapter
+        except Exception:
+            return
+
+        api = getattr(client, "api", None)
+        if api is None or not hasattr(api, "mount"):
+            return
+
+        class _DockerTLSAdapter(HTTPAdapter):
+            def init_poolmanager(
+                self, connections, maxsize, block=False, **pool_kwargs
+            ):
+                ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+                if verify and ca_cert:
+                    ctx.verify_mode = ssl.CERT_REQUIRED
+                    ctx.check_hostname = True
+                    ctx.load_verify_locations(ca_cert)
+                    # Tolerate private CAs that omit keyUsage (OpenSSL 3).
+                    if hasattr(ctx, "verify_flags") and hasattr(ssl, "VerifyFlags"):
+                        try:
+                            ctx.verify_flags = ssl.VerifyFlags(0)
+                        except Exception:
+                            pass
+                else:
+                    ctx.check_hostname = False
+                    ctx.verify_mode = ssl.CERT_NONE
+                if client_cert is not None:
+                    ctx.load_cert_chain(client_cert[0], client_cert[1])
+                pool_kwargs["ssl_context"] = ctx
+                return super().init_poolmanager(
+                    connections, maxsize, block=block, **pool_kwargs
+                )
+
+        adapter = _DockerTLSAdapter()
+        try:
+            api.mount("https://", adapter)
+            # docker-py may use the raw host:port form for some URLs.
+            api.mount("http://", adapter)
+        except Exception:
+            return
+        return
+
+    def _build_docker_client(self, url: str, endpoint: dict[str, object]) -> object:
         """Brief: Build Docker client for an endpoint, optionally using TLS.
 
         Inputs:
@@ -833,9 +997,37 @@ class DockerHosts(BasePlugin):
           - Docker SDK client object.
         """
 
+        import os
+
         tls_cfg = self._build_tls_config(endpoint)
         if tls_cfg is not None:
-            return docker.DockerClient(base_url=url, tls=tls_cfg)
+            tls_verify = bool(endpoint.get("tls_verify", False))
+            tls_cert = str(endpoint.get("tls_cert") or "").strip() or None
+            tls_key = str(endpoint.get("tls_key") or "").strip() or None
+            tls_ca = str(endpoint.get("tls_ca") or "").strip() or None
+            client_cert = (tls_cert, tls_key) if tls_cert and tls_key else None
+            # Pin an API version so DockerClient does not call /version during
+            # __init__ (that handshake would run before we can mount the
+            # OpenSSL-3-friendly adapter). Override with DOCKER_API_VERSION.
+            api_version = (
+                str(
+                    os.environ.get("DOCKER_API_VERSION")
+                    or endpoint.get("api_version")
+                    or "1.41"
+                ).strip()
+                or "1.41"
+            )
+            client = docker.DockerClient(base_url=url, tls=tls_cfg, version=api_version)
+            # Mount adapter before any API traffic so private CAs missing
+            # keyUsage still verify under OpenSSL 3.
+            if tls_verify or client_cert or tls_ca:
+                self._mount_tls_adapter(
+                    client,
+                    ca_cert=tls_ca,
+                    client_cert=client_cert,
+                    verify=bool(tls_verify),
+                )
+            return client
         return docker.DockerClient(base_url=url)
 
     @staticmethod
@@ -908,15 +1100,15 @@ class DockerHosts(BasePlugin):
             (optionally) self._aggregate_txt.
         """
 
-        new_v4: Dict[str, List[str]] = {}
-        new_v6: Dict[str, List[str]] = {}
-        new_reverse: Dict[str, str] = {}
-        new_ttl_v4: Dict[str, int] = {}
-        new_ttl_v6: Dict[str, int] = {}
-        new_ttl_ptr: Dict[str, int] = {}
-        new_txt: Dict[str, List[str]] = {}
-        new_ttl_txt: Dict[str, int] = {}
-        new_hostports: Dict[str, List[str]] = {}
+        new_v4: dict[str, list[str]] = {}
+        new_v6: dict[str, list[str]] = {}
+        new_reverse: dict[str, str] = {}
+        new_ttl_v4: dict[str, int] = {}
+        new_ttl_v6: dict[str, int] = {}
+        new_ttl_ptr: dict[str, int] = {}
+        new_txt: dict[str, list[str]] = {}
+        new_ttl_txt: dict[str, int] = {}
+        new_hostports: dict[str, list[str]] = {}
 
         total_containers = 0
         mapped_containers = 0
@@ -924,7 +1116,7 @@ class DockerHosts(BasePlugin):
         # Accumulate aliases per canonical container name so that containers
         # sharing the same canonical name end up with a single unified alias
         # set in TXT/Info (front-end groups by TXT).
-        canonical_aliases: Dict[str, set[str]] = {}
+        canonical_aliases: dict[str, set[str]] = {}
 
         for endpoint in self._endpoints:
             containers = self._iter_containers_for_endpoint(endpoint)
@@ -946,7 +1138,7 @@ class DockerHosts(BasePlugin):
                 )
                 host_ipv4 = endpoint.get("host_ipv4") or ""
                 host_ipv6 = endpoint.get("host_ipv6") or ""
-                parts: List[str] = []
+                parts: list[str] = []
                 url = str(endpoint.get("url"))
                 if url:
                     # For display, shorten tcp://host:port endpoints to just
@@ -1031,8 +1223,7 @@ class DockerHosts(BasePlugin):
                 # - Container ID as a last-resort alias
                 # - Optional project name label (when distinct from name/image)
                 raw_name = str(container.get("Name") or "").strip()
-                if raw_name.startswith("/"):
-                    raw_name = raw_name[1:]
+                raw_name = raw_name.removeprefix("/")
                 container_id = str(container.get("Id") or "").strip()
 
                 cfg = container.get("Config") or {}
@@ -1074,7 +1265,7 @@ class DockerHosts(BasePlugin):
                 raw_name = _strip_env_domain(raw_name)
                 hostname = _strip_env_domain(hostname) if hostname else hostname
 
-                candidate_names: List[Tuple[str, bool]] = []
+                candidate_names: list[tuple[str, bool]] = []
                 if raw_name:
                     candidate_names.append((raw_name, False))
                 if hostname and hostname != raw_name:
@@ -1088,7 +1279,7 @@ class DockerHosts(BasePlugin):
                     candidate_names.append((container_id[:12], True))
                     candidate_names.append((container_id, True))
 
-                normalized_candidates: List[Tuple[str, bool]] = []
+                normalized_candidates: list[tuple[str, bool]] = []
                 seen: set[str] = set()
                 for n, is_container_id_alias in candidate_names:
                     # Ensure normalized names do not retain any leading or
@@ -1101,7 +1292,7 @@ class DockerHosts(BasePlugin):
                         continue
                     seen.add(key)
                     normalized_candidates.append((key, is_container_id_alias))
-                valid_names: List[str] = []
+                valid_names: list[str] = []
                 for key, is_container_id_alias in normalized_candidates:
                     if self._is_valid_dns_name(key):
                         valid_names.append(key)
@@ -1311,7 +1502,7 @@ class DockerHosts(BasePlugin):
             self._ttl_txt = new_ttl_txt
             self._hostports = new_hostports
 
-    def get_admin_pages(self) -> List[AdminPageSpec]:
+    def get_admin_pages(self) -> list[AdminPageSpec]:
         """Brief: Describe the DockerHosts admin page for the web UI.
 
         Inputs:
@@ -1334,7 +1525,7 @@ class DockerHosts(BasePlugin):
             )
         ]
 
-    def get_admin_ui_descriptor(self) -> Dict[str, object]:
+    def get_admin_ui_descriptor(self) -> dict[str, object]:
         """Brief: Describe DockerHosts admin UI using a generic snapshot layout.
 
         Inputs:
@@ -1364,7 +1555,7 @@ class DockerHosts(BasePlugin):
             title = base_title
 
         snapshot_url = f"/api/v1/plugins/{plugin_name}/docker_hosts"
-        layout: Dict[str, object] = {
+        layout: dict[str, object] = {
             "sections": [
                 {
                     "id": "summary",
@@ -1426,7 +1617,7 @@ class DockerHosts(BasePlugin):
             "layout": layout,
         }
 
-    def get_http_snapshot(self) -> Dict[str, object]:
+    def get_http_snapshot(self) -> dict[str, object]:
         """Brief: Summarize current DockerHosts mappings for the admin web UI.
 
         Inputs:
@@ -1444,7 +1635,7 @@ class DockerHosts(BasePlugin):
         """
 
         with self._lock:
-            containers: List[Dict[str, object]] = []
+            containers: list[dict[str, object]] = []
             # Use the union of v4/v6 keys so names with only one family are included.
             all_names = set(self._forward_v4.keys()) | set(self._forward_v6.keys())
             hostports_map = {k: list(v) for k, v in self._hostports.items()}
@@ -1520,7 +1711,7 @@ class DockerHosts(BasePlugin):
                 )
 
             # Summarize endpoint configuration for quick inspection.
-            endpoints_view: List[Dict[str, object]] = []
+            endpoints_view: list[dict[str, object]] = []
             for ep in getattr(self, "_endpoints", []):
                 if not isinstance(ep, dict):
                     continue
@@ -1566,7 +1757,7 @@ class DockerHosts(BasePlugin):
             # visible to operators.
             plugin_suffix = str(getattr(self, "_suffix", "") or "")
 
-            summary: Dict[str, object] = {
+            summary: dict[str, object] = {
                 "total_containers": total_containers,
                 "endpoints": endpoints_view,
                 "reload_interval": float(getattr(self, "_reload_interval", 0.0) or 0.0),
@@ -1576,7 +1767,7 @@ class DockerHosts(BasePlugin):
         return {"summary": summary, "containers": containers}
 
     @staticmethod
-    def _container_effective_health(container: Dict) -> str:
+    def _container_effective_health(container: dict) -> str:
         """Brief: Determine the effective health/status string for a container.
 
         Inputs:
@@ -1651,21 +1842,21 @@ class DockerHosts(BasePlugin):
     @staticmethod
     def _format_aggregate_line(
         *,
-        container: Dict,
+        container: dict,
         canonical: str,
-        aliases: List[str],
+        aliases: list[str],
         endpoint_url: str,
         effective_health: str,
         project_name: str,
-        internal_v4: List[str],
-        internal_v6: List[str],
-        answer_v4: List[str],
-        answer_v6: List[str],
-        extra_txt_fields: Optional[List[Tuple[str, str]]] = None,
+        internal_v4: list[str],
+        internal_v6: list[str],
+        answer_v4: list[str],
+        answer_v6: list[str],
+        extra_txt_fields: list[tuple[str, str]] | None = None,
         replace_default_txt: bool = False,
-        txt_fields_keep: Optional[List[str]] = None,
+        txt_fields_keep: list[str] | None = None,
         max_len: int = 240,
-    ) -> Tuple[str, List[str]]:
+    ) -> tuple[str, list[str]]:
         """Brief: Build a compact, single-string summary for the aggregate TXT record.
 
         Inputs:
@@ -1700,7 +1891,7 @@ class DockerHosts(BasePlugin):
         )
         proj = str(project_name).strip() if project_name else ""
 
-        def _join(items: List[str], limit: int = 4) -> str:
+        def _join(items: list[str], limit: int = 4) -> str:
             vals = [str(x) for x in items if str(x).strip()]
             if len(vals) > limit:
                 return ",".join(vals[:limit]) + f"+{len(vals) - limit}"
@@ -1724,8 +1915,8 @@ class DockerHosts(BasePlugin):
         # to Config.ExposedPorts so that exposed-but-unbound container ports are
         # still visible in TXT/Info.
         ports = (container.get("NetworkSettings") or {}).get("Ports") or {}
-        base_pieces: List[str] = []
-        hostports: List[str] = []
+        base_pieces: list[str] = []
+        hostports: list[str] = []
         if isinstance(ports, dict):
             for _port_key, bindings in ports.items():
                 if not bindings:
@@ -1759,7 +1950,7 @@ class DockerHosts(BasePlugin):
 
         # Additional network summaries (best-effort; keep short).
         nets = (container.get("NetworkSettings") or {}).get("Networks") or {}
-        net_parts: List[str] = []
+        net_parts: list[str] = []
         if isinstance(nets, dict):
             for net_name, net in nets.items():
                 if not isinstance(net, dict):
@@ -1775,7 +1966,7 @@ class DockerHosts(BasePlugin):
 
         def _walk_json_path(
             root: object, expr: str
-        ) -> List[
+        ) -> list[
             str
         ]:  # pragma: nocover defensive: complex JSONPath helper; critical cases are covered, remaining branches guard unusual container shapes
             """Resolve a minimal JSONPath-like expression against a mapping.
@@ -1807,8 +1998,7 @@ class DockerHosts(BasePlugin):
                 # can use paths like "Config.Labels.com.docker.compose.project".
                 if s.startswith("$"):
                     s = s[1:]
-                    if s.startswith("."):
-                        s = s[1:]
+                    s = s.removeprefix(".")
 
                 # Config.Labels.<label-key-with-dots>
                 label_prefix = "Config.Labels."
@@ -1822,7 +2012,7 @@ class DockerHosts(BasePlugin):
                         if label_key in lbl_obj:
                             val = lbl_obj[label_key]
                             # Delegate to the normal flattener below.
-                            flat: List[str] = []
+                            flat: list[str] = []
 
                             def _flatten_label(obj: object) -> None:
                                 if isinstance(obj, (list, tuple, set)):
@@ -1840,7 +2030,7 @@ class DockerHosts(BasePlugin):
 
                             _flatten_label(val)
                             seen_l: set[str] = set()
-                            out_l: List[str] = []
+                            out_l: list[str] = []
                             for text in flat:
                                 if text in seen_l:
                                     continue
@@ -1853,9 +2043,9 @@ class DockerHosts(BasePlugin):
                 if not parts:
                     return []
 
-                values: List[object] = [root]
+                values: list[object] = [root]
                 for part in parts:
-                    next_vals: List[object] = []
+                    next_vals: list[object] = []
                     for val in values:
                         if isinstance(val, dict) and part in val:
                             next_vals.append(val[part])
@@ -1877,7 +2067,7 @@ class DockerHosts(BasePlugin):
                         break
                     values = next_vals
 
-                flat: List[str] = []
+                flat: list[str] = []
 
                 def _flatten(obj: object) -> None:
                     if isinstance(obj, (list, tuple, set)):
@@ -1901,7 +2091,7 @@ class DockerHosts(BasePlugin):
 
                 # Deduplicate while preserving order.
                 seen: set[str] = set()
-                out: List[str] = []
+                out: list[str] = []
                 for text in flat:
                     if text in seen:
                         continue
@@ -1978,13 +2168,13 @@ class DockerHosts(BasePlugin):
         # Map of built-in TXT keys to their "key=value" segments so that
         # txt_fields in replace mode can fall back to these when a custom
         # JSONPath does not resolve for a container.
-        base_by_key: Dict[str, str] = {}
+        base_by_key: dict[str, str] = {}
         for part in base_pieces:
             key = part.split("=", 1)[0]
             if key and key not in base_by_key:
                 base_by_key[key] = part
 
-        custom_pieces: List[str] = []
+        custom_pieces: list[str] = []
         # Track which keys have fallen back to built-in values so that
         # txt_fields_keep does not re-add them later and cause duplicates.
         fallback_keys: set[str] = set()
@@ -2012,11 +2202,10 @@ class DockerHosts(BasePlugin):
                 # consistent even when callers point txt_fields at
                 # docker-specific paths such as "Name".
                 if name_s.lower() == "name":
-                    norm_vals: List[str] = []
+                    norm_vals: list[str] = []
                     for v in values:
                         text = str(v or "").strip()
-                        if text.startswith("/"):
-                            text = text[1:]
+                        text = text.removeprefix("/")
                         if text:
                             norm_vals.append(text)
                     values = norm_vals
@@ -2033,7 +2222,7 @@ class DockerHosts(BasePlugin):
                 seg = f"{name_s}={_join(values)}"
                 custom_pieces.append(_trim_kv_segment(seg))
 
-        pieces: List[str]
+        pieces: list[str]
         if replace_default_txt and custom_pieces:
             # In replace mode, only emit custom fields by default. When
             # txt_fields_keep is configured, preserve a subset of base_pieces
@@ -2041,7 +2230,7 @@ class DockerHosts(BasePlugin):
             # container (for example "ans4", "endpoint").
             keep_keys = {k.strip() for k in (txt_fields_keep or []) if k.strip()}
             if keep_keys:
-                kept: List[str] = []
+                kept: list[str] = []
                 for part in base_pieces:
                     key = part.split("=", 1)[0]
                     # Skip keys that have already fallen back to built-in
@@ -2066,8 +2255,8 @@ class DockerHosts(BasePlugin):
 
     @staticmethod
     def _extract_container_network_data(
-        container: Dict,
-    ) -> Tuple[Optional[str], List[str], List[str]]:
+        container: dict,
+    ) -> tuple[str | None, list[str], list[str]]:
         """Brief: Extract hostname and IP addresses from a docker inspect record.
 
         Inputs:
@@ -2087,8 +2276,7 @@ class DockerHosts(BasePlugin):
         # which is often the container ID. This makes mappings line up with the
         # names operators expect to query.
         raw_name = str(container.get("Name") or "").strip()
-        if raw_name.startswith("/"):
-            raw_name = raw_name[1:]
+        raw_name = raw_name.removeprefix("/")
 
         cfg_hostname = str(cfg.get("Hostname") or "").strip()
 
@@ -2100,10 +2288,10 @@ class DockerHosts(BasePlugin):
 
         nets = (container.get("NetworkSettings") or {}).get("Networks") or {}
 
-        v4_set: List[str] = []
-        v6_set: List[str] = []
+        v4_set: list[str] = []
+        v6_set: list[str] = []
 
-        def _add_ip(target: List[str], value: Optional[str]) -> None:
+        def _add_ip(target: list[str], value: str | None) -> None:
             if not value:
                 return
             text = str(value).strip()
@@ -2132,9 +2320,9 @@ class DockerHosts(BasePlugin):
         qname: str,
         qtype: int,
         req: bytes,
-        addrs: List[str],
+        addrs: list[str],
         ttl: int,
-    ) -> Optional[bytes]:
+    ) -> bytes | None:
         """Brief: Build a minimal A/AAAA DNS response for a single owner.
 
         Inputs:
@@ -2195,7 +2383,7 @@ class DockerHosts(BasePlugin):
 
     def pre_resolve(
         self, qname: str, qtype: int, req: bytes, ctx: PluginContext
-    ) -> Optional[PluginDecision]:
+    ) -> PluginDecision | None:
         """Brief: Answer A/AAAA/PTR (and optional TXT) queries using Docker mappings.
 
         Inputs:
