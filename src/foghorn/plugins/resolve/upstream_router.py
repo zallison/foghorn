@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 from dnslib import RCODE, DNSRecord
-from pydantic import BaseModel, Field, ConfigDict, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from foghorn.utils import dns_names
 
 from .base import BasePlugin, PluginContext, PluginDecision, plugin_aliases
-from foghorn.utils import dns_names
 
 logger = logging.getLogger(__name__)
 
@@ -30,14 +31,14 @@ class UpstreamRouteTarget(BaseModel):
         config_parser / route normalization.
     """
 
-    host: Optional[str] = None
-    port: Optional[int] = Field(default=None, ge=1, le=65535)
-    url: Optional[str] = None
+    host: str | None = None
+    port: int | None = Field(default=None, ge=1, le=65535)
+    url: str | None = None
 
     model_config = ConfigDict(extra="allow")
 
     @model_validator(mode="after")
-    def _require_host_port_or_url(self) -> "UpstreamRouteTarget":
+    def _require_host_port_or_url(self) -> UpstreamRouteTarget:
         """Brief: Require either URL-form or host (+ optional port).
 
         Inputs:
@@ -69,9 +70,9 @@ class UpstreamRoute(BaseModel):
       - UpstreamRoute instance with normalized types.
     """
 
-    domain: Optional[str] = None
-    suffix: Optional[str] = None
-    upstreams: List[UpstreamRouteTarget] = Field(default_factory=list)
+    domain: str | None = None
+    suffix: str | None = None
+    upstreams: list[UpstreamRouteTarget] = Field(default_factory=list)
 
     model_config = ConfigDict(extra="allow")
 
@@ -86,7 +87,7 @@ class UpstreamRouterConfig(BaseModel):
       - UpstreamRouterConfig instance with normalized field types.
     """
 
-    routes: List[UpstreamRoute] = Field(default_factory=list)
+    routes: list[UpstreamRoute] = Field(default_factory=list)
 
     model_config = ConfigDict(extra="allow")
 
@@ -127,11 +128,12 @@ class UpstreamRouter(BasePlugin):
             'example.com'
         """
         super().__init__(**config)
-        self.routes: List[Dict] = self._normalize_routes(self.config.get("routes", []))
+        self.routes: list[dict] = self._normalize_routes(self.config.get("routes", []))
+        self._build_route_indexes()
 
     def pre_resolve(
         self, qname: str, qtype: int, req: bytes, ctx: PluginContext
-    ) -> Optional[PluginDecision]:
+    ) -> PluginDecision | None:
         """
         Route queries to specific upstream(s) based on match rules.
         Inputs:
@@ -167,9 +169,7 @@ class UpstreamRouter(BasePlugin):
         # Do not alter decision flow; just return
         return None
 
-    def _normalize_route_upstream(
-        self, up: Dict[str, Any]
-    ) -> Optional[Dict[str, object]]:
+    def _normalize_route_upstream(self, up: dict[str, Any]) -> dict[str, object] | None:
         """Brief: Normalize one route upstream entry to runtime shape.
 
         Inputs:
@@ -202,14 +202,14 @@ class UpstreamRouter(BasePlugin):
         if not host or port is None:
             return None
         try:
-            normalized: Dict[str, object] = dict(up)
+            normalized: dict[str, object] = dict(up)
             normalized["host"] = str(host)
             normalized["port"] = int(port)
         except (TypeError, ValueError):
             return None
         return normalized
 
-    def _normalize_routes(self, routes: List[Dict]) -> List[Dict]:
+    def _normalize_routes(self, routes: list[dict]) -> list[dict]:
         """
         Normalizes and validates routing rules using only the modern 'upstreams' list format.
 
@@ -231,9 +231,9 @@ class UpstreamRouter(BasePlugin):
             >>> norm_routes[0]["upstream_candidates"]
             [{'host': '1.1.1.1', 'port': 53}]
         """
-        norm: List[Dict] = []
+        norm: list[dict] = []
         for r in routes or []:
-            route: Dict[str, object] = {}
+            route: dict[str, object] = {}
             domain = r.get("domain")
             suffix = r.get("suffix")
             if domain:
@@ -241,8 +241,7 @@ class UpstreamRouter(BasePlugin):
             if suffix:
                 s = dns_names.normalize_name(suffix)
                 # Normalize suffix by removing a leading dot for simpler checks
-                if s.startswith("."):
-                    s = s[1:]
+                s = s.removeprefix(".")
                 route["suffix"] = s
 
             # Modern multiple-upstreams format only. Preserve any additional
@@ -250,7 +249,7 @@ class UpstreamRouter(BasePlugin):
             # that routes can use the same rich upstream definitions as the
             # top-level `upstreams` block. URL-form entries are expanded via the
             # shared config_parser helper.
-            upstream_candidates: List[Dict[str, object]] = []
+            upstream_candidates: list[dict[str, object]] = []
             multiple_upstreams = r.get("upstreams")
             if multiple_upstreams and isinstance(multiple_upstreams, list):
                 for up in multiple_upstreams:
@@ -269,9 +268,36 @@ class UpstreamRouter(BasePlugin):
 
         return norm
 
+    def _build_route_indexes(self) -> None:
+        """Brief: Build exact/suffix indexes for O(label-depth) route matching.
+
+        Inputs:
+          - None (uses self.routes).
+
+        Outputs:
+          - None; populates self._exact_index and self._suffix_index.
+
+        Notes:
+          - Each key maps to the index of the FIRST normalized route defining
+            it, which preserves the historical first-match-wins (config order)
+            semantics when _match_upstream_candidates selects among matches.
+        """
+
+        exact: dict[str, int] = {}
+        suffix: dict[str, int] = {}
+        for idx, r in enumerate(self.routes):
+            domain = r.get("domain")
+            if domain is not None and domain not in exact:
+                exact[domain] = idx
+            sfx = r.get("suffix")
+            if sfx is not None and sfx not in suffix:
+                suffix[sfx] = idx
+        self._exact_index = exact
+        self._suffix_index = suffix
+
     def _forward_with_failover(
-        self, request_wire: bytes, targets: List[Dict[str, any]], timeout_ms: int
-    ) -> Tuple[bool, bytes]:
+        self, request_wire: bytes, targets: list[dict[str, any]], timeout_ms: int
+    ) -> tuple[bool, bytes]:
         """Brief: Forward a DNS request to multiple upstreams using the hardened core helper.
 
         Inputs:
@@ -314,13 +340,17 @@ class UpstreamRouter(BasePlugin):
         servfail_reply.header.rcode = RCODE.SERVFAIL
         return False, servfail_reply.pack()
 
-    def _match_upstream_candidates(
-        self, q: str
-    ) -> Optional[List[Dict[str, str | int]]]:
+    def _match_upstream_candidates(self, q: str) -> list[dict[str, str | int]] | None:
         """
         Finds upstream candidates for a given query name.
+
+        Uses the precomputed exact/suffix indexes so lookup cost is proportional
+        to the number of labels in the query (O(depth)) rather than to the number
+        of configured routes. First-match-wins (config order) semantics are
+        preserved: when several routes match, the earliest one in the config wins.
+
         Args:
-            q: The query name.
+            q: The query name (normalized: lowercase, no trailing dot).
         Returns:
             A list of upstream candidates, or None if no match is found.
 
@@ -328,7 +358,7 @@ class UpstreamRouter(BasePlugin):
             >>> from foghorn.plugins.upstream_router import UpstreamRouter
             >>> config = {
             ...     "routes": [
-            ...         {"domain": "example.com", "upstream": {"host": "1.1.1.1", "port": 53}},
+            ...         {"domain": "example.com", "upstreams": [{"host": "1.1.1.1", "port": 53}]},
             ...         {"suffix": "corp", "upstreams": [{"host": "10.0.0.1", "port": 53}, {"host": "10.0.0.2", "port": 53}]}
             ...     ]
             ... }
@@ -338,11 +368,20 @@ class UpstreamRouter(BasePlugin):
             >>> plugin._match_upstream_candidates("server.corp")
             [{'host': '10.0.0.1', 'port': 53}, {'host': '10.0.0.2', 'port': 53}]
         """
-        for r in self.routes:
-            if "domain" in r and q == r["domain"]:
-                return r["upstream_candidates"]
-            if "suffix" in r:
-                s = r["suffix"]
-                if q == s or q.endswith("." + s):
-                    return r["upstream_candidates"]
-        return None
+        if not q:
+            return None
+
+        best = self._exact_index.get(q)
+        # Walk the name one label at a time (full name first, then progressively
+        # shorter suffixes); keeping the smallest route index among all matches
+        # reproduces the old linear scan's first-match-wins ordering.
+        sfx = ""
+        for label in reversed(q.split(".")):
+            sfx = f"{label}.{sfx}" if sfx else label
+            idx = self._suffix_index.get(sfx)
+            if idx is not None and (best is None or idx < best):
+                best = idx
+
+        if best is None:
+            return None
+        return self.routes[best]["upstream_candidates"]
