@@ -110,7 +110,11 @@ The configuration is described by `UpstreamRouterConfig` and `UpstreamRoute`:
 - During `pre_resolve`, UpstreamRouter:
   1. Checks BasePlugin targeting (`targets*`, listener/domain filters).
   2. Normalizes `qname` (lowercase, no trailing dot).
-  3. Walks routes in order and picks the first match.
+  3. Picks the first matching route in config order. Matching is backed by
+     precomputed exact/suffix name indexes built at init, so per-query cost is
+     proportional to the number of labels in the qname (O(depth)) rather than
+     the number of configured routes; an earlier broad suffix still wins over a
+     later narrower or exact route when both could match.
   4. When a match is found, sets `ctx.upstream_candidates` to the route's
      `[{"host", "port"}, ...]` and returns `None` so normal processing continues.
 - The core resolver is responsible for actually forwarding to the chosen
