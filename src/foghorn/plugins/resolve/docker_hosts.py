@@ -962,9 +962,18 @@ class DockerHosts(BasePlugin):
                     ctx.check_hostname = True
                     ctx.load_verify_locations(ca_cert)
                     # Tolerate private CAs that omit keyUsage (OpenSSL 3).
-                    if hasattr(ctx, "verify_flags") and hasattr(ssl, "VerifyFlags"):
+                    # Clear only VERIFY_X509_STRICT; keep other defaults such as
+                    # VERIFY_X509_TRUSTED_FIRST.
+                    strict = getattr(ssl, "VERIFY_X509_STRICT", None)
+                    if (
+                        strict is not None
+                        and hasattr(ctx, "verify_flags")
+                        and hasattr(ssl, "VerifyFlags")
+                    ):
                         try:
-                            ctx.verify_flags = ssl.VerifyFlags(0)
+                            ctx.verify_flags = ssl.VerifyFlags(
+                                int(ctx.verify_flags) & ~int(strict)
+                            )
                         except Exception:
                             pass
                 else:
