@@ -2847,6 +2847,7 @@
             "deny_delay": {
               "default": 0,
               "description": "Type: integer. Default: 0.",
+              "maximum": 300,
               "minimum": 0,
               "title": "Deny Delay",
               "type": "integer"
@@ -8892,6 +8893,7 @@
             "deny_delay": {
               "default": 0,
               "description": "Type: integer. Default: 0.",
+              "maximum": 300,
               "minimum": 0,
               "title": "Deny Delay",
               "type": "integer"
