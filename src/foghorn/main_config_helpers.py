@@ -596,6 +596,240 @@ def _get_min_cache_ttl(cache_plugin: object | None) -> int:
     return min_cache_ttl
 
 
+def _parse_upstream_selection_cfg(
+    *,
+    cfg: dict,
+) -> tuple[dict, str, object, int]:
+    """Brief: Parse upstream strategy and concurrency controls.
+
+    Inputs:
+      - cfg: Parsed root configuration mapping.
+
+    Outputs:
+      - tuple[dict, str, object, int]:
+        (upstream_cfg, strategy, health_config, max_concurrent).
+
+    Raises:
+      - ValueError: When config.upstreams is present but not a mapping.
+    """
+
+    from foghorn.runtime_config import parse_upstream_health_config
+
+    upstream_cfg = cfg.get("upstreams") or {}
+    if not isinstance(upstream_cfg, dict):
+        raise ValueError("config.upstreams must be a mapping when present")
+    upstream_strategy = str(upstream_cfg.get("strategy", "failover")).lower()
+    upstream_health = parse_upstream_health_config(upstream_cfg)
+    upstream_max_concurrent = int(upstream_cfg.get("max_concurrent", 1) or 1)
+    upstream_max_concurrent = max(upstream_max_concurrent, 1)
+    return upstream_cfg, upstream_strategy, upstream_health, upstream_max_concurrent
+
+
+def _configure_bg_executor_from_limits(
+    *,
+    limits_cfg: dict,
+    logger: logging.Logger,
+) -> None:
+    """Brief: Configure bounded background executor from server.limits.
+
+    Inputs:
+      - limits_cfg: server.limits mapping.
+      - logger: Logger for best-effort failure diagnostics.
+
+    Outputs:
+      - None.
+    """
+
+    try:
+        from .servers.bg_executor import configure_bg_executor
+
+        raw_workers = limits_cfg.get("bg_executor_workers")
+        raw_pending = limits_cfg.get("bg_executor_max_pending")
+        try:
+            bg_workers = int(raw_workers) if raw_workers is not None else None
+        except Exception:
+            bg_workers = None
+        try:
+            bg_pending = int(raw_pending) if raw_pending is not None else None
+        except Exception:
+            bg_pending = None
+        configure_bg_executor(max_workers=bg_workers, max_pending=bg_pending)
+    except Exception:
+        logger.warning("Failed to configure background executor", exc_info=True)
+
+
+def _parse_dnssec_settings(
+    *,
+    server_cfg: dict,
+) -> tuple[str, int, str]:
+    """Brief: Parse DNSSEC mode/payload/validation settings.
+
+    Inputs:
+      - server_cfg: Parsed server config mapping.
+
+    Outputs:
+      - tuple[str, int, str]: (dnssec_mode, edns_payload, dnssec_validation).
+    """
+
+    dnssec_cfg = server_cfg.get("dnssec") or {}
+    if not isinstance(dnssec_cfg, dict):
+        dnssec_cfg = {}
+    dnssec_mode = str(dnssec_cfg.get("mode", "ignore")).lower()
+    edns_payload = int(dnssec_cfg.get("udp_payload_size", 1232))
+    dnssec_validation = str(dnssec_cfg.get("validation", "upstream_ad")).lower()
+    return dnssec_mode, edns_payload, dnssec_validation
+
+
+def _parse_search_domain_settings(
+    *,
+    resolver_cfg: dict,
+) -> tuple[str, bool, object, str]:
+    """Brief: Parse resolver search-domain qualification settings.
+
+    Inputs:
+      - resolver_cfg: Parsed resolver config mapping.
+
+    Outputs:
+      - tuple[str, bool, object, str]:
+        (search_domain, qualify_single_label, qualify_non_proper_tld,
+         non_proper_tld_mode).
+    """
+
+    search_cfg = resolver_cfg.get("search") or {}
+    if not isinstance(search_cfg, dict):
+        search_cfg = {}
+    search_domain = str(search_cfg.get("domain", "") or "").strip().rstrip(".")
+    qualify_single_label = bool(search_cfg.get("qualify_single_label", True))
+    raw_npt = search_cfg.get("qualify_non_proper_tld", False)
+    if isinstance(raw_npt, list):
+        qualify_non_proper_tld: object = [
+            str(e).strip().rstrip(".") for e in raw_npt if str(e).strip()
+        ]
+    elif isinstance(raw_npt, str):
+        s = raw_npt.strip().lower()
+        qualify_non_proper_tld = True if s in ("true", "yes", "1") else False
+    else:
+        qualify_non_proper_tld = bool(raw_npt)
+    raw_tld_mode = search_cfg.get("non_proper_tld_mode", "suffix")
+    non_proper_tld_mode = str(raw_tld_mode or "suffix").strip().lower()
+    if non_proper_tld_mode not in {"suffix", "exact"}:
+        non_proper_tld_mode = "suffix"
+    return (
+        search_domain,
+        qualify_single_label,
+        qualify_non_proper_tld,
+        non_proper_tld_mode,
+    )
+
+
+def _parse_axfr_settings(
+    *,
+    server_cfg: dict,
+    tsig_keys: list,
+) -> tuple[
+    bool,
+    list[str],
+    int | None,
+    int,
+    float,
+    float,
+    int | None,
+    int,
+    bool,
+    list,
+]:
+    """Brief: Parse AXFR/IXFR transfer policy settings.
+
+    Inputs:
+      - server_cfg: Parsed server config mapping.
+      - tsig_keys: Feature-level TSIG keys used for AXFR key inheritance.
+
+    Outputs:
+      - tuple of AXFR settings:
+        (enabled, allow_clients, max_zone_rrs, max_concurrent_transfers,
+         rate_limit_per_client_per_second, rate_limit_burst,
+         max_transfer_rate_bytes_per_second, message_max_bytes,
+         require_tsig, tsig_keys).
+    """
+
+    from foghorn.runtime_config import resolve_axfr_tsig_keys
+
+    axfr_cfg = server_cfg.get("axfr") or {}
+    if not isinstance(axfr_cfg, dict):
+        axfr_cfg = {}
+    axfr_enabled = bool(axfr_cfg.get("enabled", False))
+    axfr_allow_clients = axfr_cfg.get("allow_clients") or []
+    if not isinstance(axfr_allow_clients, list):
+        axfr_allow_clients = []
+    axfr_allow_clients = [str(x) for x in axfr_allow_clients if x]
+    try:
+        raw_axfr_max_zone_rrs = axfr_cfg.get("max_zone_rrs")
+        axfr_max_zone_rrs = (
+            int(raw_axfr_max_zone_rrs)
+            if raw_axfr_max_zone_rrs is not None
+            and str(raw_axfr_max_zone_rrs).strip() != ""
+            else None
+        )
+    except Exception:
+        axfr_max_zone_rrs = None
+    if axfr_max_zone_rrs is not None and axfr_max_zone_rrs <= 0:
+        axfr_max_zone_rrs = None
+    try:
+        axfr_max_concurrent_transfers = int(axfr_cfg.get("max_concurrent_transfers", 4))
+    except Exception:
+        axfr_max_concurrent_transfers = 4
+    axfr_max_concurrent_transfers = max(1, int(axfr_max_concurrent_transfers))
+    try:
+        axfr_rate_limit_per_client_per_second = float(
+            axfr_cfg.get("rate_limit_per_client_per_second", 0.0)
+        )
+    except Exception:
+        axfr_rate_limit_per_client_per_second = 0.0
+    axfr_rate_limit_per_client_per_second = max(
+        0.0, float(axfr_rate_limit_per_client_per_second)
+    )
+    try:
+        axfr_rate_limit_burst = float(axfr_cfg.get("rate_limit_burst", 2.0))
+    except Exception:
+        axfr_rate_limit_burst = 2.0
+    axfr_rate_limit_burst = max(1.0, float(axfr_rate_limit_burst))
+    try:
+        raw_axfr_max_transfer_rate = axfr_cfg.get("max_transfer_rate_bytes_per_second")
+        axfr_max_transfer_rate_bytes_per_second = (
+            int(raw_axfr_max_transfer_rate)
+            if raw_axfr_max_transfer_rate is not None
+            and str(raw_axfr_max_transfer_rate).strip() != ""
+            else None
+        )
+    except Exception:
+        axfr_max_transfer_rate_bytes_per_second = None
+    if (
+        axfr_max_transfer_rate_bytes_per_second is not None
+        and axfr_max_transfer_rate_bytes_per_second <= 0
+    ):
+        axfr_max_transfer_rate_bytes_per_second = None
+    try:
+        axfr_message_max_bytes = int(axfr_cfg.get("message_max_bytes", 64000))
+    except Exception:
+        axfr_message_max_bytes = 64000
+    axfr_message_max_bytes = max(512, min(65535, int(axfr_message_max_bytes)))
+    axfr_require_tsig = bool(axfr_cfg.get("require_tsig", False))
+    # AXFR inherits server.features.tsig keys when its own block has none.
+    axfr_tsig_keys = resolve_axfr_tsig_keys(axfr_cfg, feature_keys=tsig_keys)
+    return (
+        axfr_enabled,
+        axfr_allow_clients,
+        axfr_max_zone_rrs,
+        axfr_max_concurrent_transfers,
+        axfr_rate_limit_per_client_per_second,
+        axfr_rate_limit_burst,
+        axfr_max_transfer_rate_bytes_per_second,
+        axfr_message_max_bytes,
+        axfr_require_tsig,
+        axfr_tsig_keys,
+    )
+
+
 def _resolve_web_config(
     *,
     cfg: dict,
