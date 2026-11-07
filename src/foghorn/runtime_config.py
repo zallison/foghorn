@@ -653,6 +653,39 @@ _OLD_PLUGINS: List[Tuple[float, List[object]]] = []
 _PLUGIN_SHUTDOWN_GRACE_SECONDS = 30.0
 
 
+def get_config_path() -> str | None:
+    """Brief: Return the active on-disk config path when known.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - str | None: Absolute/relative config path set by set_config_path() or
+        initialize_runtime(), else None.
+    """
+
+    return _CONFIG_PATH
+
+
+def set_config_path(config_path: str | None) -> None:
+    """Brief: Record the active config path before full runtime init.
+
+    Inputs:
+      - config_path: Path to the YAML config, or None to clear.
+
+    Outputs:
+      - None. Updates module-global _CONFIG_PATH under lock.
+
+    Notes:
+      - Called early in main() so plugins can resolve relative file paths
+        (e.g. keys/*.pem) during setup() before initialize_runtime().
+    """
+
+    global _CONFIG_PATH
+    with _LOCK:
+        _CONFIG_PATH = str(config_path) if config_path else None
+
+
 def initialize_runtime(
     *,
     snapshot: RuntimeSnapshot,
