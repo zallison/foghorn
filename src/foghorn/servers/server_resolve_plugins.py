@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 import logging
-import time as _time
 from typing import Any
 
-from dnslib import QTYPE, RCODE, DNSRecord
+from dnslib import RCODE, DNSRecord
 
 from foghorn.plugins.resolve.base import PluginContext, PluginDecision
 
@@ -121,11 +120,28 @@ def _run_pre_plugins(
         if isinstance(decision, PluginDecision):
             if decision.action == "drop":
                 if stats is not None:
-                    _record_suppressed_query_log_drop_candidate(
-                        stats,
-                        rcode="DROP",
-                        status="drop",
-                    )
+                    try:
+                        from foghorn.servers.resolve_telemetry import (
+                            ResolveEvent,
+                            ResolveEventKind,
+                            telemetry_from_stats,
+                        )
+
+                        telemetry_from_stats(stats).emit(
+                            ResolveEvent(
+                                kind=ResolveEventKind.PRE_PLUGIN_DECISION,
+                                action="drop",
+                                client_ip=client_ip,
+                                qname=qname,
+                                t0=t0,
+                            )
+                        )
+                    except Exception:
+                        _record_suppressed_query_log_drop_candidate(
+                            stats,
+                            rcode="DROP",
+                            status="drop",
+                        )
                 # Pre-plugin timeout/drop: return sentinel empty wire so UDP
                 # handlers and othefoghorn.servers.transports can choose not to reply.
                 return (
@@ -195,92 +211,36 @@ def _run_pre_plugins(
                 wire = _set_response_id(r.pack(), req.header.id)
                 if stats is not None:
                     try:
+                        from foghorn.servers.resolve_telemetry import (
+                            ResolveEvent,
+                            ResolveEventKind,
+                            telemetry_from_stats,
+                        )
+
                         qtype_name = _qtype_label_for_stats(qtype)
-                        # Track the EDE info-code used for this synthetic
-                        # NXDOMAIN so metrics and warm-loaded aggregates can
-                        # expose EDE volumes alongside rcodes.
-                        deny_source = "pre_plugin"
-                        try:
-                            if hasattr(stats, "record_ede_code"):
-                                stats.record_ede_code(ede_code)
-                        except Exception:  # pragma: no cover - defensive metrics hook
-                            pass
-                        try:
-                            # Pre-plugin deny bypasses cache; count it as
-                            # a cache_null response and bump the
-                            # cache_deny_pre total for live counters.
-                            stats.record_cache_null(qname, status="deny_pre")
-                        except (
-                            Exception
-                        ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-                            pass
-                        # When plugins provide a decision.stat label,
-                        # mirror it into cache statistics so the HTML
-                        # dashboard can expose per-decision tallies.
+                        short = _resolve_plugin_label(decision, p)
                         try:
                             stat_label = getattr(decision, "stat", None)
-                            if (
-                                stat_label
-                            ):  # pragma: no cover - defensive/metrics path excluded from coverage
-                                stats.record_cache_stat(str(stat_label))
-                        except (
-                            Exception
-                        ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-                            pass
-                        # Also record per-plugin pre-deny totals so
-                        # stats.totals exposes pre_deny_<name> keys. Prefer
-                        # the originating plugin instance label when
-                        # available, falling back to alias/class naming.
-                        try:
-                            short = _resolve_plugin_label(decision, p)
-                            label = f"pre_deny_{short}" if short else "pre_deny_plugin"
-                            if short:
-                                deny_source = short
-                            stats.record_cache_pre_plugin(label)
-                        except Exception:  # pragma: no cover - defensive
-                            pass
-                        stats.record_response_rcode("NXDOMAIN", qname)
-                        # Skip persistent query-log insert when the
-                        # plugin signals suppress_query_log (e.g.
-                        # rate-limit denies under flood).
-                        _suppress_qlog = bool(
-                            getattr(decision, "suppress_query_log", False)
-                        )
-                        if not _suppress_qlog:
-                            result_ctx = {
-                                "source": deny_source,
-                                "action": "deny",
-                                "ede_code": int(ede_code),
-                                "ede_text": str(ede_text),
-                            }
-                            if deny_source != "pre_plugin":
-                                result_ctx["plugin"] = deny_source
-                            result_ctx.update(request_result_meta)
-                            stats.record_query_result(
+                        except Exception:
+                            stat_label = None
+                        telemetry_from_stats(stats).emit(
+                            ResolveEvent(
+                                kind=ResolveEventKind.PRE_PLUGIN_DECISION,
+                                action="deny",
                                 client_ip=client_ip,
                                 qname=qname,
-                                qtype=qtype_name,
-                                rcode="NXDOMAIN",
-                                upstream_id=None,
-                                status="deny_pre",
-                                error=None,
-                                first=None,
-                                result=result_ctx,
+                                qtype_label=qtype_name,
+                                t0=t0,
+                                request_result_meta=dict(request_result_meta),
+                                plugin_label=short,
+                                stat_label=str(stat_label) if stat_label else None,
+                                suppress_query_log=bool(
+                                    getattr(decision, "suppress_query_log", False)
+                                ),
+                                ede_code=int(ede_code),
+                                ede_text=str(ede_text),
                             )
-                        else:
-                            _record_suppressed_query_log_drop_candidate(
-                                stats,
-                                rcode="NXDOMAIN",
-                                status="deny_pre",
-                            )
-                    except (
-                        Exception
-                    ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-                        pass
-                if stats is not None and t0 is not None:
-                    try:
-                        t1 = _time.perf_counter()
-                        stats.record_latency(t1 - t0)
+                        )
                     except (
                         Exception
                     ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
@@ -312,13 +272,7 @@ def _run_pre_plugins(
                     qtype=qtype,
                     response_wire=resp_wire,
                 )
-                if stats is not None and dnssec_status is not None:
-                    try:
-                        stats.record_dnssec_status(dnssec_status)
-                    except (
-                        Exception
-                    ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-                        pass
+                dnssec_status_for_stats = dnssec_status
                 try:
                     dnssec_mode = str(getattr(handler, "dnssec_mode", "ignore")).lower()
                 except Exception:
@@ -335,99 +289,46 @@ def _run_pre_plugins(
                     response_wire=resp_wire,
                 )
                 wire = _set_response_id(resp_wire, req.header.id)
+                rcode_name = "UNKNOWN"
                 if stats is not None:
                     try:
+                        from foghorn.servers.resolve_telemetry import (
+                            ResolveEvent,
+                            ResolveEventKind,
+                            build_answers_from_parsed,
+                            telemetry_from_stats,
+                        )
+
                         parsed = DNSRecord.parse(wire)
                         rcode_name = RCODE.get(
                             parsed.header.rcode, str(parsed.header.rcode)
                         )
-                        try:
-                            # Pre-plugin override also bypasses cache; count
-                            # it as a cache_null response and bump the
-                            # cache_override_pre total for live counters.
-                            stats.record_cache_null(qname, status="override_pre")
-                        except (
-                            Exception
-                        ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-                            pass
-                        # Mirror any decision.stat label into cache stats
-                        # so per-decision tallies are available in Totals.
+                        answers, first = build_answers_from_parsed(parsed)
+                        short = _resolve_plugin_label(decision, p)
                         try:
                             stat_label = getattr(decision, "stat", None)
-                            if (
-                                stat_label
-                            ):  # pragma: no cover - defensive/metrics path excluded from coverage
-                                stats.record_cache_stat(str(stat_label))
-                        except (
-                            Exception
-                        ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-                            pass
-                        # Also record per-plugin pre-override totals so
-                        # stats.totals exposes pre_override_<name>. Prefer
-                        # the originating plugin instance label when
-                        # available, falling back to alias/class naming.
-                        override_source = "pre_plugin_override"
-                        try:
-                            short = _resolve_plugin_label(decision, p)
-                            if short:
-                                label = f"pre_override_{short}"
-                                override_source = short
-                            else:
-                                label = "pre_override_plugin"
-                            stats.record_cache_pre_plugin(label)
-                        except Exception:  # pragma: no cover - defensive
-                            pass
-                        stats.record_response_rcode(rcode_name, qname)
-
-                        # Skip persistent query-log insert when the
-                        # plugin signals suppress_query_log.
-                        _suppress_qlog = bool(
-                            getattr(decision, "suppress_query_log", False)
-                        )
-                        if not _suppress_qlog:
-                            answers = [
-                                {
-                                    "name": str(rr.rname),
-                                    "type": QTYPE.get(rr.rtype, str(rr.rtype)),
-                                    "ttl": int(getattr(rr, "ttl", 0)),
-                                    "rdata": str(rr.rdata),
-                                }
-                                for rr in (parsed.rr or [])
-                            ]
-                            first = answers[0]["rdata"] if answers else None
-                            result_ctx = {
-                                "source": override_source,
-                                "answers": answers,
-                            }
-                            if override_source != "pre_plugin_override":
-                                result_ctx["plugin"] = override_source
-                            result_ctx.update(request_result_meta)
-                            qtype_name = _qtype_label_for_stats(qtype)
-                            stats.record_query_result(
+                        except Exception:
+                            stat_label = None
+                        telemetry_from_stats(stats).emit(
+                            ResolveEvent(
+                                kind=ResolveEventKind.PRE_PLUGIN_DECISION,
+                                action="override",
                                 client_ip=client_ip,
                                 qname=qname,
-                                qtype=qtype_name,
-                                rcode=rcode_name,
-                                upstream_id=None,
-                                status="override_pre",
-                                error=None,
-                                first=str(first) if first is not None else None,
-                                result=result_ctx,
+                                qtype_label=_qtype_label_for_stats(qtype),
+                                t0=t0,
+                                request_result_meta=dict(request_result_meta),
+                                plugin_label=short,
+                                stat_label=str(stat_label) if stat_label else None,
+                                suppress_query_log=bool(
+                                    getattr(decision, "suppress_query_log", False)
+                                ),
+                                rcode_name=rcode_name,
+                                answers=answers,
+                                first=first,
+                                dnssec_status=dnssec_status_for_stats,
                             )
-                        else:
-                            _record_suppressed_query_log_drop_candidate(
-                                stats,
-                                rcode=rcode_name,
-                                status="override_pre",
-                            )
-                    except (
-                        Exception
-                    ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-                        pass
-                if stats is not None and t0 is not None:
-                    try:
-                        t1 = _time.perf_counter()
-                        stats.record_latency(t1 - t0)
+                        )
                     except (
                         Exception
                     ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
@@ -521,11 +422,28 @@ def _run_post_plugins(
         if isinstance(decision, PluginDecision):
             if decision.action == "drop":
                 if stats is not None:
-                    _record_suppressed_query_log_drop_candidate(
-                        stats,
-                        rcode="DROP",
-                        status="drop",
-                    )
+                    try:
+                        from foghorn.servers.resolve_telemetry import (
+                            ResolveEvent,
+                            ResolveEventKind,
+                            telemetry_from_stats,
+                        )
+
+                        telemetry_from_stats(stats).emit(
+                            ResolveEvent(
+                                kind=ResolveEventKind.POST_PLUGIN_DECISION,
+                                action="drop",
+                                client_ip=client_ip,
+                                qname=qname,
+                                upstream_id=upstream_id,
+                            )
+                        )
+                    except Exception:
+                        _record_suppressed_query_log_drop_candidate(
+                            stats,
+                            rcode="DROP",
+                            status="drop",
+                        )
                 # Post-plugin timeout/drop: do not send a response.
                 return b"", _ResolveCoreResult(
                     wire=b"",

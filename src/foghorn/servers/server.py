@@ -983,8 +983,23 @@ def _resolve_core(
         # Record query stats (mirrors DNSUDPHandler.handle)
         if stats is not None:
             try:
+                from foghorn.servers.resolve_telemetry import (
+                    ResolveEvent,
+                    ResolveEventKind,
+                    telemetry_from_stats,
+                )
+
                 qtype_name = _qtype_label_for_stats(qtype)
-                stats.record_query(client_ip, qname, qtype_name)
+                telemetry_from_stats(stats).emit(
+                    ResolveEvent(
+                        kind=ResolveEventKind.QUERY_RECEIVED,
+                        client_ip=client_ip,
+                        qname=qname,
+                        qtype_label=qtype_name,
+                        t0=t0,
+                        request_result_meta=dict(request_result_meta),
+                    )
+                )
             except (
                 Exception
             ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably

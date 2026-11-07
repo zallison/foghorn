@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import time
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import Any
@@ -136,28 +135,31 @@ def _finish_early_result(
 
     if stats is not None:
         try:
-            if record_rcode:
-                stats.record_response_rcode(rcode_name, qname)
-            if record_query_result:
-                stats.record_query_result(
+            from foghorn.servers.resolve_telemetry import (
+                ResolveEvent,
+                ResolveEventKind,
+                telemetry_from_stats,
+            )
+
+            telemetry_from_stats(stats).emit(
+                ResolveEvent(
+                    kind=ResolveEventKind.GATE_SHORT_CIRCUIT,
                     client_ip=client_ip,
                     qname=qname,
-                    qtype=qtype_name,
-                    rcode=rcode_name,
-                    upstream_id=upstream_id,
+                    qtype_label=qtype_name,
+                    t0=t0,
+                    rcode_name=rcode_name,
                     status=status,
                     error=error,
-                    first=None,
                     result=result,
+                    record_rcode=record_rcode,
+                    record_query_result=record_query_result,
+                    upstream_id=upstream_id,
+                    dnssec_status=dnssec_status,
                 )
+            )
         except Exception:
             pass
-        if t0 is not None:
-            try:
-                t1 = time.perf_counter()
-                stats.record_latency(t1 - t0)
-            except Exception:
-                pass
 
     return _ResolveCoreResult(
         wire=wire,

@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-import time as _time
 from typing import Any
 
-from dnslib import QTYPE, RCODE, DNSRecord
+from dnslib import RCODE, DNSRecord
 
 from foghorn.plugins.resolve import base as plugin_base
 
@@ -106,39 +105,35 @@ def _try_cache_hit(
 
     if cached is not None:
         # Record cache hit statistics
+        rcode_name = "UNKNOWN"
         if stats is not None:
             try:
-                stats.record_cache_hit(qname)
+                from foghorn.servers.resolve_telemetry import (
+                    ResolveEvent,
+                    ResolveEventKind,
+                    build_answers_from_parsed,
+                    telemetry_from_stats,
+                )
+
                 parsed_cached = DNSRecord.parse(cached)
                 rcode_name = RCODE.get(
                     parsed_cached.header.rcode,
                     str(parsed_cached.header.rcode),
                 )
-                stats.record_response_rcode(rcode_name, qname)
-
-                answers = [
-                    {
-                        "name": str(rr.rname),
-                        "type": QTYPE.get(rr.rtype, str(rr.rtype)),
-                        "ttl": int(getattr(rr, "ttl", 0)),
-                        "rdata": str(rr.rdata),
-                    }
-                    for rr in (parsed_cached.rr or [])
-                ]
-                first = answers[0]["rdata"] if answers else None
-                result_ctx = {"source": "cache", "answers": answers}
-                result_ctx.update(request_result_meta)
-                qtype_name = _qtype_label_for_stats(qtype)
-                stats.record_query_result(
-                    client_ip=client_ip,
-                    qname=qname,
-                    qtype=qtype_name,
-                    rcode=rcode_name,
-                    upstream_id=None,
-                    status="cache_hit",
-                    error=None,
-                    first=str(first) if first is not None else None,
-                    result=result_ctx,
+                answers, first = build_answers_from_parsed(parsed_cached)
+                telemetry_from_stats(stats).emit(
+                    ResolveEvent(
+                        kind=ResolveEventKind.CACHE_LOOKUP,
+                        cache_outcome="hit",
+                        client_ip=client_ip,
+                        qname=qname,
+                        qtype_label=_qtype_label_for_stats(qtype),
+                        t0=t0,
+                        request_result_meta=dict(request_result_meta),
+                        rcode_name=rcode_name,
+                        answers=answers,
+                        first=first,
+                    )
                 )
             except (
                 Exception
@@ -216,14 +211,7 @@ def _try_cache_hit(
             secret=getattr(handler, "cookies_secret", None),
         )
         wire = _set_response_id(cached, req.header.id)
-        if stats is not None and t0 is not None:
-            try:
-                t1 = _time.perf_counter()
-                stats.record_latency(t1 - t0)
-            except (
-                Exception
-            ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-                pass
+        # Latency is recorded by CACHE_LOOKUP hit event when stats is active.
         return _ResolveCoreResult(
             wire=wire,
             dnssec_status=None,
@@ -234,7 +222,21 @@ def _try_cache_hit(
     # Cache miss
     if stats is not None:
         try:
-            stats.record_cache_miss(qname)
+            from foghorn.servers.resolve_telemetry import (
+                ResolveEvent,
+                ResolveEventKind,
+                telemetry_from_stats,
+            )
+
+            telemetry_from_stats(stats).emit(
+                ResolveEvent(
+                    kind=ResolveEventKind.CACHE_LOOKUP,
+                    cache_outcome="miss",
+                    client_ip=client_ip,
+                    qname=qname,
+                    qtype_label=_qtype_label_for_stats(qtype),
+                )
+            )
         except (
             Exception
         ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably

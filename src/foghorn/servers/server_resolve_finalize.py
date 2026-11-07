@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import time as _time
 from typing import Any
 
 from dnslib import QTYPE, RCODE, DNSRecord
@@ -74,13 +73,7 @@ def _finalize_resolved_response(
         qtype=qtype,
         response_wire=out,
     )
-    if stats is not None and dnssec_status is not None:
-        try:
-            stats.record_dnssec_status(dnssec_status)
-        except (
-            Exception
-        ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-            pass
+    dnssec_recorded = dnssec_status
     # When DNSSEC validation classifies a response as bogus under
     # dnssec_mode='validate', attach an RFC 8914 EDE code 6 (DNSSEC Bogus)
     # so clients and metrics can distinguish these failures.
@@ -206,77 +199,37 @@ def _finalize_resolved_response(
     rcode_name = "UNKNOWN"
     if stats is not None:
         try:
+            from foghorn.servers.resolve_telemetry import (
+                ResolveEvent,
+                ResolveEventKind,
+                build_answers_from_parsed,
+                telemetry_from_stats,
+            )
+
             parsed = DNSRecord.parse(wire)
             rcode_name = RCODE.get(parsed.header.rcode, str(parsed.header.rcode))
-            # Mirror any attached EDE info-code into stats totals when
-            # available so that EDE volumes can be graphed alongside rcodes.
-            if ede_code_for_logs is not None and hasattr(
-                stats, "record_ede_code"
-            ):  # pragma: no cover - defensive/metrics path excluded from coverage
-                try:  # pragma: no cover - defensive/metrics path excluded from coverage
-                    stats.record_ede_code(ede_code_for_logs)
-                except Exception:  # pragma: no cover - defensive metrics hook
-                    pass
-            stats.record_response_rcode(rcode_name, qname)
-            if upstream_id:
-                try:
-                    stats.record_upstream_rcode(upstream_id, rcode_name)
-                except (
-                    Exception
-                ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-                    pass
-
-            answers = [
-                {
-                    "name": str(rr.rname),
-                    "type": QTYPE.get(rr.rtype, str(rr.rtype)),
-                    "ttl": int(getattr(rr, "ttl", 0)),
-                    "rdata": str(rr.rdata),
-                }
-                for rr in (parsed.rr or [])
-            ]
-            first = answers[0]["rdata"] if answers else None
-            result_ctx = {"source": "upstream", "answers": answers}
-            if upstream_id:
-                result_ctx["upstream"] = str(upstream_id)
-            if upstream_url:
-                result_ctx["upstream_url"] = str(upstream_url)
-            if dnssec_status is not None:
-                result_ctx["dnssec_status"] = dnssec_status
-            if (
-                ede_code_for_logs is not None
-            ):  # pragma: no cover - defensive/metrics path excluded from coverage
-                result_ctx["ede_code"] = int(
-                    ede_code_for_logs
-                )  # pragma: no cover - defensive/metrics path excluded from coverage
-                if (
-                    ede_text_for_logs is not None
-                ):  # pragma: no cover - defensive/metrics path excluded from coverage
-                    result_ctx["ede_text"] = str(ede_text_for_logs)
-            result_ctx.update(request_result_meta)
-            qtype_name = _qtype_label_for_stats(qtype)
+            answers, first = build_answers_from_parsed(parsed)
             status = "ok" if rcode_name == "NOERROR" else "error"
-            stats.record_query_result(
-                client_ip=client_ip,
-                qname=qname,
-                qtype=qtype_name,
-                rcode=rcode_name,
-                upstream_id=upstream_id,
-                status=status,
-                error=None,
-                first=str(first) if first is not None else None,
-                result=result_ctx,
+            telemetry_from_stats(stats).emit(
+                ResolveEvent(
+                    kind=ResolveEventKind.RESPONSE_FINALIZED,
+                    client_ip=client_ip,
+                    qname=qname,
+                    qtype_label=_qtype_label_for_stats(qtype),
+                    t0=t0,
+                    request_result_meta=dict(request_result_meta),
+                    rcode_name=rcode_name,
+                    status=status,
+                    upstream_id=upstream_id,
+                    upstream_url=upstream_url,
+                    dnssec_status=dnssec_status,
+                    dnssec_recorded=dnssec_recorded,
+                    ede_code=ede_code_for_logs,
+                    ede_text=ede_text_for_logs,
+                    answers=answers,
+                    first=first,
+                )
             )
-        except (
-            Exception
-        ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-            pass
-
-    # Latency tracking shared across alfoghorn.servers.transports
-    if stats is not None and t0 is not None:
-        try:
-            t1 = _time.perf_counter()
-            stats.record_latency(t1 - t0)
         except (
             Exception
         ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably

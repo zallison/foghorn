@@ -401,6 +401,7 @@ def _resolve_upstream(
             )
 
     # Record upstream result, even when all upstreams ultimately fail.
+    outcome = "success" if reason == "ok" else str(reason)
     if stats is not None and used_upstream:
         try:
             host = str(used_upstream.get("host", ""))
@@ -412,8 +413,25 @@ def _resolve_upstream(
                 upstream_id = url
             else:
                 upstream_id = f"{host}:{port}" if host or port else host or "unknown"
-            outcome = "success" if reason == "ok" else str(reason)
-            stats.record_upstream_result(upstream_id, outcome)
+            if reply is not None:
+                from foghorn.servers.resolve_telemetry import (
+                    ResolveEvent,
+                    ResolveEventKind,
+                    telemetry_from_stats,
+                )
+
+                telemetry_from_stats(stats).emit(
+                    ResolveEvent(
+                        kind=ResolveEventKind.UPSTREAM_ATTEMPT,
+                        upstream_id=upstream_id,
+                        upstream_outcome=outcome,
+                        upstream_url=upstream_url,
+                        total_failure=False,
+                        client_ip=client_ip,
+                        qname=qname,
+                        qtype_label=_qtype_label_for_stats(qtype),
+                    )
+                )
         except (
             Exception
         ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
@@ -436,23 +454,24 @@ def _resolve_upstream(
         wire = _set_response_id(r.pack(), req.header.id)
         if stats is not None:
             try:
-                # Record both rcode and EDE info-code for this synthetic
-                # SERVFAIL so that metrics and query_log consumers can
-                # distinguish upstream/network failures from other errors.
-                if hasattr(stats, "record_ede_code"):
-                    try:
-                        stats.record_ede_code(ede_code)
-                    except Exception:  # pragma: no cover - defensive metrics hook
-                        pass
-                stats.record_response_rcode("SERVFAIL", qname)
-                if upstream_id:
-                    try:
-                        stats.record_upstream_rcode(upstream_id, "SERVFAIL")
-                    except (
-                        Exception
-                    ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-                        pass
-                qtype_name = _qtype_label_for_stats(qtype)
+                from foghorn.servers.resolve_telemetry import (
+                    ResolveEvent,
+                    ResolveEventKind,
+                    telemetry_from_stats,
+                )
+
+                # Ensure upstream_id is set when used_upstream was present but
+                # the success-path emit was skipped due to reply is None.
+                if used_upstream and not upstream_id:
+                    host = str(used_upstream.get("host", ""))
+                    port = int(used_upstream.get("port", 0))
+                    url = str(upstream_url or "").strip()
+                    if url:
+                        upstream_id = url
+                    else:
+                        upstream_id = (
+                            f"{host}:{port}" if host or port else host or "unknown"
+                        )
                 status = str(reason or "all_failed")
                 result_ctx = {
                     "source": "upstream",
@@ -461,36 +480,30 @@ def _resolve_upstream(
                     "ede_code": int(ede_code),
                     "ede_text": str(ede_text),
                 }
-                if upstream_id:
-                    result_ctx["upstream"] = str(upstream_id)
-                if upstream_url:
-                    result_ctx["upstream_url"] = str(upstream_url)
-                result_ctx.update(request_result_meta)
-                stats.record_query_result(
-                    client_ip=client_ip,
-                    qname=qname,
-                    qtype=qtype_name,
-                    rcode="SERVFAIL",
-                    upstream_id=upstream_id,
-                    status=status,
-                    error="all_upstreams_failed",
-                    first=None,
-                    result=result_ctx,
+                telemetry_from_stats(stats).emit(
+                    ResolveEvent(
+                        kind=ResolveEventKind.UPSTREAM_ATTEMPT,
+                        upstream_id=upstream_id,
+                        upstream_outcome=str(outcome if used_upstream else status),
+                        upstream_url=upstream_url,
+                        total_failure=True,
+                        client_ip=client_ip,
+                        qname=qname,
+                        qtype_label=_qtype_label_for_stats(qtype),
+                        t0=t0,
+                        request_result_meta=dict(request_result_meta),
+                        rcode_name="SERVFAIL",
+                        status=status,
+                        error="all_upstreams_failed",
+                        ede_code=int(ede_code),
+                        ede_text=str(ede_text),
+                        result=result_ctx,
+                    )
                 )
             except (
                 Exception
             ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
                 pass
-            # Record latency for the all-upstreams-failed path as well so
-            # stats callers see a duration for every resolved query.
-            if t0 is not None:
-                try:
-                    t1 = _time.perf_counter()
-                    stats.record_latency(t1 - t0)
-                except (
-                    Exception
-                ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-                    pass
         early = _ResolveCoreResult(
             wire=wire,
             dnssec_status=None,
