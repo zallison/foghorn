@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import binascii
 import hmac
 import json
 import logging
@@ -48,7 +50,7 @@ def _json_safe(value: Any) -> Any:
     return str(value)
 
 
-def resolve_www_root(config: Dict[str, Any] | None = None) -> str:
+def resolve_www_root(config: dict[str, Any] | None = None) -> str:
     """Brief: Resolve absolute html root directory for static admin assets.
 
     Inputs:
@@ -102,7 +104,7 @@ _AUTO_TOKEN_ALPHABET = string.ascii_letters + string.digits
 
 
 def ensure_web_auth_token(
-    web_cfg: Dict[str, Any] | None,
+    web_cfg: dict[str, Any] | None,
     *,
     length: int = 32,
 ) -> str | None:
@@ -176,13 +178,50 @@ def _extract_provided_auth_token(
     return str(api_key_header).strip()
 
 
+def _decode_basic_credentials(
+    authorization_header: str | None,
+) -> tuple[str, str] | None:
+    """Brief: Decode an Authorization: Basic header into (username, password).
+
+    Inputs:
+      - authorization_header: Raw Authorization header value.
+
+    Outputs:
+      - Tuple of (username, password) when the header is a well-formed
+        ``Basic base64(user:pass)`` credential; None when the header is
+        absent, uses another scheme, or fails to decode.
+
+    Notes:
+      - Scheme matching is case-insensitive per RFC 7235.
+      - The decoded payload must contain at least one ':' (RFC 7617); a
+        password may itself contain further ':' characters.
+      - Decoding failures (bad base64, non-UTF-8) return None so callers can
+        fail closed with HTTP 401 instead of raising.
+    """
+
+    auth_value = str(authorization_header or "").strip()
+    if len(auth_value) < 7 or auth_value[:6].lower() != "basic ":
+        return None
+    token = auth_value[6:].strip()
+    if not token:
+        return None
+    try:
+        decoded = base64.b64decode(token, validate=True).decode("utf-8")
+    except (binascii.Error, ValueError, UnicodeDecodeError):
+        return None
+    username, sep, password = decoded.partition(":")
+    if not sep:
+        return None
+    return username, password
+
+
 def _evaluate_web_auth(
-    web_cfg: Dict[str, Any] | None,
+    web_cfg: dict[str, Any] | None,
     *,
     authorization_header: str | None,
     api_key_header: str | None,
     default_mode: str = "token",
-) -> tuple[bool, int | None, str | None, Dict[str, str] | None]:
+) -> tuple[bool, int | None, str | None, dict[str, str] | None]:
     """Brief: Evaluate configured web auth for a single request.
 
     Inputs:
@@ -201,6 +240,8 @@ def _evaluate_web_auth(
     Behaviour:
       - ``mode=none`` allows all requests.
       - ``mode=token`` (default) enforces a static bearer/API key token.
+      - ``mode=basic`` enforces HTTP Basic credentials
+        (``Authorization: Basic base64(user:pass)``).
       - Unknown auth modes fail closed.
     """
 
@@ -208,8 +249,35 @@ def _evaluate_web_auth(
     mode = str(auth_cfg.get("mode", default_mode)).strip().lower()
     if mode in {"", "none"}:
         return True, None, None, None
-    if mode != "token":
+    if mode not in {"token", "basic"}:
         return False, 500, f"unsupported webserver.auth.mode: {mode}", None
+
+    if mode == "basic":
+        username = str(auth_cfg.get("username") or "")
+        password = str(auth_cfg.get("password") or "")
+        if not username.strip() or not password:
+            return (
+                False,
+                500,
+                "webserver.auth.username and webserver.auth.password must be set when auth.mode=basic",
+                None,
+            )
+
+        provided = _decode_basic_credentials(authorization_header)
+        if provided is None or not (
+            hmac.compare_digest(provided[0].encode("utf-8"), username.encode("utf-8"))
+            and hmac.compare_digest(
+                provided[1].encode("utf-8"), password.encode("utf-8")
+            )
+        ):
+            return (
+                False,
+                401,
+                "unauthorized",
+                {"WWW-Authenticate": 'Basic realm="foghorn"'},
+            )
+
+        return True, None, None, None
 
     token = auth_cfg.get("token")
     if not token:
@@ -226,7 +294,7 @@ def _evaluate_web_auth(
     return True, None, None, None
 
 
-def _build_auth_dependency(web_cfg: Dict[str, Any], *, default_mode: str = "token"):
+def _build_auth_dependency(web_cfg: dict[str, Any], *, default_mode: str = "token"):
     """Build a FastAPI dependency enforcing optional admin auth.
 
     Inputs:
@@ -239,7 +307,8 @@ def _build_auth_dependency(web_cfg: Dict[str, Any], *, default_mode: str = "toke
     Modes:
       - token (default): require Authorization: Bearer <token> or X-API-Key header.
       - none: no authentication.
-      - basic: require HTTP Basic credentials (not implemented yet; reserved).
+      - basic: require HTTP Basic credentials (Authorization: Basic base64(user:pass))
+        matching server.http.auth.username/password.
     """
 
     async def _auth(request: Request) -> None:
@@ -250,7 +319,7 @@ def _build_auth_dependency(web_cfg: Dict[str, Any], *, default_mode: str = "toke
             default_mode=str(default_mode or "token"),
         )
         if authorized:
-            return None
+            return
         raise HTTPException(
             status_code=int(status_code or status.HTTP_401_UNAUTHORIZED),
             detail=str(detail or "unauthorized"),

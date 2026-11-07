@@ -451,8 +451,12 @@ def start_webserver(
     auth_mode = str(auth_cfg.get("mode", "token")).strip().lower()
     auth_token = auth_cfg.get("token")
     api_enabled = bool(web_cfg.get("enable_api", False))
-    api_auth_missing = auth_mode in {"", "none"} or (
-        auth_mode == "token" and not str(auth_token or "").strip()
+    basic_username = str(auth_cfg.get("username") or "").strip()
+    basic_password = str(auth_cfg.get("password") or "")
+    api_auth_missing = (
+        auth_mode in {"", "none"}
+        or (auth_mode == "token" and not str(auth_token or "").strip())
+        or (auth_mode == "basic" and (not basic_username or not basic_password))
     )
     bind_is_loopback = _is_loopback_bind_host(host)
     schema_enabled = bool(web_cfg.get("enable_schema", False))
@@ -473,7 +477,8 @@ def start_webserver(
     if api_enabled and api_auth_missing:
         logger.warning(
             "Foghorn API is enabled but authentication is not configured; "
-            "set server.http.auth.mode=token and server.http.auth.token to protect admin endpoints"
+            "set server.http.auth (mode=token with a token, or mode=basic with "
+            "username/password) to protect admin endpoints"
         )
     # Fail closed: non-loopback admin API without effective auth is refused even
     # when TLS (including self-signed) is enabled. TLS is not authentication.
@@ -481,7 +486,8 @@ def start_webserver(
         logger.error(
             "Refusing to start admin webserver on non-loopback host %s: "
             "enable_api=true requires authentication "
-            "(server.http.auth.mode=token with a configured token). "
+            "(server.http.auth.mode=token with a configured token, or "
+            "mode=basic with username/password). "
             "TLS alone is not sufficient.",
             host,
         )

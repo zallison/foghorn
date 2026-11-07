@@ -267,10 +267,22 @@ class ServerDnssecConfig(OpenModel):
 
 
 class HttpAuthConfig(StrictModel):
-    """Brief: server.http.auth configuration."""
+    """Brief: server.http.auth configuration.
 
-    mode: Literal["none", "token"] = Field(default="token")
+    Inputs:
+      - mode: Auth mode (default "token"): none | token | basic.
+      - token: Static bearer/API key token for mode=token.
+      - username: HTTP Basic auth user name for mode=basic.
+      - password: HTTP Basic auth password for mode=basic.
+
+    Outputs:
+      - HttpAuthConfig instance used by the config schema and runtime checks.
+    """
+
+    mode: Literal["none", "token", "basic"] = Field(default="token")
     token: str | None = None
+    username: str | None = None
+    password: str | None = None
 
 
 class ServerHttpConfig(OpenModel):

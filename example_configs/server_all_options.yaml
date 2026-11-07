@@ -229,11 +229,17 @@ server:
       allowlist: []
 
     auth:
-      # none | token
+      # none | token | basic
       mode: none
       # When mode=token and token is null/blank, Foghorn generates a random
       # 32-character token at startup and logs it as a WARNING.
       token: null
+      # Used only when mode=basic: clients must send
+      # "Authorization: Basic base64(username:password)". Both values are
+      # required; if either is missing, requests fail closed (HTTP 500) and
+      # non-loopback binds with enable_api=true are refused at startup.
+      username: null
+      password: null
 
     # Keys that will be redacted in /config and /config.json outputs.
     redact_keys:

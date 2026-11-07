@@ -506,7 +506,7 @@
     },
     "HttpAuthConfig": {
       "additionalProperties": false,
-      "description": "Brief: server.http.auth configuration.",
+      "description": "Brief: server.http.auth configuration.\n\nInputs:\n  - mode: Auth mode (default \"token\"): none | token | basic.\n  - token: Static bearer/API key token for mode=token.\n  - username: HTTP Basic auth user name for mode=basic.\n  - password: HTTP Basic auth password for mode=basic.\n\nOutputs:\n  - HttpAuthConfig instance used by the config schema and runtime checks.",
       "properties": {
         "comment": {
           "anyOf": [
@@ -542,13 +542,29 @@
         },
         "mode": {
           "default": "token",
-          "description": "Type: string. Valid values: \"none\", \"token\". Default: \"token\".",
+          "description": "Type: string. Valid values: \"none\", \"token\", \"basic\". Default: \"token\".",
           "enum": [
             "none",
-            "token"
+            "token",
+            "basic"
           ],
           "title": "Mode",
           "type": "string"
+        },
+        "password": {
+          "anyOf": [
+            {
+              "description": "Type: string.",
+              "type": "string"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Types: string, null.",
+          "title": "Password"
         },
         "token": {
           "anyOf": [
@@ -564,6 +580,21 @@
           "default": null,
           "description": "Types: string, null.",
           "title": "Token"
+        },
+        "username": {
+          "anyOf": [
+            {
+              "description": "Type: string.",
+              "type": "string"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Types: string, null.",
+          "title": "Username"
         }
       },
       "title": "HttpAuthConfig",
@@ -13645,7 +13676,7 @@
             "auth": {
               "additionalProperties": false,
               "default": null,
-              "description": "Brief: server.http.auth configuration.",
+              "description": "Brief: server.http.auth configuration.\n\nInputs:\n  - mode: Auth mode (default \"token\"): none | token | basic.\n  - token: Static bearer/API key token for mode=token.\n  - username: HTTP Basic auth user name for mode=basic.\n  - password: HTTP Basic auth password for mode=basic.\n\nOutputs:\n  - HttpAuthConfig instance used by the config schema and runtime checks.",
               "properties": {
                 "comment": {
                   "anyOf": [
@@ -13681,13 +13712,29 @@
                 },
                 "mode": {
                   "default": "token",
-                  "description": "Type: string. Valid values: \"none\", \"token\". Default: \"token\".",
+                  "description": "Type: string. Valid values: \"none\", \"token\", \"basic\". Default: \"token\".",
                   "enum": [
                     "none",
-                    "token"
+                    "token",
+                    "basic"
                   ],
                   "title": "Mode",
                   "type": "string"
+                },
+                "password": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Types: string, null.",
+                  "title": "Password"
                 },
                 "token": {
                   "anyOf": [
@@ -13703,6 +13750,21 @@
                   "default": null,
                   "description": "Types: string, null.",
                   "title": "Token"
+                },
+                "username": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Types: string, null.",
+                  "title": "Username"
                 }
               },
               "type": [

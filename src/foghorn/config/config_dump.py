@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import copy
 import json
-from typing import Any, Dict
+from typing import Any
 
 import yaml
 
@@ -36,7 +36,7 @@ from foghorn.config.config_parser import (
 from foghorn.servers.overload_response import normalize_overload_response
 
 
-def build_effective_config_for_display(cfg: Dict[str, Any]) -> Dict[str, Any]:
+def build_effective_config_for_display(cfg: dict[str, Any]) -> dict[str, Any]:
     """Brief: Build a display-friendly config with runtime defaults made explicit.
 
     Inputs:
@@ -58,7 +58,7 @@ def build_effective_config_for_display(cfg: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(cfg, dict):
         return {}
 
-    out: Dict[str, Any] = copy.deepcopy(cfg)
+    out: dict[str, Any] = copy.deepcopy(cfg)
 
     server_cfg = out.get("server")
     if not isinstance(server_cfg, dict):
@@ -82,7 +82,7 @@ def build_effective_config_for_display(cfg: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
-def dump_config_text(cfg: Dict[str, Any], *, fmt: str = "yaml") -> str:
+def dump_config_text(cfg: dict[str, Any], *, fmt: str = "yaml") -> str:
     """Brief: Serialize a config mapping to YAML or JSON.
 
     Inputs:
@@ -101,7 +101,7 @@ def dump_config_text(cfg: Dict[str, Any], *, fmt: str = "yaml") -> str:
     return yaml.safe_dump(cfg, sort_keys=False)  # type: ignore[arg-type]
 
 
-def _expand_server_listen_defaults(server_cfg: Dict[str, Any]) -> None:
+def _expand_server_listen_defaults(server_cfg: dict[str, Any]) -> None:
     """Brief: Fill in server.listen defaults (udp/tcp/dot/doh).
 
     Inputs:
@@ -154,7 +154,7 @@ def _expand_server_listen_defaults(server_cfg: Dict[str, Any]) -> None:
         dot_overload_default = "drop"
         doh_overload_default = "drop"
 
-    def _sub(key: str, defaults: Dict[str, Any]) -> Dict[str, Any]:
+    def _sub(key: str, defaults: dict[str, Any]) -> dict[str, Any]:
         block = listen_cfg.get(key, {}) or {}
         if not isinstance(block, dict):
             return dict(defaults)
@@ -178,7 +178,7 @@ def _expand_server_listen_defaults(server_cfg: Dict[str, Any]) -> None:
     doh_section = listen_cfg.get("doh")
     doh_default_enabled = True if isinstance(doh_section, dict) else False
 
-    udp_defaults: Dict[str, Any] = {
+    udp_defaults: dict[str, Any] = {
         "enabled": udp_default_enabled,
         "host": default_host,
         "port": default_port or 5335,
@@ -198,7 +198,7 @@ def _expand_server_listen_defaults(server_cfg: Dict[str, Any]) -> None:
         default=udp_overload_default,
     )
 
-    tcp_defaults: Dict[str, Any] = {
+    tcp_defaults: dict[str, Any] = {
         "enabled": tcp_default_enabled,
         "host": default_host,
         "port": default_port or 5335,
@@ -214,7 +214,7 @@ def _expand_server_listen_defaults(server_cfg: Dict[str, Any]) -> None:
         default=tcp_overload_default,
     )
 
-    dot_defaults: Dict[str, Any] = {
+    dot_defaults: dict[str, Any] = {
         "enabled": dot_default_enabled,
         "host": default_host,
         "port": 853,
@@ -233,7 +233,7 @@ def _expand_server_listen_defaults(server_cfg: Dict[str, Any]) -> None:
         default=dot_overload_default,
     )
 
-    doh_defaults: Dict[str, Any] = {
+    doh_defaults: dict[str, Any] = {
         "enabled": doh_default_enabled,
         "host": default_host,
         "port": 1443,
@@ -249,7 +249,7 @@ def _expand_server_listen_defaults(server_cfg: Dict[str, Any]) -> None:
     )
 
 
-def _expand_server_resolver_defaults(server_cfg: Dict[str, Any]) -> None:
+def _expand_server_resolver_defaults(server_cfg: dict[str, Any]) -> None:
     """Brief: Fill in server.resolver defaults used by foghorn.main.
 
     Inputs:
@@ -296,7 +296,7 @@ def _expand_server_resolver_defaults(server_cfg: Dict[str, Any]) -> None:
     resolver_cfg["use_asyncio"] = bool(resolver_cfg.get("use_asyncio", True))
 
 
-def _expand_server_dnssec_defaults(server_cfg: Dict[str, Any]) -> None:
+def _expand_server_dnssec_defaults(server_cfg: dict[str, Any]) -> None:
     """Brief: Fill in server.dnssec defaults.
 
     Inputs:
@@ -327,7 +327,7 @@ def _expand_server_dnssec_defaults(server_cfg: Dict[str, Any]) -> None:
     dnssec_cfg["udp_payload_size"] = payload
 
 
-def _expand_server_limits_defaults(server_cfg: Dict[str, Any]) -> None:
+def _expand_server_limits_defaults(server_cfg: dict[str, Any]) -> None:
     """Brief: Fill in server.limits defaults.
 
     Inputs:
@@ -348,7 +348,7 @@ def _expand_server_limits_defaults(server_cfg: Dict[str, Any]) -> None:
     limits_cfg.setdefault("allow_unsafe_threaded_listeners", False)
 
 
-def _expand_server_http_defaults(server_cfg: Dict[str, Any]) -> None:
+def _expand_server_http_defaults(server_cfg: dict[str, Any]) -> None:
     """Brief: Fill in server.http defaults.
 
     Inputs:
@@ -420,11 +420,13 @@ def _expand_server_http_defaults(server_cfg: Dict[str, Any]) -> None:
         http_cfg["auth"] = auth_cfg
     auth_cfg.setdefault("mode", "none")
     auth_cfg.setdefault("token", None)
+    auth_cfg.setdefault("username", None)
+    auth_cfg.setdefault("password", None)
 
     http_cfg.setdefault("redact_keys", ["token", "password", "secret"])
 
 
-def _expand_server_feature_flags(server_cfg: Dict[str, Any]) -> None:
+def _expand_server_feature_flags(server_cfg: dict[str, Any]) -> None:
     """Brief: Fill in selected server feature-gate defaults.
 
     Inputs:
@@ -618,7 +620,7 @@ def _expand_server_feature_flags(server_cfg: Dict[str, Any]) -> None:
     axfr_cfg["tsig_keys"] = legacy_tsig_keys if legacy_tsig_keys else tsig_keys
 
 
-def _expand_upstreams_defaults(out: Dict[str, Any]) -> None:
+def _expand_upstreams_defaults(out: dict[str, Any]) -> None:
     """Brief: Normalize upstream endpoints and fill in upstream strategy defaults.
 
     Inputs:
@@ -670,8 +672,7 @@ def _expand_upstreams_defaults(out: Dict[str, Any]) -> None:
         max_conc = int(upstream_cfg.get("max_concurrent", 1) or 1)
     except Exception:
         max_conc = 1
-    if max_conc < 1:
-        max_conc = 1
+    max_conc = max(max_conc, 1)
     upstream_cfg["max_concurrent"] = max_conc
 
     # Best-effort endpoint normalization; forward mode only.
@@ -707,7 +708,7 @@ def _expand_upstreams_defaults(out: Dict[str, Any]) -> None:
             return
 
 
-def _expand_logging_defaults(out: Dict[str, Any]) -> None:
+def _expand_logging_defaults(out: dict[str, Any]) -> None:
     """Brief: Fill in logging defaults for the new logging.python layout.
 
     Inputs:
