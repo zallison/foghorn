@@ -70,7 +70,7 @@ def _send_factory(outcomes):
     """
     attempts = {"count": 0}
 
-    def _fake_send(self, host, port, timeout=None):  # noqa: ARG001
+    def _fake_send(self, host, port, timeout=None):
         if attempts["count"] >= len(outcomes):
             raise RuntimeError("no more outcomes")
         item = outcomes[attempts["count"]]
@@ -302,6 +302,157 @@ def test_match_exact_domain_vs_suffix_priority():
         {"host": "5.5.5.5", "port": 53}
     ]
     assert plugin._match_upstream_candidates("nope.test") is None
+
+
+def test_match_preserves_config_order_not_longest_suffix():
+    """
+    Brief: First-match-wins (config order) is preserved by the indexed lookup.
+
+    Inputs:
+      - routes: suffix 'example' (broad, first); suffix 'sub.example' (narrower, second)
+
+    Outputs:
+      - None: asserts 'a.sub.example' resolves to the FIRST route's upstreams
+    """
+    plugin = UpstreamRouter(
+        routes=[
+            {"suffix": "example", "upstreams": [{"host": "1.1.1.1", "port": 53}]},
+            {
+                "suffix": "sub.example",
+                "upstreams": [{"host": "2.2.2.2", "port": 53}],
+            },
+        ]
+    )
+
+    assert plugin._match_upstream_candidates("a.sub.example") == [
+        {"host": "1.1.1.1", "port": 53}
+    ]
+    assert plugin._match_upstream_candidates("b.example") == [
+        {"host": "1.1.1.1", "port": 53}
+    ]
+
+
+def test_match_broad_suffix_before_exact_domain_keeps_order():
+    """
+    Brief: An earlier broad suffix still shadows a later exact domain (legacy order).
+
+    Inputs:
+      - routes: suffix 'com' first; domain 'example.com' second
+
+    Outputs:
+      - None: asserts 'example.com' resolves to the suffix route's upstreams
+    """
+    plugin = UpstreamRouter(
+        routes=[
+            {"suffix": "com", "upstreams": [{"host": "3.3.3.3", "port": 53}]},
+            {
+                "domain": "example.com",
+                "upstreams": [{"host": "4.4.4.4", "port": 53}],
+            },
+        ]
+    )
+
+    assert plugin._match_upstream_candidates("example.com") == [
+        {"host": "3.3.3.3", "port": 53}
+    ]
+
+
+def test_match_query_equal_to_suffix():
+    """
+    Brief: A query equal to a suffix (no dot) matches the suffix route.
+
+    Inputs:
+      - routes: suffix 'corp'
+
+    Outputs:
+      - None: asserts 'corp' matches and 'notcorp' does not
+    """
+    plugin = UpstreamRouter(
+        routes=[{"suffix": "corp", "upstreams": [{"host": "5.5.5.5", "port": 53}]}]
+    )
+
+    assert plugin._match_upstream_candidates("corp") == [
+        {"host": "5.5.5.5", "port": 53}
+    ]
+    assert plugin._match_upstream_candidates("notcorp") is None
+
+
+def test_match_route_with_domain_and_suffix():
+    """
+    Brief: A single route defining both domain and suffix matches on either key.
+
+    Inputs:
+      - routes: one route with domain 'a.example' and suffix 'example'
+
+    Outputs:
+      - None: asserts exact and subdomain queries both hit the same route
+    """
+    plugin = UpstreamRouter(
+        routes=[
+            {
+                "domain": "a.example",
+                "suffix": "example",
+                "upstreams": [{"host": "6.6.6.6", "port": 53}],
+            }
+        ]
+    )
+
+    expected = [{"host": "6.6.6.6", "port": 53}]
+    assert plugin._match_upstream_candidates("a.example") == expected
+    assert plugin._match_upstream_candidates("z.example") == expected
+
+
+def test_match_empty_routes_returns_none():
+    """
+    Brief: No routes means no match (empty index edge case).
+
+    Inputs:
+      - routes: []
+
+    Outputs:
+      - None: asserts None for matching and empty query names
+    """
+    plugin = UpstreamRouter(routes=[])
+
+    assert plugin._match_upstream_candidates("example.com") is None
+    assert plugin._match_upstream_candidates("") is None
+
+
+def test_match_many_routes_indexed_lookup():
+    """
+    Brief: Large route sets resolve correctly through the indexed lookup.
+
+    Inputs:
+      - routes: 3000 suffix routes plus one exact domain route at a later position
+
+    Outputs:
+      - None: asserts correct candidates for matching and non-matching names
+    """
+    routes = [
+        {
+            "suffix": f"zone{i}.internal",
+            "upstreams": [{"host": f"10.0.{i // 256}.{i % 256}", "port": 53}],
+        }
+        for i in range(3000)
+    ]
+    routes.append(
+        {
+            "domain": "special.internal",
+            "upstreams": [{"host": "192.168.0.1", "port": 53}],
+        }
+    )
+    plugin = UpstreamRouter(routes=routes)
+
+    # Exact domain route (last in order) wins for its own name because no
+    # earlier suffix matches 'special.internal'.
+    assert plugin._match_upstream_candidates("special.internal") == [
+        {"host": "192.168.0.1", "port": 53}
+    ]
+    # A subdomain of a mid-list suffix route resolves to that route's upstreams.
+    expected_mid = plugin.routes[1234]["upstream_candidates"]
+    assert plugin._match_upstream_candidates("host.zone1234.internal") == expected_mid
+    # Unrelated names do not match.
+    assert plugin._match_upstream_candidates("nope.example") is None
 
 
 # ------------------------
