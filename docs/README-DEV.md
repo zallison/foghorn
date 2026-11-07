@@ -64,10 +64,13 @@ Important directories and modules:
   - `sqlite.py`, `mysql_mariadb.py`, `postgresql.py`, `mongodb.py`, `influxdb.py`, `mqtt_logging.py`: built‑in stats/query-log backends.
 - `src/foghorn/utils/register_caches.py`
   - Registers decorated helper functions (`registered_cached`, `registered_lru_cache`, `registered_foghorn_ttl`, `registered_sqlite_ttl`) and applies config‑driven overrides (`apply_decorated_cache_overrides`).
-- `src/foghorn/stats.py`
+- `src/foghorn/stats/`
   - Higher-level statistics collector and reporter built on top of `BaseStatsStore`.
+  - `observer.py`: `StatsCollectorObserver` maps resolve lifecycle events to `record_*` calls.
 - `src/foghorn/servers/`
   - `server.py`: core resolver loop, UDP handler glue and adapter for plugins.
+  - `resolve_telemetry.py`: resolve-pipeline event bus (`ResolveEvent` / `ResolveTelemetry`).
+  - `server_resolve_*.py`: staged resolve pipeline (gates, plugins, cache, upstream, finalize).
   - `udp_server.py`, `doh_api.py`, and related transport implementations.
   - `webserver.py`: admin HTTP API and UI, plus `RuntimeState` and log buffer.
 
@@ -202,6 +205,12 @@ Built‑in backends include aliases such as:
 - `mongo`, `mongodb`
 - `influx`, `influxdb` (logging‑only)
 - `mqtt`, `broker` (logging‑only)
+
+#### Resolve telemetry observers
+
+The shared resolve pipeline (`servers/server_resolve_*.py`) does **not** embed multi-step stats policy inline. Stages emit structured `ResolveEvent` values via `ResolveTelemetry` (`servers/resolve_telemetry.py`). When a `StatsCollector` is present, `telemetry_from_stats()` attaches a single default `StatsCollectorObserver` (`stats/observer.py`) that owns the mapping onto existing `record_*` APIs (counters, query_log rows, latency).
+
+This is intentionally separate from resolve plugins (`pre_resolve` / `post_resolve`): plugins return `PluginDecision` facts; observers interpret them for metrics. Query-log/stats **backends** under `plugins/querylog` remain the persistence layer and are orthogonal to the observer bus.
 
 ---
 

@@ -7,15 +7,20 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 - Admin UI browser API auth: stores `server.http.auth.token` in `localStorage` (`foghorn-api-token`), sends `Authorization: Bearer ...` via shared `apiFetch`, prompts once on HTTP 401, and exposes an **API Token** header control; diagram PNGs load through authenticated blob URLs.
+- `server.http.auth.mode=basic` with `username`/`password` (Basic Authorization); missing configured credentials fail closed.
 - `server.listen.dot` TLS auto-generation knobs (`generate`, `keys_dir`, `tls_days`), matching `server.http` semantics so DoT can create a self-signed cert/key pair when material is missing.
 - TLS path resolver that places relative `cert_file`/`key_file` under the config directory (and treats a leading `config/` segment as already-inside-config-dir).
+- `runtime_config.get_config_path` / `set_config_path` so plugins can resolve relative paths during setup before full runtime init.
+- Resolve telemetry bus (`servers/resolve_telemetry.py`: `ResolveEvent` / `ResolveTelemetry`) and `stats/observer.py` (`StatsCollectorObserver`) mapping pipeline events onto existing `record_*` / query-log APIs.
 - ZoneRecords shared commit pipeline (`zone_records/commit.py`) for normalized record actions used by DNS UPDATE and admin apply/delete (journal, SOA bump, NOTIFY, conflict checks).
 - ZoneRecords admin apply/delete mutations now return `zone_apex` / `serial_before` / `serial_after` metadata and optionally journal when `dns_update.persistence` is enabled.
 - DockerHosts sticky condition-state logging helpers (`_note_condition_failure` / `_note_condition_ok`) with first-failure WARNING, quiet repeats, hourly reminder, and recovery INFO.
+- DockerHosts INFO log when an endpoint Docker client connects successfully.
 - `filter` plugin time-of-day / day-of-week rules: `time_rules` (+ optional IANA `timezone`) deny or drop configured domains while the current time matches an `"HH:MM"` window and optional `days` filter (`mon`..`sun`, ISO 1-7, or `weekdays`/`weekend`/`daily`; empty = every day). Window start is inclusive and end exclusive; midnight wraparound is owned by the start day; equal start/end or omitted windows = full day. Rule decisions are evaluated before the decision cache and take precedence over allow/deny lists.
 
 ### Changed
-- Shared DNS resolve pipeline (`_resolve_core`) is split into staged modules under `src/foghorn/servers/server_resolve_*.py` (context/gates/enrich/plugins/cache/upstream/finalize) while `server.py` remains the orchestrator and compatibility re-export surface.
+- Shared DNS resolve pipeline (`_resolve_core`) is split into staged modules under `src/foghorn/servers/server_resolve_*.py` (context/gates/enrich/plugins/cache/upstream/finalize) while `server.py` remains the orchestrator and compatibility re-export surface; stages emit resolve telemetry events for observers.
+- `main.py` startup config parsing and listener lifecycle helpers live in `main_config_helpers.py` and `main_lifecycle_helpers.py`.
 - Query-log backend interface now types `select_query_log` / `aggregate_query_log_counts` results with `QueryLogSelectResult` and `QueryLogAggregateResult` TypedDicts.
 - ZoneRecords default `load_mode` is now `replace` (was `merge`), so file/zone reloads rebuild the in-memory mapping from configured sources instead of accumulating old RRset values. Set `load_mode: merge` to keep the previous overlay behaviour.
 - Filter now loads allow domain lists after block lists (files then inline), so allow entries act as exceptions when the same domain appears in both; either file group change reloads both groups in that order.
@@ -23,6 +28,7 @@ All notable changes to this project will be documented in this file.
 - Upstream failover logs at most one WARNING per upstream set while all endpoints remain failed; the warning re-arms after a successful query (recovery).
 - Makefile `docker-run` / `docker-run-not-host` derive UDP/TCP publish ports from `LISTEN_PORT` and tolerate a missing container on recreate.
 - DockerHosts endpoint/list/empty-map failures use sticky condition logging instead of simple interval rate-limits; recovery is logged once when the endpoint or mapping becomes healthy again.
+- DockerHosts `tls_cert`/`tls_key`/`tls_ca` paths resolve relative to the config directory (same helper as DoT/HTTP), reject missing or empty PEMs, require cert+key together, and use an OpenSSL-3-friendly TLS adapter with a pinned Docker API version.
 - `axfr_zones[].allow_no_dnssec: false` now **rejects** transfers classified as `dnssec_state=none|partial` (apex DNSKEY/RRSIG material check) instead of only warning and loading anyway.
 - DNS UPDATE auth is explicitly **TSIG-only**: `dns_update.zones[].psk` is unsupported and fails closed at Pydantic validation, plugin setup, and `process_update_message`.
 - SOA serial bumps in the shared commit path also refresh `_name_index` and `_zone_soa` so resolver/transfer views stay consistent.
@@ -34,6 +40,7 @@ All notable changes to this project will be documented in this file.
 - Config schema (Pydantic), config dump (secret redaction), runtime feature flags, `RuntimeSnapshot`, `main` startup, and handler mapping now carry `server.features.tsig` settings.
 - Core configuration JSON Schema is generated from Pydantic models under `src/foghorn/config/models/` (`FoghornConfig` and section models) instead of circularly rewriting `assets/config-schema.json`.
 - `scripts/generate_foghorn_schema.py` is a thin emitter (model dump, plugin `$defs` catalog, light post-processing) and restores heuristic `description` enrichment for editor tooling.
+- UpstreamRouter route matching now uses precomputed exact/suffix name indexes built at init (O(label depth) per query) instead of a linear scan over all routes; first-match-wins config ordering is preserved.
 
 ### Added
 - Added downstream QUERY TSIG (RFC 2845) under `server.features.tsig` (`enabled` default false, `mode` optional|require, `keys`/`key_sources`, `max_fudge_seconds`, optional `allow_clients`/`listeners`).
@@ -44,6 +51,8 @@ All notable changes to this project will be documented in this file.
 - `tests/config/test_foghorn_config_models.py` for FoghornConfig and nested model defaults.
 
 ### Documentation
+- Documented resolve telemetry observers and staged pipeline modules in `docs/README-DEV.md`.
+- Documented UpstreamRouter precomputed exact/suffix route indexes in `docs/plugins/resolve/upstream_router.md`.
 - Documented ZoneRecords default `load_mode: replace` in README, `docs/plugins/resolve/zone_records.md`, and zone example configs.
 - Documented Filter time-of-day / day-of-week options (`timezone`, `time_rules` with `days`/`windows`) including overnight start-day ownership and precedence in `docs/plugins/resolve/filter.md`.
 - Documented browser admin UI token storage/`apiFetch` behavior under Authentication in `docs/API.md`.
@@ -56,6 +65,8 @@ All notable changes to this project will be documented in this file.
 - `docs/README-DEV.md` and `CONTRIBUTING.md` describe the Pydantic-driven schema workflow and `make schema` regenerate step.
 
 ### Tests
+- Added `tests/stats/test_resolve_telemetry_observer.py` for StatsCollectorObserver event mapping (deny/fanout, cache, upstream, DNSSEC, error isolation).
+- Expanded UpstreamRouter tests for indexed first-match-wins exact/suffix routing.
 - Added `tests/plugins/contract_tests.py` helpers for resolve-plugin and stats-store interface contracts (hooks, priorities, return types).
 - Updated main DoT startup tests to mock `ensure_admin_tls_files` where needed and to assert the shared missing cert/key operator message.
 - Added ZoneRecords coverage that default `load_mode=replace` drops removed owners and replaces changed RRset values on reload.
