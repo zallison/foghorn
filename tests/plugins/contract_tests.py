@@ -1,9 +1,46 @@
+"""Reusable contract checks for BasePlugin and BaseStatsStore implementations.
+
+This module is a helper, not a pytest test suite: the filename intentionally
+does not match ``test_*.py`` so nothing here is collected on its own. Authors
+pin their plugin to the base-class contracts by instantiating the contract
+classes from their own test modules::
+
+    from contract_tests import ResolvePluginContract, run_contract_checks
+
+    def test_my_plugin_contracts() -> None:
+        plugin = MyPlugin(...)  # plus setup() when the plugin defines one
+        run_contract_checks(ResolvePluginContract(plugin))
+
+Notes:
+  - The hook-based checks (pre_resolve/post_resolve return types) assume the
+    plugin is fully initialized; call setup() first when the plugin defines
+    one.
+  - The query-log result-shape checks derive their expected keys from the
+    TypedDict definitions in foghorn.plugins.querylog.base, so renaming a
+    key there breaks the contract check instead of drifting silently.
+"""
+
 from foghorn.plugins.querylog.base import (
     BaseStatsStore,
     QueryLogAggregateResult,
     QueryLogSelectResult,
 )
 from foghorn.plugins.resolve.base import BasePlugin, PluginContext, PluginDecision
+
+
+def run_contract_checks(contract: object) -> None:
+    """Run every ``test_*`` method on a contract instance.
+
+    Inputs:
+      - contract: A ResolvePluginContract or StatsStoreContract instance bound
+        to a concrete implementation.
+
+    Outputs:
+      - None; propagates the AssertionError from the first failing check.
+    """
+    for name in sorted(dir(contract)):
+        if name.startswith("test_"):
+            getattr(contract, name)()
 
 
 class ResolvePluginContract:
@@ -87,25 +124,44 @@ class StatsStoreContract:
         assert hasattr(self.store, "aggregate_query_log_counts")
 
     def test_select_query_log_return_type(self):
-        """Ensure select_query_log returns QueryLogSelectResult."""
-        # We don't care about the value, just the type
+        """Ensure select_query_log returns a QueryLogSelectResult-shaped dict.
+
+        Notes:
+          - TypedDict classes do not support isinstance() checks at runtime,
+            so the shape is verified against the keys declared on
+            QueryLogSelectResult instead.
+        """
         result = self.store.select_query_log(
             qname="example.com",
             page=1,
             page_size=100,
-            filters={},
-            sort_by="timestamp",
-            sort_order="desc",
         )
-        assert isinstance(result, QueryLogSelectResult)
+        assert isinstance(
+            result, dict
+        ), f"select_query_log must return a mapping, got {type(result)}"
+        expected_keys = set(QueryLogSelectResult.__annotations__)
+        missing = expected_keys - set(result)
+        assert not missing, f"select_query_log result missing keys: {sorted(missing)}"
 
     def test_aggregate_query_log_counts_return_type(self):
-        """Ensure aggregate_query_log_counts returns QueryLogAggregateResult."""
-        # We don't care about the value, just the type
+        """Ensure aggregate_query_log_counts returns a QueryLogAggregateResult-shaped dict.
+
+        Notes:
+          - TypedDict classes do not support isinstance() checks at runtime,
+            so the shape is verified against the keys declared on
+            QueryLogAggregateResult instead.
+        """
         result = self.store.aggregate_query_log_counts(
-            qname="example.com", interval_seconds=60, group_by="rcode"
+            start_ts=0.0, end_ts=3600.0, interval_seconds=60, group_by="rcode"
         )
-        assert isinstance(result, QueryLogAggregateResult)
+        assert isinstance(
+            result, dict
+        ), f"aggregate_query_log_counts must return a mapping, got {type(result)}"
+        expected_keys = set(QueryLogAggregateResult.__annotations__)
+        missing = expected_keys - set(result)
+        assert (
+            not missing
+        ), f"aggregate_query_log_counts result missing keys: {sorted(missing)}"
 
     def test_metrics_keys(self):
         """Ensure get_async_queue_metrics returns expected keys."""

@@ -636,7 +636,7 @@ class BasePlugin:
         self.logger = plugin_logger
 
     @staticmethod
-    def _normalize_qtype_list(raw: object) -> List[str]:
+    def _normalize_qtype_list(raw: str | Sequence[str] | None) -> List[str]:
         """Brief: Normalize a raw target_qtypes config value into qtype names.
 
         Inputs:
@@ -675,7 +675,9 @@ class BasePlugin:
         return normalized or ["*"]
 
     @staticmethod
-    def _parse_priority_value(value: object, key: str, logger: logging.Logger) -> int:
+    def _parse_priority_value(
+        value: int | str | None, key: str, logger: logging.Logger
+    ) -> int:
         """Brief: Parse and clamp a priority value to the inclusive range [1, 255].
 
         Inputs:
@@ -708,7 +710,9 @@ class BasePlugin:
         return val
 
     @staticmethod
-    def _parse_network_list(raw: object) -> List[ipaddress._BaseNetwork]:
+    def _parse_network_list(
+        raw: str | Sequence[str] | None,
+    ) -> List[ipaddress._BaseNetwork]:
         """Brief: Normalize a raw targets/targets_ignore value into IP networks.
 
         Inputs:
@@ -758,7 +762,7 @@ class BasePlugin:
 
     @staticmethod
     def _normalize_domain_targets(
-        raw: object,
+        raw: str | Sequence[str] | None,
         mode: object = "any",
     ) -> Tuple[List[str], str]:
         """Brief: Normalize targets_domains and its mode.
@@ -817,7 +821,9 @@ class BasePlugin:
         return domains, "any"
 
     @staticmethod
-    def _normalize_listener_target(raw: object) -> Set[str]:
+    def _normalize_listener_target(
+        raw: str | Sequence[str] | None,
+    ) -> Set[str]:
         """Brief: Normalize a targets_listener value into a set of listener names.
 
         Inputs:
@@ -1076,7 +1082,9 @@ class BasePlugin:
         return str(qtype).upper()
 
     @staticmethod
-    def _normalize_opcode_list(raw: object) -> List[Union[str, int]]:
+    def _normalize_opcode_list(
+        raw: str | int | Sequence[str | int] | None,
+    ) -> List[Union[str, int]]:
         """Brief: Normalize a raw target_opcodes config value.
 
         Inputs:
@@ -1143,7 +1151,9 @@ class BasePlugin:
         } or name_u in {str(x).upper() for x in op_list if not isinstance(x, int)}
 
     @staticmethod
-    def _normalize_rcode_list(raw: object) -> List[Union[str, int]]:
+    def _normalize_rcode_list(
+        raw: str | int | Sequence[str | int] | None,
+    ) -> List[Union[str, int]]:
         """Brief: Normalize a raw target_rcodes config value.
 
         Inputs:
