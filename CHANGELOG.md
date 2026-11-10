@@ -6,7 +6,10 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
-- Admin UI browser API auth: stores `server.http.auth.token` in `localStorage` (`foghorn-api-token`), sends `Authorization: Bearer ...` via shared `apiFetch`, prompts once on HTTP 401, and exposes an **API Token** header control; diagram PNGs load through authenticated blob URLs.
+- Startup pre-flight `validate_connection()` checks for configured cache and stats/query-log backends; unreachable or failing backends abort startup with a CRITICAL log and non-zero exit (`BackendUnavailableError` when a configured backend cannot be constructed).
+- Cache and query-log backend interface method `validate_connection() -> bool` (driver ping/SELECT/health probe; in-memory/null always true). Multi-backend stats stores treat primary failure as fatal and secondary failures as warnings.
+- Per-plugin resolve execution telemetry (`servers/plugin_telemetry.py`): times pre/post hooks, DEBUG millisecond breakdowns per query, and WARNING when a plugin exceeds `FOGHORN_SLOW_PLUGIN_MS` (default 50ms).
+- Admin UI browser API auth: stores `server.http.auth.token` in `sessionStorage` (`foghorn-api-token`, with one-time migrate from legacy `localStorage`), sends `Authorization: Bearer ...` via shared `apiFetch`, prompts once on HTTP 401, and exposes an **API Token** header control; diagram PNGs load through authenticated blob URLs.
 - `server.http.auth.mode=basic` with `username`/`password` (Basic Authorization); missing configured credentials fail closed.
 - `server.listen.dot` TLS auto-generation knobs (`generate`, `keys_dir`, `tls_days`), matching `server.http` semantics so DoT can create a self-signed cert/key pair when material is missing.
 - TLS path resolver that places relative `cert_file`/`key_file` under the config directory (and treats a leading `config/` segment as already-inside-config-dir).
@@ -23,7 +26,9 @@ All notable changes to this project will be documented in this file.
 - `main.py` startup config parsing and listener lifecycle helpers live in `main_config_helpers.py` and `main_lifecycle_helpers.py`.
 - Query-log backend interface now types `select_query_log` / `aggregate_query_log_counts` results with `QueryLogSelectResult` and `QueryLogAggregateResult` TypedDicts.
 - ZoneRecords default `load_mode` is now `replace` (was `merge`), so file/zone reloads rebuild the in-memory mapping from configured sources instead of accumulating old RRset values. Set `load_mode: merge` to keep the previous overlay behaviour.
-- Filter now loads allow domain lists after block lists (files then inline), so allow entries act as exceptions when the same domain appears in both; either file group change reloads both groups in that order.
+- Filter now loads allow domain lists after block lists (files then inline), so allow entries act as exceptions when the same domain appears in both; either file group change force-reloads both groups in that order (ignoring per-file unchanged short-circuits) so allow exceptions survive block-only updates on a persistent `db_path`.
+- Filter list file reloads delete all prior rows for that source filename (including per-line JSON/AdGuard mode overrides) before re-inserting; inline `blocked_domains`/`allowed_domains` replace prior `filename=config` rows on each `setup()`.
+- RateLimit `deny_delay` hard cap lowered from 300 seconds to 5 seconds (request-path sleep holds a worker thread).
 - Missing TLS cert/key failures now use one shared operator-facing line (`format_missing_tls_files_message`) across HTTP ensure, uvicorn/threaded admin start, and DoT/asyncio listeners—no traceback dump for simple missing files.
 - Upstream failover logs at most one WARNING per upstream set while all endpoints remain failed; the warning re-arms after a successful query (recovery).
 - Makefile `docker-run` / `docker-run-not-host` derive UDP/TCP publish ports from `LISTEN_PORT` and tolerate a missing container on recreate.
@@ -55,7 +60,9 @@ All notable changes to this project will be documented in this file.
 - Documented UpstreamRouter precomputed exact/suffix route indexes in `docs/plugins/resolve/upstream_router.md`.
 - Documented ZoneRecords default `load_mode: replace` in README, `docs/plugins/resolve/zone_records.md`, and zone example configs.
 - Documented Filter time-of-day / day-of-week options (`timezone`, `time_rules` with `days`/`windows`) including overnight start-day ownership and precedence in `docs/plugins/resolve/filter.md`.
-- Documented browser admin UI token storage/`apiFetch` behavior under Authentication in `docs/API.md`.
+- Documented browser admin UI token sessionStorage/`apiFetch` behavior under Authentication in `docs/API.md`.
+- Documented Filter force dual-group list reload, filename-scoped DELETE, and inline config purge semantics in `docs/plugins/resolve/filter.md`.
+- Documented RateLimit `deny_delay` worker-stall risk and 5-second maximum in `docs/plugins/resolve/rate_limit.md`.
 - Added QUERY TSIG operational notes (optional vs require, shared key_sources files, NTP, cookies/DoT interaction, empty-keyring policy) to `docs/RFCs.md` §5.4.
 - Documented DockerHosts sticky condition logging in `docs/plugins/resolve/docker_hosts.md`.
 - Documented TSIG-only UPDATE auth and rejected `psk` in `docs/plugins/resolve/zone_update.md`, RFCs notes, and zone-update example configs.
@@ -65,6 +72,9 @@ All notable changes to this project will be documented in this file.
 - `docs/README-DEV.md` and `CONTRIBUTING.md` describe the Pydantic-driven schema workflow and `make schema` regenerate step.
 
 ### Tests
+- Added `tests/plugins/test_validate_connection.py` for cache/query-log connectivity probes.
+- Added `tests/test_main_preflight_validation.py` for startup backend validation orchestration and fatal load paths.
+- Added `tests/servers/test_plugin_telemetry.py` for per-plugin timing helpers and resolve-path DEBUG/WARNING output.
 - Added `tests/stats/test_resolve_telemetry_observer.py` for StatsCollectorObserver event mapping (deny/fanout, cache, upstream, DNSSEC, error isolation).
 - Expanded UpstreamRouter tests for indexed first-match-wins exact/suffix routing.
 - Added `tests/plugins/contract_tests.py` helpers for resolve-plugin and stats-store interface contracts (hooks, priorities, return types).
@@ -73,7 +83,9 @@ All notable changes to this project will be documented in this file.
 - Added `tests/plugins/test_filter_time_rules.py` covering config validation, window semantics (boundaries, midnight wraparound, full day), day-of-week filters (aliases/groups, overnight start-day ownership), suffix/case/trailing-dot matching, drop action, timezone conversion, targets interplay, decision-cache bypass, and allowlist precedence.
 - Added TLS generate/path-resolve/missing-cert message coverage in `tests/test_webserver_tls_generate.py` and partial-TLS start coverage in `tests/test_webserver.py`.
 - Added upstream all-failed warning throttle coverage in `tests/server/test_send_query_with_failover_all_failed_throttle.py`.
-- Added admin UI regression coverage for API token localStorage/`apiFetch`/401-retry wiring in shipped `index.html` (`tests/servers/test_webserver_admin_ui.py`).
+- Added admin UI regression coverage for API token sessionStorage/`apiFetch`/401-retry wiring in shipped `index.html` (`tests/servers/test_webserver_admin_ui.py`).
+- Expanded Filter list-reload coverage for allow-after-block persistence, inline config purge, JSON mode-override cleanup, empty keywords, ReDoS rejects, and IP replace family mismatch remove semantics.
+- Added RateLimit config validation coverage that `deny_delay` is bounded to `[0, 5]`.
 - Added AXFR TSIG key-inheritance coverage (axfr-empty inherits `server.features.tsig`, axfr-level keys win, snapshot wiring) in `tests/test_runtime_config_comprehensive.py`; updated the AXFR require-TSIG error message text in transfer tests.
 - Fixed `test_run_setup_plugins_priority_and_fallback` to capture the per-plugin setup log at DEBUG after startup setup lines were demoted from INFO to DEBUG.
 - Expanded `tests/server/test_dns_tsig.py` with allow_clients/listeners scoping, fudge/algorithm-mismatch rejection, empty-keyring fail-closed behavior, and an explicit cached-body-has-no-TSIG assertion; added TSIG startup-warning coverage in `tests/test_main_security_warnings.py`.
@@ -132,6 +144,10 @@ All notable changes to this project will be documented in this file.
 - Admin webserver startup now warns for non-loopback plaintext binds, public OpenAPI/Swagger exposure, permissive public CORS settings, and non-loopback threaded fallback usage.
 - API request audit startup now warns when enabled with implicit defaults for `db_path` or retention configuration.
 ### Fixed
+- Filter allow-after-block exceptions no longer disappear after a block-only list reload on a persistent SQLite `db_path` (force dual-group reload).
+- Filter blank `blocked_keywords` entries no longer match every domain (`"" in name`).
+- Filter post-resolve `replace` with IP family mismatch now removes the blocked answer RR instead of returning it unchanged.
+- Filter regex safety heuristics reject additional catastrophic-backtracking shapes (quantified alternation groups).
 - Admin web UI can authenticate to token-protected `/api/v1/*` endpoints (previously fetches sent no credentials, so `enable_api` + default token auth made the UI unable to load stats/config).
 - Runtime snapshot initialization in `main` now passes `cookies_enabled` / `cookies_mode` / `cookies_secret` / `cookies_secret_old` / `cookies_lifetime_seconds` into `RuntimeSnapshot`, fixing startup after DNS COOKIE support was added.
 - RateLimit webserver stats now resolve runtime reader callbacks by `db_path` using exact, absolute, and normalized suffix matching, preventing missed current-window/profile metrics when configured paths and plugin runtime paths differ.
