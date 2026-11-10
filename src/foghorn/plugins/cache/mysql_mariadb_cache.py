@@ -97,6 +97,18 @@ class MySqlCache(CachePlugin):
             driver_fallback=driver_fallback,
         )
 
+    def validate_connection(self) -> bool:
+        """Brief: Return True when the configured cache backend is reachable.
+
+        Inputs:
+          - None.
+
+        Outputs:
+          - bool: True when a MySQL/MariaDB SELECT 1 probe succeeds, else False.
+        """
+
+        return self._cache.validate_connection()
+
     def get(self, key: Tuple[str, int]) -> Any | None:
         """Brief: Lookup a cached entry enforcing expiry.
 

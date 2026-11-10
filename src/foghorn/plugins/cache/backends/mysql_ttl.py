@@ -5,6 +5,7 @@ import logging
 import threading
 import time
 from typing import Any, Optional, Tuple
+
 from foghorn.plugins.cache.safe_codec import (
     RAW_BYTES_FLAG,
     SAFE_SERIALIZED_FLAG,
@@ -435,6 +436,25 @@ class MySQLTTLCache:
             except Exception:  # pragma: nocover - defensive
                 pass
         return removed
+
+    def validate_connection(self) -> bool:
+        """Brief: Return True when the underlying connection is usable.
+
+        Inputs:
+          - None.
+
+        Outputs:
+          - bool: True when a trivial SELECT 1 succeeds, else False.
+        """
+
+        try:
+            with self._lock:
+                cur = self._conn.cursor()
+                cur.execute("SELECT 1")
+                cur.fetchone()
+            return True
+        except Exception:  # pragma: nocover - defensive probe failure path
+            return False
 
     def close(self) -> None:
         """Brief: Close the underlying connection.

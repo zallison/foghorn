@@ -173,6 +173,22 @@ class RedisCache(CachePlugin):
             decode_responses=False,
         )
 
+    def validate_connection(self) -> bool:
+        """Brief: Return True when the configured cache backend is reachable.
+
+        Inputs:
+          - None.
+
+        Outputs:
+          - bool: True when a Redis PING round-trip succeeds, else False.
+        """
+
+        try:
+            self._client.ping()
+            return True
+        except Exception:  # pragma: no cover - defensive probe failure path
+            return False
+
     def _redis_key(self, key: Tuple[str, int]) -> str:
         """Brief: Map a CachePlugin key to a Redis key.
 

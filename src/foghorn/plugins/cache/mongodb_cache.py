@@ -165,6 +165,22 @@ class MongoDBCache(CachePlugin):
         except Exception:  # pragma: no cover - defensive index creation
             pass
 
+    def validate_connection(self) -> bool:
+        """Brief: Return True when the configured cache backend is reachable.
+
+        Inputs:
+          - None.
+
+        Outputs:
+          - bool: True when a MongoDB ping command succeeds, else False.
+        """
+
+        try:
+            self._client.admin.command("ping")
+            return True
+        except Exception:  # pragma: no cover - defensive probe failure path
+            return False
+
     def _mongo_id_for_key(self, key: Tuple[str, int]) -> str:
         """Brief: Map a CachePlugin key to a MongoDB _id value.
 

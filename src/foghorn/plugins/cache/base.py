@@ -132,3 +132,24 @@ class CachePlugin:
         raise NotImplementedError(
             "CachePlugin.purge() must be implemented by a subclass"
         )
+
+    def validate_connection(self) -> bool:
+        """Brief: Return True when the configured cache backend is reachable.
+
+        Inputs:
+          - None.
+
+        Outputs:
+          - bool: True when a driver-level connectivity probe succeeds, else False.
+
+        Notes:
+          - Called at startup as a pre-flight check before listeners start.
+            Implementations must use the backing driver (for example a ping)
+            and return False instead of raising when the service is
+            unreachable. Backends without an external service (in-memory,
+            null) always return True.
+        """
+
+        raise NotImplementedError(
+            "CachePlugin.validate_connection() must be implemented by a subclass"
+        )

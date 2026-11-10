@@ -92,6 +92,18 @@ class InMemoryTTLCache(CachePlugin):
                 eviction_policy=self.eviction_policy,
             )
 
+    def validate_connection(self) -> bool:
+        """Brief: Return True when the configured cache backend is reachable.
+
+        Inputs:
+          - None.
+
+        Outputs:
+          - bool: Always True; the in-memory cache has no external backend.
+        """
+
+        return True
+
     @staticmethod
     def _is_nxdomain_wire(value: object) -> bool:
         """Brief: Determine whether a cached value is an NXDOMAIN DNS response.
@@ -531,9 +543,9 @@ class InMemoryTTLCache(CachePlugin):
         # Per-plugin target caches (BasePlugin._targets_cache) from shared
         # runtime plugin state.
         try:
-            from foghorn.servers.dns_runtime_state import (
+            from foghorn.servers.dns_runtime_state import (  # type: ignore[import]
                 DNSRuntimeState,
-            )  # type: ignore[import]
+            )
 
             plugins_list = getattr(DNSRuntimeState, "plugins", []) or []
         except Exception:

@@ -22,6 +22,7 @@ import logging
 import threading
 import time
 from typing import Any, Dict, Optional, Tuple
+
 from foghorn.plugins.cache.safe_codec import (
     RAW_BYTES_FLAG,
     SAFE_SERIALIZED_FLAG,
@@ -385,6 +386,24 @@ class PostgresTTLCache:
             )
             self._conn.commit()
             return cur.rowcount
+
+    def validate_connection(self) -> bool:
+        """Return True when the underlying connection is usable.
+
+        Inputs:
+            None.
+
+        Outputs:
+            bool: True when a trivial SELECT 1 succeeds, else False.
+        """
+
+        try:
+            cur = self._conn.cursor()
+            cur.execute("SELECT 1")
+            cur.fetchone()
+            return True
+        except Exception:  # pragma: nocover - defensive probe failure path
+            return False
 
     def close(self) -> None:
         """Close the underlying database connection.

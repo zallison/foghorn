@@ -21,6 +21,18 @@ class NullCache(CachePlugin):
     def __init__(self, **config: object) -> None:
         pass
 
+    def validate_connection(self) -> bool:
+        """Brief: Return True when the configured cache backend is reachable.
+
+        Inputs:
+          - None.
+
+        Outputs:
+          - bool: Always True; the null cache has no external backend.
+        """
+
+        return True
+
     def get(self, key: Tuple[str, int]) -> Any | None:
         return None
 

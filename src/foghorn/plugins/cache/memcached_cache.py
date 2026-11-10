@@ -154,6 +154,22 @@ class MemcachedCache(CachePlugin):
             timeout=timeout,
         )
 
+    def validate_connection(self) -> bool:
+        """Brief: Return True when the configured cache backend is reachable.
+
+        Inputs:
+          - None.
+
+        Outputs:
+          - bool: True when a Memcached version round-trip succeeds, else False.
+        """
+
+        try:
+            self._client.version()
+            return True
+        except Exception:  # pragma: no cover - defensive probe failure path
+            return False
+
     def _mem_key(self, key: Tuple[str, int]) -> str:
         """Brief: Map a CachePlugin key to a Memcached key.
 

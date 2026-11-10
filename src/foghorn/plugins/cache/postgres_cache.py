@@ -90,6 +90,18 @@ class PostgresCache(CachePlugin):
                 f"Failed to initialize PostgreSQL cache backend: {exc}"
             ) from exc
 
+    def validate_connection(self) -> bool:
+        """Brief: Return True when the configured cache backend is reachable.
+
+        Inputs:
+          - None.
+
+        Outputs:
+          - bool: True when a PostgreSQL SELECT 1 probe succeeds, else False.
+        """
+
+        return self._cache.validate_connection()
+
     def get(self, key: Tuple[str, int]) -> Any | None:
         """Brief: Lookup a cached entry enforcing expiry.
 

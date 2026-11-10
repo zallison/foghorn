@@ -132,6 +132,18 @@ class SQLite3Cache(CachePlugin):
                 maxsize=self.nxdomain_budget,
             )
 
+    def validate_connection(self) -> bool:
+        """Brief: Return True when the configured cache backend is reachable.
+
+        Inputs:
+          - None.
+
+        Outputs:
+          - bool: True when a SQLite3 SELECT 1 probe succeeds, else False.
+        """
+
+        return self._cache.validate_connection()
+
     def get_http_snapshot(self) -> dict[str, object]:
         """Brief: Summarize current SQLite3 cache state for the admin web UI.
 
@@ -371,9 +383,9 @@ class SQLite3Cache(CachePlugin):
         # Per-plugin target caches (BasePlugin._targets_cache) from shared
         # runtime plugin state.
         try:
-            from foghorn.servers.dns_runtime_state import (
+            from foghorn.servers.dns_runtime_state import (  # type: ignore[import]
                 DNSRuntimeState,
-            )  # type: ignore[import]
+            )
 
             plugins_list = getattr(DNSRuntimeState, "plugins", []) or []
         except (
