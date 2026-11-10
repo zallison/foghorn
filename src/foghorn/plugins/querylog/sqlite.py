@@ -27,9 +27,7 @@ import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from foghorn.plugins.querylog.base import BaseStatsStore
-from foghorn.plugins.querylog.common import (
-    normalize_domain as _normalize_domain,
-)
+from foghorn.plugins.querylog.common import normalize_domain as _normalize_domain
 from foghorn.plugins.sql_safety import resolve_query_log_group_column
 from foghorn.security_limits import (
     MAX_QUERY_LOG_AGG_GROUPED_RESULTS,
@@ -321,6 +319,18 @@ class SqliteStatsStore(BaseStatsStore):
             return True
         except Exception:
             return False
+
+    def validate_connection(self) -> bool:
+        """Brief: Return True when the configured backend is reachable.
+
+        Inputs:
+          - None.
+
+        Outputs:
+          - bool: Result of the driver-level connectivity probe.
+        """
+
+        return self.health_check()
 
     def _execute(self, sql: str, params: Tuple[Any, ...]) -> None:
         """Brief: Execute one SQL statement immediately or queue it for batch flush.

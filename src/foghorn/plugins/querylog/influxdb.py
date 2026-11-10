@@ -357,6 +357,18 @@ class InfluxLogging(BaseStatsStore):
 
         return bool(self._healthy)
 
+    def validate_connection(self) -> bool:
+        """Brief: Return True when the configured backend is reachable.
+
+        Inputs:
+          - None.
+
+        Outputs:
+          - bool: Result of the driver-level connectivity probe.
+        """
+
+        return self.health_check()
+
     def close(self) -> None:  # type: ignore[override]
         """Close the underlying HTTP session.
 

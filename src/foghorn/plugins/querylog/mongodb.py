@@ -26,8 +26,8 @@ import threading
 import time
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
-from foghorn.plugins.db_drivers import import_mongo_driver
 
+from foghorn.plugins.db_drivers import import_mongo_driver
 from foghorn.security_limits import (
     MAX_QUERY_LOG_AGG_GROUPED_RESULTS,
     enforce_query_log_aggregate_bucket_limit,
@@ -315,6 +315,18 @@ class MongoStatsStore(BaseStatsStore):
             return True
         except Exception:  # pragma: no cover - defensive
             return False
+
+    def validate_connection(self) -> bool:
+        """Brief: Return True when the configured backend is reachable.
+
+        Inputs:
+          - None.
+
+        Outputs:
+          - bool: Result of the driver-level connectivity probe.
+        """
+
+        return self.health_check()
 
     def close(self) -> None:
         """Close the underlying MongoDB client.

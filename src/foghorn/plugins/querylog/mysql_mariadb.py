@@ -396,6 +396,18 @@ class MySqlStatsStore(BaseStatsStore):
         except Exception:  # pragma: no cover - defensive
             return False
 
+    def validate_connection(self) -> bool:
+        """Brief: Return True when the configured backend is reachable.
+
+        Inputs:
+          - None.
+
+        Outputs:
+          - bool: Result of the driver-level connectivity probe.
+        """
+
+        return self.health_check()
+
     def close(self) -> None:
         """Close the underlying connection.
 

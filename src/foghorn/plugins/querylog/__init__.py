@@ -104,6 +104,65 @@ class MultiStatsStore(BaseStatsStore):
         fn = getattr(primary, "health_check", None)
         return bool(fn()) if callable(fn) else True
 
+    def validate_connection(self) -> bool:
+        """Brief: Return True when the primary backend is reachable.
+
+        Inputs:
+          - None.
+
+        Outputs:
+          - bool: True when the primary backend's validate_connection (or
+            health_check fallback) succeeds. Secondary backends are also
+            probed; failures there are logged as warnings and do not make
+            this method return False.
+
+        Notes:
+          - Startup treats a False result as fatal. Secondaries are best-effort
+            fan-out targets, so an offline secondary must not abort startup.
+        """
+
+        log = logging.getLogger(__name__)
+        primary_ok = True
+
+        for index, backend in enumerate(self._backends):
+            name = type(backend).__name__
+            role = "primary" if index == 0 else f"secondary[{index}]"
+            try:
+                fn = getattr(backend, "validate_connection", None)
+                if callable(fn):
+                    reachable = bool(fn())
+                else:
+                    health_fn = getattr(backend, "health_check", None)
+                    reachable = bool(health_fn()) if callable(health_fn) else True
+            except Exception as exc:
+                if index == 0:
+                    # Primary failures are fatal via the False return; the
+                    # caller logs CRITICAL. Avoid a redundant WARNING here.
+                    primary_ok = False
+                else:
+                    log.warning(
+                        "MultiStatsStore %s backend %s is unreachable during pre-flight: %s",
+                        role,
+                        name,
+                        exc,
+                        exc_info=True,
+                    )
+                continue
+
+            if reachable:
+                continue
+
+            if index == 0:
+                primary_ok = False
+            else:
+                log.warning(
+                    "MultiStatsStore %s backend %s is unreachable during pre-flight; continuing",
+                    role,
+                    name,
+                )
+
+        return primary_ok
+
     def close(self) -> None:
         """Brief: Flush any queued operations and close all underlying backends.
 
@@ -560,9 +619,16 @@ def load_stats_store_backend(
         else ""
     )
     backends: List[BaseStatsStore] = []
+    log = logging.getLogger(__name__)
 
     if isinstance(backends_cfg, list) and backends_cfg:
-        for entry in backends_cfg:
+        # Track whether the configured primary slot failed so secondaries remain
+        # best-effort while a missing/broken primary stays fatal for callers.
+        primary_slot_failed = False
+        primary_slot_error: Exception | None = None
+        primary_slot_label = "primary"
+
+        for index, entry in enumerate(backends_cfg):
             if not isinstance(entry, dict):
                 continue
             backend_name = str(entry.get("backend", "sqlite"))
@@ -583,9 +649,41 @@ def load_stats_store_backend(
                 backend=backend_name,
                 config=cfg or {},
             )
-            backends.append(_build_backend_from_config(model))
+            label = (
+                str(instance_name).strip()
+                if isinstance(instance_name, str) and instance_name.strip()
+                else backend_name
+            )
+            try:
+                backends.append(_build_backend_from_config(model))
+            except Exception as exc:
+                # Until primary_backend reordering runs, index 0 is the default
+                # primary. Construction failures there are fatal; later entries
+                # are secondary fan-out targets and only warn.
+                if index == 0 and not backends:
+                    primary_slot_failed = True
+                    primary_slot_error = exc
+                    primary_slot_label = label
+                    log.error(
+                        "Primary stats backend %s failed to initialize: %s",
+                        label,
+                        exc,
+                        exc_info=True,
+                    )
+                else:
+                    log.warning(
+                        "Secondary stats backend %s failed to initialize; continuing without it: %s",
+                        label,
+                        exc,
+                        exc_info=True,
+                    )
 
         if not backends:
+            if primary_slot_failed and primary_slot_error is not None:
+                raise RuntimeError(
+                    f"primary stats backend {primary_slot_label} failed to initialize: "
+                    f"{primary_slot_error}"
+                ) from primary_slot_error
             return None
         if len(backends) == 1:
             return backends[0]

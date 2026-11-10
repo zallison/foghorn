@@ -236,6 +236,18 @@ class JsonLogging(BaseStatsStore):
 
         return bool(self._healthy and getattr(self, "_fh", None) is not None)
 
+    def validate_connection(self) -> bool:
+        """Brief: Return True when the configured backend is reachable.
+
+        Inputs:
+          - None.
+
+        Outputs:
+          - bool: Result of the driver-level connectivity probe.
+        """
+
+        return self.health_check()
+
     def close(self) -> None:  # type: ignore[override]
         """Close the underlying file handle.
 

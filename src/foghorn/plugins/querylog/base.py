@@ -581,6 +581,26 @@ class BaseStatsStore:
 
         raise NotImplementedError("health_check() must be implemented by a subclass")
 
+    def validate_connection(self) -> bool:  # pragma: no cover - interface only
+        """Brief: Return True when the configured backend is reachable.
+
+        Inputs:
+          - None.
+
+        Outputs:
+          - bool: True when a driver-level connectivity probe succeeds, else False.
+
+        Notes:
+          - Called at startup as a pre-flight check before listeners start.
+            Implementations must use the backend driver (for example a ping
+            or SELECT 1) and return False instead of raising when the service
+            is unreachable.
+        """
+
+        raise NotImplementedError(
+            "validate_connection() must be implemented by a subclass"
+        )
+
     def close(self) -> None:  # pragma: no cover - interface only
         """Brief: Close the backend and release any associated resources.
 

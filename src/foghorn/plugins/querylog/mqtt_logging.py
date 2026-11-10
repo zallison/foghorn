@@ -24,6 +24,7 @@ import logging
 import socket
 import time
 from typing import Any, Dict, Optional
+
 from foghorn.plugins.db_drivers import import_mqtt_driver
 
 from .base import BaseStatsStore
@@ -157,6 +158,18 @@ class MqttLogging(BaseStatsStore):
         """
 
         return bool(self._healthy)
+
+    def validate_connection(self) -> bool:
+        """Brief: Return True when the configured backend is reachable.
+
+        Inputs:
+          - None.
+
+        Outputs:
+          - bool: Result of the driver-level connectivity probe.
+        """
+
+        return self.health_check()
 
     def close(self) -> None:  # type: ignore[override]
         """Close the underlying MQTT client and stop its network loop.
