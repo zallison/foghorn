@@ -245,7 +245,12 @@ plugins:
   - Allow entries therefore act as exceptions to block entries when the same
     domain appears in both.
   - When any allowlist or blocklist file changes, the plugin reloads both file
-    groups in that order so precedence stays consistent.
+    groups in that order (forced, ignoring per-file unchanged short-circuits)
+    so precedence stays consistent on a persistent `db_path`.
+  - File reloads delete all prior rows for that source filename (including
+    per-line JSON/AdGuard mode overrides) before re-inserting.
+  - Inline `blocked_domains` / `allowed_domains` replace prior `filename=config`
+    rows on each `setup()` so removed inline entries do not linger.
 
 ### Common BasePlugin options
 

@@ -19,10 +19,10 @@ from dnslib import AAAA as RDATA_AAAA
 from dnslib import QTYPE, RCODE, RR
 from dnslib import A as RDATA_A
 from dnslib import DNSHeader, DNSRecord
-from pydantic import BaseModel, Field, ConfigDict, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from foghorn.utils.current_cache import get_current_namespaced_cache, module_namespace
 from foghorn.utils import ip_networks
+from foghorn.utils.current_cache import get_current_namespaced_cache, module_namespace
 
 from .base import BasePlugin, PluginContext, PluginDecision, plugin_aliases
 
@@ -628,7 +628,9 @@ class Filter(BasePlugin):
 
         # Pre-resolve (domain) filtering configuration (inline first)
         self.blocked_patterns: List[re.Pattern] = []
-        self.blocked_keywords: Set[str] = set(self.config.get("blocked_keywords", []))
+        self.blocked_keywords: Set[str] = self._normalize_keywords(
+            self.config.get("blocked_keywords", [])
+        )
 
         # Compile regex patterns for domain filtering from inline config
         for pattern in self.config.get("blocked_patterns", []):
@@ -738,22 +740,28 @@ class Filter(BasePlugin):
         # exceptions to blocklists when the same domain appears in both.
         #
         # Reload both file groups whenever either group changes so last-write-wins
-        # ordering stays consistent across partial file updates.
+        # ordering stays consistent across partial file updates. force=True skips
+        # per-file unchanged short-circuits so allow exceptions are re-applied
+        # after a block-only change (persistent db_path).
         allow_changed = self._any_list_file_changed(self.allowlist_files, "allow")
         block_changed = self._any_list_file_changed(self.blocklist_files, "deny")
         if allow_changed or block_changed:
             for file in self.blocklist_files:
-                self.load_list_from_file(file, "deny")
+                self.load_list_from_file(file, "deny", force=True)
             for file in self.allowlist_files:
-                self.load_list_from_file(file, "allow")
+                self.load_list_from_file(file, "allow", force=True)
 
-        # Inline allow/deny domains from config: batch into a single transaction
-        if self.allowlist or self.blocklist:
-            with self.conn:
-                for domain in self.blocklist:
-                    self._db_insert_domain(domain, "config", "deny")
-                for domain in self.allowlist:
-                    self._db_insert_domain(domain, "config", "allow")
+        # Inline allow/deny domains from config: replace prior config rows so
+        # removed inline entries do not linger on a persistent db_path.
+        with self.conn:
+            self.conn.execute(
+                "DELETE FROM blocked_domains WHERE filename = ?",
+                ("config",),
+            )
+            for domain in self.blocklist:
+                self._db_insert_domain(domain, "config", "deny")
+            for domain in self.allowlist:
+                self._db_insert_domain(domain, "config", "allow")
 
         # Load patterns/keywords/IPs from files (additive to inline config)
         for patfile in self._expand_globs(
@@ -775,6 +783,29 @@ class Filter(BasePlugin):
         self._rebuild_blocked_network_index()
 
     @staticmethod
+    def _normalize_keywords(values: object) -> Set[str]:
+        """Brief: Normalize keyword tokens; drop blanks that would match every domain.
+
+        Inputs:
+            values: Iterable of keyword-like values, or a single string.
+
+        Outputs:
+            set[str]: Lowercased non-empty keyword strings.
+        """
+        if values is None:
+            return set()
+        if isinstance(values, str):
+            values = [values]
+        if not isinstance(values, (list, tuple, set, frozenset)):
+            return set()
+        out: Set[str] = set()
+        for item in values:
+            token = str(item or "").strip().lower()
+            if token:
+                out.add(token)
+        return out
+
+    @staticmethod
     def _is_pattern_safe(pattern: str) -> bool:
         """Brief: Heuristically reject regexes with common catastrophic-backtracking shapes.
 
@@ -789,9 +820,15 @@ class Filter(BasePlugin):
         suspicious = (
             r"\([^)]*[+*][^)]*\)[+*{]",
             r"\(\?:[^)]*[+*][^)]*\)[+*{]",
+            # Quantified groups with alternation: (a|aa)+, (foo|bar){2,}
+            r"\([^)]*\|[^)]*\)[+*{]",
+            r"\(\?:[^)]*\|[^)]*\)[+*{]",
             r"\(\.\*\)\+",
             r"\(\.\+\)\+",
             r"\.\*.*\.\*",
+            # Adjacent greedy quantifiers on the same atom class (a*a*, \w+\w+)
+            r"([+*])\1",
+            r"([+*])\{\d",
             r"\\[1-9]",
         )
         return not any(re.search(token, text) for token in suspicious)
@@ -1338,13 +1375,16 @@ class Filter(BasePlugin):
                         replacement_ip,
                         qname,
                     )
-                else:
-                    logger.warning(
-                        "Cannot replace IP %s with %s due to version mismatch.",
-                        ip_addr,
-                        replacement_ip,
-                    )
-                return rr, True, None, None
+                    return rr, True, None, None
+
+                # Family mismatch: fail closed by removing the blocked address
+                # rather than returning it unchanged to the client.
+                logger.warning(
+                    "Cannot replace IP %s with %s due to version mismatch; removing",
+                    ip_addr,
+                    replacement_ip,
+                )
+                return None, True, None, str(ip_addr)
 
             return rr, False, None, None
         except ValueError:
@@ -1798,9 +1838,9 @@ class Filter(BasePlugin):
                 if not isinstance(obj, dict) or "keyword" not in obj:
                     logger.error("JSON keyword missing 'keyword' in %s:%d", path, ln)
                     continue
-                kws.add(str(obj["keyword"]).lower())
+                kws.update(self._normalize_keywords([obj["keyword"]]))
             else:
-                kws.add(text.lower())
+                kws.update(self._normalize_keywords([text]))
         return kws
 
     def _load_blocked_ips_from_file(self, path: str) -> None:
@@ -2288,13 +2328,18 @@ class Filter(BasePlugin):
 
         return dns_names.is_plain_domain_token(token)
 
-    def load_list_from_file(self, filename: str, mode: str = "deny") -> None:
+    def load_list_from_file(
+        self, filename: str, mode: str = "deny", *, force: bool = False
+    ) -> None:
         """
         Load domains from a file into the database.
 
         Inputs:
             filename: Path to file containing domains.
             mode: Either "allow" or "deny". Default: "deny".
+            force: When True, skip unchanged-file short-circuit and always
+                rebuild rows for this source (used when any list group changes
+                so allow-after-block order is re-applied).
         Outputs:
             None
 
@@ -2319,7 +2364,7 @@ class Filter(BasePlugin):
             int(stat_snapshot["ctime"]),
         )
         cached_meta = self._get_list_file_cache(source_filename, mode)
-        if cached_meta:
+        if cached_meta and not force:
             cached_size = int(cached_meta.get("size", -1))
             cached_mtime = int(cached_meta.get("mtime", -1))
             cached_ctime = int(cached_meta.get("ctime", -1))
@@ -2370,11 +2415,13 @@ class Filter(BasePlugin):
         unsupported_lines = 0
         # Use a single transaction per file for performance on very large lists.
         with self.conn:
-            # Replace previous entries from this source/mode when file content
-            # changes so removed domains do not remain stale in the DB.
+            # Replace previous entries from this source when file content changes
+            # so removed domains (including per-line mode overrides) do not remain
+            # stale in the DB. Mode is not part of the predicate because JSON/AdGuard
+            # lines may insert a different eff_mode than the file-level mode.
             self.conn.execute(
-                "DELETE FROM blocked_domains WHERE filename = ? AND mode = ?",
-                (source_filename, mode),
+                "DELETE FROM blocked_domains WHERE filename = ?",
+                (source_filename,),
             )
             with open(filename, "r", encoding="utf-8") as fh:
                 for raw in fh:

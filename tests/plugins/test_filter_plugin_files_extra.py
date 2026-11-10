@@ -101,6 +101,122 @@ def test_allow_domains_override_block_files_and_inline(tmp_path):
         assert p.is_allowed("inline-overlap.example") is True
 
 
+def test_allow_override_survives_block_only_reload(tmp_path):
+    """Brief: Block-only file change still re-applies allow exceptions on persistent DB.
+
+    Inputs:
+      - Shared domain in block+allow files; second setup after only block file mutates.
+
+    Outputs:
+      - None: Asserts overlap domain remains allowed after block-only reload.
+    """
+    import time
+
+    db = tmp_path / "persist.db"
+    allowf = tmp_path / "allows.txt"
+    blockf = tmp_path / "blocks.txt"
+    allowf.write_text("overlap.example\n")
+    blockf.write_text("overlap.example\nonly-blocked.example\n")
+
+    p1 = Filter(
+        db_path=str(db),
+        allowed_domains_files=[str(allowf)],
+        blocked_domains_files=[str(blockf)],
+        default="deny",
+    )
+    p1.setup()
+    with closing(p1.conn):
+        assert p1.is_allowed("overlap.example") is True
+
+    # Mutate only the block list so allow file looks unchanged to list_file_cache.
+    time.sleep(1.05)
+    blockf.write_text("overlap.example\nonly-blocked.example\nextra-blocked.example\n")
+
+    p2 = Filter(
+        db_path=str(db),
+        allowed_domains_files=[str(allowf)],
+        blocked_domains_files=[str(blockf)],
+        default="deny",
+    )
+    p2.setup()
+    with closing(p2.conn):
+        assert p2.is_allowed("overlap.example") is True
+        assert p2.is_allowed("only-blocked.example") is False
+        assert p2.is_allowed("extra-blocked.example") is False
+
+
+def test_inline_config_domains_purged_on_setup(tmp_path):
+    """Brief: Removed inline domains disappear from persistent DB on next setup.
+
+    Inputs:
+      - First setup with inline blocked domain; second setup without it.
+
+    Outputs:
+      - None: Asserts domain falls back to default after second setup.
+    """
+    db = tmp_path / "inline.db"
+    p1 = Filter(
+        db_path=str(db),
+        blocked_domains=["gone.example"],
+        default="allow",
+    )
+    p1.setup()
+    with closing(p1.conn):
+        assert p1.is_allowed("gone.example") is False
+
+    p2 = Filter(db_path=str(db), blocked_domains=[], default="allow")
+    p2.setup()
+    with closing(p2.conn):
+        assert p2.is_allowed("gone.example") is True
+
+
+def test_json_mode_override_removed_on_reload(tmp_path):
+    """Brief: Per-line mode overrides are cleared when removed from a list file.
+
+    Inputs:
+      - Deny-mode file with JSON allow override, then rewrite without it.
+
+    Outputs:
+      - None: Asserts override domain no longer allowed after reload.
+    """
+    import time
+
+    db = tmp_path / "json_mode.db"
+    blockf = tmp_path / "blocks.jsonl"
+    blockf.write_text(
+        "\n".join(
+            [
+                '{"domain":"keep-deny.example"}',
+                '{"domain":"was-allow.example","mode":"allow"}',
+            ]
+        )
+        + "\n"
+    )
+
+    p1 = Filter(
+        db_path=str(db),
+        blocked_domains_files=[str(blockf)],
+        default="deny",
+    )
+    p1.setup()
+    with closing(p1.conn):
+        assert p1.is_allowed("keep-deny.example") is False
+        assert p1.is_allowed("was-allow.example") is True
+
+    time.sleep(1.05)
+    blockf.write_text('{"domain":"keep-deny.example"}\n')
+
+    p2 = Filter(
+        db_path=str(db),
+        blocked_domains_files=[str(blockf)],
+        default="deny",
+    )
+    p2.setup()
+    with closing(p2.conn):
+        assert p2.is_allowed("keep-deny.example") is False
+        assert p2.is_allowed("was-allow.example") is False
+
+
 def test_load_list_from_file_json_error_and_missing_domain(tmp_path, caplog):
     """Brief: load_list_from_file handles invalid JSON, non-dict, and missing domain.
 

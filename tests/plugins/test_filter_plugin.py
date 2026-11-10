@@ -227,6 +227,56 @@ def test_pre_resolve_qtype_denylist_takes_precedence(tmp_path):
         assert dec_a.action == "skip"
 
 
+def test_empty_blocked_keyword_does_not_match_all(tmp_path):
+    """Brief: Blank blocked_keywords entries are ignored (would otherwise match all).
+
+    Inputs:
+      - blocked_keywords: ['', '  ', 'bad']
+
+    Outputs:
+      - None: Asserts only real keyword matches deny.
+    """
+    db = tmp_path / "bl_kw.db"
+    p = Filter(
+        db_path=str(db),
+        default="allow",
+        blocked_keywords=["", "  ", "bad"],
+    )
+    p.setup()
+    ctx = PluginContext(client_ip="*******")
+
+    with closing(p.conn):
+        assert "" not in p.blocked_keywords
+        assert p.pre_resolve("good.com", QTYPE.A, b"", ctx).action == "skip"
+        assert p.pre_resolve("verybad.com", QTYPE.A, b"", ctx).action == "deny"
+
+
+def test_is_pattern_safe_rejects_quantified_alternation(tmp_path):
+    """Brief: _is_pattern_safe rejects common ReDoS alternation shapes.
+
+    Inputs:
+      - Patterns such as '(a|aa)+' and backreferences.
+
+    Outputs:
+      - None: Asserts unsafe patterns are rejected and a simple pattern compiles.
+    """
+    assert Filter._is_pattern_safe("(a|aa)+") is False
+    assert Filter._is_pattern_safe(r"(foo|bar){2,}") is False
+    assert Filter._is_pattern_safe(r"(a+)\\1") is False
+    assert Filter._is_pattern_safe(r"^ads\\.") is True
+
+    db = tmp_path / "bl_pat.db"
+    p = Filter(
+        db_path=str(db),
+        default="allow",
+        blocked_patterns=["(a|aa)+", r"^ads\\."],
+    )
+    p.setup()
+    with closing(p.conn):
+        assert len(p.blocked_patterns) == 1
+        assert p.blocked_patterns[0].pattern == r"^ads\\."
+
+
 def test_pre_resolve_allow_keyword_and_pattern(tmp_path, caplog):
     """
     Brief: Allowed domain passes; keyword and regex pattern rules deny.
@@ -366,38 +416,36 @@ def test_post_resolve_deny_response_servfail_for_blocked_ip(tmp_path):
 
 def test_post_resolve_replace_version_mismatch_and_invalid_runtime(tmp_path):
     """
-    Brief: Replace with version mismatch returns override unchanged; invalid replacement at runtime keeps record.
+    Brief: Replace with version mismatch removes the blocked RR; invalid replacement keeps record.
 
     Inputs:
       - blocked_ips: replace IPv6->IPv4 mismatch and a manual invalid replacement entry
 
     Outputs:
-      - None: Asserts override with unchanged rdata
+      - None: Asserts mismatch removes answer (deny when sole RR); invalid replace skips
     """
     db = tmp_path / "bl.db"
+    ipv6 = "2001:db8::1"
+    ipv4_repl = "192.0.2.1"
     p = Filter(
         db_path=str(db),
-        blocked_ips=[
-            {"ip": "2001:db8::1", "action": "replace", "replace_with": "127.0.0.1"}
-        ],
+        blocked_ips=[{"ip": ipv6, "action": "replace", "replace_with": ipv4_repl}],
     )
     p.setup()
-    ctx = PluginContext(client_ip="1.2.3.4")
+    ctx = PluginContext(client_ip="192.0.2.10")
 
     with closing(p.conn):
-        # Version mismatch path
-        resp = _mk_response_with_ips("ex6.com", [("AAAA", "2001:db8::1", 60)])
+        # Version mismatch path: fail closed by removing the blocked address.
+        resp = _mk_response_with_ips("ex6.com", [("AAAA", ipv6, 60)])
         dec = p.post_resolve("ex6.com", QTYPE.AAAA, resp, ctx)
-        assert dec.action == "override"
-        mod = DNSRecord.parse(dec.response)
-        assert str(mod.rr[0].rdata) == "2001:db8::1"  # unchanged due to mismatch
+        assert isinstance(dec, PluginDecision) and dec.action == "deny"
 
         # Invalid replacement runtime by patching config after init
-        p.blocked_ips[ipaddress.ip_address("10.0.0.1")] = {
+        p.blocked_ips[ipaddress.ip_address("192.0.2.8")] = {
             "action": "replace",
             "replace_with": "bad!",
         }
-        resp2 = _mk_response_with_ips("ex.com", [("A", "10.0.0.1", 60)])
+        resp2 = _mk_response_with_ips("ex.com", [("A", "192.0.2.8", 60)])
         dec2 = p.post_resolve("ex.com", QTYPE.A, resp2, ctx)
         # Invalid replacement at runtime leads to no change and records_changed remains False => skip
         assert isinstance(dec2, PluginDecision)
