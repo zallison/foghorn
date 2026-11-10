@@ -9,11 +9,11 @@ import time
 from typing import Dict, Mapping, Optional, Tuple
 
 from dnslib import QTYPE, RCODE, DNSRecord
-from pydantic import BaseModel, Field, ConfigDict, model_validator
-from foghorn.plugins.resolve.admin_ui import config_to_items
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
 from foghorn.plugins.cache.backends.foghorn_ttl import FoghornTTLCache
 from foghorn.plugins.cache.none import NullCache
-
+from foghorn.plugins.resolve.admin_ui import config_to_items
 from foghorn.plugins.resolve.base import (
     AdminPageSpec,
     BasePlugin,
@@ -21,12 +21,12 @@ from foghorn.plugins.resolve.base import (
     PluginDecision,
     plugin_aliases,
 )
+from foghorn.utils import dns_names, ip_networks
 from foghorn.utils.current_cache import (
     TTLCacheAdapter,
     get_current_namespaced_cache,
     module_namespace,
 )
-from foghorn.utils import dns_names, ip_networks
 from foghorn.utils.register_caches import registered_lru_cache
 
 logger = logging.getLogger(__name__)
@@ -210,9 +210,9 @@ class RateLimitConfig(BaseModel):
     bootstrap_rps: float = Field(default=50.0, ge=0.0)
 
     deny_response: str = Field(default="nxdomain")
-    # Seconds to sleep on the request path before a deny response. Capped to
-    # avoid unbounded worker stalls from misconfiguration.
-    deny_delay: int = Field(default=0, ge=0, le=300)
+    # Seconds to sleep on the request path before a deny response. Hard-capped
+    # low: each sleep holds a resolver worker thread and amplifies DoS under load.
+    deny_delay: int = Field(default=0, ge=0, le=5)
     deny_response_ip4: Optional[str] = None
     deny_response_ip6: Optional[str] = None
     ttl: int = Field(default=60, ge=0)
@@ -2583,8 +2583,8 @@ class RateLimit(BasePlugin):
         except (TypeError, ValueError):
             delay = 0
         if delay > 0:
-            # Hard ceiling matches RateLimitConfig.deny_delay le=300.
-            time.sleep(min(delay, 300))
+            # Hard ceiling matches RateLimitConfig.deny_delay le=5.
+            time.sleep(min(delay, 5))
 
         mode = (getattr(self, "deny_response", "nxdomain") or "nxdomain").lower()
         if mode == "drop":
@@ -2625,11 +2625,11 @@ class RateLimit(BasePlugin):
 
             # Add EDE message for rate limit (code 17) when enable_ede is true
             try:
-                from foghorn.servers.server import (
-                    _echo_client_edns,
-                    _attach_ede_option,
-                )
                 from foghorn.servers.dns_runtime_state import DNSRuntimeState
+                from foghorn.servers.server import (
+                    _attach_ede_option,
+                    _echo_client_edns,
+                )
 
                 if getattr(DNSRuntimeState, "enable_ede", False):
                     _echo_client_edns(req, reply)

@@ -133,7 +133,8 @@ plugins:
 
 	  # Deny behaviour
 	  deny_response: nxdomain        # nxdomain|refused|servfail|noerror_empty|ip
-	  deny_response_ip4: 0.0.0.0
+	  deny_delay: 0                  # optional sleep before deny (0-5s; holds a worker)
+	  deny_response_ip4: *******
 	  deny_response_ip6: ::1
 	  ttl: 60                        # TTL for synthetic IP answers when using 'ip'
 	  assume_udp_when_listener_missing: true  # apply UDP prefix bucketing when listener is unknown
@@ -195,6 +196,11 @@ plugins:
 - `deny_response: str`
   - Policy for limited queries (same semantics as Filter):
 	- `"nxdomain"` (default), `"refused"`, `"servfail"`, `"noerror_empty"`/`"nodata"`, `"ip"`.
+- `deny_delay: int`
+  - Optional seconds to sleep on the request path before emitting a deny
+    response (default `0`, maximum `5`). Each sleep holds a resolver worker
+    thread; keep this at `0` unless you intentionally want slow denials, and
+    never raise it under high concurrency.
 - `deny_response_ip4: str | null`, `deny_response_ip6: str | null`
   - Replacement IPs used when `deny_response == 'ip'` for A/AAAA queries.
 - `assume_udp_when_listener_missing: bool`

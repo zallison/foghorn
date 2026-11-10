@@ -16,9 +16,9 @@ from contextlib import closing
 import pytest
 from dnslib import QTYPE, DNSRecord
 from pydantic import ValidationError
-from foghorn.plugins.cache.none import NullCache
 
 import foghorn.plugins.resolve.rate_limit as rate_limit_module
+from foghorn.plugins.cache.none import NullCache
 from foghorn.plugins.resolve.base import PluginContext
 from foghorn.plugins.resolve.rate_limit import RateLimit
 
@@ -488,6 +488,29 @@ def test_rate_limit_config_applies_defaults_for_new_fields():
     assert cfg.bootstrap_rps == 50.0
     assert cfg.stats_window_seconds == 0
     assert cfg.psl_strict is False
+
+
+def test_rate_limit_config_validates_deny_delay_range():
+    """Brief: deny_delay must be in [0, 5] to bound worker-thread stalls.
+
+    Inputs:
+      - None
+
+    Outputs:
+      - None: asserts bounds and ValidationError outside range.
+    """
+
+    assert rate_limit_module.RateLimitConfig(deny_delay=0).deny_delay == 0
+    assert rate_limit_module.RateLimitConfig(deny_delay=5).deny_delay == 5
+
+    with pytest.raises(ValidationError):
+        rate_limit_module.RateLimitConfig(deny_delay=-1)
+
+    with pytest.raises(ValidationError):
+        rate_limit_module.RateLimitConfig(deny_delay=6)
+
+    with pytest.raises(ValidationError):
+        rate_limit_module.RateLimitConfig(deny_delay=300)
 
 
 def test_rate_limit_config_validates_max_profiles_ge_1():
@@ -3368,7 +3391,9 @@ def test_flush_completed_active_window_keys_creates_global_floor_when_missing(
     plugin.shutdown()
 
 
-def test_admin_list_profile_keys_covers_paging_filter_and_global_skip_branches(tmp_path):
+def test_admin_list_profile_keys_covers_paging_filter_and_global_skip_branches(
+    tmp_path,
+):
     """Brief: admin_list_profile_keys normalizes paging and filters out global/search misses.
 
     Inputs:
@@ -3379,41 +3404,43 @@ def test_admin_list_profile_keys_covers_paging_filter_and_global_skip_branches(t
         case-insensitive search filtering.
     """
 
-    plugin = RateLimit(db_path=str(tmp_path / 'rl-admin-list.db'))
+    plugin = RateLimit(db_path=str(tmp_path / "rl-admin-list.db"))
     plugin.setup()
 
-    plugin._seed_profile(rate_limit_module._GLOBAL_RPS_DB_KEY, rps=1.0, now_ts=1, samples=1)
-    plugin._seed_profile('Alpha-Key', rps=2.0, now_ts=2, samples=2)
-    plugin._seed_profile('beta-key', rps=3.0, now_ts=3, samples=3)
+    plugin._seed_profile(
+        rate_limit_module._GLOBAL_RPS_DB_KEY, rps=1.0, now_ts=1, samples=1
+    )
+    plugin._seed_profile("Alpha-Key", rps=2.0, now_ts=2, samples=2)
+    plugin._seed_profile("beta-key", rps=3.0, now_ts=3, samples=3)
 
     out_bad_page = plugin.admin_list_profile_keys(
-        page='bad',
-        page_size='bad',
-        search='',
+        page="bad",
+        page_size="bad",
+        search="",
     )
-    assert out_bad_page['page'] == 1
-    assert out_bad_page['page_size'] == 100
-    assert out_bad_page['total'] == 2
-    assert {item['key'] for item in out_bad_page['items']} == {'Alpha-Key', 'beta-key'}
+    assert out_bad_page["page"] == 1
+    assert out_bad_page["page_size"] == 100
+    assert out_bad_page["total"] == 2
+    assert {item["key"] for item in out_bad_page["items"]} == {"Alpha-Key", "beta-key"}
 
     out_clamped = plugin.admin_list_profile_keys(
         page=0,
         page_size=0,
-        search='  ALPHA  ',
+        search="  ALPHA  ",
     )
-    assert out_clamped['page'] == 1
-    assert out_clamped['page_size'] == 1
-    assert out_clamped['total'] == 1
-    assert out_clamped['total_pages'] == 1
-    assert [item['key'] for item in out_clamped['items']] == ['Alpha-Key']
+    assert out_clamped["page"] == 1
+    assert out_clamped["page_size"] == 1
+    assert out_clamped["total"] == 1
+    assert out_clamped["total_pages"] == 1
+    assert [item["key"] for item in out_clamped["items"]] == ["Alpha-Key"]
 
     out_big_page_size = plugin.admin_list_profile_keys(
         page=1,
         page_size=5000,
-        search='key',
+        search="key",
     )
-    assert out_big_page_size['page_size'] == 1000
-    assert out_big_page_size['total'] == 2
+    assert out_big_page_size["page_size"] == 1000
+    assert out_big_page_size["total"] == 2
 
     plugin.shutdown()
 
@@ -3429,41 +3456,41 @@ def test_admin_clear_profiles_covers_key_and_global_clear_branches(tmp_path):
         non-global bulk deletes, and include_global full purge behavior.
     """
 
-    plugin = RateLimit(db_path=str(tmp_path / 'rl-admin-clear.db'))
+    plugin = RateLimit(db_path=str(tmp_path / "rl-admin-clear.db"))
     plugin.setup()
 
     plugin._db_update_profile(rate_limit_module._GLOBAL_RPS_DB_KEY, rps=1.0, now_ts=10)
-    plugin._db_update_profile('client-a', rps=2.0, now_ts=11)
-    plugin._db_update_profile('client-b', rps=3.0, now_ts=12)
+    plugin._db_update_profile("client-a", rps=2.0, now_ts=11)
+    plugin._db_update_profile("client-b", rps=3.0, now_ts=12)
     plugin._burst_exceeded_count = {}
     plugin._below_threshold_count = {}
-    plugin._deny_episode_count['client-a'] = 1
-    plugin._burst_exceeded_count['client-a'] = 2
-    plugin._below_threshold_count['client-a'] = 3
+    plugin._deny_episode_count["client-a"] = 1
+    plugin._burst_exceeded_count["client-a"] = 2
+    plugin._below_threshold_count["client-a"] = 3
 
     out_protected = plugin.admin_clear_profiles(
         key=rate_limit_module._GLOBAL_RPS_DB_KEY,
         include_global=False,
     )
-    assert out_protected == {'deleted_profiles': 0, 'deleted_windows': 0}
+    assert out_protected == {"deleted_profiles": 0, "deleted_windows": 0}
 
-    out_key = plugin.admin_clear_profiles(key='client-a', include_global=False)
-    assert out_key['deleted_profiles'] >= 1
-    assert out_key['deleted_windows'] >= 1
-    assert 'client-a' not in plugin._deny_episode_count
-    assert 'client-a' not in plugin._burst_exceeded_count
-    assert 'client-a' not in plugin._below_threshold_count
+    out_key = plugin.admin_clear_profiles(key="client-a", include_global=False)
+    assert out_key["deleted_profiles"] >= 1
+    assert out_key["deleted_windows"] >= 1
+    assert "client-a" not in plugin._deny_episode_count
+    assert "client-a" not in plugin._burst_exceeded_count
+    assert "client-a" not in plugin._below_threshold_count
 
     out_non_global = plugin.admin_clear_profiles(key=None, include_global=False)
-    assert out_non_global['deleted_profiles'] >= 1
-    assert out_non_global['deleted_windows'] >= 1
+    assert out_non_global["deleted_profiles"] >= 1
+    assert out_non_global["deleted_windows"] >= 1
     assert plugin._db_get_profile(rate_limit_module._GLOBAL_RPS_DB_KEY) is not None
-    assert plugin._db_get_profile('client-b') is None
+    assert plugin._db_get_profile("client-b") is None
 
-    plugin._db_update_profile('client-c', rps=4.0, now_ts=20)
+    plugin._db_update_profile("client-c", rps=4.0, now_ts=20)
     out_all = plugin.admin_clear_profiles(key=None, include_global=True)
-    assert out_all['deleted_profiles'] >= 1
-    assert out_all['deleted_windows'] >= 1
+    assert out_all["deleted_profiles"] >= 1
+    assert out_all["deleted_windows"] >= 1
     assert plugin._db_get_profile(rate_limit_module._GLOBAL_RPS_DB_KEY) is None
 
     plugin.shutdown()
@@ -3480,18 +3507,18 @@ def test_snapshot_rps_stats_returns_defaults_when_total_aggregate_query_fails(tm
         sqlite aggregate query raises unexpectedly.
     """
 
-    plugin = RateLimit(db_path=str(tmp_path / 'rl-snapshot-total-query-fail.db'))
+    plugin = RateLimit(db_path=str(tmp_path / "rl-snapshot-total-query-fail.db"))
     plugin.setup()
 
-    plugin._conn.execute('DROP TABLE rate_profiles')
+    plugin._conn.execute("DROP TABLE rate_profiles")
     plugin._conn.commit()
     stats = plugin._get_snapshot_rps_stats()
 
     assert stats == {
-        'total_avg_rps': 0.0,
-        'total_max_rps': 0.0,
-        'window_avg_rps': 0.0,
-        'window_max_rps': 0.0,
+        "total_avg_rps": 0.0,
+        "total_max_rps": 0.0,
+        "window_avg_rps": 0.0,
+        "window_max_rps": 0.0,
     }
 
     plugin.shutdown()
