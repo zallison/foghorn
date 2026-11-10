@@ -29,6 +29,7 @@ from .config.config_parser import (
 )
 from .config.logging_config import init_logging
 from .main_config_helpers import (
+    BackendUnavailableError,
     _apply_cache_overrides_from_config,
     _build_listener_configs,
     _build_main_arg_parser,
@@ -239,9 +240,13 @@ def main(argv: list[str] | None = None) -> int:
     # by untrusted network events (cache refresh / NOTIFY scheduling).
     _configure_bg_executor_from_limits(limits_cfg=limits_cfg, logger=logger)
 
-    cache_plugin = _load_cache_plugin_from_cfg(
-        cfg=cfg, server_cfg=server_cfg, logger=logger
-    )
+    try:
+        cache_plugin = _load_cache_plugin_from_cfg(
+            cfg=cfg, server_cfg=server_cfg, logger=logger
+        )
+    except BackendUnavailableError as exc:
+        logger.critical("Startup aborted: %s", exc)
+        return 1
     _install_cache_plugin_global(cache_plugin=cache_plugin, logger=logger)
     min_cache_ttl = _get_min_cache_ttl(cache_plugin)
 
@@ -277,16 +282,26 @@ def main(argv: list[str] | None = None) -> int:
         for plugin in (plugins or [])
         if bool(getattr(plugin, "setup_provides_dns", False))
     ]
-    if setup_dns_providers:
-        with _SetupDNSResolverContext(
-            providers=setup_dns_providers,
-            upstreams=list(upstreams or []) + list(upstream_backups or []),
-            timeout_ms=int(timeout_ms),
-            resolver_mode=str(resolver_mode or "forward"),
-            upstream_max_concurrent=max(1, int(upstream_max_concurrent or 1)),
-            fallback_to_system=True,
-            logger_obj=logger,
-        ):
+    try:
+        if setup_dns_providers:
+            with _SetupDNSResolverContext(
+                providers=setup_dns_providers,
+                upstreams=list(upstreams or []) + list(upstream_backups or []),
+                timeout_ms=int(timeout_ms),
+                resolver_mode=str(resolver_mode or "forward"),
+                upstream_max_concurrent=max(1, int(upstream_max_concurrent or 1)),
+                fallback_to_system=True,
+                logger_obj=logger,
+            ):
+                stats_collector, stats_reporter, stats_persistence_store = (
+                    _initialize_statistics_subsystem(
+                        cfg=cfg,
+                        logging_cfg=logging_cfg,
+                        args=args,
+                        logger=logger,
+                    )
+                )
+        else:
             stats_collector, stats_reporter, stats_persistence_store = (
                 _initialize_statistics_subsystem(
                     cfg=cfg,
@@ -295,15 +310,19 @@ def main(argv: list[str] | None = None) -> int:
                     logger=logger,
                 )
             )
-    else:
-        stats_collector, stats_reporter, stats_persistence_store = (
-            _initialize_statistics_subsystem(
-                cfg=cfg,
-                logging_cfg=logging_cfg,
-                args=args,
-                logger=logger,
-            )
-        )
+    except BackendUnavailableError as exc:
+        logger.critical("Startup aborted: %s", exc)
+        return 1
+
+    # Pre-flight connectivity validation for configured backends (cache and
+    # stats persistence). Aborts startup with a non-zero exit code when a
+    # configured backend is unreachable.
+    if not _validate_backend_connections(
+        logger=logger,
+        cache_plugin=cache_plugin,
+        stats_persistence_store=stats_persistence_store,
+    ):
+        return 1
 
     # Initialize webserver log buffer (shared with admin HTTP API).
     web_cfg, web_enabled = _resolve_web_config(cfg=cfg, server_cfg=server_cfg)
@@ -1722,6 +1741,55 @@ def _is_truthy_env(val: str | None) -> bool:
     }  # pragma: no cover - best effort
 
 
+def _validate_backend_connections(
+    *,
+    logger: logging.Logger,
+    cache_plugin: object | None,
+    stats_persistence_store: BaseStatsStore | None,
+) -> bool:
+    """Brief: Pre-flight validate_connection() checks for configured backends.
+
+    Inputs:
+      - logger: Logger for startup diagnostics.
+      - cache_plugin: Configured cache plugin instance (None when absent).
+      - stats_persistence_store: Configured stats persistence store (None when
+        persistence is disabled).
+
+    Outputs:
+      - bool: True when every configured backend reports reachable; False
+        otherwise, after logging a CRITICAL error naming each failing backend.
+    """
+
+    ok = True
+    for label, instance in (
+        ("cache", cache_plugin),
+        ("stats_store", stats_persistence_store),
+    ):
+        if instance is None:
+            continue
+        name = type(instance).__name__
+        try:
+            reachable = bool(instance.validate_connection())
+        except Exception as exc:
+            logger.critical(
+                "Startup pre-flight check failed for %s backend %s: %s",
+                label,
+                name,
+                exc,
+                exc_info=True,
+            )
+            ok = False
+            continue
+        if not reachable:
+            logger.critical(
+                "Configured %s backend %s is unreachable; refusing to start",
+                label,
+                name,
+            )
+            ok = False
+    return ok
+
+
 def _initialize_statistics_subsystem(
     *,
     cfg: dict,
@@ -1804,6 +1872,7 @@ def _initialize_statistics_subsystem(
         force_rebuild_env = _is_truthy_env(os.getenv("FOGHORN_FORCE_REBUILD"))
         force_rebuild = bool(args.rebuild or force_rebuild_env or force_rebuild_root)
 
+        persistence_configured = False
         try:
             # Delegate backend construction (including multi-backend setups) to
             # the querylog backend loader. This uses logging.backends and
@@ -1812,7 +1881,8 @@ def _initialize_statistics_subsystem(
                 cfg=cfg,
                 stats_cfg=stats_cfg,
             )
-            if backend_cfg:
+            persistence_configured = bool(backend_cfg)
+            if persistence_configured:
                 stats_persistence_store = load_stats_store_backend(backend_cfg)
             else:
                 stats_persistence_store = None
@@ -1873,6 +1943,11 @@ def _initialize_statistics_subsystem(
         except (
             Exception
         ) as exc:  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
+            if persistence_configured:
+                # A configured backend that cannot be constructed at startup
+                # (for example an unreachable PostgreSQL/Redis service) must
+                # abort startup instead of silently degrading to memory-only.
+                raise BackendUnavailableError("stats_store", str(exc)) from exc
             logger.error(
                 "Failed to initialize statistics persistence: %s; continuing without persistence",
                 exc,

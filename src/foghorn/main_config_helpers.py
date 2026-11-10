@@ -15,6 +15,32 @@ from .servers.overload_response import normalize_overload_response
 from .servers.runtime_state import RuntimeState
 
 
+class BackendUnavailableError(RuntimeError):
+    """Raised at startup when a configured backend cannot be reached.
+
+    Brief:
+      Carries the logical backend label (for example "cache" or
+      "stats_store") and a detail string so main() can log a CRITICAL
+      message naming the backend and abort startup with a non-zero exit
+      code.
+
+    Inputs:
+      - backend: Logical backend label.
+      - detail: Optional underlying error description.
+
+    Outputs:
+      - BackendUnavailableError instance whose str() names the backend.
+    """
+
+    def __init__(self, backend: str, detail: str = "") -> None:
+        self.backend = backend
+        self.detail = detail
+        message = f"backend '{backend}' is unavailable"
+        if detail:
+            message += f": {detail}"
+        super().__init__(message)
+
+
 def _build_main_arg_parser() -> argparse.ArgumentParser:
     """Brief: Build the CLI parser used by main().
 
@@ -533,6 +559,13 @@ def _load_cache_plugin_from_cfg(
     #
     # Outputs:
     #   - cache_plugin: CachePlugin instance
+    #
+    # Notes:
+    #   When a cache is explicitly configured but cannot be loaded (for
+    #   example an unreachable database or an unknown module), this raises
+    #   BackendUnavailableError so startup aborts instead of silently
+    #   running without the configured cache.
+    cache_cfg_configured = False
     try:
         from foghorn.plugins.cache.registry import load_cache_plugin
 
@@ -541,8 +574,11 @@ def _load_cache_plugin_from_cfg(
             cache_cfg = server_cfg.get("cache")
         if cache_cfg is None:
             cache_cfg = cfg.get("cache")
+        cache_cfg_configured = cache_cfg is not None
         cache_plugin = load_cache_plugin(cache_cfg)
     except Exception as exc:
+        if cache_cfg_configured:
+            raise BackendUnavailableError("cache", str(exc)) from exc
         logger.warning("Failed to load cache plugin, running without cache: %s", exc)
         cache_plugin = None
     return cache_plugin
