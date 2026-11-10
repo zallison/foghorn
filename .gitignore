@@ -50,3 +50,6 @@ schema.json
 # Profiling artifacts
 foghorn_cpu.svg
 keys
+
+# Local sqlite artifacts
+*.sqlite3
