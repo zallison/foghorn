@@ -546,10 +546,32 @@
 
 			function getStoredApiToken() {
 				try {
-					if (!window.localStorage) {
-						return '';
+					if (window.sessionStorage) {
+						var sessionTok = String(
+							sessionStorage.getItem(API_TOKEN_STORAGE_KEY) || ''
+						).trim();
+						if (sessionTok) {
+							return sessionTok;
+						}
 					}
-					return String(localStorage.getItem(API_TOKEN_STORAGE_KEY) || '').trim();
+					// One-time migrate from older localStorage persistence.
+					if (window.localStorage) {
+						var legacy = String(
+							localStorage.getItem(API_TOKEN_STORAGE_KEY) || ''
+						).trim();
+						if (legacy) {
+							try {
+								if (window.sessionStorage) {
+									sessionStorage.setItem(API_TOKEN_STORAGE_KEY, legacy);
+								}
+							} catch (e2) {}
+							try {
+								localStorage.removeItem(API_TOKEN_STORAGE_KEY);
+							} catch (e3) {}
+							return legacy;
+						}
+					}
+					return '';
 				} catch (e) {
 					return '';
 				}
@@ -558,12 +580,16 @@
 			function setStoredApiToken(token) {
 				var next = token == null ? '' : String(token).trim();
 				try {
-					if (window.localStorage) {
+					if (window.sessionStorage) {
 						if (next) {
-							localStorage.setItem(API_TOKEN_STORAGE_KEY, next);
+							sessionStorage.setItem(API_TOKEN_STORAGE_KEY, next);
 						} else {
-							localStorage.removeItem(API_TOKEN_STORAGE_KEY);
+							sessionStorage.removeItem(API_TOKEN_STORAGE_KEY);
 						}
+					}
+					// Drop any legacy durable copy so tokens do not outlive the tab session.
+					if (window.localStorage) {
+						localStorage.removeItem(API_TOKEN_STORAGE_KEY);
 					}
 				} catch (e) {}
 				return next;
@@ -641,7 +667,7 @@
 						return resp;
 					}
 					// Token auth required: prompt once (shared across concurrent 401s),
-					// store in localStorage, and retry this request exactly once.
+					// store in sessionStorage, and retry this request exactly once.
 					return promptForApiToken('HTTP 401 from ' + path).then(function (token) {
 						if (!token) {
 							return resp;

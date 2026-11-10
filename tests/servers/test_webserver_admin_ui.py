@@ -380,9 +380,10 @@ def test_admin_index_html_sends_stored_api_token_on_fetches() -> None:
       - None; reads packaged html/index.html from resolve_www_root.
 
     Outputs:
-      - Asserts localStorage token helpers, 401 prompt/retry via apiFetch,
-        Authorization bearer wiring, and API Token button/control exist so the
-        browser UI can talk to token-protected enable_api endpoints.
+      - Asserts sessionStorage token helpers (with localStorage migrate),
+        401 prompt/retry via apiFetch, Authorization bearer wiring, and API
+        Token button/control exist so the browser UI can talk to
+        token-protected enable_api endpoints.
     """
 
     from foghorn.servers import webserver as ws
@@ -397,6 +398,9 @@ def test_admin_index_html_sends_stored_api_token_on_fetches() -> None:
     assert "function promptForApiToken(reason)" in text
     assert "function buildApiFetchInit(init)" in text
     assert "function apiFetch(path, init, allowPrompt)" in text
+    assert "sessionStorage.getItem(API_TOKEN_STORAGE_KEY)" in text
+    assert "sessionStorage.setItem(API_TOKEN_STORAGE_KEY" in text
+    assert "localStorage.removeItem(API_TOKEN_STORAGE_KEY)" in text
     assert "headers.set('Authorization', 'Bearer ' + token);" in text
     assert "resp.status !== 401 || !allowPrompt" in text
     assert "return fetch(path, buildApiFetchInit(init));" in text

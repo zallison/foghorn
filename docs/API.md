@@ -47,12 +47,14 @@ production deployments.
 
 #### Browser admin UI
 The built-in web UI (`/` / `index.html`) stores the token in browser
-`localStorage` under `foghorn-api-token` and sends it as
-`Authorization: Bearer ...` on API requests via a shared `apiFetch` helper.
-On HTTP 401 it prompts once for the token (shared across concurrent failures),
-retries the request, and exposes an **API Token** header button to set or clear
-the stored value. Diagram PNGs are loaded through `apiFetch` + blob URLs because
-`<img src>` cannot attach auth headers.
+`sessionStorage` under `foghorn-api-token` (cleared when the tab session ends)
+and sends it as `Authorization: Bearer ...` on API requests via a shared
+`apiFetch` helper. A one-time migration copies any legacy `localStorage` value
+into `sessionStorage` and removes the durable copy. On HTTP 401 it prompts once
+for the token (shared across concurrent failures), retries the request, and
+exposes an **API Token** header button to set or clear the stored value. Diagram
+PNGs are loaded through `apiFetch` + blob URLs because `<img src>` cannot attach
+auth headers.
 
 ### No-auth mode
 When `server.http.auth.mode: none`, protected endpoints are not enforced.
