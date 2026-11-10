@@ -9,6 +9,11 @@ from dnslib import RCODE, DNSRecord
 
 from foghorn.plugins.resolve.base import PluginContext, PluginDecision
 
+from .plugin_telemetry import (
+    log_plugin_telemetry,
+    plugin_telemetry_enabled,
+    time_plugin_call,
+)
 from .server_opcode import _ResolveCoreResult
 from .server_response_utils import (
     _attach_ede_option,
@@ -95,6 +100,8 @@ def _run_pre_plugins(
             token=id(getattr(handler, "plugins", plugins_list)),
         )
 
+    record_plugin_timing = plugin_telemetry_enabled(logger)
+    pre_telemetry: list = []
     for p in pre_plugins:
         # Skip plugins that do not target this qtype when they opt in via
         # BasePlugin.target_qtypes.
@@ -111,7 +118,12 @@ def _run_pre_plugins(
             pass
 
         try:
-            decision = p.pre_resolve(qname, qtype, data, ctx)
+            decision = time_plugin_call(
+                pre_telemetry,
+                type(p).__name__,
+                lambda p=p: p.pre_resolve(qname, qtype, data, ctx),
+                record=record_plugin_timing,
+            )
         except Exception:
             logger.error(
                 "pre_resolve failed for plugin %s", type(p).__name__, exc_info=True
@@ -144,6 +156,7 @@ def _run_pre_plugins(
                         )
                 # Pre-plugin timeout/drop: return sentinel empty wire so UDP
                 # handlers and othefoghorn.servers.transports can choose not to reply.
+                log_plugin_telemetry(logger, "pre", qname, pre_telemetry)
                 return (
                     pre_plugins,
                     post_plugins,
@@ -245,6 +258,7 @@ def _run_pre_plugins(
                         Exception
                     ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
                         pass
+                log_plugin_telemetry(logger, "pre", qname, pre_telemetry)
                 return (
                     pre_plugins,
                     post_plugins,
@@ -333,6 +347,7 @@ def _run_pre_plugins(
                         Exception
                     ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
                         pass
+                log_plugin_telemetry(logger, "pre", qname, pre_telemetry)
                 return (
                     pre_plugins,
                     post_plugins,
@@ -348,6 +363,7 @@ def _run_pre_plugins(
                 # continue normal resolution (cache/upstream).
                 break
 
+    log_plugin_telemetry(logger, "pre", qname, pre_telemetry)
     return pre_plugins, post_plugins, None
 
 
@@ -399,6 +415,8 @@ def _run_post_plugins(
     except Exception:  # pragma: no cover - defensive
         pass
     out = reply
+    record_plugin_timing = plugin_telemetry_enabled(logger)
+    post_telemetry: list = []
     for p in post_plugins:
         # Skip plugins that do not target this qtype when they opt in via
         # BasePlugin.target_qtypes.
@@ -413,7 +431,12 @@ def _run_post_plugins(
             pass
 
         try:
-            decision = p.post_resolve(qname, qtype, out, ctx2)
+            decision = time_plugin_call(
+                post_telemetry,
+                type(p).__name__,
+                lambda p=p, out=out: p.post_resolve(qname, qtype, out, ctx2),
+                record=record_plugin_timing,
+            )
         except Exception:
             logger.error(
                 "post_resolve failed for plugin %s", type(p).__name__, exc_info=True
@@ -445,6 +468,7 @@ def _run_post_plugins(
                             status="drop",
                         )
                 # Post-plugin timeout/drop: do not send a response.
+                log_plugin_telemetry(logger, "post", qname, post_telemetry)
                 return b"", _ResolveCoreResult(
                     wire=b"",
                     dnssec_status=None,
@@ -522,4 +546,5 @@ def _run_post_plugins(
                 # leave the upstream response unchanged.
                 break
 
+    log_plugin_telemetry(logger, "post", qname, post_telemetry)
     return out, None

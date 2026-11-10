@@ -9,6 +9,11 @@ from dnslib import RCODE, DNSRecord
 from ..plugins.resolve.base import PluginDecision
 from .dns_runtime_state import DNSRuntimeState
 from .edns_utils import client_udp_payload_limit
+from .plugin_telemetry import (
+    log_plugin_telemetry,
+    plugin_telemetry_enabled,
+    time_plugin_call,
+)
 
 logger = logging.getLogger("foghorn.server")
 
@@ -331,6 +336,8 @@ class DNSUDPHandler(DNSRuntimeState, socketserver.BaseRequestHandler):
         except Exception:  # pragma: no cover - defensive
             pass
 
+        pre_telemetry = []
+        record_plugin_timing = plugin_telemetry_enabled(logger)
         for p in sorted(self.plugins, key=lambda p: getattr(p, "pre_priority", 50)):
             # Skip plugins that do not target this qtype when they opt in via
             # BasePlugin.target_qtypes.
@@ -342,7 +349,12 @@ class DNSUDPHandler(DNSRuntimeState, socketserver.BaseRequestHandler):
             ):  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
                 pass
 
-            decision = p.pre_resolve(qname, qtype, data, ctx)
+            decision = time_plugin_call(
+                pre_telemetry,
+                type(p).__name__,
+                lambda: p.pre_resolve(qname, qtype, data, ctx),
+                record=record_plugin_timing,
+            )
             if isinstance(decision, PluginDecision):
                 if decision.action == "deny":
                     logger.debug(
@@ -364,6 +376,8 @@ class DNSUDPHandler(DNSRuntimeState, socketserver.BaseRequestHandler):
                     break
 
                 logger.debug("Plugin %s: %s", p.__class__.__name__, decision.action)
+
+        log_plugin_telemetry(logger, "pre", qname, pre_telemetry)
         return None
 
     def _choose_upstreams(self, qname: str, qtype: int, ctx):
@@ -550,6 +564,8 @@ class DNSUDPHandler(DNSRuntimeState, socketserver.BaseRequestHandler):
         except Exception:  # pragma: no cover - defensive
             pass
 
+        post_telemetry = []
+        record_plugin_timing = plugin_telemetry_enabled(logger)
         for p in sorted(self.plugins, key=lambda p: getattr(p, "post_priority", 50)):
             # Skip plugins that do not target this qtype when they opt in via
             # BasePlugin.target_qtypes.
@@ -561,7 +577,12 @@ class DNSUDPHandler(DNSRuntimeState, socketserver.BaseRequestHandler):
             ):  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
                 pass
 
-            decision = p.post_resolve(qname, qtype, reply, ctx)
+            decision = time_plugin_call(
+                post_telemetry,
+                type(p).__name__,
+                lambda: p.post_resolve(qname, qtype, reply, ctx),
+                record=record_plugin_timing,
+            )
             if isinstance(decision, PluginDecision):
                 if decision.action == "deny":
                     logger.warning(
@@ -601,6 +622,8 @@ class DNSUDPHandler(DNSRuntimeState, socketserver.BaseRequestHandler):
                         p.__class__.__name__,
                     )
                     break
+
+        log_plugin_telemetry(logger, "post", qname, post_telemetry)
         return reply
 
     def _make_nxdomain_response(self, request: DNSRecord):
