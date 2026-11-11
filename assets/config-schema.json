@@ -2746,6 +2746,293 @@
         },
         "module": "foghorn.plugins.resolve.mdns.MdnsBridge"
       },
+      "proxmox_hosts": {
+        "aliases": [
+          "proxmox",
+          "proxmox_hosts",
+          "pve"
+        ],
+        "config_schema": {
+          "$defs": {
+            "ProxmoxEndpointConfig": {
+              "description": "Brief: Per-endpoint Proxmox API connection settings.\n\nInputs:\n  - url: Base URL, e.g. https://pve1.lan:8006\n  - token_id: Full token id USER@REALM!TOKENID (or token name only with user)\n  - token_secret: Token secret UUID\n  - user / password: Optional ticket-auth fallback when token is absent\n  - verify_tls: Verify HTTPS certificates (default True)\n  - tls_ca: Optional CA bundle path\n  - use_ipv4 / use_ipv6: Optional host IP overrides for all guests\n  - ttl: Optional TTL override for this endpoint\n  - suffix: Optional DNS suffix override\n  - reload_interval_second: Hint used for global poll interval\n\nOutputs:\n  - ProxmoxEndpointConfig instance.",
+              "properties": {
+                "password": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Types: string, null.",
+                  "title": "Password"
+                },
+                "reload_interval_second": {
+                  "default": 30.0,
+                  "description": "Type: number. Default: 30.0.",
+                  "minimum": 0,
+                  "title": "Reload Interval Second",
+                  "type": "number"
+                },
+                "suffix": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Types: string, null.",
+                  "title": "Suffix"
+                },
+                "tls_ca": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Types: string, null.",
+                  "title": "Tls Ca"
+                },
+                "token_id": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Types: string, null.",
+                  "title": "Token Id"
+                },
+                "token_secret": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Types: string, null.",
+                  "title": "Token Secret"
+                },
+                "ttl": {
+                  "anyOf": [
+                    {
+                      "description": "Type: integer.",
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Types: integer, null.",
+                  "title": "Ttl"
+                },
+                "url": {
+                  "description": "Type: string.",
+                  "title": "Url",
+                  "type": "string"
+                },
+                "use_ipv4": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Types: string, null.",
+                  "title": "Use Ipv4"
+                },
+                "use_ipv6": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Types: string, null.",
+                  "title": "Use Ipv6"
+                },
+                "user": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Types: string, null.",
+                  "title": "User"
+                },
+                "verify_tls": {
+                  "default": true,
+                  "description": "Type: boolean. Default: true.",
+                  "title": "Verify Tls",
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "url"
+              ],
+              "title": "ProxmoxEndpointConfig",
+              "type": "object"
+            }
+          },
+          "additionalProperties": true,
+          "description": "Brief: Typed configuration for ProxmoxHosts.\n\nInputs:\n  - endpoints: Proxmox API endpoints (failover order)\n  - ttl: Default answer TTL\n  - reload_interval_second: Background poll interval\n  - status: Guest status allowlist (default: running)\n  - include_types: qemu and/or lxc\n  - include_templates: When true, publish template guests\n  - use_guest_agent: Query QEMU agent for NICs\n  - merge_addresses: Merge all address sources instead of first-wins\n  - publish_vmid / publish_tags: Extra name aliases\n  - discovery / expose_txt_in_additional: TXT inventory controls\n  - suffix: Default DNS suffix\n  - max_workers: Parallel per-guest fetch concurrency\n\nOutputs:\n  - ProxmoxHostsConfig instance.",
+          "properties": {
+            "discovery": {
+              "default": false,
+              "description": "Type: boolean. Default: false.",
+              "title": "Discovery",
+              "type": "boolean"
+            },
+            "endpoints": {
+              "description": "Type: array.",
+              "items": {
+                "$ref": "#/$defs/ProxmoxEndpointConfig"
+              },
+              "title": "Endpoints",
+              "type": "array"
+            },
+            "expose_txt_in_additional": {
+              "default": false,
+              "description": "Type: boolean. Default: false.",
+              "title": "Expose Txt In Additional",
+              "type": "boolean"
+            },
+            "include_templates": {
+              "default": false,
+              "description": "Type: boolean. Default: false.",
+              "title": "Include Templates",
+              "type": "boolean"
+            },
+            "include_types": {
+              "description": "Type: array.",
+              "items": {
+                "description": "Type: string.",
+                "type": "string"
+              },
+              "title": "Include Types",
+              "type": "array"
+            },
+            "max_workers": {
+              "default": 4,
+              "description": "Type: integer. Default: 4.",
+              "maximum": 32,
+              "minimum": 1,
+              "title": "Max Workers",
+              "type": "integer"
+            },
+            "merge_addresses": {
+              "default": false,
+              "description": "Type: boolean. Default: false.",
+              "title": "Merge Addresses",
+              "type": "boolean"
+            },
+            "publish_tags": {
+              "default": false,
+              "description": "Type: boolean. Default: false.",
+              "title": "Publish Tags",
+              "type": "boolean"
+            },
+            "publish_vmid": {
+              "default": false,
+              "description": "Type: boolean. Default: false.",
+              "title": "Publish Vmid",
+              "type": "boolean"
+            },
+            "reload_interval_second": {
+              "default": 30.0,
+              "description": "Type: number. Default: 30.0.",
+              "minimum": 0,
+              "title": "Reload Interval Second",
+              "type": "number"
+            },
+            "status": {
+              "description": "Type: array.",
+              "items": {
+                "description": "Type: string.",
+                "type": "string"
+              },
+              "title": "Status",
+              "type": "array"
+            },
+            "suffix": {
+              "anyOf": [
+                {
+                  "description": "Type: string.",
+                  "type": "string"
+                },
+                {
+                  "description": "Type: null.",
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Types: string, null.",
+              "title": "Suffix"
+            },
+            "ttl": {
+              "default": 60,
+              "description": "Type: integer. Default: 60.",
+              "minimum": 0,
+              "title": "Ttl",
+              "type": "integer"
+            },
+            "use_guest_agent": {
+              "default": true,
+              "description": "Type: boolean. Default: true.",
+              "title": "Use Guest Agent",
+              "type": "boolean"
+            }
+          },
+          "title": "ProxmoxHostsConfig",
+          "type": "object"
+        },
+        "module": "foghorn.plugins.resolve.proxmox_hosts.ProxmoxHosts"
+      },
       "rate_limit": {
         "aliases": [
           "rate",
@@ -6246,8 +6533,9 @@
           "title": "Id"
         },
         "max_depth": {
-          "default": 16,
-          "description": "Type: integer. Default: 16.",
+          "default": 12,
+          "description": "Recursive resolver max depth (clamped 1..32 at runtime). Default: 12.",
+          "maximum": 32,
           "minimum": 1,
           "title": "Max Depth",
           "type": "integer"
@@ -8791,6 +9079,293 @@
           "type": "object"
         },
         "module": "foghorn.plugins.resolve.mdns.MdnsBridge"
+      },
+      "proxmox_hosts": {
+        "aliases": [
+          "proxmox",
+          "proxmox_hosts",
+          "pve"
+        ],
+        "config_schema": {
+          "$defs": {
+            "ProxmoxEndpointConfig": {
+              "description": "Brief: Per-endpoint Proxmox API connection settings.\n\nInputs:\n  - url: Base URL, e.g. https://pve1.lan:8006\n  - token_id: Full token id USER@REALM!TOKENID (or token name only with user)\n  - token_secret: Token secret UUID\n  - user / password: Optional ticket-auth fallback when token is absent\n  - verify_tls: Verify HTTPS certificates (default True)\n  - tls_ca: Optional CA bundle path\n  - use_ipv4 / use_ipv6: Optional host IP overrides for all guests\n  - ttl: Optional TTL override for this endpoint\n  - suffix: Optional DNS suffix override\n  - reload_interval_second: Hint used for global poll interval\n\nOutputs:\n  - ProxmoxEndpointConfig instance.",
+              "properties": {
+                "password": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Types: string, null.",
+                  "title": "Password"
+                },
+                "reload_interval_second": {
+                  "default": 30.0,
+                  "description": "Type: number. Default: 30.0.",
+                  "minimum": 0,
+                  "title": "Reload Interval Second",
+                  "type": "number"
+                },
+                "suffix": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Types: string, null.",
+                  "title": "Suffix"
+                },
+                "tls_ca": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Types: string, null.",
+                  "title": "Tls Ca"
+                },
+                "token_id": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Types: string, null.",
+                  "title": "Token Id"
+                },
+                "token_secret": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Types: string, null.",
+                  "title": "Token Secret"
+                },
+                "ttl": {
+                  "anyOf": [
+                    {
+                      "description": "Type: integer.",
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Types: integer, null.",
+                  "title": "Ttl"
+                },
+                "url": {
+                  "description": "Type: string.",
+                  "title": "Url",
+                  "type": "string"
+                },
+                "use_ipv4": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Types: string, null.",
+                  "title": "Use Ipv4"
+                },
+                "use_ipv6": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Types: string, null.",
+                  "title": "Use Ipv6"
+                },
+                "user": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Types: string, null.",
+                  "title": "User"
+                },
+                "verify_tls": {
+                  "default": true,
+                  "description": "Type: boolean. Default: true.",
+                  "title": "Verify Tls",
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "url"
+              ],
+              "title": "ProxmoxEndpointConfig",
+              "type": "object"
+            }
+          },
+          "additionalProperties": true,
+          "description": "Brief: Typed configuration for ProxmoxHosts.\n\nInputs:\n  - endpoints: Proxmox API endpoints (failover order)\n  - ttl: Default answer TTL\n  - reload_interval_second: Background poll interval\n  - status: Guest status allowlist (default: running)\n  - include_types: qemu and/or lxc\n  - include_templates: When true, publish template guests\n  - use_guest_agent: Query QEMU agent for NICs\n  - merge_addresses: Merge all address sources instead of first-wins\n  - publish_vmid / publish_tags: Extra name aliases\n  - discovery / expose_txt_in_additional: TXT inventory controls\n  - suffix: Default DNS suffix\n  - max_workers: Parallel per-guest fetch concurrency\n\nOutputs:\n  - ProxmoxHostsConfig instance.",
+          "properties": {
+            "discovery": {
+              "default": false,
+              "description": "Type: boolean. Default: false.",
+              "title": "Discovery",
+              "type": "boolean"
+            },
+            "endpoints": {
+              "description": "Type: array.",
+              "items": {
+                "$ref": "#/$defs/ProxmoxEndpointConfig"
+              },
+              "title": "Endpoints",
+              "type": "array"
+            },
+            "expose_txt_in_additional": {
+              "default": false,
+              "description": "Type: boolean. Default: false.",
+              "title": "Expose Txt In Additional",
+              "type": "boolean"
+            },
+            "include_templates": {
+              "default": false,
+              "description": "Type: boolean. Default: false.",
+              "title": "Include Templates",
+              "type": "boolean"
+            },
+            "include_types": {
+              "description": "Type: array.",
+              "items": {
+                "description": "Type: string.",
+                "type": "string"
+              },
+              "title": "Include Types",
+              "type": "array"
+            },
+            "max_workers": {
+              "default": 4,
+              "description": "Type: integer. Default: 4.",
+              "maximum": 32,
+              "minimum": 1,
+              "title": "Max Workers",
+              "type": "integer"
+            },
+            "merge_addresses": {
+              "default": false,
+              "description": "Type: boolean. Default: false.",
+              "title": "Merge Addresses",
+              "type": "boolean"
+            },
+            "publish_tags": {
+              "default": false,
+              "description": "Type: boolean. Default: false.",
+              "title": "Publish Tags",
+              "type": "boolean"
+            },
+            "publish_vmid": {
+              "default": false,
+              "description": "Type: boolean. Default: false.",
+              "title": "Publish Vmid",
+              "type": "boolean"
+            },
+            "reload_interval_second": {
+              "default": 30.0,
+              "description": "Type: number. Default: 30.0.",
+              "minimum": 0,
+              "title": "Reload Interval Second",
+              "type": "number"
+            },
+            "status": {
+              "description": "Type: array.",
+              "items": {
+                "description": "Type: string.",
+                "type": "string"
+              },
+              "title": "Status",
+              "type": "array"
+            },
+            "suffix": {
+              "anyOf": [
+                {
+                  "description": "Type: string.",
+                  "type": "string"
+                },
+                {
+                  "description": "Type: null.",
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Types: string, null.",
+              "title": "Suffix"
+            },
+            "ttl": {
+              "default": 60,
+              "description": "Type: integer. Default: 60.",
+              "minimum": 0,
+              "title": "Ttl",
+              "type": "integer"
+            },
+            "use_guest_agent": {
+              "default": true,
+              "description": "Type: boolean. Default: true.",
+              "title": "Use Guest Agent",
+              "type": "boolean"
+            }
+          },
+          "title": "ProxmoxHostsConfig",
+          "type": "object"
+        },
+        "module": "foghorn.plugins.resolve.proxmox_hosts.ProxmoxHosts"
       },
       "rate_limit": {
         "aliases": [
@@ -14914,8 +15489,9 @@
               "title": "Id"
             },
             "max_depth": {
-              "default": 16,
-              "description": "Type: integer. Default: 16.",
+              "default": 12,
+              "description": "Recursive resolver max depth (clamped 1..32 at runtime). Default: 12.",
+              "maximum": 32,
               "minimum": 1,
               "title": "Max Depth",
               "type": "integer"

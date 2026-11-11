@@ -1,0 +1,86 @@
+# Example: ProxmoxHosts resolve plugin
+#
+# Requires a least-privilege API token. See docs/plugins/resolve/proxmox_hosts.md
+# for pveum role/user/token setup (FoghornDNS + foghorn@pve!dns).
+
+vars:
+  DOMAIN: example.lan
+  # Prefer env substitution in real deploys:
+  #   export PVE_TOKEN_SECRET=...
+
+upstreams:
+  endpoints:
+    - host: 1.1.1.1
+      port: 53
+
+logging:
+  python:
+    level: info
+
+plugins:
+  - type: proxmox_hosts
+    id: pve-lan
+    enabled: true
+    comment: "Publish Proxmox VE guests as DNS names (cluster-wide via any node)."
+    hooks:
+      pre_resolve: 40
+    config:
+      # BasePlugin options
+      abort_on_failure: false
+      targets:
+        ips:
+          - 0.0.0.0/0
+        listeners: any
+        qtypes:
+          - A
+          - AAAA
+          - PTR
+          - TXT
+        opcodes:
+          - QUERY
+      logging:
+        level: info
+        stderr: true
+
+      # ProxmoxHosts-specific options
+      suffix: pve.${DOMAIN}
+      ttl: 60
+      reload_interval_second: 30
+      status:
+        - running
+      include_types:
+        - qemu
+        - lxc
+      use_guest_agent: true
+      discovery: false
+      expose_txt_in_additional: false
+      # Fail over across nodes; any one node can list the whole cluster.
+      endpoints:
+        - url: https://pve1.${DOMAIN}:8006
+          token_id: foghorn@pve!dns
+          token_secret: "${PVE_TOKEN_SECRET}"
+          verify_tls: true
+          # tls_ca: keys/pve-root-ca.pem
+        - url: https://pve2.${DOMAIN}:8006
+          token_id: foghorn@pve!dns
+          token_secret: "${PVE_TOKEN_SECRET}"
+          verify_tls: true
+        - url: https://pve3.${DOMAIN}:8006
+          token_id: foghorn@pve!dns
+          token_secret: "${PVE_TOKEN_SECRET}"
+          verify_tls: true
+
+server:
+  listen:
+    udp:
+      enabled: true
+      host: 127.0.0.1
+      port: 5353
+    tcp:
+      enabled: false
+    dot:
+      enabled: false
+  dnssec:
+    mode: passthrough
+    validation: upstream_ad
+    udp_payload_size: 1232
