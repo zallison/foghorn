@@ -414,7 +414,7 @@ class FileDownloader(BasePlugin):
                 fname = self._make_hashed_filename(url)
             else:
                 fname = self._make_plain_filename(url)
-            fpath = os.path.join(self.download_path, fname)
+            fpath = self._resolved_download_path(fname)
             if not os.path.exists(fpath):
                 return False
             try:
@@ -475,7 +475,7 @@ class FileDownloader(BasePlugin):
             else:
                 fname = self._make_plain_filename(url)
 
-            fpath = os.path.join(self.download_path, fname)
+            fpath = self._resolved_download_path(fname)
             prior = path_to_url.get(fpath)
             if prior and prior != url:
                 raise ValueError(
@@ -739,19 +739,106 @@ class FileDownloader(BasePlugin):
         Notes:
           - If URL has no path component, fall back to netloc.
           - If the path basename has no extension, ext is ''.
+          - Only the final path segment is considered (os.path.basename).
 
         Example usage:
             >>> FileDownloader()._derive_base_and_ext('https://x/y/AdguardDNS.txt?z=1')
             ('AdguardDNS', '.txt')
         """
         p = urlparse(url)
-        basename = os.path.basename(p.path)
-        if not basename:
+        basename = os.path.basename(p.path or "")
+        # Drop trailing slashes / empty segments already handled by basename;
+        # reject bare '.' / '..' path segments by falling back to netloc.
+        if not basename or basename in {".", ".."}:
             base = p.netloc or "list"
             return base, ""
         base, ext = os.path.splitext(basename)
         base = base or (p.netloc or "list")
         return base, ext
+
+    @staticmethod
+    def _sanitize_filename_stem(base: str) -> str:
+        """Brief: Sanitize a filename stem for local storage under download_path.
+
+        Inputs:
+          - base: Raw stem (no directory components expected).
+
+        Outputs:
+          - Safe stem using [A-Za-z0-9._-], never empty, never '.'/'..'.
+        """
+        safe: list[str] = []
+        for ch in str(base or ""):
+            if ch.isalnum() or ch in ("-", "_", "."):
+                safe.append(ch)
+            else:
+                safe.append("_")
+        base_safe = "".join(safe).strip(".") or "list"
+        if base_safe in {".", ".."}:
+            return "list"
+        # Collapse accidental multi-dot path-ish stems to a single safe token.
+        if os.sep in base_safe or (os.altsep and os.altsep in base_safe):
+            return "list"
+        return base_safe
+
+    @staticmethod
+    def _sanitize_filename_ext(ext: str) -> str:
+        """Brief: Sanitize a filename extension (including leading dot).
+
+        Inputs:
+          - ext: Raw extension from splitext (may be empty).
+
+        Outputs:
+          - '' or '.<alnum>+' (no path separators or extra dots).
+        """
+        raw = str(ext or "")
+        if not raw or raw == ".":
+            return ""
+        if not raw.startswith("."):
+            raw = "." + raw
+        body = raw[1:]
+        if not body or not all(ch.isalnum() for ch in body):
+            return ""
+        return "." + body.lower()
+
+    def _resolved_download_path(self, filename: str) -> str:
+        """Brief: Join filename under download_path with traversal protection.
+
+        Inputs:
+          - filename: Final leaf name only (no directories).
+
+        Outputs:
+          - Absolute path strictly inside abspath(download_path).
+
+        Raises:
+          - ValueError when filename is unsafe or escapes download_path.
+        """
+        name = str(filename or "").strip()
+        if not name or name in {".", ".."}:
+            raise ValueError(f"Unsafe download filename: {filename!r}")
+        if os.path.isabs(name):
+            raise ValueError(f"Absolute download filename rejected: {filename!r}")
+        # Reject any directory separator, including '\' on POSIX (not os.sep there
+        # but still unsafe / surprising if ever interpreted by other tools).
+        if (
+            os.sep in name
+            or (os.altsep and os.altsep in name)
+            or "/" in name
+            or chr(92) in name
+        ):
+            raise ValueError(
+                f"Download filename must be a single path segment: {filename!r}"
+            )
+        if name != os.path.basename(name):
+            raise ValueError(f"Download filename must be a bare basename: {filename!r}")
+
+        root = os.path.abspath(str(self.download_path))
+        candidate = os.path.abspath(os.path.join(root, name))
+        # Require candidate under root (file path, not the root directory itself).
+        if candidate == root or not candidate.startswith(root + os.sep):
+            raise ValueError(
+                f"Resolved download path escapes download_path ({root}): {filename!r}"
+            )
+        return candidate
 
     def _make_hashed_filename(self, url: str, base_name: str | None = None) -> str:
         """
@@ -766,6 +853,7 @@ class FileDownloader(BasePlugin):
         Behavior:
           - If URL provides an extension, preserve it; otherwise, omit extension entirely.
           - If no extension, result is 'base-<hash>' (no trailing dot).
+          - Stem/ext are sanitized; result is always a single path segment.
         """
         url_hash = self._url_hash12(url)
         if base_name:
@@ -773,15 +861,9 @@ class FileDownloader(BasePlugin):
             _, ext = self._derive_base_and_ext(url)
         else:
             base, ext = self._derive_base_and_ext(url)
-        # sanitize base (keep common safe characters)
-        safe = []
-        for ch in base:
-            if ch.isalnum() or ch in ("-", "_", "."):
-                safe.append(ch)
-            else:
-                safe.append("_")
-        base_safe = "".join(safe) or "list"
-        return f"{base_safe}-{url_hash}{ext}"
+        base_safe = self._sanitize_filename_stem(base)
+        ext_safe = self._sanitize_filename_ext(ext)
+        return f"{base_safe}-{url_hash}{ext_safe}"
 
     def _make_plain_filename(self, url: str, base_name: str | None = None) -> str:
         """Brief: Build '{base}{ext}' using URL-derived or provided base.
@@ -798,20 +880,16 @@ class FileDownloader(BasePlugin):
           - When hashing is disabled via hash_filenames=False, filenames are
             derived directly from the URL path (or netloc when no path) without
             any hash or dash suffix.
+          - Stem/ext are sanitized; result is always a single path segment.
         """
         if base_name:
             base = base_name
             _, ext = self._derive_base_and_ext(url)
         else:
             base, ext = self._derive_base_and_ext(url)
-        safe = []
-        for ch in base:
-            if ch.isalnum() or ch in ("-", "_", "."):
-                safe.append(ch)
-            else:
-                safe.append("_")
-        base_safe = "".join(safe) or "list"
-        return f"{base_safe}{ext}"
+        base_safe = self._sanitize_filename_stem(base)
+        ext_safe = self._sanitize_filename_ext(ext)
+        return f"{base_safe}{ext_safe}"
 
     def _read_url_files(self, paths: List[str]) -> Set[str]:
         """
