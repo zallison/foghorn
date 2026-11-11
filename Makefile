@@ -167,14 +167,13 @@ gen-tsig-key: $(VENV)/bin/foghorn
 	  --algorithm "$$ALGO" \
 	  --config-snippet
 
-# Generate a PSK token for DNS UPDATE authentication
+# PSK auth for DNS UPDATE was removed; keep the target as a hard error so old
+# workflows get a clear TSIG-only message instead of a silent missing rule.
 .PHONY: gen-psk-token
-gen-psk-token: $(VENV)/bin/foghorn
-	. ${VENV}/bin/activate
-	@echo "Generating PSK token" ; \
-	${VENV}/bin/python scripts/generate_dns_update_keys.py \
-	  --psk \
-	  --config-snippet
+gen-psk-token:
+	@echo "PSK tokens are not supported: DNS UPDATE auth is TSIG-only." >&2
+	@echo "Use: make gen-tsig-key  (or scripts/generate_dns_update_keys.py --tsig)" >&2
+	@exit 2
 
 # ------------------------------------------------------------
 # Run tests
@@ -363,7 +362,7 @@ help:
 	@echo "  dnssec-sign-zone - Sign a DNS zone file with DNSSEC records (see target for ZONE/INPUT/OUTPUT args)"
 	@echo "DNS UPDATE helpers:"
 	@echo "  gen-tsig-key     - Generate a TSIG key for DNS UPDATE (optional: NAME=dynamic-key.example.com ALGO=hmac-sha256)"
-	@echo "  gen-psk-token    - Generate a PSK token for DNS UPDATE"
+	@echo "  gen-psk-token    - Removed: exits with TSIG-only guidance (PSK auth no longer supported)"
 
 	@echo "Build and run containers:"
 	@echo "  docker-build     - Build docker image ${PREFIX}/${IMAGE_NAME}:${TAG}"
