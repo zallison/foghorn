@@ -738,18 +738,18 @@ def test_docker_hosts_condition_helpers_lazy_init(caplog):
     plugin.config = {}
     caplog.set_level(logging.INFO, logger=mod.__name__)
 
-    plugin._note_condition_failure("lazy-key", "DockerHosts: lazy fail %s", "x")
+    plugin._note_condition_failure("lazy-key", "lazy fail %s", "x")
     assert plugin._condition_failed_by_key["lazy-key"] is True
     assert any("lazy fail" in r.getMessage() for r in caplog.records)
 
     caplog.clear()
-    plugin._note_condition_ok("lazy-key", "DockerHosts: lazy ok %s", "x")
+    plugin._note_condition_ok("lazy-key", "lazy ok %s", "x")
     assert plugin._condition_failed_by_key["lazy-key"] is False
     assert any("lazy ok" in r.getMessage() for r in caplog.records)
 
     # Second ok while healthy is silent.
     caplog.clear()
-    plugin._note_condition_ok("lazy-key", "DockerHosts: lazy ok %s", "x")
+    plugin._note_condition_ok("lazy-key", "lazy ok %s", "x")
     assert not any("lazy ok" in r.getMessage() for r in caplog.records)
 
 
@@ -2482,3 +2482,181 @@ def test_docker_hosts_admin_ui_descriptor_handles_errors_and_empty_name(monkeypa
     desc = plugin.get_admin_ui_descriptor()
     assert desc["title"] == "Docker"
     assert desc["endpoints"]["snapshot"].endswith("/docker_hosts")
+
+
+def test_docker_hosts_tls_verify_without_ca_raises(tmp_path, monkeypatch):
+    """Brief: tls_verify=true without tls_ca fails closed at TLS config build.
+
+    Inputs:
+      - tmp_path/monkeypatch: pytest fixtures.
+
+    Outputs:
+      - Asserts DockerException mentioning tls_ca is required.
+    """
+
+    import pytest
+
+    mod = importlib.import_module("foghorn.plugins.resolve.docker_hosts")
+    DockerHosts = mod.DockerHosts
+
+    class FakeTLSConfig:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    class FakeDockerModule:
+        class tls:  # noqa: N801
+            TLSConfig = FakeTLSConfig
+
+        def DockerClient(self, *args, **kwargs):  # noqa: N802
+            raise AssertionError(
+                "DockerClient must not be called when TLS config fails"
+            )
+
+    monkeypatch.setattr(mod, "docker", FakeDockerModule(), raising=True)
+
+    with pytest.raises(mod.DockerException) as exc_info:
+        DockerHosts._build_tls_config(
+            {
+                "url": "tcp://docker.example:2376",
+                "tls_verify": True,
+            }
+        )
+    assert "tls_ca" in str(exc_info.value)
+    assert "tls_verify" in str(exc_info.value).lower()
+
+
+def test_docker_hosts_tls_verify_with_ca_builds_config(tmp_path, monkeypatch):
+    """Brief: tls_verify=true with tls_ca builds a verifying TLSConfig.
+
+    Inputs:
+      - tmp_path/monkeypatch: pytest fixtures; creates a dummy CA file.
+
+    Outputs:
+      - Asserts TLSConfig verify=True and ca_cert set to the resolved path.
+    """
+
+    mod = importlib.import_module("foghorn.plugins.resolve.docker_hosts")
+    DockerHosts = mod.DockerHosts
+
+    ca_path = tmp_path / "ca.pem"
+    ca_path.write_text("dummy-ca\n", encoding="utf-8")
+
+    class FakeTLSConfig:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    class FakeDockerModule:
+        class tls:  # noqa: N801
+            TLSConfig = FakeTLSConfig
+
+    monkeypatch.setattr(mod, "docker", FakeDockerModule(), raising=True)
+    monkeypatch.setattr(
+        DockerHosts, "_resolve_tls_path", staticmethod(lambda p: str(p)), raising=False
+    )
+
+    endpoint = {
+        "url": "tcp://docker.example:2376",
+        "tls_verify": True,
+        "tls_ca": str(ca_path),
+    }
+    cfg = DockerHosts._build_tls_config(endpoint)
+    assert cfg is not None
+    assert cfg.kwargs["verify"] is True
+    assert cfg.kwargs["ca_cert"] == str(ca_path)
+
+
+def test_docker_hosts_mount_tls_adapter_refuses_verify_without_ca():
+    """Brief: _mount_tls_adapter never enables CERT_NONE when verify=True.
+
+    Inputs:
+      - None (calls the static helper directly).
+
+    Outputs:
+      - Asserts ValueError when verify=True and ca_cert is missing.
+    """
+
+    import pytest
+
+    mod = importlib.import_module("foghorn.plugins.resolve.docker_hosts")
+    DockerHosts = mod.DockerHosts
+
+    mounts: list[tuple[str, object]] = []
+
+    class FakeApi:
+        def mount(self, prefix, adapter):  # noqa: ANN001
+            mounts.append((prefix, adapter))
+
+    client = types.SimpleNamespace(api=FakeApi())
+
+    with pytest.raises(ValueError) as exc_info:
+        DockerHosts._mount_tls_adapter(
+            client,
+            ca_cert=None,
+            client_cert=None,
+            verify=True,
+        )
+    assert "ca_cert" in str(exc_info.value)
+    assert mounts == []
+
+
+def test_docker_hosts_mount_tls_adapter_verify_uses_cert_required(
+    tmp_path, monkeypatch
+):
+    """Brief: verify=True adapter configures CERT_REQUIRED with the CA path.
+
+    Inputs:
+      - tmp_path: dummy CA file path passed to load_verify_locations.
+      - monkeypatch: stub SSLContext.load_verify_locations and pool init.
+
+    Outputs:
+      - Asserts SSL context uses CERT_REQUIRED, hostname checking, and the CA.
+    """
+
+    import ssl
+
+    from requests.adapters import HTTPAdapter
+
+    mod = importlib.import_module("foghorn.plugins.resolve.docker_hosts")
+    DockerHosts = mod.DockerHosts
+
+    ca_path = tmp_path / "ca.pem"
+    ca_path.write_text("dummy-ca\n", encoding="utf-8")
+
+    mounts: list[str] = []
+    captured: dict[str, object] = {}
+
+    class FakeApi:
+        def mount(self, prefix, adapter):  # noqa: ANN001
+            mounts.append(str(prefix))
+            captured["adapter"] = adapter
+
+    def fake_load(self, cafile=None, capath=None, cadata=None):  # noqa: ANN001
+        captured["cafile"] = cafile
+        return None
+
+    def fake_super_init(
+        self, connections, maxsize, block=False, **pool_kwargs
+    ):  # noqa: ANN001
+        captured["ssl_context"] = pool_kwargs.get("ssl_context")
+        return None
+
+    monkeypatch.setattr(ssl.SSLContext, "load_verify_locations", fake_load)
+    monkeypatch.setattr(HTTPAdapter, "init_poolmanager", fake_super_init)
+
+    DockerHosts._mount_tls_adapter(
+        types.SimpleNamespace(api=FakeApi()),
+        ca_cert=str(ca_path),
+        client_cert=None,
+        verify=True,
+    )
+
+    adapter = captured.get("adapter")
+    assert adapter is not None
+    assert "https://" in mounts
+
+    adapter.init_poolmanager(1, 1, False)
+    ctx = captured.get("ssl_context")
+    assert isinstance(ctx, ssl.SSLContext)
+    assert ctx.verify_mode == ssl.CERT_REQUIRED
+    assert ctx.check_hostname is True
+    assert captured.get("cafile") == str(ca_path)

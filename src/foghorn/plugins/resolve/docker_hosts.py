@@ -92,10 +92,11 @@ class DockerEndpointConfig(BaseModel):
       - suffix: Optional DNS suffix override for names sourced from this
         endpoint. When omitted, the plugin-level suffix is used.
       - tls_verify: When true, verify Docker daemon TLS certs for tcp://
-        endpoints.
+        endpoints. Requires tls_ca (fail closed; never skip verification).
       - tls_cert: Optional client TLS certificate path.
       - tls_key: Optional client TLS private-key path.
-      - tls_ca: Optional CA bundle path used to verify the daemon cert.
+      - tls_ca: CA bundle path used to verify the daemon cert when tls_verify
+        is true (required in that case).
 
     Outputs:
       - DockerEndpointConfig instance with normalized field types.
@@ -242,7 +243,7 @@ class DockerHosts(BasePlugin):
         Example:
           self._note_condition_failure(
               f"endpoint:{url}",
-              "DockerHosts: failed to list containers for %s: %s",
+              "failed to list containers for %s: %s",
               url,
               exc,
           )
@@ -291,7 +292,7 @@ class DockerHosts(BasePlugin):
             return
 
         logger.debug(
-            "DockerHosts: suppressed repeated condition %s (count=%d): " + message,
+            "suppressed repeated condition %s (count=%d): " + message,
             key,
             suppressed,
             *args,
@@ -385,7 +386,7 @@ class DockerHosts(BasePlugin):
                 continue
             if key not in allowed:
                 logger.warning(
-                    "DockerHosts: ignoring unsupported health status %r (supported: %s)",
+                    "ignoring unsupported health status %r (supported: %s)",
                     item,
                     ",".join(sorted(allowed)),
                 )
@@ -433,22 +434,20 @@ class DockerHosts(BasePlugin):
         if isinstance(raw_txt_fields, list):
             for item in raw_txt_fields:
                 if not isinstance(item, dict):
-                    logger.warning(
-                        "DockerHosts: ignoring non-mapping txt_fields entry %r", item
-                    )
+                    logger.warning("ignoring non-mapping txt_fields entry %r", item)
                     continue
                 name_val = str(item.get("name") or "").strip()
                 path_val = str(item.get("path") or "").strip()
                 if not name_val or not path_val:
                     logger.warning(
-                        "DockerHosts: ignoring txt_fields entry missing name/path: %r",
+                        "ignoring txt_fields entry missing name/path: %r",
                         item,
                     )
                     continue
                 txt_fields.append((name_val, path_val))
         elif raw_txt_fields:
             logger.warning(
-                "DockerHosts: txt_fields must be a list when set; got %r",
+                "txt_fields must be a list when set; got %r",
                 type(raw_txt_fields),
             )
 
@@ -471,7 +470,7 @@ class DockerHosts(BasePlugin):
                 txt_fields_keep.append(text)
         elif raw_txt_keep:
             logger.warning(
-                "DockerHosts: txt_fields_keep must be a list when set; got %r",
+                "txt_fields_keep must be a list when set; got %r",
                 type(raw_txt_keep),
             )
 
@@ -483,21 +482,15 @@ class DockerHosts(BasePlugin):
         # Normalize endpoint mappings; each must be a dict with a "url" key.
         for item in raw_endpoints:
             if not isinstance(item, dict):
-                logger.warning(
-                    "DockerHosts: ignoring non-mapping endpoint definition %r", item
-                )
+                logger.warning("ignoring non-mapping endpoint definition %r", item)
                 continue
             url_raw = item.get("url")
             if not url_raw:
-                logger.warning(
-                    "DockerHosts: endpoint missing 'url'; skipping entry %r", item
-                )
+                logger.warning("endpoint missing 'url'; skipping entry %r", item)
                 continue
             url = str(url_raw).strip()
             if not url:
-                logger.warning(
-                    "DockerHosts: endpoint has empty 'url'; skipping entry %r", item
-                )
+                logger.warning("endpoint has empty 'url'; skipping entry %r", item)
                 continue
 
             # Per-endpoint reload interval
@@ -519,11 +512,9 @@ class DockerHosts(BasePlugin):
                     if ip_obj.version == 4:
                         host_ipv4 = str(ip_obj)
                     else:
-                        logger.warning(
-                            "DockerHosts: use_ipv4=%r is not IPv4; ignoring", raw_v4
-                        )
+                        logger.warning("use_ipv4=%r is not IPv4; ignoring", raw_v4)
                 except ValueError:
-                    logger.warning("DockerHosts: invalid use_ipv4 %r; ignoring", raw_v4)
+                    logger.warning("invalid use_ipv4 %r; ignoring", raw_v4)
             raw_v6 = item.get("use_ipv6")
             if raw_v6:
                 try:
@@ -531,11 +522,9 @@ class DockerHosts(BasePlugin):
                     if ip_obj.version == 6:
                         host_ipv6 = str(ip_obj)
                     else:
-                        logger.warning(
-                            "DockerHosts: use_ipv6=%r is not IPv6; ignoring", raw_v6
-                        )
+                        logger.warning("use_ipv6=%r is not IPv6; ignoring", raw_v6)
                 except ValueError:
-                    logger.warning("DockerHosts: invalid use_ipv6 %r; ignoring", raw_v6)
+                    logger.warning("invalid use_ipv6 %r; ignoring", raw_v6)
 
             # Per-endpoint TTL override
             ttl_override: int | None
@@ -548,7 +537,7 @@ class DockerHosts(BasePlugin):
                     ttl_override = ttl_val if ttl_val >= 0 else None
                 except (TypeError, ValueError):
                     logger.warning(
-                        "DockerHosts: invalid ttl %r for endpoint %s; ignoring override",
+                        "invalid ttl %r for endpoint %s; ignoring override",
                         ttl_raw,
                         url,
                     )
@@ -595,7 +584,7 @@ class DockerHosts(BasePlugin):
 
         if not endpoints_cfg:
             logger.info(
-                "DockerHosts: no endpoints configured; using default unix:///var/run/docker.sock"
+                "no endpoints configured; using default unix:///var/run/docker.sock"
             )
             endpoints_cfg.append(
                 {
@@ -639,16 +628,16 @@ class DockerHosts(BasePlugin):
                 except DockerException as exc:
                     self._note_condition_failure(
                         f"endpoint:{url}",
-                        "DockerHosts: failed to create client for %s: %s",
+                        "failed to create client for %s: %s",
                         url,
                         exc,
                     )
                     continue
                 self._clients[url] = client
-                logger.info("DockerHosts: connected to endpoint %s", url)
+                logger.info("connected to endpoint %s", url)
         else:
             logger.warning(
-                "DockerHosts: docker SDK is not installed; plugin will be inert until it is available"
+                "docker SDK is not installed; plugin will be inert until it is available"
             )
 
         # Compute global reload interval as the minimum positive endpoint interval
@@ -694,7 +683,7 @@ class DockerHosts(BasePlugin):
                 self._reload_from_docker()
                 self._note_condition_ok(
                     "periodic-reload-error",
-                    "DockerHosts: periodic reload recovered",
+                    "periodic reload recovered",
                 )
             except (
                 Exception
@@ -703,7 +692,7 @@ class DockerHosts(BasePlugin):
                 # that transient Docker connectivity issues do not flood logs.
                 self._note_condition_failure(
                     "periodic-reload-error",
-                    "DockerHosts: error during periodic reload; keeping previous mappings: %s",
+                    "error during periodic reload; keeping previous mappings: %s",
                     exc,
                 )
 
@@ -751,14 +740,14 @@ class DockerHosts(BasePlugin):
             ) as exc:  # pragma: nocover defensive: connection and auth errors depend on external Docker daemon state
                 self._note_condition_failure(
                     endpoint_key,
-                    "DockerHosts: failed to create client for %s during reload: %s",
+                    "failed to create client for %s during reload: %s",
                     url,
                     exc,
                 )
                 return []
             else:
                 self._clients[url] = client
-                logger.info("DockerHosts: connected to endpoint %s", url)
+                logger.info("connected to endpoint %s", url)
         elif client is None:
             # docker SDK is unavailable; nothing to do for this endpoint.
             return []
@@ -775,7 +764,7 @@ class DockerHosts(BasePlugin):
         except Exception as exc:
             self._note_condition_failure(
                 endpoint_key,
-                "DockerHosts: failed to list containers for %s: %s",
+                "failed to list containers for %s: %s",
                 url,
                 exc,
             )
@@ -783,7 +772,7 @@ class DockerHosts(BasePlugin):
 
         self._note_condition_ok(
             endpoint_key,
-            "DockerHosts: endpoint %s is reachable again",
+            "endpoint %s is reachable again",
             url,
         )
         return result
@@ -837,8 +826,10 @@ class DockerHosts(BasePlugin):
           - Optional TLSConfig object for docker.DockerClient.
 
         Raises:
-          - DockerException: When tls_cert/tls_key/tls_ca paths are set but
-            missing/empty on disk (the Docker SDK error is otherwise opaque).
+          - DockerException: When tls_verify is set without tls_ca; when
+            tls_cert/tls_key/tls_ca paths are set but missing/empty on disk
+            (the Docker SDK error is otherwise opaque); or when only one of
+            tls_cert/tls_key is set.
         """
 
         if docker is None:
@@ -851,6 +842,14 @@ class DockerHosts(BasePlugin):
         tls_ca = str(endpoint.get("tls_ca") or "").strip() or None
         if not (tls_verify or tls_cert or tls_key or tls_ca):
             return None
+
+        # Fail closed: verification without an explicit CA previously fell
+        # through to CERT_NONE in the custom adapter (silent MITM).
+        if tls_verify and not tls_ca:
+            raise DockerException(
+                "Docker TLS tls_verify=true requires tls_ca (CA bundle path); "
+                "refusing to connect without certificate verification"
+            )
 
         tls_mod = getattr(docker, "tls", None)
         tls_cls = getattr(tls_mod, "TLSConfig", None) if tls_mod is not None else None
@@ -939,6 +938,8 @@ class DockerHosts(BasePlugin):
           - OpenSSL 3 may reject private CAs missing keyUsage with
             CERTIFICATE_VERIFY_FAILED. Clearing VERIFY_X509_STRICT keeps CA
             path verification while tolerating that common homelab CA shape.
+          - When verify is true, ca_cert is required and CERT_NONE is never
+            used (callers must fail setup earlier if tls_ca is missing).
         """
 
         try:
@@ -952,12 +953,21 @@ class DockerHosts(BasePlugin):
         if api is None or not hasattr(api, "mount"):
             return
 
+        if verify and not ca_cert:
+            # Defense in depth: never mount an adapter that would disable
+            # verification when the operator asked for tls_verify.
+            raise ValueError(
+                "Docker TLS adapter refuses verify=True without ca_cert; "
+                "set endpoint tls_ca or disable tls_verify"
+            )
+
         class _DockerTLSAdapter(HTTPAdapter):
             def init_poolmanager(
                 self, connections, maxsize, block=False, **pool_kwargs
             ):
                 ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-                if verify and ca_cert:
+                if verify:
+                    # verify=True always requires ca_cert (checked above).
                     ctx.verify_mode = ssl.CERT_REQUIRED
                     ctx.check_hostname = True
                     ctx.load_verify_locations(ca_cert)
@@ -977,6 +987,7 @@ class DockerHosts(BasePlugin):
                         except Exception:
                             pass
                 else:
+                    # Explicit insecure mode only when tls_verify is false.
                     ctx.check_hostname = False
                     ctx.verify_mode = ssl.CERT_NONE
                 if client_cert is not None:
@@ -1212,15 +1223,13 @@ class DockerHosts(BasePlugin):
                 # requirement and existing tests.
                 if not hostname:
                     cid = container.get("Id", "<unknown>")
-                    logger.warning(
-                        "DockerHosts: container %s has no hostname; skipping", cid
-                    )
+                    logger.warning("container %s has no hostname; skipping", cid)
                     continue
 
                 if not v4_list and not v6_list:
                     cid = container.get("Id", "<unknown>")
                     logger.warning(
-                        "DockerHosts: container %s (%s) has no IPv4/IPv6; skipping",
+                        "container %s (%s) has no IPv4/IPv6; skipping",
                         cid,
                         hostname,
                     )
@@ -1310,7 +1319,7 @@ class DockerHosts(BasePlugin):
                         valid_names.append(key)
                         continue
                     logger.warning(
-                        "DockerHosts: skipping invalid container DNS name %r",
+                        "skipping invalid container DNS name %r",
                         key,
                     )
                 normalized_names = valid_names
@@ -1325,7 +1334,7 @@ class DockerHosts(BasePlugin):
                         normalized_names = [key]
                     else:
                         logger.warning(
-                            "DockerHosts: container %s has IPs but no usable name/ID; skipping",
+                            "container %s has IPs but no usable name/ID; skipping",
                             container.get("Id", "<unknown>"),
                         )
                         continue
@@ -1398,7 +1407,7 @@ class DockerHosts(BasePlugin):
                                 new_ttl_ptr[ptr_name] = ep_ttl
                             except ValueError:
                                 logger.warning(
-                                    "DockerHosts: invalid IPv4 address %r for %s; skipping",
+                                    "invalid IPv4 address %r for %s; skipping",
                                     ip,
                                     ptr_canonical,
                                 )
@@ -1415,7 +1424,7 @@ class DockerHosts(BasePlugin):
                                 new_ttl_ptr[ptr_name] = ep_ttl
                             except ValueError:
                                 logger.warning(
-                                    "DockerHosts: invalid IPv6 address %r for %s; skipping",
+                                    "invalid IPv6 address %r for %s; skipping",
                                     ip,
                                     ptr_canonical,
                                 )
@@ -1466,7 +1475,7 @@ class DockerHosts(BasePlugin):
                 # per-endpoint overrides have been applied.
                 if v4_list or v6_list:
                     logger.debug(
-                        "DockerHosts: %s -> v4=%s v6=%s (ttl=%s)",
+                        "%s -> v4=%s v6=%s (ttl=%s)",
                         ",".join(names_for_mapping),
                         v4_list or [],
                         v6_list or [],
@@ -1476,13 +1485,13 @@ class DockerHosts(BasePlugin):
         if total_containers and not mapped_containers:
             self._note_condition_failure(
                 "mapped-containers-empty",
-                "DockerHosts: inspected %d containers but none had usable hostname/IP",
+                "inspected %d containers but none had usable hostname/IP",
                 total_containers,
             )
         elif not new_v4 and not new_v6:
             self._note_condition_failure(
                 "no-hostname-ip-mappings",
-                "DockerHosts: no hostname/IP mappings were added from any endpoint (no running containers or all were skipped)",
+                "no hostname/IP mappings were added from any endpoint (no running containers or all were skipped)",
             )
         else:
             # Mappings are healthy again; clear sticky empty-map conditions.
@@ -2355,7 +2364,7 @@ class DockerHosts(BasePlugin):
         except Exception as exc:
             log = getattr(self, "logger", logger)
             log.warning(
-                "DockerHosts: parse failure building response for %s %s: %s",
+                "parse failure building response for %s %s: %s",
                 qname,
                 QTYPE.get(qtype, str(qtype)),
                 exc,
@@ -2428,7 +2437,7 @@ class DockerHosts(BasePlugin):
             try:
                 request = DNSRecord.parse(req)
             except Exception as exc:
-                logger.warning("DockerHosts: parse failure for A %s: %s", qname, exc)
+                logger.warning("parse failure for A %s: %s", qname, exc)
                 return None
 
             reply = DNSRecord(
@@ -2482,7 +2491,7 @@ class DockerHosts(BasePlugin):
             try:
                 request = DNSRecord.parse(req)
             except Exception as exc:
-                logger.warning("DockerHosts: parse failure for AAAA %s: %s", qname, exc)
+                logger.warning("parse failure for AAAA %s: %s", qname, exc)
                 return None
 
             reply = DNSRecord(
@@ -2538,7 +2547,7 @@ class DockerHosts(BasePlugin):
             try:
                 request = DNSRecord.parse(req)
             except Exception as exc:
-                logger.warning("DockerHosts: parse failure for TXT %s: %s", qname, exc)
+                logger.warning("parse failure for TXT %s: %s", qname, exc)
                 return None
 
             reply = DNSRecord(
@@ -2590,7 +2599,7 @@ class DockerHosts(BasePlugin):
             try:
                 request = DNSRecord.parse(req)
             except Exception as exc:
-                logger.warning("DockerHosts: parse failure for PTR %s: %s", qname, exc)
+                logger.warning("parse failure for PTR %s: %s", qname, exc)
                 return None
 
             reply = DNSRecord(
