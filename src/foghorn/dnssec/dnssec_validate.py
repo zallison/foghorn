@@ -1,7 +1,7 @@
 import base64
 import logging
 import time
-from typing import Optional, Tuple, Final
+from typing import Final
 
 try:  # Ensure required crypto backend is present before enabling DNSSEC logic.
     import importlib.util as _importlib_util
@@ -74,7 +74,7 @@ _VALIDATION_NAMESERVERS: Final[list[str] | None] = None
 _VALIDATION_VIA_RECURSIVE: Final[bool] = False
 
 
-def configure_dnssec_resolver(nameservers: Optional[list[str]]) -> None:
+def configure_dnssec_resolver(nameservers: list[str] | None) -> None:
     """Configure nameservers for DNSSEC validation lookups.
 
     Inputs:
@@ -111,14 +111,14 @@ def configure_dnssec_resolver(nameservers: Optional[list[str]]) -> None:
 # RFC 5011-style trust anchor configuration (wired in by the application
 # config loader). Defaults keep existing static behavior.
 _TRUST_ANCHOR_MODE: Final[str] = "rfc5011"  # "static" or "rfc5011"
-_TRUST_ANCHOR_STORE_PATH: Optional[str] = None
+_TRUST_ANCHOR_STORE_PATH: str | None = None
 _TRUST_ANCHOR_HOLD_ADD_DAYS: Final[int] = 2
 _TRUST_ANCHOR_HOLD_REMOVE_DAYS: Final[int] = 2
 
 
 def configure_trust_anchors(
     mode: str = "static",
-    store_path: Optional[str] = None,
+    store_path: str | None = None,
     hold_down_add_days: int = 2,
     hold_down_remove_days: int = 2,
 ) -> None:
@@ -145,12 +145,19 @@ def configure_trust_anchors(
     _TRUST_ANCHOR_HOLD_REMOVE_DAYS = int(hold_down_remove_days or 2)
 
 
-# Root trust anchor (KSK-2017) as DNSKEY public key (RFC 7958) in presentation form
-# Source: https://data.iana.org/root-anchors/root-anchors.xml
-# key id 20326, algorithm 8 (RSASHA256)
-ROOT_DNSKEY_STR = """. 0 IN DNSKEY 257 3 8 AwEAAaz/tAm8yTn4Mfeh5eyI96WSVexTBAvkMgJzkKTOiWv7fE0kGJ0G4KPPeG3K
-j8GvXfY8+9GZV3fQ0R2U2GZQBaL8Xo4Z5V3Ckq5oO2GhgGZLQG5w5fVsrEo3xPx+
-CfJ4H3CvGf2bQ3aU/J5g7y3i7vU898vW3HjR8wQ6Y2GQ7QvG4hVYbVUrkE0="""
+# Root trust anchor (KSK-2017) as DNSKEY public key (RFC 7958) in presentation form.
+# Source: https://data.iana.org/root-anchors/root-anchors.xml (KeyDigest id=Klajeyz)
+# key id 20326, algorithm 8 (RSASHA256), DS SHA-256:
+#   E06D44B80B8F1D39A95C0B0D7C65D08458E880409BBC683457104237C7F8EC8D
+ROOT_DNSKEY_STR = (
+    ". 0 IN DNSKEY 257 3 8 "
+    "AwEAAaz/tAm8yTn4Mfeh5eyI96WSVexTBAvkMgJzkKTOiW1vkIbzxeF3+/4RgWOq"
+    "7HrxRixHlFlExOLAJr5emLvN7SWXgnLh4+B5xQlNVz8Og8kvArMtNROxVQuCaSnI"
+    "DdD5LKyWbRd2n9WGe2R8PzgCmr3EgVLrjyBxWezF0jLHwVN8efS3rCj/EWgvIWgb"
+    "9tarpVUDK/b58Da+sqqls3eNbuv7pr+eoZG+SrDK6nWeL3c6H5Apxz7LjVc1uTId"
+    "sIXxuOLYA4/ilBmSVIzuDWfdRUfhHdY6+cn8HFRm+2hM8AnXGXws9555KrUB5qih"
+    "ylGa8subX2Nn6UwNR1AkUTV74bU="
+)
 
 
 class _RecursiveAnswer:
@@ -184,7 +191,7 @@ class _RecursiveValidationResolver:
     def __init__(self, payload_size: int = 1232) -> None:
         self._payload_size = int(payload_size or 1232)
 
-    def resolve(self, name, rdtype, raise_on_no_answer: bool = True):  # noqa: D401
+    def resolve(self, name, rdtype, raise_on_no_answer: bool = True):
         """Resolve a single qname/rdtype using RecursiveResolver."""
 
         # Local imports to avoid introducing hard module-level dependencies or
@@ -281,7 +288,7 @@ def _fetch(r: dns.resolver.Resolver, name: dns.name.Name, rdtype: str):
 
 
 @registered_ttl_cache(maxsize=16, ttl=86400)
-def _root_dnskey_rrset() -> Optional[dns.rrset.RRset]:
+def _root_dnskey_rrset() -> dns.rrset.RRset | None:
     """Return the current root trust anchor DNSKEY RRset.
 
     In 'static' mode this is derived from the baked-in constant. In 'rfc5011'
@@ -337,7 +344,7 @@ def _root_dnskey_rrset() -> Optional[dns.rrset.RRset]:
 
 def _find_zone_apex(
     r: dns.resolver.Resolver, qname: dns.name.Name
-) -> Optional[dns.name.Name]:
+) -> dns.name.Name | None:
     """Return the closest zone apex that publishes a DNSKEY for qname.
 
     Inputs:
@@ -362,12 +369,12 @@ def _find_zone_apex(
 # TTLs, clamped to a maximum lifetime.
 _MAX_KEY_CACHE_TTL_SECONDS = 4 * 3600  # 4 hours
 _MAX_KEY_CACHE_ENTRIES = 4096
-_DNSKEY_CACHE: dict[str, Tuple[dns.rrset.RRset, float]] = {}
-_DS_CACHE: dict[str, Tuple[dns.rrset.RRset, float]] = {}
+_DNSKEY_CACHE: dict[str, tuple[dns.rrset.RRset, float]] = {}
+_DS_CACHE: dict[str, tuple[dns.rrset.RRset, float]] = {}
 
 
 def _evict_expired_cache_entries(
-    cache: dict[str, Tuple[dns.rrset.RRset, float]], now: float
+    cache: dict[str, tuple[dns.rrset.RRset, float]], now: float
 ) -> None:
     """Evict cache entries whose expiration timestamp has passed.
 
@@ -386,7 +393,7 @@ def _evict_expired_cache_entries(
 
 
 def _enforce_cache_entry_limit(
-    cache: dict[str, Tuple[dns.rrset.RRset, float]], max_entries: int
+    cache: dict[str, tuple[dns.rrset.RRset, float]], max_entries: int
 ) -> None:
     """Ensure a cache dictionary does not exceed a configured maximum size.
 
@@ -456,7 +463,7 @@ def _fetch_ds_cached(r: dns.resolver.Resolver, name: dns.name.Name) -> dns.rrset
 
 def _fetch_dnskey_and_rrsig(
     r: dns.resolver.Resolver, name: dns.name.Name
-) -> tuple[dns.rrset.RRset, Optional[dns.rrset.RRset]]:
+) -> tuple[dns.rrset.RRset, dns.rrset.RRset | None]:
     """Fetch DNSKEY RRset and its covering RRSIG(DNSKEY) for the given owner.
 
     Inputs:
@@ -487,9 +494,9 @@ def _fetch_dnskey_and_rrsig(
 
 def _validate_chain(
     r: dns.resolver.Resolver, apex: dns.name.Name
-) -> Optional[
-    dns.rrset.RRset
-]:  # pragma: no cover - networked DNSSEC chain validation exercised via higher-level tests
+) -> (
+    dns.rrset.RRset | None
+):  # pragma: no cover - networked DNSSEC chain validation exercised via higher-level tests
     """
     Validates the DNSKEY rrset at apex back to the root trust anchor.
 
@@ -587,7 +594,7 @@ def _validate_chain(
                 )
             except Exception as e:
                 # If missing/invalid, fail
-                logger.warn(
+                logger.warning(
                     "_validate_chain: DNSKEY self-signature validation failed for %s: %s",
                     child,
                     e,
@@ -606,7 +613,7 @@ def _validate_chain(
 @registered_ttl_cache(maxsize=1024, ttl=120)
 def _find_zone_apex_cached(
     qname_text: str, udp_payload_size: int
-) -> Optional[dns.name.Name]:
+) -> dns.name.Name | None:
     """Resolve and cache the DNSSEC apex for a given qname/UDP payload size.
 
     Inputs:
@@ -627,7 +634,7 @@ def _find_zone_apex_cached(
 @registered_ttl_cache(maxsize=4096, ttl=900)
 def _validate_chain_cached(
     apex_text: str, udp_payload_size: int
-) -> Optional[dns.rrset.RRset]:
+) -> dns.rrset.RRset | None:
     """Validate and cache the DNSKEY rrset at apex back to the root anchor.
 
     Inputs:
@@ -741,7 +748,7 @@ def _collect_positive_rrsets(
     msg: dns.message.Message,
     qname: dns.name.Name,
     rdtype: int,
-) -> Optional[tuple[dns.name.Name, list[dns.rrset.RRset], list[dns.rrset.RRset]]]:
+) -> tuple[dns.name.Name, list[dns.rrset.RRset], list[dns.rrset.RRset]] | None:
     """Collect RRsets and signatures forming a positive answer chain.
 
     Inputs:
@@ -998,22 +1005,24 @@ def _nsec_proves_nodata(
                 continue
             rdata = rrset[0]
             try:
-                # rdata.windows is dnspython's internal representation of the
-                # type bitmap. Use the contains() helper when available.
-                if hasattr(rdata, "covers") and hasattr(rdata, "to_text"):
-                    # Prefer the official interface when present.
-                    if hasattr(rdata, "types"):
-                        types = set(rdata.types)
-                    else:
-                        # Fallback: parse textual form.
-                        parts = rdata.to_text().split()
-                        types = set(parts[2:]) if len(parts) > 2 else set()
-                    if dns.rdatatype.to_text(rdtype) not in types:
-                        return True
+                # Prefer structured type sets when present (future dnspython).
+                if hasattr(rdata, "types"):
+                    raw_types = set(rdata.types)
+                    types = {
+                        (dns.rdatatype.to_text(t) if isinstance(t, int) else str(t))
+                        for t in raw_types
+                    }
+                elif hasattr(rdata, "to_text"):
+                    # NSEC presentation: "next.name. TYPE1 TYPE2 ..."
+                    # Index 0 is the next name; types start at index 1.
+                    parts = rdata.to_text().split()
+                    types = set(parts[1:]) if len(parts) > 1 else set()
                 else:
                     # Very conservative fallback: assume NODATA cannot be
                     # proven without a richer view of the bitmap.
                     return False
+                if dns.rdatatype.to_text(rdtype) not in types:
+                    return True
             except Exception:
                 return False
         return False
@@ -1023,7 +1032,7 @@ def _nsec_proves_nodata(
 
 def _nsec3_common_params(
     nsec3_rrsets: list[dns.rrset.RRset],
-) -> Optional[tuple[dns.name.Name, int, int, bytes]]:
+) -> tuple[dns.name.Name, int, int, bytes] | None:
     """Extract common NSEC3 parameters (origin, algorithm, iterations, salt)."""
     try:
         if not nsec3_rrsets:
@@ -1251,7 +1260,7 @@ def _classify_dnssec_local(
     qtype_num: int,
     response_wire: bytes,
     udp_payload_size: int,
-) -> Optional[str]:
+) -> str | None:
     """Baseline local DNSSEC classification used by 'local' and 'local_extended'.
 
     This inspects only the DNSSEC material present in the provided response and
@@ -1286,7 +1295,7 @@ def _classify_dnssec_local_extended(
     qtype_num: int,
     response_wire: bytes,
     udp_payload_size: int,
-) -> Optional[str]:
+) -> str | None:
     """Extended local DNSSEC classification.
 
     This first applies the baseline local classification and, when the result is
@@ -1394,7 +1403,7 @@ def classify_dnssec_status(
     response_wire: bytes,
     *,
     udp_payload_size: int = 1232,
-) -> Optional[str]:
+) -> str | None:
     """Classify a DNS response as DNSSEC "secure", "unsigned", or "bogus".
 
     Inputs:

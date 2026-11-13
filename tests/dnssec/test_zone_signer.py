@@ -13,8 +13,8 @@ Outputs:
 from __future__ import annotations
 
 import datetime
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Iterator, Tuple
 
 import dns.name
 import dns.node
@@ -77,7 +77,7 @@ class _ZoneItemsStrWrapper:
     def find_node(self, name: dns.name.Name, *, create: bool = False):
         return self._zone.find_node(name, create=create)
 
-    def items(self) -> Iterator[Tuple[object, object]]:
+    def items(self) -> Iterator[tuple[object, object]]:
         for i, (name, node) in enumerate(self._zone.items()):
             if i == 0:
                 yield name.to_text(), node
@@ -156,6 +156,11 @@ def test_save_and_load_key_including_legacy_filename(tmp_path: Path) -> None:
         "ECDSAP256SHA256",
     )
     assert saved.exists()
+    # Owner-only key material (0o600). Mask to permission bits only.
+    assert (saved.stat().st_mode & 0o777) == 0o600
+    meta_path = key_dir / "domainkey_example_test.ksk.meta.json"
+    assert meta_path.exists()
+    assert (meta_path.stat().st_mode & 0o777) == 0o600
 
     loaded_primary = zone_signer.load_key(key_dir, zone_name, "ksk")
     assert loaded_primary is not None
@@ -167,6 +172,36 @@ def test_save_and_load_key_including_legacy_filename(tmp_path: Path) -> None:
 
     loaded_legacy = zone_signer.load_key(key_dir, zone_name, "ksk")
     assert loaded_legacy is not None
+
+
+def test_save_key_tolerates_chmod_failure(tmp_path: Path, monkeypatch) -> None:
+    """Brief: save_key still writes keys when chmod is denied (e.g. Docker mounts).
+
+    Inputs:
+      - tmp_path: pytest temporary directory.
+      - monkeypatch: Forces os.chmod to raise OSError.
+
+    Outputs:
+      - Asserts save_key returns a readable key path without raising.
+    """
+
+    def _deny_chmod(path, mode):
+        raise OSError("Operation not permitted")
+
+    monkeypatch.setattr(zone_signer.os, "chmod", _deny_chmod)
+
+    key_dir = tmp_path / "keys"
+    private_key, _ = zone_signer.generate_keypair("ECDSAP256SHA256", "zsk")
+    saved = zone_signer.save_key(
+        private_key,
+        key_dir,
+        "docker.example.",
+        "zsk",
+        "ECDSAP256SHA256",
+    )
+    assert saved.exists()
+    assert saved.read_bytes().startswith(b"-----")
+    assert zone_signer.load_key(key_dir, "docker.example.", "zsk") is not None
 
 
 def test_load_key_invalid_pem_returns_none(tmp_path: Path) -> None:
@@ -269,7 +304,7 @@ def test_sign_zone_derelativizes_non_absolute_origin(tmp_path: Path) -> None:
                 self._nodes[name] = node
             return node
 
-        def items(self) -> Iterator[Tuple[object, object]]:
+        def items(self) -> Iterator[tuple[object, object]]:
             for i, (name, node) in enumerate(self._nodes.items()):
                 if i == 0:
                     yield name.to_text(), node

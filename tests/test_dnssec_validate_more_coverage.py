@@ -61,11 +61,11 @@ def test_recursive_validation_resolver_handles_int_rdtype(monkeypatch) -> None:
     import foghorn.servers.recursive_resolver as rr_mod
 
     class _FakeRecursiveResolver:
-        def __init__(self, *args, **kwargs):  # noqa: ANN001
+        def __init__(self, *args, **kwargs):
             self.args = args
             self.kwargs = kwargs
 
-        def resolve(self, q):  # noqa: ANN001
+        def resolve(self, q):
             _ = q
             msg = dns.message.Message()
             msg.answer.append(
@@ -95,7 +95,7 @@ def _clear_root_dnskey_cache() -> None:
     Outputs:
       - None
     """
-    func = getattr(dval, "_root_dnskey_rrset")
+    func = dval._root_dnskey_rrset
     cache_obj = getattr(func, "cache", None)
     if hasattr(cache_obj, "clear"):
         cache_obj.clear()
@@ -121,19 +121,19 @@ def test_root_dnskey_rrset_rfc5011_bootstraps_store(monkeypatch, tmp_path) -> No
 
     calls: dict[str, object] = {}
 
-    def fake_load_store(path: str) -> dict:  # noqa: ANN001
+    def fake_load_store(path: str) -> dict:
         calls["load"] = path
         return {"zones": {}}
 
-    def fake_anchors_for_zone(store: dict, zone: str):  # noqa: ANN001
+    def fake_anchors_for_zone(store: dict, zone: str):
         calls["anchors_for_zone"] = (store, zone)
         return []
 
-    def fake_bootstrap(store: dict, zone: str, rrset):  # noqa: ANN001
+    def fake_bootstrap(store: dict, zone: str, rrset):
         calls["bootstrap"] = zone
         return store
 
-    def fake_save_store(path: str, store: dict) -> None:  # noqa: ANN001
+    def fake_save_store(path: str, store: dict) -> None:
         calls["save"] = path
 
     monkeypatch.setattr(ta, "load_store", fake_load_store)
@@ -210,7 +210,7 @@ def test_fetch_dnskey_and_rrsig_skips_rrsig_without_type_covered() -> None:
     bad_sig_rr = _RRset(name, dns.rdatatype.RRSIG, [_BadSigRdata()])
 
     class _R:
-        def resolve(self, n, t, raise_on_no_answer=True):  # noqa: ANN001
+        def resolve(self, n, t, raise_on_no_answer=True):
             assert n == name
             assert t == "DNSKEY"
             assert raise_on_no_answer is True
@@ -234,7 +234,7 @@ def test_validate_response_local_positive_chain_validate_error_returns_false(
     """
 
     class _Msg:
-        def rcode(self):  # noqa: D401
+        def rcode(self):
             return dns.rcode.NOERROR
 
     monkeypatch.setattr(
@@ -252,7 +252,7 @@ def test_validate_response_local_positive_chain_validate_error_returns_false(
     monkeypatch.setattr(dval, "_find_zone_apex_cached", lambda *_a, **_k: dns.name.root)
     monkeypatch.setattr(dval, "_validate_chain_cached", lambda *_a, **_k: object())
 
-    def boom_validate(*_a, **_k):  # noqa: ANN001
+    def boom_validate(*_a, **_k):
         raise RuntimeError("boom")
 
     monkeypatch.setattr(
@@ -277,7 +277,7 @@ def test_collect_positive_rrsets_cname_target_missing_returns_none() -> None:
             self.name = name
             self.rdtype = dns.rdatatype.CNAME
 
-        def __getitem__(self, idx: int):  # noqa: D401
+        def __getitem__(self, idx: int):
             _ = idx
             raise ValueError("no target")
 
@@ -308,7 +308,7 @@ def test_collect_positive_rrsets_dname_target_missing_returns_none() -> None:
             self.name = name
             self.rdtype = dns.rdatatype.DNAME
 
-        def __getitem__(self, idx: int):  # noqa: D401
+        def __getitem__(self, idx: int):
             _ = idx
             raise ValueError("no target")
 
@@ -383,6 +383,17 @@ def test_nsec_helpers_cover_edge_paths() -> None:
 
     nodata_rr = _NsecRRset(q, [_Bitmapless()])
     assert dval._nsec_proves_nodata(q, dns.rdatatype.A, [nodata_rr]) is False
+
+    # Textual NSEC bitmap: first listed type must not be dropped (parts[1:]).
+    class _TextNsec:
+        def to_text(self):
+            return "b.example. A NS SOA MX AAAA"
+
+    text_rr = _NsecRRset(q, [_TextNsec()])
+    # Queried type A is first in the bitmap — must NOT prove NODATA.
+    assert dval._nsec_proves_nodata(q, dns.rdatatype.A, [text_rr]) is False
+    # Queried type TXT is absent — may prove NODATA.
+    assert dval._nsec_proves_nodata(q, dns.rdatatype.TXT, [text_rr]) is True
 
 
 def test_nsec3_common_params_negative_cases() -> None:
@@ -624,7 +635,7 @@ def test_classify_dnssec_local_extended_parse_failure_returns_baseline(
         dval, "_classify_dnssec_local", lambda *_a, **_k: "dnssec_unsigned"
     )
 
-    def from_wire(_wire):  # noqa: ANN001
+    def from_wire(_wire):
         raise RuntimeError("boom")
 
     monkeypatch.setattr(
@@ -690,7 +701,7 @@ def test_classify_dnssec_local_extended_enriched_rrsig_secure_and_bogus(
     )
 
     # Bogus path.
-    def boom_validate(*_a, **_k):  # noqa: ANN001
+    def boom_validate(*_a, **_k):
         raise RuntimeError("boom")
 
     monkeypatch.setattr(

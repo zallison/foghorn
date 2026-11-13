@@ -1,8 +1,7 @@
 import json
 import os
 from dataclasses import asdict, dataclass
-from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Optional
+from datetime import UTC, datetime, timedelta
 
 import dns.dnssec
 import dns.name
@@ -32,10 +31,10 @@ class TrustAnchorKey:
     status: str
     first_seen: str
     last_seen: str
-    promoted_at: Optional[str] = None
+    promoted_at: str | None = None
 
 
-Store = Dict[str, Dict[str, List[Dict]]]
+Store = dict[str, dict[str, list[dict]]]
 
 
 def _now_utc() -> datetime:
@@ -45,7 +44,7 @@ def _now_utc() -> datetime:
       - timezone-aware datetime in UTC.
     """
 
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def load_store(path: str) -> Store:
@@ -62,6 +61,10 @@ def load_store(path: str) -> Store:
     if not path:
         return {}
     try:
+        from foghorn.utils.safe_paths import enforce_data_root_path, get_data_root
+
+        if get_data_root() is not None:
+            path = enforce_data_root_path(path, kind="DNSSEC trust-anchor store")
         if not os.path.exists(path):
             return {}
         with open(path, "r", encoding="utf-8") as f:
@@ -86,6 +89,14 @@ def save_store(path: str, store: Store) -> None:
 
     if not path:
         return
+    try:
+        from foghorn.utils.safe_paths import enforce_data_root_path, get_data_root
+
+        if get_data_root() is not None:
+            path = enforce_data_root_path(path, kind="DNSSEC trust-anchor store")
+    except ValueError:
+        # Fail closed: refuse to write outside data_root.
+        return
     directory = os.path.dirname(path) or "."
     os.makedirs(directory, exist_ok=True)
     tmp_path = path + ".tmp"
@@ -94,7 +105,7 @@ def save_store(path: str, store: Store) -> None:
     os.replace(tmp_path, path)
 
 
-def _zone_bucket(store: Store, zone: str) -> Dict:
+def _zone_bucket(store: Store, zone: str) -> dict:
     """Return bucket for a given zone, creating it if needed."""
 
     zone = zone or "."
@@ -105,7 +116,7 @@ def _zone_bucket(store: Store, zone: str) -> Dict:
     return bucket
 
 
-def anchors_for_zone(store: Store, zone: str) -> List[dns.rdata.Rdata]:
+def anchors_for_zone(store: Store, zone: str) -> list[dns.rdata.Rdata]:
     """Return trusted DNSKEY RDATAs for a zone.
 
     Inputs:
@@ -117,7 +128,7 @@ def anchors_for_zone(store: Store, zone: str) -> List[dns.rdata.Rdata]:
     """
 
     bucket = _zone_bucket(store, zone)
-    out: List[dns.rdata.Rdata] = []
+    out: list[dns.rdata.Rdata] = []
     for entry in bucket.get("keys", []):
         if entry.get("status") != "trusted":
             continue
@@ -184,7 +195,7 @@ def update_from_dnskey_rrset(
     zone: str,
     rrset: dns.rrset.RRset,
     *,
-    now: Optional[datetime] = None,
+    now: datetime | None = None,
     hold_down_add_days: int = 2,
     hold_down_remove_days: int = 2,
 ) -> bool:
@@ -220,7 +231,7 @@ def update_from_dnskey_rrset(
             continue
 
     # Existing entries.
-    entries: List[Dict] = bucket.get("keys", [])
+    entries: list[dict] = bucket.get("keys", [])
     by_tag = {e.get("key_tag"): e for e in entries}
 
     # Mark presence and last_seen.

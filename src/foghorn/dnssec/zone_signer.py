@@ -21,8 +21,8 @@ Outputs:
 import datetime
 import json
 import logging
+import os
 from pathlib import Path
-from typing import List, Optional, Tuple
 
 import dns.dnssec
 import dns.name
@@ -48,7 +48,7 @@ ALGORITHM_MAP = {
 
 def generate_keypair(
     algorithm_name: str, key_type: str
-) -> Tuple[object, dns.dnssec.Algorithm]:
+) -> tuple[object, dns.dnssec.Algorithm]:
     """Brief: Generate a cryptographic keypair for DNSSEC signing.
 
     Inputs:
@@ -87,7 +87,72 @@ def _sanitize_zone_name(zone_name: str) -> str:
     return zone_str.replace(".", "_")
 
 
-def _candidate_key_lookup_dirs(keys_dir: Path) -> List[Path]:
+def _best_effort_chmod(path: Path, mode: int) -> None:
+    """Brief: Apply file mode bits, tolerating ownership/FS limits.
+
+    Inputs:
+      - path: Filesystem path to chmod.
+      - mode: POSIX mode bits (e.g. 0o600).
+
+    Outputs:
+      - None. Logs a warning when chmod fails (common under Docker volume
+        mounts where the process does not own the file).
+    """
+
+    try:
+        os.chmod(path, mode)
+    except OSError as exc:
+        logger.warning(
+            "Could not set mode %04o on %s (%s); continuing without changing permissions",
+            mode,
+            path,
+            exc,
+        )
+
+
+def _write_private_bytes(path: Path, data: bytes) -> None:
+    """Brief: Write bytes creating the file with owner-only permissions.
+
+    Inputs:
+      - path: Destination file path.
+      - data: Raw bytes to write.
+
+    Outputs:
+      - None. File contents replaced; mode set to 0o600 when the OS allows it.
+
+    Notes:
+      - Opens with mode 0o600 so new files are private even if a later chmod
+        fails (e.g. process does not own a bind-mounted key file in Docker).
+      - chmod is best-effort and never raises.
+    """
+
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    fd = os.open(str(path), flags, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            fd = -1  # ownership transferred to the file object
+            handle.write(data)
+    finally:
+        if fd >= 0:  # pragma: no cover - only if fdopen failed before transfer
+            os.close(fd)
+    _best_effort_chmod(path, 0o600)
+
+
+def _write_private_text(path: Path, text: str) -> None:
+    """Brief: Write UTF-8 text with owner-only permissions when possible.
+
+    Inputs:
+      - path: Destination file path.
+      - text: Unicode string to write.
+
+    Outputs:
+      - None. See ``_write_private_bytes``.
+    """
+
+    _write_private_bytes(path, text.encode("utf-8"))
+
+
+def _candidate_key_lookup_dirs(keys_dir: Path) -> list[Path]:
     """Brief: Build candidate directories for key-file existence checks.
 
     Inputs:
@@ -104,7 +169,7 @@ def _candidate_key_lookup_dirs(keys_dir: Path) -> List[Path]:
         while keeping persisted config values unchanged.
     """
 
-    candidates: List[Path] = [keys_dir]
+    candidates: list[Path] = [keys_dir]
 
     if keys_dir.is_absolute():
         return candidates
@@ -145,9 +210,12 @@ def save_key(
       - Older releases used a `K<apex>.<key_type>.key` pattern; keys written
         by those versions are still loaded via ``load_key`` for backwards
         compatibility but new keys are written with the `domainkey_` prefix.
+      - Key material is written with owner-read/write mode (0o600). chmod is
+        best-effort so Docker bind mounts owned by another uid still succeed.
     """
 
     key_dir.mkdir(parents=True, exist_ok=True)
+    _best_effort_chmod(key_dir, 0o700)
     sanitized_zone = _sanitize_zone_name(zone_name)
     base_name = f"domainkey_{sanitized_zone}"
     key_path = key_dir / f"{base_name}.{key_type}.key"
@@ -159,7 +227,7 @@ def save_key(
         encryption_algorithm=serialization.NoEncryption(),
     )
 
-    key_path.write_bytes(pem_bytes)
+    _write_private_bytes(key_path, pem_bytes)
 
     meta = {
         "zone": zone_name,
@@ -167,13 +235,13 @@ def save_key(
         "algorithm": algorithm,
         "created": datetime.datetime.utcnow().isoformat(),
     }
-    meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    _write_private_text(meta_path, json.dumps(meta, indent=2))
 
     logger.info("Saved %s key to %s", key_type.upper(), key_path)
     return key_path
 
 
-def load_key(key_dir: Path, zone_name: str, key_type: str) -> Optional[object]:
+def load_key(key_dir: Path, zone_name: str, key_type: str) -> object | None:
     """Brief: Load an existing private key from disk.
 
     Inputs:
@@ -325,7 +393,7 @@ def sign_zone(
 
 def generate_ds_records(
     zone_name: dns.name.Name, ksk_dnskey: dns.rdata.Rdata
-) -> List[dns.rdata.Rdata]:
+) -> list[dns.rdata.Rdata]:
     """Brief: Generate DS records for the KSK.
 
     Inputs:
@@ -336,7 +404,7 @@ def generate_ds_records(
       - List of DS rdata objects (SHA-256 and SHA-384 digests).
     """
 
-    ds_records: List[dns.rdata.Rdata] = []
+    ds_records: list[dns.rdata.Rdata] = []
     for digest_type in (dns.dnssec.DSDigest.SHA256, dns.dnssec.DSDigest.SHA384):
         try:
             ds = dns.dnssec.make_ds(zone_name, ksk_dnskey, digest_type)
@@ -354,7 +422,7 @@ def ensure_zone_keys(
     *,
     algorithm: str,
     generate_policy: str,
-) -> Tuple[object, object, dns.rdata.Rdata, dns.rdata.Rdata]:
+) -> tuple[object, object, dns.rdata.Rdata, dns.rdata.Rdata]:
     """Brief: Ensure KSK/ZSK and DNSKEY rdata for a zone under a policy.
 
     Inputs:
@@ -397,11 +465,11 @@ def ensure_zone_keys(
             )
     else:
         if ksk_private is None:
-            logger.warn("Generating new KSK with algorithm %s", algorithm)
+            logger.warning("Generating new KSK with algorithm %s", algorithm)
             ksk_private, _ = generate_keypair(algorithm, "ksk")
             save_key(ksk_private, keys_dir, zone_name_str, "ksk", algorithm)
         if zsk_private is None:
-            logger.warn("Generating new ZSK with algorithm %s", algorithm)
+            logger.warning("Generating new ZSK with algorithm %s", algorithm)
             zsk_private, _ = generate_keypair(algorithm, "zsk")
             save_key(zsk_private, keys_dir, zone_name_str, "zsk", algorithm)
 
@@ -423,7 +491,7 @@ def sign_zone_object(
     ksk_dnskey: dns.rdata.Rdata,
     zsk_dnskey: dns.rdata.Rdata,
     validity_days: int = 30,
-    now: Optional[datetime.datetime] = None,
+    now: datetime.datetime | None = None,
 ) -> dns.zone.Zone:
     """Brief: Sign an in-memory zone object and return it.
 
@@ -464,11 +532,11 @@ def sign_zone_file(
     input_path: Path,
     output_path: Path,
     *,
-    keys_dir: Optional[Path] = None,
+    keys_dir: Path | None = None,
     algorithm: str = "ECDSAP256SHA256",
     generate_policy: str = "maybe",
     validity_days: int = 30,
-) -> List[str]:
+) -> list[str]:
     """Brief: Load, sign, and write a BIND-style zone file.
 
     Inputs:

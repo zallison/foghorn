@@ -9,11 +9,21 @@ Outputs:
 
 import base64
 
+import dns.dnssec
 import dns.name
 import dns.rcode
+import dns.rdata
+import dns.rdataclass
+import dns.rdatatype
 import pytest
 
 import foghorn.dnssec.dnssec_validate as dval
+
+# IANA root-anchors.xml KeyDigest id=Klajeyz (KSK-2017).
+_IANA_KSK2017_KEY_TAG = 20326
+_IANA_KSK2017_DS_SHA256 = (
+    "E06D44B80B8F1D39A95C0B0D7C65D08458E880409BBC683457104237C7F8EC8D"
+)
 
 
 def test_resolver_sets_do_and_lifetime():
@@ -73,6 +83,46 @@ def test_root_dnskey_rrset_constructs_trust_anchor():
     assert rrset.name == dns.name.root
 
 
+def test_root_dnskey_str_is_iana_ksk2017():
+    """Brief: ROOT_DNSKEY_STR matches IANA KSK-2017 (key id 20326).
+
+    Inputs:
+      - None
+
+    Outputs:
+      - None; asserts dns.dnssec.key_id and SHA-256 DS match IANA root-anchors.
+
+    Notes:
+      - Guards against truncated/placeholder public keys that still parse but
+        do not match the published KSK-2017 trust anchor.
+    """
+
+    txt = dval.ROOT_DNSKEY_STR.replace("\n", " ")
+    rdata = dns.rdata.from_text(
+        dns.rdataclass.IN,
+        dns.rdatatype.DNSKEY,
+        txt.split(" DNSKEY ")[1],
+    )
+    assert int(rdata.flags) & 0x0100  # SEP bit set (KSK)
+    assert int(rdata.algorithm) == 8  # RSASHA256
+    assert dns.dnssec.key_id(rdata) == _IANA_KSK2017_KEY_TAG
+
+    ds = dns.dnssec.make_ds(
+        dns.name.root,
+        rdata,
+        dns.dnssec.DSDigest.SHA256,
+    )
+    assert int(ds.key_tag) == _IANA_KSK2017_KEY_TAG
+    assert int(ds.algorithm) == 8
+    assert int(ds.digest_type) == 2
+    assert ds.digest.hex().upper() == _IANA_KSK2017_DS_SHA256
+
+    # Static path via _root_dnskey_rrset must surface the same key.
+    rrset = dval._root_dnskey_rrset()
+    assert rrset is not None
+    assert any(dns.dnssec.key_id(rd) == _IANA_KSK2017_KEY_TAG for rd in rrset)
+
+
 def test_find_zone_apex_uses_first_success_and_root_on_failure(monkeypatch):
     """Brief: _find_zone_apex returns first successful DNSKEY owner or root.
 
@@ -128,7 +178,7 @@ def test_find_zone_apex_cached_success_and_failure(monkeypatch):
 
     # Clear any cached entries so this test is independent of prior calls and
     # does not accidentally reuse a different apex from earlier tests.
-    func = getattr(dval, "_find_zone_apex_cached")
+    func = dval._find_zone_apex_cached
     cache_obj = getattr(func, "cache", None)
     if hasattr(cache_obj, "clear"):
         cache_obj.clear()
@@ -167,7 +217,7 @@ def test_validate_chain_cached_success_and_failure(monkeypatch):
     """
 
     # Clear any cached entries so this test is independent of prior calls.
-    func = getattr(dval, "_validate_chain_cached")
+    func = dval._validate_chain_cached
     cache_obj = getattr(func, "cache", None)
     if hasattr(cache_obj, "clear"):
         cache_obj.clear()
@@ -783,7 +833,7 @@ def test_classify_dnssec_local_variants(monkeypatch):
     def fake_from_wire(_wire):
         return _Msg(has_dnssec=True)
 
-    def fake_has_dnssec_rr(msg):  # noqa: D401
+    def fake_has_dnssec_rr(msg):
         return msg._has_dnssec
 
     # Secure when validate_response_local returns True.
@@ -876,7 +926,7 @@ def test_validate_authority_rrsets_behaviour(monkeypatch):
     sig_rr = _RRset(apex, dns.rdatatype.RRSIG, ["sig"])
     msg4 = type("_Msg4", (), {"authority": [ds_rr, sig_rr]})()
 
-    def _boom_validate(rrset, sig_rrset, keymap):  # noqa: D401, ANN001
+    def _boom_validate(rrset, sig_rrset, keymap):
         raise RuntimeError("boom")
 
     monkeypatch.setattr(
@@ -970,7 +1020,7 @@ def test_classify_dnssec_local_extended_additional_paths(monkeypatch):
     def fake_from_wire(_wire):
         return _Msg(has_dnssec=True)
 
-    def fake_has_dnssec_rr(msg):  # noqa: D401
+    def fake_has_dnssec_rr(msg):
         return msg._has_dnssec
 
     monkeypatch.setattr(
@@ -1099,13 +1149,13 @@ def test_configure_dnssec_resolver_and_resolver_variants(monkeypatch):
     import foghorn.servers.recursive_resolver as rr_mod
 
     class _FakeRecursiveResolver:
-        def __init__(self, *args, **kwargs):  # noqa: D401, ANN001
+        def __init__(self, *args, **kwargs):
             """Record constructor arguments without side effects."""
 
             self.args = args
             self.kwargs = kwargs
 
-        def resolve(self, q):  # noqa: D401, ANN001
+        def resolve(self, q):
             """Return a minimal dns.message-based response for testing."""
 
             msg = dns.message.Message()
@@ -1134,10 +1184,10 @@ def test_configure_dnssec_resolver_and_resolver_variants(monkeypatch):
 
     # Error path: no matching RRset should raise NoAnswer when requested.
     class _EmptyRecursiveResolver:
-        def __init__(self, *args, **kwargs):  # noqa: D401, ANN001
+        def __init__(self, *args, **kwargs):
             """Resolver that always returns an empty answer section."""
 
-        def resolve(self, q):  # noqa: D401, ANN001
+        def resolve(self, q):
             msg = dns.message.Message()
             wire = msg.to_wire()
             return wire, "test-upstream"
@@ -1190,7 +1240,7 @@ def test_dnskey_and_ds_caches_use_ttl_and_refresh(monkeypatch):
 
     now_values = [1000.0, 1005.0, 1015.0, 1020.0, 1025.0, 1030.0]
 
-    def fake_time() -> float:  # noqa: D401
+    def fake_time() -> float:
         """Return controlled timestamps for cache tests."""
 
         return now_values.pop(0)
@@ -1203,7 +1253,7 @@ def test_dnskey_and_ds_caches_use_ttl_and_refresh(monkeypatch):
 
     fetch_calls: list[tuple[str, str]] = []
 
-    def fake_fetch(resolver, name, rdtype):  # noqa: D401, ANN001
+    def fake_fetch(resolver, name, rdtype):
         """Return distinct rrsets so refresh behavior is visible."""
 
         fetch_calls.append((name.to_text(), rdtype))
@@ -1261,7 +1311,7 @@ def test_fetch_dnskey_and_rrsig_parsing_and_errors():
         def __init__(self, answer):
             self._answer = answer
 
-        def resolve(self, n, t, raise_on_no_answer=True):  # noqa: D401, ANN001
+        def resolve(self, n, t, raise_on_no_answer=True):
             assert n == name
             assert t == "DNSKEY"
             return _Ans(self._answer)
@@ -1314,7 +1364,7 @@ def test_nsec3_common_params_and_helpers(monkeypatch):
     assert salt == b""
 
     # Patch nsec3_hash so that we have a deterministic digest.
-    def fake_hash(qname, alg, iters, s):  # noqa: D401, ANN001
+    def fake_hash(qname, alg, iters, s):
         return b"digest-bytes"
 
     monkeypatch.setattr(
@@ -1336,7 +1386,7 @@ def test_nsec3_common_params_and_helpers(monkeypatch):
         def __init__(self, types):
             self.types = types
 
-        def to_text(self):  # noqa: D401
+        def to_text(self):
             """Return a textual form with trailing type names."""
 
             return "owner next " + " ".join(self.types)
@@ -1346,7 +1396,7 @@ def test_nsec3_common_params_and_helpers(monkeypatch):
     # For the NODATA helper we do not rely on the full NSEC3 parameter
     # extraction logic; stub _nsec3_common_params so the test focuses on the
     # bitmap handling.
-    def fake_common_params(_rrsets):  # noqa: D401, ANN001
+    def fake_common_params(_rrsets):
         return origin, 1, 0, b""
 
     monkeypatch.setattr(dval, "_nsec3_common_params", fake_common_params)
