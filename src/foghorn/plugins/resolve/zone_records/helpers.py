@@ -10,17 +10,17 @@ import logging
 import os
 import pathlib
 import re
-from typing import Dict, Iterable, List, Optional, Tuple
+from collections.abc import Iterable
 
 from foghorn.utils import dns_names
 from foghorn.utils.register_caches import registered_lru_cache
 
 logger = logging.getLogger(__name__)
 _ZONE_SUFFIX_TERMINAL = object()
-_WILDCARD_PATTERN_CACHE: Dict[int, Tuple[int, List[str]]] = {}
+_WILDCARD_PATTERN_CACHE: dict[int, tuple[int, list[str]]] = {}
 
 
-def normalize_path_allowlist(raw: object) -> List[pathlib.Path]:
+def normalize_path_allowlist(raw: object) -> list[pathlib.Path]:
     """Brief: Normalize a path allowlist into resolved directory prefixes.
 
     Inputs:
@@ -42,7 +42,7 @@ def normalize_path_allowlist(raw: object) -> List[pathlib.Path]:
         )
         return []
 
-    prefixes: List[pathlib.Path] = []
+    prefixes: list[pathlib.Path] = []
     for idx, entry in enumerate(items):
         if entry is None:
             continue
@@ -71,7 +71,7 @@ def normalize_path_allowlist(raw: object) -> List[pathlib.Path]:
         prefixes.append(resolved)
 
     # De-duplicate while preserving order.
-    deduped: List[pathlib.Path] = []
+    deduped: list[pathlib.Path] = []
     seen: set[str] = set()
     for p in prefixes:
         key = str(p)
@@ -113,11 +113,11 @@ def _path_is_within_allowlist(
 
 
 def normalize_paths(
-    file_paths: Optional[Iterable[str]],
-    legacy: Optional[str],
+    file_paths: Iterable[str] | None,
+    legacy: str | None,
     *,
-    path_allowlist: Optional[Iterable[pathlib.Path]] = None,
-) -> List[str]:
+    path_allowlist: Iterable[pathlib.Path] | None = None,
+) -> list[str]:
     """Brief: Coerce provided file path inputs into an ordered, de-duplicated list.
 
     Inputs:
@@ -136,7 +136,7 @@ def normalize_paths(
       normalize_paths(["/a", "/b"], "/a") -> ["/a", "/b"]
       normalize_paths(None, "/a") -> ["/a"]
     """
-    paths: List[str] = []
+    paths: list[str] = []
     allowlist = list(path_allowlist or [])
     if file_paths:
         for idx, p in enumerate(file_paths):
@@ -165,7 +165,7 @@ def normalize_paths(
     return paths
 
 
-def normalize_zone_suffixes(raw: object) -> List[str]:
+def normalize_zone_suffixes(raw: object) -> list[str]:
     """Brief: Normalize a zone suffix list for NXDOMAIN enforcement.
 
     Inputs:
@@ -192,7 +192,7 @@ def normalize_zone_suffixes(raw: object) -> List[str]:
         )
         return []
 
-    zones: List[str] = []
+    zones: list[str] = []
     for idx, entry in enumerate(items):
         if entry is None:
             continue
@@ -215,8 +215,8 @@ def normalize_zone_suffixes(raw: object) -> List[str]:
 
 
 def normalize_bind_paths(
-    raw: object, *, path_allowlist: Optional[Iterable[pathlib.Path]] = None
-) -> List[Dict[str, object]]:
+    raw: object, *, path_allowlist: Iterable[pathlib.Path] | None = None
+) -> list[dict[str, object]]:
     """Brief: Normalize bind_paths entries into a list of per-file config mappings.
 
     Inputs:
@@ -236,7 +236,7 @@ def normalize_bind_paths(
       - This function is intentionally permissive because ZoneRecords can be
         instantiated directly in tests without Pydantic validation.
     """
-    entries: List[Dict[str, object]] = []
+    entries: list[dict[str, object]] = []
     allowlist = list(path_allowlist or [])
 
     if raw is None:
@@ -257,8 +257,8 @@ def normalize_bind_paths(
         return entries
 
     for idx, entry in enumerate(items):
-        path_val: Optional[str]
-        origin_val: Optional[str]
+        path_val: str | None
+        origin_val: str | None
         ttl_val: object
 
         if isinstance(entry, (str, pathlib.Path)):
@@ -267,7 +267,7 @@ def normalize_bind_paths(
             ttl_val = None
         elif hasattr(entry, "path"):
             try:
-                path_val = str(getattr(entry, "path"))
+                path_val = str(entry.path)
             except Exception:
                 path_val = None
             try:
@@ -301,14 +301,14 @@ def normalize_bind_paths(
             )
             continue
 
-        origin_norm: Optional[str]
+        origin_norm: str | None
         if origin_val is None:
             origin_norm = None
         else:
             origin_text = str(origin_val).strip()
             origin_norm = origin_text if origin_text else None
 
-        ttl_norm: Optional[int]
+        ttl_norm: int | None
         if ttl_val is None:
             ttl_norm = None
         else:
@@ -330,7 +330,7 @@ def normalize_bind_paths(
     return entries
 
 
-def normalize_axfr_notify_targets(raw: object) -> List[Dict[str, object]]:
+def normalize_axfr_notify_targets(raw: object) -> list[dict[str, object]]:
     """Brief: Normalize axfr_notify targets into upstream-like mappings.
 
     Inputs:
@@ -347,7 +347,7 @@ def normalize_axfr_notify_targets(raw: object) -> List[Dict[str, object]]:
           - "verify": boolean TLS verification flag for DoT.
           - "ca_file": optional CA bundle path for DoT.
     """
-    targets: List[Dict[str, object]] = []
+    targets: list[dict[str, object]] = []
     if raw is None:
         return targets
 
@@ -363,18 +363,18 @@ def normalize_axfr_notify_targets(raw: object) -> List[Dict[str, object]]:
         return targets
 
     for idx, entry in enumerate(items):
-        host: Optional[str]
+        host: str | None
         port_val: object
         timeout_val: object
         transport_val: object
-        server_name_val: Optional[str]
+        server_name_val: str | None
         verify_val: object
         ca_file_val: object
 
         # Support both typed AxfrUpstreamConfig and plain dicts.
         if hasattr(entry, "host") and hasattr(entry, "port"):
             try:
-                host = str(getattr(entry, "host"))
+                host = str(entry.host)
             except Exception:
                 host = None
             port_val = getattr(entry, "port", 53)
@@ -441,7 +441,7 @@ def normalize_axfr_notify_targets(raw: object) -> List[Dict[str, object]]:
     return targets
 
 
-def normalize_axfr_config(raw: object) -> List[Dict[str, object]]:
+def normalize_axfr_config(raw: object) -> list[dict[str, object]]:
     """Brief: Normalize raw axfr_zones config into a list of zones.
 
     Inputs:
@@ -467,7 +467,7 @@ def normalize_axfr_config(raw: object) -> List[Dict[str, object]]:
     if raw is None:
         return []
 
-    zones: List[Dict[str, object]] = []
+    zones: list[dict[str, object]] = []
 
     if not isinstance(raw, list):
         logger.warning(
@@ -493,7 +493,7 @@ def normalize_axfr_config(raw: object) -> List[Dict[str, object]]:
 
         # Optional per-zone polling interval (seconds).
         poll_interval_val = entry.get("poll_interval_seconds")
-        poll_interval: Optional[int]
+        poll_interval: int | None
         try:
             poll_interval = (
                 int(poll_interval_val) if poll_interval_val is not None else None
@@ -510,7 +510,7 @@ def normalize_axfr_config(raw: object) -> List[Dict[str, object]]:
             )
             continue
 
-        upstreams: List[Dict[str, object]] = []
+        upstreams: list[dict[str, object]] = []
         if isinstance(masters_val, dict):
             masters_val = [masters_val]
         if isinstance(masters_val, list):
@@ -615,23 +615,34 @@ def normalize_axfr_config(raw: object) -> List[Dict[str, object]]:
         else:
             allow_public_upstreams = bool(allow_public_val)
 
-        max_rrs_val = entry.get("max_rrs_per_zone")
-        try:
-            max_rrs_per_zone = int(max_rrs_val) if max_rrs_val is not None else None
-        except (TypeError, ValueError):
-            max_rrs_per_zone = None
-        if max_rrs_per_zone is not None and max_rrs_per_zone <= 0:
-            max_rrs_per_zone = None
+        from foghorn.security_limits import (
+            DEFAULT_AXFR_MAX_BYTES_PER_ZONE,
+            DEFAULT_AXFR_MAX_RRS_PER_ZONE,
+        )
 
-        max_bytes_val = entry.get("max_bytes_per_zone")
+        max_rrs_val = entry.get("max_rrs_per_zone", DEFAULT_AXFR_MAX_RRS_PER_ZONE)
         try:
-            max_bytes_per_zone = (
-                int(max_bytes_val) if max_bytes_val is not None else None
+            max_rrs_per_zone = (
+                int(max_rrs_val)
+                if max_rrs_val is not None
+                else int(DEFAULT_AXFR_MAX_RRS_PER_ZONE)
             )
         except (TypeError, ValueError):
-            max_bytes_per_zone = None
-        if max_bytes_per_zone is not None and max_bytes_per_zone <= 0:
-            max_bytes_per_zone = None
+            max_rrs_per_zone = int(DEFAULT_AXFR_MAX_RRS_PER_ZONE)
+        if max_rrs_per_zone <= 0:
+            max_rrs_per_zone = int(DEFAULT_AXFR_MAX_RRS_PER_ZONE)
+
+        max_bytes_val = entry.get("max_bytes_per_zone", DEFAULT_AXFR_MAX_BYTES_PER_ZONE)
+        try:
+            max_bytes_per_zone = (
+                int(max_bytes_val)
+                if max_bytes_val is not None
+                else int(DEFAULT_AXFR_MAX_BYTES_PER_ZONE)
+            )
+        except (TypeError, ValueError):
+            max_bytes_per_zone = int(DEFAULT_AXFR_MAX_BYTES_PER_ZONE)
+        if max_bytes_per_zone <= 0:
+            max_bytes_per_zone = int(DEFAULT_AXFR_MAX_BYTES_PER_ZONE)
 
         max_retries_val = entry.get("max_retries_per_zone")
         try:
@@ -655,7 +666,7 @@ def normalize_axfr_config(raw: object) -> List[Dict[str, object]]:
         except (TypeError, ValueError):
             failure_backoff_max_seconds = 0.0
 
-        zone_cfg: Dict[str, object] = {
+        zone_cfg: dict[str, object] = {
             "zone": zone_text,
             "upstreams": upstreams,
             "allow_no_dnssec": allow_no_dnssec,
@@ -665,10 +676,8 @@ def normalize_axfr_config(raw: object) -> List[Dict[str, object]]:
             "failure_backoff_initial_seconds": failure_backoff_initial_seconds,
             "failure_backoff_max_seconds": failure_backoff_max_seconds,
         }
-        if max_rrs_per_zone is not None:
-            zone_cfg["max_rrs_per_zone"] = max_rrs_per_zone
-        if max_bytes_per_zone is not None:
-            zone_cfg["max_bytes_per_zone"] = max_bytes_per_zone
+        zone_cfg["max_rrs_per_zone"] = max_rrs_per_zone
+        zone_cfg["max_bytes_per_zone"] = max_bytes_per_zone
         if max_retries_per_zone is not None:
             zone_cfg["max_retries_per_zone"] = max_retries_per_zone
         if poll_interval is not None:
@@ -681,9 +690,9 @@ def normalize_axfr_config(raw: object) -> List[Dict[str, object]]:
 
 def find_zone_for_name(
     name: str,
-    zone_soa: Dict[str, Tuple[int, List[str]]],
-    zone_index: Optional[Dict[str, object]] = None,
-) -> Optional[str]:
+    zone_soa: dict[str, tuple[int, list[str]]],
+    zone_index: dict[str, object] | None = None,
+) -> str | None:
     """Brief: Find the longest-matching authoritative zone apex for a name.
 
     Inputs:
@@ -703,8 +712,8 @@ def find_zone_for_name(
     """
     if zone_index:
         return _find_zone_for_name_in_index(name, zone_index)
-    best: Optional[str] = None
-    for apex in zone_soa.keys():
+    best: str | None = None
+    for apex in zone_soa:
         if name == apex or name.endswith("." + apex):
             if best is None or len(apex) > len(best):
                 best = apex
@@ -712,8 +721,8 @@ def find_zone_for_name(
 
 
 def build_zone_suffix_index(
-    zone_soa: Dict[str, Tuple[int, List[str]]],
-) -> Dict[str, object]:
+    zone_soa: dict[str, tuple[int, list[str]]],
+) -> dict[str, object]:
     """Brief: Build a reverse-label index for authoritative zone lookup.
 
     Inputs:
@@ -722,13 +731,13 @@ def build_zone_suffix_index(
     Outputs:
       - dict: Reverse-label trie keyed by labels; terminal nodes store the apex.
     """
-    index: Dict[str, object] = {}
-    for apex in zone_soa.keys():
+    index: dict[str, object] = {}
+    for apex in zone_soa:
         norm = dns_names.normalize_name(apex)
         if not norm:
             continue
         labels = norm.split(".")
-        node: Dict[str, object] = index
+        node: dict[str, object] = index
         for label in reversed(labels):
             nxt = node.get(label)
             if not isinstance(nxt, dict):
@@ -740,8 +749,8 @@ def build_zone_suffix_index(
 
 
 def _find_zone_for_name_in_index(
-    name: str, zone_index: Dict[str, object]
-) -> Optional[str]:
+    name: str, zone_index: dict[str, object]
+) -> str | None:
     """Brief: Match a name to the longest zone apex using a suffix index.
 
     Inputs:
@@ -755,8 +764,8 @@ def _find_zone_for_name_in_index(
     if not norm:
         return None
     labels = norm.split(".")
-    node: Dict[str, object] = zone_index
-    best: Optional[str] = None
+    node: dict[str, object] = zone_index
+    best: str | None = None
     for label in reversed(labels):
         nxt = node.get(label)
         if not isinstance(nxt, dict):
@@ -771,7 +780,7 @@ def _find_zone_for_name_in_index(
 _DNS_LABEL_RE = re.compile(r"^[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9_])?$")
 
 
-def _normalize_dns_name_for_cache(text: object) -> Optional[str]:
+def _normalize_dns_name_for_cache(text: object) -> str | None:
     """Brief: Normalize DNS-like text for cache-friendly wildcard matching.
 
     Inputs:
@@ -936,7 +945,7 @@ def match_wildcard_domain(name: str, pattern: str) -> bool:
 
 
 @registered_lru_cache(maxsize=8196)
-def wildcard_matched_character_count(name: str, pattern: str) -> Optional[int]:
+def wildcard_matched_character_count(name: str, pattern: str) -> int | None:
     """Brief: Count how many characters were consumed by a leading wildcard match.
 
     Inputs:
@@ -983,7 +992,7 @@ def wildcard_matched_character_count(name: str, pattern: str) -> Optional[int]:
     return len(".".join(name_labels[:leading_len]))
 
 
-def sort_wildcard_patterns(patterns: Iterable[str]) -> List[str]:
+def sort_wildcard_patterns(patterns: Iterable[str]) -> list[str]:
     """Brief: Sort wildcard patterns from most-specific to least-specific.
 
     Inputs:
@@ -1008,8 +1017,8 @@ def sort_wildcard_patterns(patterns: Iterable[str]) -> List[str]:
 
 
 def get_cached_wildcard_patterns(
-    name_index: Dict[str, Dict[int, Tuple[int, List[str]]]],
-) -> List[str]:
+    name_index: dict[str, dict[int, tuple[int, list[str]]]],
+) -> list[str]:
     """Brief: Fetch or compute sorted wildcard patterns for a name index.
 
     Inputs:
@@ -1040,9 +1049,9 @@ def get_cached_wildcard_patterns(
 
 def find_best_rrsets_for_name(
     name: str,
-    name_index: Dict[str, Dict[int, Tuple[int, List[str]]]],
-    wildcard_patterns: Optional[List[str]] = None,
-) -> tuple[Optional[str], Dict[int, Tuple[int, List[str]]]]:
+    name_index: dict[str, dict[int, tuple[int, list[str]]]],
+    wildcard_patterns: list[str] | None = None,
+) -> tuple[str | None, dict[int, tuple[int, list[str]]]]:
     """Brief: Find the best matching RRsets for *name* using wildcard owners.
 
     Inputs:
@@ -1071,8 +1080,8 @@ def find_best_rrsets_for_name(
     if patterns is None:
         patterns = get_cached_wildcard_patterns(name_index)
 
-    best_pat: Optional[str] = None
-    best_cost: Optional[int] = None
+    best_pat: str | None = None
+    best_cost: int | None = None
 
     # We scan all candidates because the "fewest leading-wildcard characters"
     # metric is query-dependent.
@@ -1096,8 +1105,8 @@ def find_best_rrsets_for_name(
 
 def snapshot_zone_state(
     zone_apex: str,
-    name_index: Dict[str, Dict[int, Tuple[int, List[str]]]],
-) -> set[Tuple[str, int, int, Tuple[str, ...]]]:
+    name_index: dict[str, dict[int, tuple[int, list[str]]]],
+) -> set[tuple[str, int, int, tuple[str, ...]]]:
     """Brief: Build a hashable snapshot of RRsets for a given zone.
 
     Inputs:
@@ -1109,7 +1118,7 @@ def snapshot_zone_state(
         The values tuple is derived from the rrset values list; rrset tuples
         are expected to include a sources element.
     """
-    snapshot: set[Tuple[str, int, int, Tuple[str, ...]]] = set()
+    snapshot: set[tuple[str, int, int, tuple[str, ...]]] = set()
     apex = dns_names.normalize_name(zone_apex)
     if not apex:
         return snapshot
@@ -1135,11 +1144,11 @@ def snapshot_zone_state(
 
 
 def compute_changed_zones(
-    old_name_index: Dict[str, Dict[int, Tuple[int, List[str]]]],
-    old_zone_soa: Dict[str, Tuple[int, List[str]]],
-    new_name_index: Dict[str, Dict[int, Tuple[int, List[str]]]],
-    new_zone_soa: Dict[str, Tuple[int, List[str]]],
-) -> List[str]:
+    old_name_index: dict[str, dict[int, tuple[int, list[str]]]],
+    old_zone_soa: dict[str, tuple[int, list[str]]],
+    new_name_index: dict[str, dict[int, tuple[int, list[str]]]],
+    new_zone_soa: dict[str, tuple[int, list[str]]],
+) -> list[str]:
     """Brief: Determine which authoritative zones changed between snapshots.
 
     Inputs:
@@ -1149,7 +1158,7 @@ def compute_changed_zones(
     Outputs:
       - list of zone apex names whose RRsets changed.
     """
-    changed: List[str] = []
+    changed: list[str] = []
     all_apexes = set(old_zone_soa.keys()) | set(new_zone_soa.keys())
     for apex in sorted(all_apexes):
         if apex not in old_zone_soa or apex not in new_zone_soa:

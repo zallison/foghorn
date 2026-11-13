@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import ipaddress
 import math
-from typing import AsyncIterable, Optional
+from collections.abc import AsyncIterable
 
 # DNS-over-TCP maximum message size.
 #
@@ -36,6 +36,10 @@ MAX_DOH_QUERY_PARAM_BYTES: int = 65535
 
 # AXFR is length-prefixed DNS over TCP. Keep protocol max by default.
 MAX_AXFR_FRAME_BYTES: int = 65535
+# Default caps for a single outbound AXFR (zone_records upstream transfer).
+# Operators may raise these per-zone; unset/None previously meant unbounded.
+DEFAULT_AXFR_MAX_RRS_PER_ZONE: int = 100_000
+DEFAULT_AXFR_MAX_BYTES_PER_ZONE: int = 32 * 1024 * 1024  # 32 MiB
 # Maximum number of buckets allowed for query-log aggregate APIs.
 # This bounds memory and CPU used by dense zero-filled bucket responses.
 MAX_QUERY_LOG_AGG_BUCKETS: int = 20000
@@ -89,8 +93,7 @@ async def read_async_body_with_limit(
     """
 
     max_i = int(max_bytes)
-    if max_i < 0:
-        max_i = 0
+    max_i = max(max_i, 0)
     total = 0
     parts: list[bytes] = []
     async for chunk in chunks:
@@ -157,7 +160,7 @@ def clamp_positive_int(value: object, *, default: int, minimum: int = 1) -> int:
     return int(out)
 
 
-def maybe_parse_content_length(value: Optional[str]) -> int:
+def maybe_parse_content_length(value: str | None) -> int:
     """Brief: Parse Content-Length header safely.
 
     Inputs:
@@ -174,7 +177,7 @@ def maybe_parse_content_length(value: Optional[str]) -> int:
         ln = int(str(value).strip())
     except Exception:
         return 0
-    return ln if ln > 0 else 0
+    return max(0, ln)
 
 
 def compute_query_log_aggregate_bucket_count(
@@ -213,7 +216,7 @@ def compute_query_log_aggregate_bucket_count(
     except Exception:
         return 0
 
-    return count if count > 0 else 0
+    return max(0, count)
 
 
 def enforce_query_log_aggregate_bucket_limit(
@@ -278,8 +281,7 @@ def enforce_query_log_aggregate_grouped_result_limit(
         count = int(grouped_result_count)  # type: ignore[arg-type]
     except Exception:
         count = 0
-    if count < 0:
-        count = 0
+    count = max(count, 0)
 
     try:
         max_i = int(max_grouped_results)

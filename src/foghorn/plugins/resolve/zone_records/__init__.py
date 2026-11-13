@@ -11,7 +11,6 @@ import os
 import socket
 import threading
 import time
-from typing import Dict, List, Optional, Set, Tuple
 
 from cachetools import TTLCache
 from dnslib import OPCODE, QTYPE, RCODE, DNSHeader, DNSRecord
@@ -41,7 +40,7 @@ logger = logging.getLogger(__name__)
 _NOTIFY_LOGGER = logging.getLogger("foghorn.server")
 _NOTIFY_BG_LOCK = threading.Lock()
 _NOTIFY_REFRESH_INFLIGHT: set[str] = set()
-_NOTIFY_REFRESH_STATE: Dict[str, Dict[str, object]] = {}
+_NOTIFY_REFRESH_STATE: dict[str, dict[str, object]] = {}
 _NOTIFY_RESOLVE_CACHE_LOCK = threading.Lock()
 _NOTIFY_RESOLVE_CACHE_TTL_SECONDS = 30.0
 _NOTIFY_RESOLVE_CACHE_MAX_ENTRIES = 4096
@@ -83,28 +82,28 @@ class UpdateTsigKeyConfig(BaseModel):
     )
 
     # Per-key authorization scopes
-    allow_names: Optional[List[str]] = Field(
+    allow_names: list[str] | None = Field(
         default=None, description="Hostnames this key can update (wildcards supported)."
     )
-    allow_names_files: Optional[List[str]] = Field(
+    allow_names_files: list[str] | None = Field(
         default=None, description="File paths containing allowed names for this key."
     )
-    block_names: Optional[List[str]] = Field(
+    block_names: list[str] | None = Field(
         default=None, description="Hostnames this key cannot update."
     )
-    block_names_files: Optional[List[str]] = Field(
+    block_names_files: list[str] | None = Field(
         default=None, description="File paths containing blocked names for this key."
     )
-    allow_update_ips: Optional[List[str]] = Field(
+    allow_update_ips: list[str] | None = Field(
         default=None, description="IP addresses this key can set in A/AAAA records."
     )
-    allow_update_ips_files: Optional[List[str]] = Field(
+    allow_update_ips_files: list[str] | None = Field(
         default=None, description="File paths containing allowed IPs for this key."
     )
-    block_update_ips: Optional[List[str]] = Field(
+    block_update_ips: list[str] | None = Field(
         default=None, description="Blocked IPs for this key."
     )
-    block_update_ips_files: Optional[List[str]] = Field(
+    block_update_ips_files: list[str] | None = Field(
         default=None, description="File paths containing blocked IPs."
     )
 
@@ -130,29 +129,29 @@ class UpdatePskTokenConfig(BaseModel):
     )
 
     # Per-token authorization scopes
-    allow_names: Optional[List[str]] = Field(
+    allow_names: list[str] | None = Field(
         default=None,
         description="Hostnames this token can update (wildcards supported).",
     )
-    allow_names_files: Optional[List[str]] = Field(
+    allow_names_files: list[str] | None = Field(
         default=None, description="File paths containing allowed names for this token."
     )
-    block_names: Optional[List[str]] = Field(
+    block_names: list[str] | None = Field(
         default=None, description="Hostnames this token cannot update."
     )
-    block_names_files: Optional[List[str]] = Field(
+    block_names_files: list[str] | None = Field(
         default=None, description="File paths containing blocked names for this token."
     )
-    allow_update_ips: Optional[List[str]] = Field(
+    allow_update_ips: list[str] | None = Field(
         default=None, description="IP addresses this token can set in A/AAAA records."
     )
-    allow_update_ips_files: Optional[List[str]] = Field(
+    allow_update_ips_files: list[str] | None = Field(
         default=None, description="File paths containing allowed IPs for this token."
     )
-    block_update_ips: Optional[List[str]] = Field(
+    block_update_ips: list[str] | None = Field(
         default=None, description="Blocked IPs for this token."
     )
-    block_update_ips_files: Optional[List[str]] = Field(
+    block_update_ips_files: list[str] | None = Field(
         default=None, description="File paths containing blocked IPs."
     )
 
@@ -187,54 +186,54 @@ class UpdateZoneApexConfig(BaseModel):
     """
 
     zone: str = Field(..., description="Zone apex (e.g. 'example.com').")
-    tsig: Optional[dict] = Field(
+    tsig: dict | None = Field(
         default=None,
         description="TSIG authentication configuration.",
     )
-    psk: Optional[dict] = Field(
+    psk: dict | None = Field(
         default=None,
         description=(
             "Unsupported. DNS UPDATE authentication is TSIG-only; omit this key. "
             "If set (including empty tokens), config validation fails closed."
         ),
     )
-    allow_names: Optional[List[str]] = Field(
+    allow_names: list[str] | None = Field(
         default=None,
         description="Allowed name patterns (wildcards supported).",
     )
-    allow_names_files: Optional[List[str]] = Field(
+    allow_names_files: list[str] | None = Field(
         default=None,
         description="File paths containing allowed names.",
     )
-    block_names: Optional[List[str]] = Field(
+    block_names: list[str] | None = Field(
         default=None,
         description="Blocked names.",
     )
-    block_names_files: Optional[List[str]] = Field(
+    block_names_files: list[str] | None = Field(
         default=None,
         description="File paths containing blocked names.",
     )
-    allow_clients: Optional[List[str]] = Field(
+    allow_clients: list[str] | None = Field(
         default=None,
         description="CIDR list of clients allowed to send UPDATE.",
     )
-    allow_clients_files: Optional[List[str]] = Field(
+    allow_clients_files: list[str] | None = Field(
         default=None,
         description="File paths containing allowed client CIDRs.",
     )
-    allow_update_ips: Optional[List[str]] = Field(
+    allow_update_ips: list[str] | None = Field(
         default=None,
         description="CIDR list of IPs allowed in A/AAAA record values.",
     )
-    allow_update_ips_files: Optional[List[str]] = Field(
+    allow_update_ips_files: list[str] | None = Field(
         default=None,
         description="File paths containing allowed update IPs.",
     )
-    block_update_ips: Optional[List[str]] = Field(
+    block_update_ips: list[str] | None = Field(
         default=None,
         description="CIDR list of IPs blocked from A/AAAA record values.",
     )
-    block_update_ips_files: Optional[List[str]] = Field(
+    block_update_ips_files: list[str] | None = Field(
         default=None,
         description="File paths containing blocked update IPs.",
     )
@@ -254,7 +253,7 @@ class UpdateZoneApexConfig(BaseModel):
 
     @field_validator("psk")
     @classmethod
-    def reject_unsupported_psk(cls, v: Optional[dict]) -> Optional[dict]:
+    def reject_unsupported_psk(cls, v: dict | None) -> dict | None:
         """Brief: Reject dns_update PSK config so auth knobs match runtime.
 
         Inputs:
@@ -297,7 +296,7 @@ class PersistenceConfig(BaseModel):
         default=True,
         description="Enable persistence for DNS UPDATE journaling.",
     )
-    state_dir: Optional[str] = Field(
+    state_dir: str | None = Field(
         default=None,
         description="Directory for journal files. Defaults to runtime state directory.",
     )
@@ -352,7 +351,7 @@ class ReplicationConfig(BaseModel):
         default="primary",
         description="Node role: 'primary', 'replica', or 'peer'.",
     )
-    zone_owner_node_id: Optional[str] = Field(
+    zone_owner_node_id: str | None = Field(
         default=None,
         description="Node ID that owns zones in peer mode.",
     )
@@ -360,7 +359,7 @@ class ReplicationConfig(BaseModel):
         default=True,
         description="Send NOTIFY after successful UPDATE commit.",
     )
-    node_id: Optional[str] = Field(
+    node_id: str | None = Field(
         default=None,
         description=(
             "Stable node identity used in dynamic update journal origin metadata. "
@@ -454,19 +453,19 @@ class DnsUpdateConfig(BaseModel):
         default=False,
         description="Enable DNS UPDATE support.",
     )
-    zones: Optional[List[UpdateZoneApexConfig]] = Field(
+    zones: list[UpdateZoneApexConfig] | None = Field(
         default=None,
         description="Per-zone DNS UPDATE configuration.",
     )
-    persistence: Optional[PersistenceConfig] = Field(
+    persistence: PersistenceConfig | None = Field(
         default=None,
         description="Persistence and journaling configuration.",
     )
-    replication: Optional[ReplicationConfig] = Field(
+    replication: ReplicationConfig | None = Field(
         default=None,
         description="Replication and clustering configuration.",
     )
-    security: Optional[SecurityConfig] = Field(
+    security: SecurityConfig | None = Field(
         default=None,
         description="Security limits and rate limiting.",
     )
@@ -497,14 +496,12 @@ class AxfrUpstreamConfig(BaseModel):
         default=5000, ge=0, description="Transfer timeout in milliseconds."
     )
     transport: str = Field(default="tcp", description="Transport: 'tcp' or 'dot'.")
-    server_name: Optional[str] = Field(
-        default=None, description="TLS SNI name for DoT."
-    )
+    server_name: str | None = Field(default=None, description="TLS SNI name for DoT.")
     verify: bool = Field(
         default=True, description="TLS certificate verification for DoT."
     )
-    ca_file: Optional[str] = Field(default=None, description="CA bundle path for DoT.")
-    tsig: Optional[Dict[str, str]] = Field(
+    ca_file: str | None = Field(default=None, description="CA bundle path for DoT.")
+    tsig: dict[str, str] | None = Field(
         default=None,
         description=(
             "Optional TSIG credentials for AXFR requests " "(name/secret/algorithm)."
@@ -530,8 +527,10 @@ class AxfrZoneConfig(BaseModel):
       - poll_interval_seconds: Optional polling interval for periodic AXFR refreshes.
       - allow_private_upstreams: Allow non-public upstream addresses (default True).
       - allow_public_upstreams: Allow public upstream addresses (default True).
-      - max_rrs_per_zone: Optional maximum RR count for a single AXFR transfer.
-      - max_bytes_per_zone: Optional maximum total bytes for a single AXFR transfer.
+      - max_rrs_per_zone: Maximum RR count for a single AXFR transfer
+        (default 100_000).
+      - max_bytes_per_zone: Maximum total bytes for a single AXFR transfer
+        (default 32 MiB).
       - max_retries_per_zone: Optional maximum consecutive transfer failures.
       - failure_backoff_initial_seconds: Initial backoff delay after failure.
       - failure_backoff_max_seconds: Maximum backoff delay after failures.
@@ -541,10 +540,10 @@ class AxfrZoneConfig(BaseModel):
     """
 
     zone: str = Field(..., description="Zone apex (e.g. 'example.com').")
-    upstreams: Optional[List[AxfrUpstreamConfig]] = Field(
+    upstreams: list[AxfrUpstreamConfig] | None = Field(
         default=None, description="List of upstream servers to transfer from."
     )
-    masters: Optional[List[AxfrUpstreamConfig]] = Field(
+    masters: list[AxfrUpstreamConfig] | None = Field(
         default=None, description="Legacy alias for upstreams (deprecated)."
     )
     allow_no_dnssec: bool = Field(
@@ -565,7 +564,7 @@ class AxfrZoneConfig(BaseModel):
             "NOTIFY was received for the zone. A value of 0 reloads on every load."
         ),
     )
-    poll_interval_seconds: Optional[int] = Field(
+    poll_interval_seconds: int | None = Field(
         default=None,
         ge=0,
         description="Optional polling interval in seconds for periodic AXFR refreshes.",
@@ -581,17 +580,23 @@ class AxfrZoneConfig(BaseModel):
         default=True,
         description="Allow public upstream addresses (defaults to true).",
     )
-    max_rrs_per_zone: Optional[int] = Field(
-        default=None,
+    max_rrs_per_zone: int | None = Field(
+        default=100_000,
         ge=1,
-        description="Optional maximum number of RRs allowed in a single AXFR transfer.",
+        description=(
+            "Maximum number of RRs allowed in a single AXFR transfer "
+            "(default 100000; bounds memory from a hostile upstream)."
+        ),
     )
-    max_bytes_per_zone: Optional[int] = Field(
-        default=None,
+    max_bytes_per_zone: int | None = Field(
+        default=32 * 1024 * 1024,
         ge=1,
-        description="Optional maximum total response bytes allowed per AXFR transfer.",
+        description=(
+            "Maximum total response bytes allowed per AXFR transfer "
+            "(default 32MiB; bounds memory from a hostile upstream)."
+        ),
     )
-    max_retries_per_zone: Optional[int] = Field(
+    max_retries_per_zone: int | None = Field(
         default=None,
         ge=1,
         description="Optional maximum consecutive AXFR failures before giving up.",
@@ -663,7 +668,7 @@ class ZoneDnssecSigningConfig(BaseModel):
             "to explicitly disable."
         ),
     )
-    keys_dir: Optional[str] = Field(
+    keys_dir: str | None = Field(
         default=None,
         description="Directory to read/write DNSSEC keys; defaults to the working directory when omitted.",
     )
@@ -680,11 +685,11 @@ class ZoneDnssecSigningConfig(BaseModel):
         ge=1,
         description="Signature validity window in days.",
     )
-    nsec3: Optional[ZoneDnssecNsec3Config] = Field(
+    nsec3: ZoneDnssecNsec3Config | None = Field(
         default=None,
         description="Optional NSEC3 parameters used for negative-answer proofs.",
     )
-    use_tld: Optional[str] = Field(
+    use_tld: str | None = Field(
         default=None,
         description=(
             "Optional single-label TLD (e.g. 'zaa', 'corp') that ZoneRecords "
@@ -746,14 +751,14 @@ class BindZoneFileConfig(BaseModel):
     """
 
     path: str = Field(..., description="Path to an RFC-1035 style zonefile.")
-    origin: Optional[str] = Field(
+    origin: str | None = Field(
         default=None,
         description=(
             "Optional override for the zonefile base domain ($ORIGIN). When set, "
             "ZoneRecords ignores any $ORIGIN lines found in the file and uses this value."
         ),
     )
-    ttl: Optional[int] = Field(
+    ttl: int | None = Field(
         default=None,
         ge=0,
         description=(
@@ -813,16 +818,16 @@ class ZoneRecordsConfig(BaseModel):
       - ZoneRecordsConfig instance with normalized field types.
     """
 
-    file_paths: Optional[List[str]] = None
-    path_allowlist: Optional[List[str]] = Field(
+    file_paths: list[str] | None = None
+    path_allowlist: list[str] | None = Field(
         default=None,
         description=(
             "Optional list of allowed directory prefixes for file_paths and "
             "bind_paths. Paths outside these prefixes are ignored with a warning."
         ),
     )
-    bind_paths: Optional[List[str | BindZoneFileConfig]] = None
-    records: Optional[List[str]] = None
+    bind_paths: list[str | BindZoneFileConfig] | None = None
+    records: list[str] | None = None
     load_mode: str = Field(
         default="replace",
         description=(
@@ -877,10 +882,10 @@ class ZoneRecordsConfig(BaseModel):
             "no explicit SOA is present."
         ),
     )
-    watchdog_enabled: Optional[bool] = None
+    watchdog_enabled: bool | None = None
     watchdog_min_interval_seconds: float = Field(default=1.0, ge=0)
     watchdog_poll_interval_seconds: float = Field(default=60.0, ge=0)
-    watchdog_data_directories: Optional[List[str]] = Field(
+    watchdog_data_directories: list[str] | None = Field(
         default=None,
         description=(
             "Optional directory prefixes allowed for watchdog/polling file "
@@ -914,7 +919,7 @@ class ZoneRecordsConfig(BaseModel):
         ),
     )
     ttl: int = Field(default=300, ge=0)
-    nxdomain_zones: Optional[List[str]] = Field(
+    nxdomain_zones: list[str] | None = Field(
         default=None,
         description=(
             "Optional list of zone suffixes for which ZoneRecords should return "
@@ -936,7 +941,7 @@ class ZoneRecordsConfig(BaseModel):
         ge=1,
         description="Maximum total records returned for QTYPE=ANY responses.",
     )
-    axfr_zones: Optional[List[AxfrZoneConfig]] = None
+    axfr_zones: list[AxfrZoneConfig] | None = None
     axfr_poll_min_interval_seconds: float = Field(
         default=60.0,
         ge=0,
@@ -945,7 +950,7 @@ class ZoneRecordsConfig(BaseModel):
             "Values below the hard floor are clamped."
         ),
     )
-    axfr_notify: Optional[List[AxfrUpstreamConfig]] = Field(
+    axfr_notify: list[AxfrUpstreamConfig] | None = Field(
         default=None,
         description=(
             "Optional list of NOTIFY recipients for AXFR-backed zones. Each "
@@ -961,7 +966,7 @@ class ZoneRecordsConfig(BaseModel):
             "private/loopback/link-local/multicast/reserved addresses are blocked."
         ),
     )
-    axfr_notify_target_allowlist: Optional[List[str]] = Field(
+    axfr_notify_target_allowlist: list[str] | None = Field(
         default=None,
         description=(
             "Optional allowlist for outbound NOTIFY targets. Entries can be "
@@ -985,7 +990,7 @@ class ZoneRecordsConfig(BaseModel):
             "rolling 60-second window."
         ),
     )
-    axfr_notify_scheduled: Optional[int] = Field(
+    axfr_notify_scheduled: int | None = Field(
         default=None,
         ge=0,
         description=(
@@ -993,13 +998,13 @@ class ZoneRecordsConfig(BaseModel):
             "behavior. Parsed but ignored."
         ),
     )
-    dnssec_signing: Optional[ZoneDnssecSigningConfig] = None
-    dns_update: Optional[DnsUpdateConfig] = None
+    dnssec_signing: ZoneDnssecSigningConfig | None = None
+    dns_update: DnsUpdateConfig | None = None
 
     model_config = ConfigDict(extra="allow")
 
 
-def _upstream_fingerprint(upstreams: List[Dict]) -> str:
+def _upstream_fingerprint(upstreams: list[dict]) -> str:
     """Brief: Build a deterministic fingerprint for candidate upstreams.
 
     Inputs:
@@ -1008,7 +1013,7 @@ def _upstream_fingerprint(upstreams: List[Dict]) -> str:
     Outputs:
       - str: Stable fingerprint for short-lived auth cache keys.
     """
-    items: List[str] = []
+    items: list[str] = []
     for upstream in upstreams or []:
         if not isinstance(upstream, dict):
             continue
@@ -1069,7 +1074,7 @@ def _resolve_host_ips(hostname: str) -> set[str]:
     return resolved
 
 
-def _sender_matches_upstream(sender_ip: str, upstream: Dict) -> bool:
+def _sender_matches_upstream(sender_ip: str, upstream: dict) -> bool:
     """Brief: Validate sender IP against one upstream without PTR trust.
 
     Inputs:
@@ -1097,9 +1102,9 @@ def _sender_matches_upstream(sender_ip: str, upstream: Dict) -> bool:
 
 def _resolve_notify_sender_upstream_from_candidates(
     sender_ip: str,
-    upstreams: List[Dict],
+    upstreams: list[dict],
     cache_scope: str,
-) -> Optional[Dict]:
+) -> dict | None:
     """Brief: Match sender to one upstream with TTL-bounded caching.
 
     Inputs:
@@ -1128,7 +1133,7 @@ def _resolve_notify_sender_upstream_from_candidates(
         if cache_key in _NOTIFY_RESOLVE_CACHE:
             return _NOTIFY_RESOLVE_CACHE[cache_key]
 
-    match: Optional[Dict] = None
+    match: dict | None = None
     for upstream in candidates:
         if _sender_matches_upstream(sender, upstream):
             match = upstream
@@ -1139,7 +1144,7 @@ def _resolve_notify_sender_upstream_from_candidates(
     return match
 
 
-def _resolve_notify_sender_upstream(sender_ip: str) -> Optional[Dict]:
+def _resolve_notify_sender_upstream(sender_ip: str) -> dict | None:
     """Brief: Map a NOTIFY sender IP address to a configured global upstream.
 
     Inputs:
@@ -1169,10 +1174,10 @@ def _resolve_notify_sender_upstream(sender_ip: str) -> Optional[Dict]:
 
 
 def _resolve_notify_sender_for_zone(
-    plugin: "ZoneRecords",
+    plugin: ZoneRecords,
     zone_name: str,
     sender_ip: str,
-) -> Optional[Dict]:
+) -> dict | None:
     """Brief: Resolve and authorize a NOTIFY sender for a specific AXFR zone.
 
     Inputs:
@@ -1204,7 +1209,7 @@ def _resolve_notify_sender_for_zone(
 
 
 @registered_ttl_cache(maxsize=1024, ttl=10)
-def _zone_has_axfr_config(plugin: "ZoneRecords", zone_name: str) -> bool:
+def _zone_has_axfr_config(plugin: ZoneRecords, zone_name: str) -> bool:
     """Brief: Determine whether AXFR config exists for a zone.
 
     Inputs:
@@ -1229,7 +1234,7 @@ def _zone_has_axfr_config(plugin: "ZoneRecords", zone_name: str) -> bool:
 
 
 def _get_zone_notify_min_refresh_seconds(
-    plugin: "ZoneRecords",
+    plugin: ZoneRecords,
     zone_norm: str,
 ) -> float:
     """Brief: Read the per-zone NOTIFY refresh cooldown from AXFR config.
@@ -1291,7 +1296,7 @@ def _notify_sender_is_rate_limited(sender_ip: str) -> bool:
         return False
 
 
-def _schedule_notify_axfr_refresh(zone_name: str, upstream: Dict) -> None:
+def _schedule_notify_axfr_refresh(zone_name: str, upstream: dict) -> None:
     """Brief: Best-effort AXFR reload for AXFR-backed plugins on NOTIFY.
 
     Inputs:
@@ -1359,7 +1364,7 @@ def _schedule_notify_axfr_refresh(zone_name: str, upstream: Dict) -> None:
               - None; logs and suppresses any exceptions.
             """
             try:
-                setattr(p, "_axfr_loaded_once", False)
+                p._axfr_loaded_once = False
                 loader_fn = getattr(p, "_load_records", None)
                 if callable(loader_fn):
                     loader_fn()
@@ -1494,8 +1499,8 @@ def _build_notify_response(
     req_wire: bytes,
     rcode: int,
     *,
-    ede_code: Optional[int] = None,
-    ede_text: Optional[str] = None,
+    ede_code: int | None = None,
+    ede_text: str | None = None,
 ) -> bytes:
     """Brief: Build a NOTIFY response wire payload with optional EDE metadata.
 
@@ -1560,13 +1565,13 @@ def _build_notify_response(
 
 
 def _handle_notify_opcode(
-    plugin: "ZoneRecords",
+    plugin: ZoneRecords,
     opcode: int,
     qname: str,
     qtype: int,
     req: bytes,
     ctx: PluginContext,
-) -> Optional[PluginDecision]:
+) -> PluginDecision | None:
     """Brief: Handle inbound DNS NOTIFY requests for ZoneRecords.
 
     Inputs:
@@ -1687,7 +1692,7 @@ def _handle_notify_opcode(
             zone_metadata = getattr(plugin, "_axfr_zone_metadata", None)
             if not isinstance(zone_metadata, dict):
                 zone_metadata = {}
-                setattr(plugin, "_axfr_zone_metadata", zone_metadata)
+                plugin._axfr_zone_metadata = zone_metadata
             if zone_norm not in zone_metadata:
                 zone_metadata[zone_norm] = {}
             zone_metadata[zone_norm]["last_notify"] = time.time()
@@ -1710,7 +1715,7 @@ class ZoneRecords(BasePlugin):
 
     def handle_opcode(
         self, opcode: int, qname: str, qtype: int, req: bytes, ctx: PluginContext
-    ) -> Optional[PluginDecision]:
+    ) -> PluginDecision | None:
         """Brief: Handle NOTIFY and UPDATE opcodes for ZoneRecords.
 
         Inputs:
@@ -1759,7 +1764,7 @@ class ZoneRecords(BasePlugin):
         axfr_cfg = self.config.get("axfr_zones")
 
         self.file_paths = []
-        self.bind_paths: List[object] = []
+        self.bind_paths: list[object] = []
         self._path_allowlist = helpers.normalize_path_allowlist(path_allowlist_cfg)
 
         if provided_paths is not None or legacy_path is not None:
@@ -1814,7 +1819,7 @@ class ZoneRecords(BasePlugin):
         self._axfr_zones = helpers.normalize_axfr_config(axfr_cfg)
         self._axfr_loaded_once = False
         # Track AXFR zone metadata for reload timing
-        self._axfr_zone_metadata: Dict[str, Dict[str, object]] = {}
+        self._axfr_zone_metadata: dict[str, dict[str, object]] = {}
 
         self._axfr_notify_static_targets = helpers.normalize_axfr_notify_targets(
             self.config.get("axfr_notify")
@@ -1823,7 +1828,7 @@ class ZoneRecords(BasePlugin):
             self.config.get("axfr_notify_allow_private_targets", False)
         )
         allowlist_cfg = self.config.get("axfr_notify_target_allowlist")
-        allowlist_values: List[str] = []
+        allowlist_values: list[str] = []
         if isinstance(allowlist_cfg, list):
             for value in allowlist_cfg:
                 try:
@@ -1833,8 +1838,8 @@ class ZoneRecords(BasePlugin):
                 if item:
                     allowlist_values.append(item)
         self._axfr_notify_target_allowlist = list(allowlist_values)
-        self._axfr_notify_target_allowlist_hosts: Set[str] = set()
-        self._axfr_notify_target_allowlist_networks: List[ipaddress._BaseNetwork] = []
+        self._axfr_notify_target_allowlist_hosts: set[str] = set()
+        self._axfr_notify_target_allowlist_networks: list[ipaddress._BaseNetwork] = []
         for item in allowlist_values:
             net = ip_networks.parse_network(item, strict=False)
             if net is not None:
@@ -1870,8 +1875,8 @@ class ZoneRecords(BasePlugin):
             notify_delay = None
         self._axfr_notify_delay = notify_delay
         self._axfr_notify_lock = threading.RLock()
-        self._axfr_notify_send_history: Dict[str, List[float]] = {}
-        self._axfr_notify_last_sent: Dict[str, float] = {}
+        self._axfr_notify_send_history: dict[str, list[float]] = {}
+        self._axfr_notify_last_sent: dict[str, float] = {}
         if "axfr_notify_all" in self.config:
             logger.warning(
                 "ZoneRecords: axfr_notify_all is deprecated and ignored; use axfr_notify targets only."
@@ -1896,7 +1901,7 @@ class ZoneRecords(BasePlugin):
         self._dns_update_persistence_config = {}
         self._dns_update_journal_state_dir = None
         self._dns_update_node_id = str(os.getenv("FOGHORN_NODE_ID", "unknown"))
-        self._dynamic_last_seq_by_zone: Dict[str, int] = {}
+        self._dynamic_last_seq_by_zone: dict[str, int] = {}
         self._dns_update_replay_duration_seconds: float = 0.0
         self._dns_update_replay_entries: int = 0
         self._dns_update_compact_count: int = 0
@@ -1921,16 +1926,16 @@ class ZoneRecords(BasePlugin):
             )
         else:
             self._dns_update_file_paths = []
-        self._dns_update_timestamps: Dict[str, float] = {}
-        self._dns_update_lists_cache: Dict[str, List[str]] = {}
+        self._dns_update_timestamps: dict[str, float] = {}
+        self._dns_update_lists_cache: dict[str, list[str]] = {}
         self._dns_update_cache_lock = threading.RLock()
         # Track owners managed by DNS UPDATE (for source tracking)
-        self._update_managed_owners: Set[str] = set()
+        self._update_managed_owners: set[str] = set()
 
         # Initialize state and locks
         self._records_lock = threading.RLock()
         self._reload_records_lock = threading.RLock()
-        self.records: Dict[Tuple[str, int], Tuple[int, List[str], List[str]]] = {}
+        self.records: dict[tuple[str, int], tuple[int, list[str], list[str]]] = {}
         self._observer = None
         self._axfr_poll_stop = None
         self._axfr_poll_thread = None
@@ -2012,7 +2017,7 @@ class ZoneRecords(BasePlugin):
 
     def pre_resolve(
         self, qname: str, qtype: int, req: bytes, ctx: PluginContext
-    ) -> Optional[PluginDecision]:
+    ) -> PluginDecision | None:
         """Brief: Decide whether to override resolution for a query.
 
         Inputs:
@@ -2027,7 +2032,7 @@ class ZoneRecords(BasePlugin):
         """
         return resolver.pre_resolve(self, qname, qtype, req, ctx)
 
-    def get_http_snapshot(self) -> Dict[str, object]:
+    def get_http_snapshot(self) -> dict[str, object]:
         """Brief: Summarize current ZoneRecords state for the admin web UI.
 
         Inputs:
@@ -2044,7 +2049,7 @@ class ZoneRecords(BasePlugin):
             bind_paths, and inline-config records.
         """
 
-        def _parse_qtype_code(raw: object) -> Optional[int]:
+        def _parse_qtype_code(raw: object) -> int | None:
             if raw is None:
                 return None
             text = str(raw).strip()
@@ -2069,9 +2074,9 @@ class ZoneRecords(BasePlugin):
             return int(qtype_val) if isinstance(qtype_val, int) else None
 
         def _iter_pipe_records(
-            source_label: str, lines: List[str]
-        ) -> List[tuple[str, int, str]]:
-            out: List[tuple[str, int, str]] = []
+            source_label: str, lines: list[str]
+        ) -> list[tuple[str, int, str]]:
+            out: list[tuple[str, int, str]] = []
             for raw_line in lines or []:
                 try:
                     line = str(raw_line)
@@ -2095,14 +2100,14 @@ class ZoneRecords(BasePlugin):
             return out
 
         # Snapshot configured sources into (owner,qtype,value)->set(source_labels).
-        sources_map: Dict[tuple[str, int, str], set[str]] = {}
+        sources_map: dict[tuple[str, int, str], set[str]] = {}
 
         # File-based records.
         file_paths = list(getattr(self, "file_paths", []) or [])
         for fp in file_paths:
             try:
                 with open(str(fp), "r", encoding="utf-8") as f:
-                    lines = [ln.rstrip("\n") for ln in f.readlines()]
+                    lines = [ln.rstrip("\n") for ln in f]
             except Exception:
                 continue
             for owner, qcode, value in _iter_pipe_records(str(fp), lines):
@@ -2131,7 +2136,7 @@ class ZoneRecords(BasePlugin):
                 zone_soa = dict(getattr(self, "_zone_soa", {}) or {})
                 zone_suffix_index = getattr(self, "_zone_suffix_index", None)
 
-        zones: List[Dict[str, object]] = []
+        zones: list[dict[str, object]] = []
         for apex, entry in sorted(zone_soa.items(), key=lambda kv: str(kv[0])):
             ttl = entry[0]
             values = entry[1]
@@ -2143,7 +2148,7 @@ class ZoneRecords(BasePlugin):
                 }
             )
 
-        rows: List[Dict[str, object]] = []
+        rows: list[dict[str, object]] = []
         for (owner, qcode), entry in sorted(
             records_map.items(), key=lambda kv: (str(kv[0][0]), int(kv[0][1]))
         ):
@@ -2176,13 +2181,13 @@ class ZoneRecords(BasePlugin):
                     }
                 )
 
-        summary: Dict[str, object] = {
-            "zones": int(len(zones)),
-            "rrsets": int(len(records_map)),
+        summary: dict[str, object] = {
+            "zones": len(zones),
+            "rrsets": len(records_map),
             "records": int(
                 sum(len(entry[1] or []) for _k, entry in records_map.items())
             ),
-            "owners": int(len(name_index)),
+            "owners": len(name_index),
         }
         dns_update_cfg = getattr(self, "_dns_update_config", None)
         if isinstance(dns_update_cfg, dict):
@@ -2191,9 +2196,9 @@ class ZoneRecords(BasePlugin):
                 persistence_cfg.get("enabled", False)
             ):
                 journal_state_dir = getattr(self, "_dns_update_journal_state_dir", None)
-                per_zone_state: Dict[str, Dict[str, object]] = {}
+                per_zone_state: dict[str, dict[str, object]] = {}
                 zones_raw = dns_update_cfg.get("zones")
-                configured_zones: List[str] = []
+                configured_zones: list[str] = []
                 if isinstance(zones_raw, list):
                     configured_zones = [
                         dns_names.normalize_name(z.get("zone", ""))
@@ -2208,7 +2213,7 @@ class ZoneRecords(BasePlugin):
                     seq = int(
                         getattr(self, "_dynamic_last_seq_by_zone", {}).get(zone, 0) or 0
                     )
-                    zone_state: Dict[str, object] = {"last_seq": seq}
+                    zone_state: dict[str, object] = {"last_seq": seq}
                     if journal_state_dir and callable(load_manifest):
                         try:
                             manifest = load_manifest(
@@ -2252,7 +2257,7 @@ class ZoneRecords(BasePlugin):
             "records": rows,
         }
 
-    def _admin_editable_file_paths(self) -> List[str]:
+    def _admin_editable_file_paths(self) -> list[str]:
         """Brief: Return normalized list of file paths allowed for admin persistence.
 
         Inputs:
@@ -2295,7 +2300,7 @@ class ZoneRecords(BasePlugin):
             raise ValueError(f"invalid qtype: {raw_qtype}")
         return int(attr_val)
 
-    def _admin_find_update_zone_cfg(self, owner: str) -> Dict[str, object] | None:
+    def _admin_find_update_zone_cfg(self, owner: str) -> dict[str, object] | None:
         """Brief: Resolve DNS UPDATE zone authorization config for an owner name.
 
         Inputs:
@@ -2329,7 +2334,7 @@ class ZoneRecords(BasePlugin):
         qtype: str | int,
         value: str,
         ttl: int = 300,
-    ) -> Dict[str, object]:
+    ) -> dict[str, object]:
         """Brief: Validate a zone record mutation against update policies.
 
         Inputs:
@@ -2455,7 +2460,7 @@ class ZoneRecords(BasePlugin):
         ttl: int = 300,
         persist: bool = False,
         file_path: str | None = None,
-    ) -> Dict[str, object]:
+    ) -> dict[str, object]:
         """Brief: Apply a zone record mutation to in-memory state and optional file.
 
         Inputs:
@@ -2503,11 +2508,11 @@ class ZoneRecords(BasePlugin):
                 target_path = str(allowed_paths[0])
             os.makedirs(os.path.dirname(target_path) or ".", exist_ok=True)
             line_text = f"{owner_norm}|{qtype_i}|{ttl_i}|{value_text}"
-            existing_lines: List[str] = []
+            existing_lines: list[str] = []
             if os.path.exists(target_path):
                 with open(target_path, "r", encoding="utf-8") as f:
-                    existing_lines = [ln.rstrip("\n") for ln in f.readlines()]
-            out_lines: List[str] = []
+                    existing_lines = [ln.rstrip("\n") for ln in f]
+            out_lines: list[str] = []
             replaced = False
             for raw_line in existing_lines:
                 line = raw_line.split("#", 1)[0].strip()
@@ -2614,7 +2619,7 @@ class ZoneRecords(BasePlugin):
         value: str | None = None,
         persist: bool = False,
         file_path: str | None = None,
-    ) -> Dict[str, object]:
+    ) -> dict[str, object]:
         """Brief: Delete in-memory zone records and optional persisted file rows.
 
         Inputs:
@@ -2654,8 +2659,8 @@ class ZoneRecords(BasePlugin):
                 target_path = str(allowed_paths[0])
             if os.path.exists(target_path):
                 with open(target_path, "r", encoding="utf-8") as f:
-                    existing = [ln.rstrip("\n") for ln in f.readlines()]
-                out_lines: List[str] = []
+                    existing = [ln.rstrip("\n") for ln in f]
+                out_lines: list[str] = []
                 for raw_line in existing:
                     line = raw_line.split("#", 1)[0].strip()
                     if not line:
@@ -2766,8 +2771,8 @@ class ZoneRecords(BasePlugin):
         }
 
     def iter_zone_rrs_for_transfer(
-        self, zone_apex: str, client_ip: Optional[str] = None
-    ) -> Optional[list]:
+        self, zone_apex: str, client_ip: str | None = None
+    ) -> list | None:
         """Brief: Export authoritative RRsets for a zone for AXFR/IXFR.
 
         Inputs:
@@ -2807,7 +2812,7 @@ class ZoneRecords(BasePlugin):
         Outputs:
           - None; mutates ``self._name_index`` and ``self._wildcard_owners``.
         """
-        name_index: Dict[str, Dict[int, Tuple[int, List[str], List[str]]]] = {}
+        name_index: dict[str, dict[int, tuple[int, list[str], list[str]]]] = {}
         for (owner, qtype), entry in (self.records or {}).items():
             try:
                 ttl, values, sources = entry
@@ -2828,7 +2833,7 @@ class ZoneRecords(BasePlugin):
         self._name_index = name_index
         wildcard_owners = [
             owner
-            for owner in name_index.keys()
+            for owner in name_index
             if helpers.is_wildcard_domain_pattern(str(owner))
         ]
         self._wildcard_owners = helpers.sort_wildcard_patterns(wildcard_owners)
@@ -2902,8 +2907,8 @@ class ZoneRecords(BasePlugin):
         self._dns_update_replay_entries = int(replay_entries)
 
     def compact_dns_update_journals(
-        self, zone_apex: Optional[str] = None
-    ) -> Dict[str, bool]:
+        self, zone_apex: str | None = None
+    ) -> dict[str, bool]:
         """Brief: Manually compact DNS UPDATE journals for one or all configured zones.
 
         Inputs:
@@ -2913,7 +2918,7 @@ class ZoneRecords(BasePlugin):
         Outputs:
           - Mapping of zone apex to compaction success boolean.
         """
-        result: Dict[str, bool] = {}
+        result: dict[str, bool] = {}
         dns_update_cfg = getattr(self, "_dns_update_config", None)
         if not isinstance(dns_update_cfg, dict):
             return result
@@ -2926,7 +2931,7 @@ class ZoneRecords(BasePlugin):
         if not state_dir:
             return result
 
-        configured_zones: List[str] = []
+        configured_zones: list[str] = []
         zones_raw = dns_update_cfg.get("zones")
         if isinstance(zones_raw, list):
             configured_zones = [
@@ -3041,29 +3046,29 @@ class ZoneRecords(BasePlugin):
             self._reload_debounce_timer = None
 
 
-def _client_allowed_for_axfr(client_ip: Optional[str]) -> bool:
+def _client_allowed_for_axfr(client_ip: str | None) -> bool:
     """Backward-compat wrapper for ZoneRecords-owned AXFR client policy checks."""
     return transfer._client_allowed_for_axfr(client_ip)
 
 
 def iter_axfr_messages(
     req: DNSRecord,
-    client_ip: Optional[str] = None,
-    req_wire: Optional[bytes] = None,
-) -> List[bytes]:
+    client_ip: str | None = None,
+    req_wire: bytes | None = None,
+) -> list[bytes]:
     """Backward-compat wrapper for ZoneRecords-owned AXFR/IXFR message streaming."""
     return transfer.iter_axfr_messages(req, client_ip=client_ip, req_wire=req_wire)
 
 
 # Re-export config models for public API
 __all__ = [
-    "ZoneRecords",
-    "ZoneRecordsConfig",
     "AxfrUpstreamConfig",
     "AxfrZoneConfig",
-    "ZoneDnssecSigningConfig",
     "DnsUpdateConfig",
-    "UpdateTsigKeyConfig",
     "UpdatePskTokenConfig",
+    "UpdateTsigKeyConfig",
     "UpdateZoneApexConfig",
+    "ZoneDnssecSigningConfig",
+    "ZoneRecords",
+    "ZoneRecordsConfig",
 ]
