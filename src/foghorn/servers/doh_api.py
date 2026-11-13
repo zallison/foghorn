@@ -1,11 +1,12 @@
 import http.server
 import inspect
-import json
 import logging
 import ssl
 import threading
 import urllib.parse
-from typing import Any, Callable, Optional
+from collections.abc import Callable
+from typing import Any, Optional
+
 from foghorn.security_limits import (
     RequestBodyTooLargeError,
     read_async_body_with_limit,
@@ -158,11 +159,12 @@ def create_doh_app(
             "FastAPI is required for the uvicorn-based DoH server. Install fastapi or run with use_asyncio: false to use the threaded fallback."
         ) from exc
 
+    # Docs/OpenAPI are off by default; production DoH should not expose schema UI.
     app = FastAPI(
         title="Foghorn DoH",
-        docs_url="/docs",
+        docs_url=None,
         redoc_url=None,
-        openapi_url="/openapi.json",
+        openapi_url=None,
     )
 
     @app.get("/dns-query")
@@ -320,165 +322,7 @@ class _ThreadedDoHRequestHandler(http.server.BaseHTTPRequestHandler):
 
         self._send_bytes(status_code, b"", "text/plain; charset=utf-8")
 
-    def _send_json(self, status_code: int, payload: dict[str, Any]) -> None:
-        """Brief: Send a JSON response.
-
-        Inputs:
-        - status_code: HTTP status code
-        - payload: JSON-serializable object
-
-        Outputs:
-        - None
-        """
-
-        body = json.dumps(payload).encode("utf-8")
-        self._send_bytes(status_code, body, "application/json; charset=utf-8")
-
-    def _send_html(self, status_code: int, html_body: str) -> None:
-        """Brief: Send an HTML response.
-
-        Inputs:
-        - status_code: HTTP status code
-        - html_body: HTML document to send
-
-        Outputs:
-        - None
-        """
-
-        self._send_bytes(
-            status_code, html_body.encode("utf-8"), "text/html; charset=utf-8"
-        )
-
-    def _openapi_schema(self) -> dict[str, Any]:
-        """Brief: Build a minimal OpenAPI schema for the threaded DoH server.
-
-        Inputs: none
-
-        Outputs:
-        - dict OpenAPI schema describing /dns-query GET and POST.
-        """
-
-        return {
-            "openapi": "3.0.0",
-            "info": {"title": "Foghorn DoH", "version": "unknown"},
-            "paths": {
-                "/dns-query": {
-                    "get": {
-                        "summary": "DoH GET",
-                        "parameters": [
-                            {
-                                "name": "dns",
-                                "in": "query",
-                                "required": True,
-                                "schema": {"type": "string"},
-                                "description": "Base64url-encoded DNS message (no padding)",
-                            }
-                        ],
-                        "responses": {
-                            "200": {
-                                "description": "DNS response",
-                                "content": {
-                                    "application/dns-message": {
-                                        "schema": {"type": "string", "format": "binary"}
-                                    }
-                                },
-                            },
-                            "400": {"description": "Bad request"},
-                        },
-                    },
-                    "post": {
-                        "summary": "DoH POST",
-                        "requestBody": {
-                            "required": True,
-                            "content": {
-                                "application/dns-message": {
-                                    "schema": {"type": "string", "format": "binary"}
-                                }
-                            },
-                        },
-                        "responses": {
-                            "200": {
-                                "description": "DNS response",
-                                "content": {
-                                    "application/dns-message": {
-                                        "schema": {"type": "string", "format": "binary"}
-                                    }
-                                },
-                            },
-                            "400": {"description": "Bad request"},
-                            "415": {"description": "Unsupported media type"},
-                        },
-                    },
-                }
-            },
-        }
-
-    def _docs_html(self) -> str:
-        """Brief: Return Swagger UI HTML for the threaded DoH server.
-
-        Inputs: none
-        Outputs: HTML string.
-        """
-
-        return """<!DOCTYPE html>
-<html>
-<head>
-  <meta charset=\"utf-8\" />
-  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
-  <title>Foghorn DoH - Swagger UI</title>
-  <link rel=\"stylesheet\" href=\"https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui.css\" />
-</head>
-<body>
-  <div id=\"swagger-ui\"></div>
-  <script src=\"https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui-bundle.js\"></script>
-  <script src=\"https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui-standalone-preset.js\"></script>
-  <script>
-  window.onload = () => {
-    window.ui = SwaggerUIBundle({
-      url: '/openapi.json',
-      dom_id: '#swagger-ui',
-      presets: [SwaggerUIBundle.presets.apis, SwaggerUIStandalonePreset],
-      layout: 'StandaloneLayout',
-    });
-  };
-  </script>
-</body>
-</html>
-"""
-
-    def _oauth2_redirect_html(self) -> str:
-        """Brief: Return a minimal oauth2 redirect HTML page for Swagger UI.
-
-        Inputs: none
-        Outputs: HTML string.
-        """
-
-        return """<!doctype html>
-<html lang=\"en-US\">
-<head>
-  <title>Swagger UI: OAuth2 Redirect</title>
-</head>
-<body>
-<script>
-'use strict';
-(function() {
-  function run() {
-    var oauth2 = window.opener && window.opener.swaggerUIRedirectOauth2;
-    if (!oauth2) {
-      window.close();
-      return;
-    }
-    oauth2.callback({ url: window.location.href });
-    window.close();
-  }
-  run();
-})();
-</script>
-</body>
-</html>
-"""
-
-    def do_GET(self) -> None:  # noqa: N802 (HTTP verb name)
+    def do_GET(self) -> None:
         """Brief: Handle GET requests for threaded DoH server.
 
         Inputs: None
@@ -486,19 +330,9 @@ class _ThreadedDoHRequestHandler(http.server.BaseHTTPRequestHandler):
 
         Notes:
         - Supports DoH at /dns-query.
-        - Also exposes lightweight docs/schema endpoints to match the FastAPI path.
+        - Docs/OpenAPI paths are intentionally not served (match FastAPI defaults).
         """
         parsed = urllib.parse.urlparse(self.path)
-
-        if parsed.path == "/openapi.json":
-            self._send_json(200, self._openapi_schema())
-            return
-        if parsed.path == "/docs":
-            self._send_html(200, self._docs_html())
-            return
-        if parsed.path == "/docs/oauth2-redirect":
-            self._send_html(200, self._oauth2_redirect_html())
-            return
 
         if parsed.path != "/dns-query":
             self._send_empty(404)
@@ -535,7 +369,7 @@ class _ThreadedDoHRequestHandler(http.server.BaseHTTPRequestHandler):
 
         self._send_bytes(200, resp, _DNS_CT)
 
-    def do_POST(self) -> None:  # noqa: N802 (HTTP verb name)
+    def do_POST(self) -> None:
         """Brief: Handle POST /dns-query with DNS message body.
 
         Inputs: None
@@ -586,7 +420,7 @@ class _ThreadedDoHRequestHandler(http.server.BaseHTTPRequestHandler):
 
         self._send_bytes(200, resp, _DNS_CT)
 
-    def log_message(self, format: str, *args: Any) -> None:  # noqa: A003
+    def log_message(self, format: str, *args: Any) -> None:
         """Brief: Route handler logs through the module logger instead of stderr.
 
         Inputs:
@@ -608,8 +442,8 @@ def _start_doh_server_threaded(
     port: int,
     resolver: Callable[[bytes, str], bytes],
     *,
-    cert_file: Optional[str] = None,
-    key_file: Optional[str] = None,
+    cert_file: str | None = None,
+    key_file: str | None = None,
 ) -> Optional["DoHServerHandle"]:
     """Brief: Start a threaded HTTP DoH server without using asyncio.
 
@@ -723,11 +557,11 @@ def start_doh_server(
     port: int,
     resolver: Callable[[bytes, str], bytes],
     *,
-    cert_file: Optional[str] = None,
-    key_file: Optional[str] = None,
+    cert_file: str | None = None,
+    key_file: str | None = None,
     use_asyncio: bool = True,
     allow_threaded_fallback: bool = True,
-) -> Optional[DoHServerHandle]:
+) -> DoHServerHandle | None:
     """Brief: Start DoH server, preferring uvicorn but falling back to threaded HTTP.
 
     Inputs:

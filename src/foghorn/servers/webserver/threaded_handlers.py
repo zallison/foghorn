@@ -2492,7 +2492,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
           - This endpoint intentionally does not reload or restart.
         """
 
-        if not self._require_auth():
+        if not self._require_admin_action(action="config.save"):
             return
 
         try:
@@ -2542,7 +2542,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
           - If restart_required is detected, returns HTTP 409 and skips reload.
         """
 
-        if not self._require_auth():
+        if not self._require_admin_action(action="config.save_and_reload"):
             return
 
         try:
@@ -2652,7 +2652,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
           - JSON describing outcome (status, server_time, path, backed_up_to).
         """
 
-        if not self._require_auth():
+        if not self._require_admin_action(action="config.save_and_restart"):
             return
 
         try:
@@ -2701,7 +2701,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             later.
         """
 
-        if not self._require_auth():
+        if not self._require_admin_action(action="config.reload_reloadable"):
             return
 
         cfg_path = getattr(self._server(), "config_path", None)
@@ -2784,7 +2784,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             is required.
         """
 
-        if not self._require_auth():
+        if not self._require_admin_action(action="config.reload"):
             return
 
         cfg_path = getattr(self._server(), "config_path", None)
@@ -4285,7 +4285,9 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             handler(body)
             return
         if path in {"/restart", "/api/v1/restart"}:
-            body = _read_authed_admin_json_body()
+            if not self._require_admin_action(action="config.restart"):
+                return
+            body = self._read_admin_json_body()
             if body is None:
                 return
             delay_seconds = 1.0

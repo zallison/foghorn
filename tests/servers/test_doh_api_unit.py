@@ -28,7 +28,7 @@ except (
         allow_module_level=True,
     )
 
-import foghorn.servers.doh_api as doh_api
+from foghorn.servers import doh_api
 
 
 def test_b64url_decode_nopad_non_str_raises_valueerror() -> None:
@@ -43,6 +43,49 @@ def test_b64url_decode_nopad_non_str_raises_valueerror() -> None:
 
     with pytest.raises(ValueError):
         doh_api._b64url_decode_nopad(b"not-a-string")  # type: ignore[arg-type]
+
+
+def test_create_doh_app_defaults_hide_docs_and_openapi() -> None:
+    """Brief: Default create_doh_app does not expose docs/OpenAPI/ReDoc routes.
+
+    Inputs:
+      - None
+
+    Outputs:
+      - None; asserts /docs, /redoc, and /openapi.json return 404.
+    """
+
+    app = doh_api.create_doh_app(lambda q, ip: q)
+    client = TestClient(app)
+
+    assert client.get("/docs").status_code == 404
+    assert client.get("/redoc").status_code == 404
+    assert client.get("/openapi.json").status_code == 404
+
+
+def test_threaded_doh_docs_and_openapi_paths_return_404() -> None:
+    """Brief: Threaded DoH handler does not serve docs/OpenAPI paths.
+
+    Inputs:
+      - None
+
+    Outputs:
+      - None; asserts /docs and /openapi.json yield 404 via _send_empty.
+    """
+
+    for path in ("/docs", "/openapi.json", "/docs/oauth2-redirect", "/redoc"):
+        handler = doh_api._ThreadedDoHRequestHandler.__new__(
+            doh_api._ThreadedDoHRequestHandler
+        )
+        handler.path = path  # type: ignore[assignment]
+        called: list[int] = []
+
+        def fake_send_empty(status: int, _called: list[int] = called) -> None:
+            _called.append(status)
+
+        handler._send_empty = fake_send_empty  # type: ignore[assignment]
+        handler.do_GET()
+        assert called == [404], path
 
 
 def test_doh_get_bad_base64_returns_400(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -830,7 +873,7 @@ def test_start_doh_server_disables_threaded_fallback(
 
     monkeypatch.setattr(asyncio, "new_event_loop", boom_new_event_loop)
 
-    def echo_resolver(q: bytes, client_ip: str) -> bytes:  # noqa: ARG001
+    def echo_resolver(q: bytes, client_ip: str) -> bytes:
         return q
 
     handle = doh_api.start_doh_server(

@@ -1,12 +1,11 @@
 from __future__ import annotations
 
 import json
-
 import os
 import shutil
 import signal
 import sys as _sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 from typing import Any, Dict, Optional
 
 from fastapi import (
@@ -20,13 +19,13 @@ from fastapi import (
     status,
 )
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
+
 from ...security_limits import (
     MAX_ADMIN_JSON_BODY_BYTES,
     RequestBodyTooLargeError,
     maybe_parse_content_length,
     read_async_body_with_limit,
 )
-
 from ...stats import StatsCollector
 from ...utils.config_diagram import (
     generate_dot_text_from_config_path,
@@ -62,7 +61,7 @@ def _register_core_routes(app: FastAPI) -> None:
 
     @app.get("/api/v1/health")
     @app.get("/health", include_in_schema=False)
-    async def health() -> Dict[str, Any]:
+    async def health() -> dict[str, Any]:
         """Health check.
 
         Aliases:
@@ -73,7 +72,7 @@ def _register_core_routes(app: FastAPI) -> None:
 
     @app.get("/api/v1/about")
     @app.get("/about", include_in_schema=False)
-    async def about() -> Dict[str, Any]:
+    async def about() -> dict[str, Any]:
         """About/build metadata.
 
         Aliases:
@@ -128,7 +127,7 @@ def _register_config_routes(
 
     @app.get("/api/v1/config.json", dependencies=[Depends(auth_dep)])
     @app.get("/config.json", dependencies=[Depends(auth_dep)], include_in_schema=False)
-    async def get_config_json() -> Dict[str, Any]:
+    async def get_config_json() -> dict[str, Any]:
         _status_code, payload = _endpoint_services.build_config_json_result(
             config=getattr(app.state, "config", None),
         )
@@ -138,7 +137,7 @@ def _register_config_routes(
     @app.get(
         "/config/schema", dependencies=[Depends(auth_dep)], include_in_schema=False
     )
-    async def get_config_schema() -> Dict[str, Any]:
+    async def get_config_schema() -> dict[str, Any]:
         """Brief: Return the current JSON schema used for config validation.
 
         Inputs:
@@ -198,7 +197,7 @@ def _register_config_routes(
             )
         )
         if next_attempted_sig is not None:
-            setattr(app.state, "_config_diagram_build_attempt_sig", next_attempted_sig)
+            app.state._config_diagram_build_attempt_sig = next_attempted_sig
         if error_detail is not None:
             raise HTTPException(status_code=int(status_code), detail=str(error_detail))
         if meta_only:
@@ -247,7 +246,7 @@ def _register_config_routes(
             )
         )
         if next_attempted_sig is not None:
-            setattr(app.state, "_config_diagram_build_attempt_sig", next_attempted_sig)
+            app.state._config_diagram_build_attempt_sig = next_attempted_sig
         if error_detail is not None:
             raise HTTPException(status_code=int(status_code), detail=str(error_detail))
         if meta_only:
@@ -265,7 +264,7 @@ def _register_config_routes(
         dependencies=[Depends(auth_dep)],
         include_in_schema=False,
     )
-    async def upload_config_diagram_png(file: UploadFile = File(...)) -> Dict[str, Any]:
+    async def upload_config_diagram_png(file: UploadFile = File(...)) -> dict[str, Any]:
         """Brief: Upload a custom config diagram PNG.
 
         Inputs:
@@ -384,7 +383,7 @@ def _register_config_routes(
         dependencies=[Depends(auth_dep)],
         include_in_schema=False,
     )
-    async def get_config_raw_json() -> Dict[str, Any]:
+    async def get_config_raw_json() -> dict[str, Any]:
         status_code, payload, error_detail = (
             _endpoint_services.build_config_raw_json_result(
                 config_path=getattr(app.state, "config_path", None),
@@ -436,7 +435,7 @@ def _register_config_routes(
 
     async def _read_json_body_limited(
         request: Request, *, max_bytes: int, too_large_detail: str
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Brief: Read and parse a JSON-object request body with a strict byte cap.
 
         Inputs:
@@ -501,7 +500,7 @@ def _register_config_routes(
             )
         return body
 
-    async def _read_admin_json_body(request: Request) -> Dict[str, Any]:
+    async def _read_admin_json_body(request: Request) -> dict[str, Any]:
         """Brief: Parse admin JSON request bodies using the shared size limit.
 
         Inputs:
@@ -518,7 +517,7 @@ def _register_config_routes(
             too_large_detail=f"request body too large (max {max_bytes:,} bytes)",
         )
 
-    def _save_config_to_disk(*, body: Dict[str, Any]) -> Dict[str, Any]:
+    def _save_config_to_disk(*, body: dict[str, Any]) -> dict[str, Any]:
         """Brief: Persist raw YAML to disk and validate it.
 
         Inputs:
@@ -549,7 +548,7 @@ def _register_config_routes(
             )
 
         cfg_path_abs = os.path.abspath(cfg_path)
-        ts = datetime.now(timezone.utc).isoformat().replace(":", "-")
+        ts = datetime.now(UTC).isoformat().replace(":", "-")
         backup_path = f"{cfg_path_abs}.bak.{ts}"
 
         raw_yaml = body.get("raw_yaml")
@@ -618,6 +617,43 @@ def _register_config_routes(
 
     # Control-plane mutations (save/reload/restart) require enable_admin.
     _mutation_auth = admin_auth_dep if admin_auth_dep is not None else auth_dep
+
+    def _enforce_mutation_rate_limit(request: Request, *, action: str) -> None:
+        """Brief: Rate-limit control-plane mutation endpoints.
+
+        Inputs:
+          - request: FastAPI request object.
+          - action: Stable action id (e.g. config.save, config.reload).
+
+        Outputs:
+          - None when allowed; raises HTTPException(429) when blocked.
+        """
+
+        service = _admin_rate_limit.get_admin_rate_limit_service(
+            state_obj=app.state,
+            config=getattr(app.state, "config", {}) or {},
+            plugins=list(getattr(app.state, "plugins", []) or []),
+        )
+        client_ip = "unknown"
+        try:
+            if request.client is not None and request.client.host:
+                client_ip = str(request.client.host)
+        except Exception:  # pragma: no cover - defensive
+            client_ip = "unknown"
+        decision = service.evaluate(
+            action=str(action),
+            client_ip=str(client_ip),
+            authorization_header=request.headers.get("authorization"),
+            api_key_header=request.headers.get("x-api-key"),
+        )
+        if bool(decision.allowed):
+            return
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="admin API rate limit exceeded",
+            headers=decision.to_headers(),
+        )
+
     if enable_admin:
 
         @app.post("/api/v1/config/save", dependencies=[Depends(_mutation_auth)])
@@ -627,7 +663,8 @@ def _register_config_routes(
             include_in_schema=False,
         )
         async def save_config(
-            body: Dict[str, Any] = Depends(_read_admin_json_body),
+            request: Request,
+            body: dict[str, Any] = Depends(_read_admin_json_body),
         ) -> JSONResponse:
             """Brief: Persist config YAML without applying reload or restart.
             Inputs:
@@ -638,6 +675,7 @@ def _register_config_routes(
               - This endpoint is intentionally side-effect free (no reload, no restart)
                 so operators can save now and choose when to reload/restart.
             """
+            _enforce_mutation_rate_limit(request, action="config.save")
             saved = _save_config_to_disk(body=body)
             analysis = saved["analysis"]
             msg = "saved"
@@ -664,7 +702,8 @@ def _register_config_routes(
             include_in_schema=False,
         )
         async def save_and_reload_config(
-            body: Dict[str, Any] = Depends(_read_admin_json_body),
+            request: Request,
+            body: dict[str, Any] = Depends(_read_admin_json_body),
         ) -> JSONResponse:
             """Brief: Persist config YAML and apply an in-process reload when possible.
             Inputs:
@@ -675,6 +714,7 @@ def _register_config_routes(
               - If the saved config implies restart_required, reload is refused with
                 HTTP 409 and no restart is scheduled by this endpoint.
             """
+            _enforce_mutation_rate_limit(request, action="config.save_and_reload")
             saved = _save_config_to_disk(body=body)
             analysis = saved["analysis"]
             from foghorn import runtime_config as _runtime_config
@@ -762,7 +802,8 @@ def _register_config_routes(
             include_in_schema=False,
         )
         async def save_and_restart_config(
-            body: Dict[str, Any] = Depends(_read_admin_json_body),
+            request: Request,
+            body: dict[str, Any] = Depends(_read_admin_json_body),
         ) -> JSONResponse:
             """Brief: Persist config YAML and schedule a restart (SIGHUP).
             Inputs:
@@ -770,6 +811,7 @@ def _register_config_routes(
             Outputs:
               - JSONResponse with save metadata.
             """
+            _enforce_mutation_rate_limit(request, action="config.save_and_restart")
             saved = _save_config_to_disk(body=body)
             _schedule_restart(delay_seconds=1.0, reason="config.save_and_restart")
             payload = {
@@ -799,7 +841,7 @@ def _register_config_routes(
             dependencies=[Depends(_mutation_auth)],
             include_in_schema=False,
         )
-        async def reload_config() -> JSONResponse:
+        async def reload_config(request: Request) -> JSONResponse:
             """Brief: Reload runtime config from the on-disk YAML.
             Inputs:
               - None (uses app.state.config_path).
@@ -809,6 +851,7 @@ def _register_config_routes(
               - If restart_required is detected, reload is refused (HTTP 409) so the
                 operator can restart explicitly via /restart.
             """
+            _enforce_mutation_rate_limit(request, action="config.reload")
             cfg_path = getattr(app.state, "config_path", None)
             if not cfg_path:
                 raise HTTPException(
@@ -892,7 +935,7 @@ def _register_config_routes(
             dependencies=[Depends(_mutation_auth)],
             include_in_schema=False,
         )
-        async def reload_reloadable() -> JSONResponse:
+        async def reload_reloadable(request: Request) -> JSONResponse:
             """Brief: Reload only zero-downtime-safe settings, even if restart is required.
             Inputs:
               - None (uses app.state.config_path).
@@ -904,6 +947,7 @@ def _register_config_routes(
               - This endpoint never schedules a restart; callers may invoke /restart
                 later when convenient.
             """
+            _enforce_mutation_rate_limit(request, action="config.reload_reloadable")
             cfg_path = getattr(app.state, "config_path", None)
             if not cfg_path:
                 raise HTTPException(
@@ -971,7 +1015,8 @@ def _register_config_routes(
             include_in_schema=False,
         )
         async def restart_process(
-            body: Dict[str, Any] = Depends(_read_admin_json_body),
+            request: Request,
+            body: dict[str, Any] = Depends(_read_admin_json_body),
         ) -> JSONResponse:
             """Brief: Schedule a process restart (SIGHUP) without saving or reloading.
             Inputs:
@@ -979,6 +1024,7 @@ def _register_config_routes(
             Outputs:
               - JSONResponse indicating restart has been scheduled.
             """
+            _enforce_mutation_rate_limit(request, action="config.restart")
             delay_seconds = 1.0
             try:
                 delay_seconds = float(body.get("delay_seconds", delay_seconds))
@@ -1019,8 +1065,8 @@ def _register_query_log_routes(app: FastAPI, auth_dep: Any) -> None:
         end: str | None = None,
         page: int = 1,
         page_size: int = 100,
-    ) -> Dict[str, Any]:
-        collector: Optional[StatsCollector] = app.state.stats_collector
+    ) -> dict[str, Any]:
+        collector: StatsCollector | None = app.state.stats_collector
         store = getattr(collector, "_store", None) if collector is not None else None
         if store is None:
             return {
@@ -1058,8 +1104,7 @@ def _register_query_log_routes(app: FastAPI, auth_dep: Any) -> None:
             ps = 100
         if ps <= 0:
             ps = 100
-        if ps > 1000:
-            ps = 1000
+        ps = min(ps, 1000)
         status_filter = query_status if isinstance(query_status, str) else None
 
         payload = _admin_logic.build_query_log_payload(
@@ -1094,8 +1139,8 @@ def _register_query_log_routes(app: FastAPI, auth_dep: Any) -> None:
         qname: str | None = None,
         rcode: str | None = None,
         group_by: str | None = None,
-    ) -> Dict[str, Any]:
-        collector: Optional[StatsCollector] = app.state.stats_collector
+    ) -> dict[str, Any]:
+        collector: StatsCollector | None = app.state.stats_collector
         store = getattr(collector, "_store", None) if collector is not None else None
         if store is None:
             return {"status": "disabled", "server_time": _utc_now_iso(), "items": []}
@@ -1168,9 +1213,7 @@ def _register_admin_routes(app: FastAPI, auth_dep: Any) -> None:
         return list(getattr(app.state, "plugins", []) or [])
 
     def _get_store() -> object | None:
-        collector: Optional[StatsCollector] = getattr(
-            app.state, "stats_collector", None
-        )
+        collector: StatsCollector | None = getattr(app.state, "stats_collector", None)
         return getattr(collector, "_store", None) if collector is not None else None
 
     def _runtime_state() -> object | None:
@@ -1214,7 +1257,7 @@ def _register_admin_routes(app: FastAPI, auth_dep: Any) -> None:
             headers=decision.to_headers(),
         )
 
-    async def _read_admin_json_body(request: Request) -> Dict[str, Any]:
+    async def _read_admin_json_body(request: Request) -> dict[str, Any]:
         max_bytes = int(MAX_ADMIN_JSON_BODY_BYTES)
         length = maybe_parse_content_length(request.headers.get("content-length"))
         if length > max_bytes:
@@ -1253,7 +1296,7 @@ def _register_admin_routes(app: FastAPI, auth_dep: Any) -> None:
         action: str,
         target: str,
         ok: bool,
-        details: Dict[str, Any] | None = None,
+        details: dict[str, Any] | None = None,
     ) -> None:
         _admin_logic.add_admin_audit_event(
             _runtime_state(),
@@ -1276,7 +1319,7 @@ def _register_admin_routes(app: FastAPI, auth_dep: Any) -> None:
             status_code=int(exc.status_code), detail=str(exc.detail)
         ) from exc
 
-    def _with_server_time(payload: Dict[str, Any]) -> Dict[str, Any]:
+    def _with_server_time(payload: dict[str, Any]) -> dict[str, Any]:
         """Brief: Attach server_time to a response payload.
 
         Inputs:
@@ -1289,7 +1332,7 @@ def _register_admin_routes(app: FastAPI, auth_dep: Any) -> None:
         payload["server_time"] = _utc_now_iso()
         return payload
 
-    def _optional_raw_yaml(body: Dict[str, Any]) -> str | None:
+    def _optional_raw_yaml(body: dict[str, Any]) -> str | None:
         """Brief: Validate and normalize optional raw_yaml request field.
 
         Inputs:
@@ -1304,7 +1347,7 @@ def _register_admin_routes(app: FastAPI, auth_dep: Any) -> None:
             raise HTTPException(status_code=400, detail="raw_yaml must be a string")
         return str(raw_yaml) if isinstance(raw_yaml, str) else None
 
-    def _required_plugin_name(body: Dict[str, Any]) -> str:
+    def _required_plugin_name(body: dict[str, Any]) -> str:
         """Brief: Read required plugin name from request body.
 
         Inputs:
@@ -1320,7 +1363,7 @@ def _register_admin_routes(app: FastAPI, auth_dep: Any) -> None:
         return plugin_name.strip()
 
     @app.get("/api/v1/admin/status", dependencies=[Depends(auth_dep)])
-    async def admin_status(request: Request) -> Dict[str, Any]:
+    async def admin_status(request: Request) -> dict[str, Any]:
         _enforce_admin_rate_limit(request, action="admin.status")
         _status_code, payload = _endpoint_services.build_admin_status_result(
             config=getattr(app.state, "config", None),
@@ -1333,7 +1376,7 @@ def _register_admin_routes(app: FastAPI, auth_dep: Any) -> None:
         return payload
 
     @app.get("/api/v1/admin/capabilities", dependencies=[Depends(auth_dep)])
-    async def admin_capabilities(request: Request) -> Dict[str, Any]:
+    async def admin_capabilities(request: Request) -> dict[str, Any]:
         _enforce_admin_rate_limit(request, action="admin.capabilities")
         _status_code, payload = _endpoint_services.build_admin_capabilities_result(
             stats_collector=getattr(app.state, "stats_collector", None),
@@ -1347,11 +1390,11 @@ def _register_admin_routes(app: FastAPI, auth_dep: Any) -> None:
         request: Request,
         limit: int = 100,
         action: str | None = None,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         _enforce_admin_rate_limit(request, action="admin.audit")
         runtime_state = _runtime_state()
         list_fn = getattr(runtime_state, "list_audit_events", None)
-        items: list[Dict[str, Any]] = []
+        items: list[dict[str, Any]] = []
         if callable(list_fn):
             try:
                 raw = list_fn(limit=int(limit), action=action)
@@ -1367,7 +1410,7 @@ def _register_admin_routes(app: FastAPI, auth_dep: Any) -> None:
         }
 
     @app.post("/api/v1/admin/audit/clear", dependencies=[Depends(auth_dep)])
-    async def admin_audit_clear(request: Request) -> Dict[str, Any]:
+    async def admin_audit_clear(request: Request) -> dict[str, Any]:
         _enforce_admin_rate_limit(request, action="admin.audit.clear")
         runtime_state = _runtime_state()
         clear_fn = getattr(runtime_state, "clear_audit_events", None)
@@ -1386,7 +1429,7 @@ def _register_admin_routes(app: FastAPI, auth_dep: Any) -> None:
         return {"status": "ok", "server_time": _utc_now_iso(), "removed": int(removed)}
 
     @app.post("/api/v1/admin/config/verify", dependencies=[Depends(auth_dep)])
-    async def admin_config_verify(request: Request) -> Dict[str, Any]:
+    async def admin_config_verify(request: Request) -> dict[str, Any]:
         _enforce_admin_rate_limit(request, action="admin.config.verify")
         body = await _read_admin_json_body(request)
         raw_yaml = _optional_raw_yaml(body)
@@ -1415,7 +1458,7 @@ def _register_admin_routes(app: FastAPI, auth_dep: Any) -> None:
         return _with_server_time(payload)
 
     @app.post("/api/v1/admin/query_log/clear", dependencies=[Depends(auth_dep)])
-    async def admin_query_log_clear(request: Request) -> Dict[str, Any]:
+    async def admin_query_log_clear(request: Request) -> dict[str, Any]:
         _enforce_admin_rate_limit(request, action="admin.query_log.clear")
         body = await _read_admin_json_body(request)
         filters = body.get("filters")
@@ -1453,7 +1496,7 @@ def _register_admin_routes(app: FastAPI, auth_dep: Any) -> None:
         page: int = 1,
         page_size: int = 100,
         search: str | None = None,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         _enforce_admin_rate_limit(request, action="admin.rate_limit.keys")
         try:
             payload = _admin_logic.execute_rate_limit_keys_list(
@@ -1473,7 +1516,7 @@ def _register_admin_routes(app: FastAPI, auth_dep: Any) -> None:
         return _with_server_time(payload)
 
     @app.post("/api/v1/admin/rate_limit/clear", dependencies=[Depends(auth_dep)])
-    async def admin_rate_limit_clear(request: Request) -> Dict[str, Any]:
+    async def admin_rate_limit_clear(request: Request) -> dict[str, Any]:
         _enforce_admin_rate_limit(request, action="admin.rate_limit.clear")
         body = await _read_admin_json_body(request)
         plugin_name = body.get("plugin")
@@ -1514,7 +1557,7 @@ def _register_admin_routes(app: FastAPI, auth_dep: Any) -> None:
     @app.post(
         "/api/v1/admin/records/{target}/validate", dependencies=[Depends(auth_dep)]
     )
-    async def admin_records_validate(target: str, request: Request) -> Dict[str, Any]:
+    async def admin_records_validate(target: str, request: Request) -> dict[str, Any]:
         _enforce_admin_rate_limit(request, action="admin.records.validate")
         body = await _read_admin_json_body(request)
         plugin_name = _required_plugin_name(body)
@@ -1541,7 +1584,7 @@ def _register_admin_routes(app: FastAPI, auth_dep: Any) -> None:
         return _with_server_time(payload)
 
     @app.post("/api/v1/admin/records/{target}/apply", dependencies=[Depends(auth_dep)])
-    async def admin_records_apply(target: str, request: Request) -> Dict[str, Any]:
+    async def admin_records_apply(target: str, request: Request) -> dict[str, Any]:
         _enforce_admin_rate_limit(request, action="admin.records.apply")
         body = await _read_admin_json_body(request)
         plugin_name = _required_plugin_name(body)
@@ -1570,7 +1613,7 @@ def _register_admin_routes(app: FastAPI, auth_dep: Any) -> None:
         return _with_server_time(payload)
 
     @app.post("/api/v1/admin/records/{target}/delete", dependencies=[Depends(auth_dep)])
-    async def admin_records_delete(target: str, request: Request) -> Dict[str, Any]:
+    async def admin_records_delete(target: str, request: Request) -> dict[str, Any]:
         _enforce_admin_rate_limit(request, action="admin.records.delete")
         body = await _read_admin_json_body(request)
         plugin_name = _required_plugin_name(body)
@@ -1600,7 +1643,7 @@ def _register_admin_routes(app: FastAPI, auth_dep: Any) -> None:
         return payload
 
     @app.get("/api/v1/admin/restart/status", dependencies=[Depends(auth_dep)])
-    async def admin_restart_status(request: Request) -> Dict[str, Any]:
+    async def admin_restart_status(request: Request) -> dict[str, Any]:
         _enforce_admin_rate_limit(request, action="admin.restart.status")
         _status_code, payload = _endpoint_services.build_admin_restart_status_result(
             runtime_state=_runtime_state(),
@@ -1609,7 +1652,7 @@ def _register_admin_routes(app: FastAPI, auth_dep: Any) -> None:
         return payload
 
     @app.get("/api/v1/admin/tasks", dependencies=[Depends(auth_dep)])
-    async def admin_tasks(request: Request, limit: int = 50) -> Dict[str, Any]:
+    async def admin_tasks(request: Request, limit: int = 50) -> dict[str, Any]:
         _enforce_admin_rate_limit(request, action="admin.tasks")
         _status_code, payload = _endpoint_services.build_admin_tasks_result(
             runtime_state=_runtime_state(),
@@ -1621,7 +1664,7 @@ def _register_admin_routes(app: FastAPI, auth_dep: Any) -> None:
         return payload
 
     @app.post("/api/v1/admin/config/diff", dependencies=[Depends(auth_dep)])
-    async def admin_config_diff(request: Request) -> Dict[str, Any]:
+    async def admin_config_diff(request: Request) -> dict[str, Any]:
         _enforce_admin_rate_limit(request, action="admin.config.diff")
         body = await _read_admin_json_body(request)
         raw_yaml = _optional_raw_yaml(body)
@@ -1637,7 +1680,7 @@ def _register_admin_routes(app: FastAPI, auth_dep: Any) -> None:
         return _with_server_time(payload)
 
     @app.post("/api/v1/admin/config/lint", dependencies=[Depends(auth_dep)])
-    async def admin_config_lint(request: Request) -> Dict[str, Any]:
+    async def admin_config_lint(request: Request) -> dict[str, Any]:
         _enforce_admin_rate_limit(request, action="admin.config.lint")
         body = await _read_admin_json_body(request)
         raw_yaml = _optional_raw_yaml(body)
@@ -1653,7 +1696,7 @@ def _register_admin_routes(app: FastAPI, auth_dep: Any) -> None:
         return _with_server_time(payload)
 
     @app.post("/api/v1/admin/query_log/export", dependencies=[Depends(auth_dep)])
-    async def admin_query_log_export(request: Request) -> Dict[str, Any]:
+    async def admin_query_log_export(request: Request) -> dict[str, Any]:
         _enforce_admin_rate_limit(request, action="admin.query_log.export")
         body = await _read_admin_json_body(request)
         filters = body.get("filters")
@@ -1679,7 +1722,7 @@ def _register_admin_routes(app: FastAPI, auth_dep: Any) -> None:
         return payload
 
     @app.post("/api/v1/admin/query_log/compact", dependencies=[Depends(auth_dep)])
-    async def admin_query_log_compact(request: Request) -> Dict[str, Any]:
+    async def admin_query_log_compact(request: Request) -> dict[str, Any]:
         _enforce_admin_rate_limit(request, action="admin.query_log.compact")
         body = await _read_admin_json_body(request)
         mode = str(body.get("mode", "vacuum") or "vacuum")
@@ -1701,7 +1744,7 @@ def _register_admin_routes(app: FastAPI, auth_dep: Any) -> None:
         request: Request,
         plugin: str | None = None,
         limit: int = 20,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         _enforce_admin_rate_limit(request, action="admin.rate_limit.hot_keys")
         try:
             payload = _admin_logic.execute_rate_limit_hot_keys(
@@ -1722,7 +1765,7 @@ def _register_admin_routes(app: FastAPI, auth_dep: Any) -> None:
     @app.post(
         "/api/v1/admin/rate_limit/reset_counters", dependencies=[Depends(auth_dep)]
     )
-    async def admin_rate_limit_reset_counters(request: Request) -> Dict[str, Any]:
+    async def admin_rate_limit_reset_counters(request: Request) -> dict[str, Any]:
         _enforce_admin_rate_limit(request, action="admin.rate_limit.reset_counters")
         body = await _read_admin_json_body(request)
         plugin = body.get("plugin")
@@ -1746,7 +1789,7 @@ def _register_admin_routes(app: FastAPI, auth_dep: Any) -> None:
         return payload
 
     @app.post("/api/v1/admin/records/{target}/list", dependencies=[Depends(auth_dep)])
-    async def admin_records_list(target: str, request: Request) -> Dict[str, Any]:
+    async def admin_records_list(target: str, request: Request) -> dict[str, Any]:
         _enforce_admin_rate_limit(request, action="admin.records.list")
         body = await _read_admin_json_body(request)
         plugin_name = _required_plugin_name(body)
@@ -1773,7 +1816,7 @@ def _register_admin_routes(app: FastAPI, auth_dep: Any) -> None:
     )
     async def admin_records_purge_expired(
         target: str, request: Request
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         _enforce_admin_rate_limit(request, action="admin.records.purge_expired")
         body = await _read_admin_json_body(request)
         plugin_name = _required_plugin_name(body)
@@ -1796,7 +1839,7 @@ def _register_admin_routes(app: FastAPI, auth_dep: Any) -> None:
         return payload
 
     @app.get("/api/v1/admin/version/compat", dependencies=[Depends(auth_dep)])
-    async def admin_version_compat(request: Request) -> Dict[str, Any]:
+    async def admin_version_compat(request: Request) -> dict[str, Any]:
         _enforce_admin_rate_limit(request, action="admin.version.compat")
         _status_code, payload = _endpoint_services.build_admin_version_compat_result(
             plugins=_get_plugins(),
@@ -1806,7 +1849,7 @@ def _register_admin_routes(app: FastAPI, auth_dep: Any) -> None:
         return payload
 
     @app.get("/api/v1/admin/diag/runtime-snapshot", dependencies=[Depends(auth_dep)])
-    async def admin_diag_runtime_snapshot(request: Request) -> Dict[str, Any]:
+    async def admin_diag_runtime_snapshot(request: Request) -> dict[str, Any]:
         _enforce_admin_rate_limit(request, action="admin.diag.runtime_snapshot")
         _status_code, payload = (
             _endpoint_services.build_admin_diag_runtime_snapshot_result(
@@ -2076,17 +2119,17 @@ def _register_plugin_routes(app: FastAPI, auth_dep: Any) -> None:
         return _admin_logic.collect_plugin_ui_descriptors(plugins_list)
 
     @app.get("/api/v1/plugin_pages", dependencies=[Depends(auth_dep)])
-    async def list_plugin_pages() -> Dict[str, Any]:
+    async def list_plugin_pages() -> dict[str, Any]:
         pages = _collect_admin_pages_for_response()
         return {"server_time": _utc_now_iso(), "pages": _json_safe(pages)}
 
     @app.get("/api/v1/plugins/ui", dependencies=[Depends(auth_dep)])
-    async def list_plugin_ui_descriptors() -> Dict[str, Any]:
+    async def list_plugin_ui_descriptors() -> dict[str, Any]:
         items = _collect_plugin_ui_descriptors()
         return {"server_time": _utc_now_iso(), "items": _json_safe(items)}
 
     @app.get("/api/v1/cache", dependencies=[Depends(auth_dep)])
-    async def get_cache_snapshot() -> Dict[str, Any]:
+    async def get_cache_snapshot() -> dict[str, Any]:
         cache = _get_dns_cache()
         if cache is None or not hasattr(cache, "get_http_snapshot"):
             raise HTTPException(
@@ -2120,7 +2163,7 @@ def _register_plugin_routes(app: FastAPI, auth_dep: Any) -> None:
         search: str | None = None,
         hide_zero_calls: int | None = None,
         hide_zero_hits: int | None = None,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Brief: Return a server-side paginated cache table for the admin UI.
 
         Inputs:
@@ -2221,7 +2264,7 @@ def _register_plugin_routes(app: FastAPI, auth_dep: Any) -> None:
         sort_dir: str | None = None,
         search: str | None = None,
         hide_hash_like: int | None = None,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Brief: Return a server-side paginated table for a plugin snapshot page.
 
         Inputs:
@@ -2303,7 +2346,7 @@ def _register_plugin_routes(app: FastAPI, auth_dep: Any) -> None:
     )
     async def get_plugin_page_detail(
         plugin_name: str, page_slug: str
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         _assert_plugin_api_enabled(plugin_name)
         detail = _find_admin_page_detail(plugin_name, page_slug)
         if detail is None:
@@ -2311,7 +2354,7 @@ def _register_plugin_routes(app: FastAPI, auth_dep: Any) -> None:
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="plugin page not found",
             )
-        out: Dict[str, Any] = {
+        out: dict[str, Any] = {
             "server_time": _utc_now_iso(),
             "page": _json_safe(detail),
         }
@@ -2319,14 +2362,14 @@ def _register_plugin_routes(app: FastAPI, auth_dep: Any) -> None:
 
     @app.get("/api/v1/logs", dependencies=[Depends(auth_dep)])
     @app.get("/logs", dependencies=[Depends(auth_dep)], include_in_schema=False)
-    async def get_logs(limit: int = 100) -> Dict[str, Any]:
+    async def get_logs(limit: int = 100) -> dict[str, Any]:
         _status_code, payload = _endpoint_services.build_logs_result(
             log_buffer=getattr(app.state, "log_buffer", None),
             limit=limit,
         )
         return payload
 
-    def _plugin_snapshot_response(plugin_name: str) -> Dict[str, Any]:
+    def _plugin_snapshot_response(plugin_name: str) -> dict[str, Any]:
         """Brief: Build the common JSON response shape for plugin snapshots.
 
         Inputs:
@@ -2348,7 +2391,7 @@ def _register_plugin_routes(app: FastAPI, auth_dep: Any) -> None:
             "data": _json_safe(snap["data"]),
         }
 
-    def _plugin_payload_response(plugin_name: str, builder: Any) -> Dict[str, Any]:
+    def _plugin_payload_response(plugin_name: str, builder: Any) -> dict[str, Any]:
         """Brief: Build standard plugin endpoint responses around admin_logic calls.
 
         Inputs:
@@ -2369,7 +2412,7 @@ def _register_plugin_routes(app: FastAPI, auth_dep: Any) -> None:
         return _json_safe(payload)
 
     @app.get("/api/v1/plugins/{plugin_name}/snapshot", dependencies=[Depends(auth_dep)])
-    async def get_plugin_snapshot(plugin_name: str) -> Dict[str, Any]:
+    async def get_plugin_snapshot(plugin_name: str) -> dict[str, Any]:
         return _plugin_snapshot_response(plugin_name)
 
     @app.get(
@@ -2388,7 +2431,7 @@ def _register_plugin_routes(app: FastAPI, auth_dep: Any) -> None:
     @app.get(
         "/api/v1/plugins/{plugin_name}/zone_records", dependencies=[Depends(auth_dep)]
     )
-    async def get_plugin_snapshot_compat_alias(plugin_name: str) -> Dict[str, Any]:
+    async def get_plugin_snapshot_compat_alias(plugin_name: str) -> dict[str, Any]:
         """Brief: Compatibility aliases for existing plugin-specific snapshots.
 
         Inputs:
@@ -2404,7 +2447,7 @@ def _register_plugin_routes(app: FastAPI, auth_dep: Any) -> None:
         "/api/v1/plugins/{plugin_name}/access_control/rules",
         dependencies=[Depends(auth_dep)],
     )
-    async def get_access_control_rules(plugin_name: str) -> Dict[str, Any]:
+    async def get_access_control_rules(plugin_name: str) -> dict[str, Any]:
         return _plugin_payload_response(
             plugin_name,
             lambda plugins_list, name: _admin_logic.build_plugin_access_control_rules_payload(
@@ -2418,7 +2461,7 @@ def _register_plugin_routes(app: FastAPI, auth_dep: Any) -> None:
     )
     async def get_zone_records_dns_update_zone_status(
         plugin_name: str, zone: str
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         return _plugin_payload_response(
             plugin_name,
             lambda plugins_list, name: _admin_logic.build_plugin_zone_records_dns_update_zone_payload(
@@ -2434,7 +2477,7 @@ def _register_plugin_routes(app: FastAPI, auth_dep: Any) -> None:
     )
     async def get_etc_hosts_lookup(
         plugin_name: str, name: str | None = None
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         return _plugin_payload_response(
             plugin_name,
             lambda plugins_list, plugin: _admin_logic.build_plugin_etc_hosts_lookup_payload(
@@ -2448,7 +2491,7 @@ def _register_plugin_routes(app: FastAPI, auth_dep: Any) -> None:
     )
     async def get_docker_container_by_name(
         plugin_name: str, name: str
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         return _plugin_payload_response(
             plugin_name,
             lambda plugins_list, plugin: _admin_logic.build_plugin_docker_container_payload(
@@ -2463,7 +2506,7 @@ def _register_plugin_routes(app: FastAPI, auth_dep: Any) -> None:
         plugin_name: str,
         status_text: str | None = Query(None, alias="status"),
         service_type: str | None = Query(None, alias="type"),
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         return _plugin_payload_response(
             plugin_name,
             lambda plugins_list, plugin: _admin_logic.build_plugin_mdns_services_payload(
@@ -2480,7 +2523,7 @@ def _register_plugin_routes(app: FastAPI, auth_dep: Any) -> None:
     )
     async def get_rate_limit_profiles(
         plugin_name: str, limit: int | None = None, sort: str | None = None
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         return _plugin_payload_response(
             plugin_name,
             lambda plugins_list, plugin: _admin_logic.build_plugin_rate_limit_profiles_payload(
@@ -2494,7 +2537,7 @@ def _register_plugin_routes(app: FastAPI, auth_dep: Any) -> None:
     )
     async def get_zone_records_lookup(
         plugin_name: str, owner: str | None = None, qtype: str | None = None
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         return _plugin_payload_response(
             plugin_name,
             lambda plugins_list, plugin: _admin_logic.build_plugin_zone_records_lookup_payload(
@@ -2509,7 +2552,7 @@ def _register_plugin_routes(app: FastAPI, auth_dep: Any) -> None:
         "/api/v1/plugins/{plugin_name}/etc_hosts/reload",
         dependencies=[Depends(auth_dep)],
     )
-    async def post_etc_hosts_reload(plugin_name: str) -> Dict[str, Any]:
+    async def post_etc_hosts_reload(plugin_name: str) -> dict[str, Any]:
         return _plugin_payload_response(
             plugin_name,
             lambda plugins_list, plugin: _admin_logic.build_plugin_reload_payload(
@@ -2521,7 +2564,7 @@ def _register_plugin_routes(app: FastAPI, auth_dep: Any) -> None:
         "/api/v1/plugins/{plugin_name}/docker_hosts/reload",
         dependencies=[Depends(auth_dep)],
     )
-    async def post_docker_hosts_reload(plugin_name: str) -> Dict[str, Any]:
+    async def post_docker_hosts_reload(plugin_name: str) -> dict[str, Any]:
         return _plugin_payload_response(
             plugin_name,
             lambda plugins_list, plugin: _admin_logic.build_plugin_reload_payload(
@@ -2533,7 +2576,7 @@ def _register_plugin_routes(app: FastAPI, auth_dep: Any) -> None:
         "/api/v1/plugins/{plugin_name}/zone_records/reload",
         dependencies=[Depends(auth_dep)],
     )
-    async def post_zone_records_reload(plugin_name: str) -> Dict[str, Any]:
+    async def post_zone_records_reload(plugin_name: str) -> dict[str, Any]:
         return _plugin_payload_response(
             plugin_name,
             lambda plugins_list, plugin: _admin_logic.build_plugin_reload_payload(
@@ -2548,7 +2591,7 @@ def _register_plugin_routes(app: FastAPI, auth_dep: Any) -> None:
     async def post_zone_records_compact(
         plugin_name: str,
         request: Request,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         _assert_plugin_api_enabled(plugin_name)
         try:
             body_any = await request.json()
@@ -2581,7 +2624,7 @@ def _register_plugin_routes(app: FastAPI, auth_dep: Any) -> None:
     )
     async def get_upstream_router_evaluate(
         plugin_name: str, qname: str | None = None
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         return _plugin_payload_response(
             plugin_name,
             lambda plugins_list, plugin: _admin_logic.build_plugin_upstream_evaluate_payload(

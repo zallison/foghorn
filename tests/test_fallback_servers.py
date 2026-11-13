@@ -36,6 +36,8 @@ from foghorn.stats import StatsCollector, StatsSQLiteStore
 pytestmark = pytest.mark.slow
 
 
+from datetime import UTC
+
 from tests.helpers.webserver_test_cfg import (
     normalize_web_cfg_layout as _normalize_web_cfg_layout,
 )
@@ -115,15 +117,13 @@ def test_doh_fallback_threaded_server_roundtrip(monkeypatch: Any) -> None:
     # Give the server a brief moment to start accepting connections.
     time.sleep(0.05)
 
-    # Test /openapi.json and /docs exist in threaded mode.
+    # Docs/OpenAPI are off by default on DoH (parity with secure admin defaults).
     conn0 = http.client.HTTPConnection(host, port, timeout=1)
     try:
         conn0.request("GET", "/openapi.json")
         resp0 = conn0.getresponse()
-        body0 = resp0.read()
-        assert resp0.status == 200
-        schema = json.loads(body0.decode("utf-8"))
-        assert "/dns-query" in (schema.get("paths") or {})
+        resp0.read()
+        assert resp0.status == 404
     finally:
         conn0.close()
 
@@ -131,9 +131,8 @@ def test_doh_fallback_threaded_server_roundtrip(monkeypatch: Any) -> None:
     try:
         conn0b.request("GET", "/docs")
         resp0b = conn0b.getresponse()
-        body0b = resp0b.read()
-        assert resp0b.status == 200
-        assert b"SwaggerUIBundle" in body0b
+        resp0b.read()
+        assert resp0b.status == 404
     finally:
         conn0b.close()
 
@@ -550,9 +549,9 @@ def test_admin_fallback_query_log_and_aggregate(monkeypatch: Any, tmp_path) -> N
     collector = StatsCollector(stats_store=store)
 
     # Insert two rows in a known window.
-    from datetime import datetime, timezone
+    from datetime import datetime
 
-    start_dt = datetime(2025, 12, 10, 1, 0, 0, tzinfo=timezone.utc)
+    start_dt = datetime(2025, 12, 10, 1, 0, 0, tzinfo=UTC)
     collector.record_query_result(
         client_ip="192.0.2.1",
         qname="example.com",
@@ -824,11 +823,11 @@ def test_admin_fallback_query_log_validation_errors(monkeypatch: Any) -> None:
     monkeypatch.setattr(asyncio, "new_event_loop", boom_new_loop, raising=True)
 
     class DummyStore:
-        def select_query_log(self, **_kw):  # noqa: ANN003
+        def select_query_log(self, **_kw):
             # Include a non-dict item to exercise the "else" append path in the handler.
             return {"items": ["x"], "total": 0, "total_pages": 0}
 
-        def aggregate_query_log_counts(self, **_kw):  # noqa: ANN003
+        def aggregate_query_log_counts(self, **_kw):
             return {"items": []}
 
     class DummyStats:
