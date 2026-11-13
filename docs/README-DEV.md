@@ -173,10 +173,13 @@ Cache plugins live under `src/foghorn/plugins/cache` and subclass `CachePlugin`.
 
 - `CachePlugin` in `cache/base.py` defines the DNS cache interface:
   - `get(key)`, `get_with_meta(key)`, `set(key, ttl, value)`, `purge()`.
+  - `validate_connection() -> bool`: connectivity probe used at startup (and on reload for a configured cache). In-memory/null backends always return true.
 - `cache_aliases()` decorator assigns short aliases used in configuration.
 - `cache/registry.py`:
   - Walks `foghorn.plugins.cache` and registers each `CachePlugin` subclass under a default alias plus explicit aliases.
   - `load_cache_plugin()` accepts `None`, a string alias/path, or a small mapping and returns a configured cache instance.
+
+**Operator note (fail-closed preflight):** when a configured cache or stats/query-log backend cannot be constructed or fails `validate_connection()`, `main` aborts startup with a CRITICAL log and non-zero exit (`BackendUnavailableError` on construction failure). Multi-backend stats stores treat primary failure as fatal and secondary failures as warnings. Runtime reload likewise raises if a configured cache cannot load or validate—Foghorn will not continue with a silently broken cache. Ensure external backends are reachable before start/reload.
 
 Built‑in DNS cache plugins include aliases such as:
 
@@ -191,7 +194,7 @@ Built‑in DNS cache plugins include aliases such as:
 
 Statistics and query-log backends live under `src/foghorn/plugins/querylog` and subclass `BaseStatsStore`.
 
-- `BaseStatsStore` in `querylog/base.py` defines the contract used by `StatsCollector` and the web UI.
+- `BaseStatsStore` in `querylog/base.py` defines the contract used by `StatsCollector` and the web UI, including `validate_connection()` for startup preflight.
 - `querylog/registry.py`:
   - Walks `foghorn.plugins.querylog` and registers each `BaseStatsStore` subclass under a default alias plus explicit aliases.
   - `get_stats_backend_class()` resolves aliases or dotted import paths.

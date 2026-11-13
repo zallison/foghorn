@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "foghorn"
-version = "0.7.1b"
+version = "0.7.2"
 description = "Pluggable DNS server with caching, filtering, and routing. Supports UDP, TCP, DoT, and DoH upstream and downstream, plus DNSSEC."
 authors = [ { name = "Zack Allison", email = "zack@zackallison.com" } ]
 license = { file = "LICENSE.txt" }

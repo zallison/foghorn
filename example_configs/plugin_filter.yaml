@@ -60,7 +60,7 @@ plugins:
 
       # Filter-specific options
       default: deny
-      db_path: ./config/var/blacklist.db
+      db_path: ./config/var/blocklist.db
       cache_ttl_seconds: 600
       ttl: 300
 
@@ -74,6 +74,25 @@ plugins:
         - AAAA
       deny_qtypes:
         - TXT
+
+      # Time-of-day / day-of-week rules (evaluated before decision cache;
+      # take precedence over allow/block lists while a window matches).
+      timezone: America/Chicago
+      time_rules:
+        - domains:
+            - games.example
+            - streaming.example
+          days: [weekdays]
+          windows:
+            - start: '09:00'
+              end: '17:00'
+          action: deny
+        - domains: social.example
+          days: [fri, sat, sun]
+          windows:
+            - start: '22:00'
+              end: '06:00'   # overnight; start day owns the span
+          action: drop
 
       blocked_domains_files:
         - ./config/deny/domains.txt

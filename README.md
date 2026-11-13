@@ -398,6 +398,8 @@ Without `trust-ad`, glibc clears the AD flag before handing answers to applicati
     - `ecs.use_for_plugin_targeting`: allow trusted inbound ECS to influence plugin targeting IP selection.
   - When ECS influences upstream selection/targeting, cache reads/writes are bypassed to avoid cross-subnet contamination.
   - Legacy `server.enable_ede` and `server.forward_local` keys are still accepted as compatibility aliases.
+  - Downstream DNS COOKIE (RFC 7873) lives under `server.features.cookies` (`enabled` default `true`, `mode: learn|require_udp`, optional shared `secret` / `secret_old`). See `docs/RFCs.md` and `example_configs/server_all_options.yaml`.
+  - Downstream QUERY TSIG (RFC 2845) lives under `server.features.tsig` (`enabled` default `false`, `mode: optional|require`, `keys` / `key_sources`). Separate from AXFR TSIG under `server.axfr.tsig`. See `docs/RFCs.md`.
 - `server.resolver`
   - Timeouts, recursion depth, and resolver mode:
 	- `forward` (default): forward to configured `upstreams`.
@@ -406,8 +408,19 @@ Without `trust-ad`, glibc clears the AD flag before handing answers to applicati
   - Recursive destination policy (split-horizon safe defaults):
 	- `allow_private_destinations` (default `true`): when `false`, skip non-global next-hop glue (private/loopback/link-local/etc.).
 	- `destination_allowlist`: optional IP/CIDR exceptions still accepted when private destinations are blocked.
+  - `max_depth` defaults to `12` and is clamped to `1..32`.
 - `server.http`
-  - Admin web UI listener configuration.
+  - Admin web UI / control-plane HTTP listener.
+  - Surface gates (all default `false`; enable only what you need):
+    - `enable_api`: machine-readable `/api/v1/*` data endpoints.
+    - `enable_admin`: control-plane mutations (config save/reload/restart and related write actions).
+    - `enable_schema` / `enable_docs`: OpenAPI (`/openapi.json`) and Swagger UI (`/docs`); docs also require schema.
+  - Auth under `server.http.auth`: `mode: none|token|basic` (default `token`). The built-in admin UI is token-oriented; see `docs/API.md`.
+  - Optional admin TLS: `cert_file` / `key_file`, or `generate` / `keys_dir` / `tls_days` for self-signed material.
+
+#### Startup backend preflight (fail-closed)
+
+When a **configured** DNS cache (`server.cache`) or stats/query-log backend (`logging.backends` / stats persistence) cannot be constructed or fails its `validate_connection()` probe, Foghorn aborts startup with a CRITICAL log and a non-zero exit. In-memory/null backends always pass. Multi-backend stats stores treat a primary failure as fatal and secondary failures as warnings. Runtime config reload is likewise fail-closed for a configured cache that cannot load or validate. Ensure databases, Redis, MQTT brokers, and similar services are reachable before starting or reloading Foghorn.
 
 ### 2.3 Upstreams block
 

@@ -46,15 +46,44 @@ operators can retrieve it. Prefer setting an explicit token in config for
 production deployments.
 
 #### Browser admin UI
-The built-in web UI (`/` / `index.html`) stores the token in browser
-`sessionStorage` under `foghorn-api-token` (cleared when the tab session ends)
-and sends it as `Authorization: Bearer ...` on API requests via a shared
-`apiFetch` helper. A one-time migration copies any legacy `localStorage` value
-into `sessionStorage` and removes the durable copy. On HTTP 401 it prompts once
-for the token (shared across concurrent failures), retries the request, and
-exposes an **API Token** header button to set or clear the stored value. Diagram
-PNGs are loaded through `apiFetch` + blob URLs because `<img src>` cannot attach
-auth headers.
+The built-in web UI (`/` / `index.html`) is **token-oriented**: it stores the
+token in browser `sessionStorage` under `foghorn-api-token` (cleared when the
+tab session ends) and sends it as `Authorization: Bearer ...` on API requests
+via a shared `apiFetch` helper. A one-time migration copies any legacy
+`localStorage` value into `sessionStorage` and removes the durable copy. On
+HTTP 401 it prompts once for the token (shared across concurrent failures),
+retries the request, and exposes an **API Token** header button to set or clear
+the stored value. Diagram PNGs are loaded through `apiFetch` + blob URLs
+because `<img src>` cannot attach auth headers. Basic-auth deployments should
+use curl/API clients (or a reverse proxy) rather than relying on the shipped UI
+prompt flow.
+
+### Basic mode
+When `server.http.auth.mode: basic`, protected endpoints require HTTP Basic:
+
+- `Authorization: Basic base64(<username>:<password>)`
+
+Configure both `server.http.auth.username` and `server.http.auth.password`.
+Missing or blank credentials fail closed (requests are rejected; non-loopback
+binds with `enable_api: true` are refused at startup). Example:
+
+```yaml
+server:
+  http:
+    enable_api: true
+    auth:
+      mode: basic
+      username: foghorn-admin
+      password: replace-me
+```
+
+```bash
+curl -sS -u "foghorn-admin:replace-me" "$BASE_URL/api/v1/stats"
+```
+
+The shipped admin UI prompt/sessionStorage path is built around bearer tokens;
+prefer `mode: token` when using the browser UI, or front Basic auth at a reverse
+proxy if you need browser access under Basic.
 
 ### No-auth mode
 When `server.http.auth.mode: none`, protected endpoints are not enforced.

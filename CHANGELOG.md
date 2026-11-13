@@ -5,8 +5,13 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## 0.7.2 — 2026-11-10
+
 ### Added
-- Startup pre-flight `validate_connection()` checks for configured cache and stats/query-log backends; unreachable or failing backends abort startup with a CRITICAL log and non-zero exit (`BackendUnavailableError` when a configured backend cannot be constructed).
+- server.data_root optional base directory for local file path containment; when set, configurable paths must resolve under it (DNSSEC trust-anchor store, EtcHosts hosts files, JSON query-log file_path). Relative paths resolve against data_root.
+- Shared helpers in foghorn.utils.safe_paths (enforce_data_root_path, apply_data_root_from_config) applied at startup and reload.
+- ProxmoxHosts address selection filters: `include_cidrs` / `exclude_cidrs`, `include_interfaces`, and per-family `address_limit` for guest/agent/LXC IPs.
+- Startup pre-flight `validate_connection()` checks for configured cache and stats/query-log backends; unreachable or failing backends abort startup with a CRITICAL log and non-zero exit (`BackendUnavailableError` when a configured backend cannot be constructed). Configured cache load/validate during runtime reload is also fail-closed.
 - Cache and query-log backend interface method `validate_connection() -> bool` (driver ping/SELECT/health probe; in-memory/null always true). Multi-backend stats stores treat primary failure as fatal and secondary failures as warnings.
 - Per-plugin resolve execution telemetry (`servers/plugin_telemetry.py`): times pre/post hooks, DEBUG millisecond breakdowns per query, and WARNING when a plugin exceeds `FOGHORN_SLOW_PLUGIN_MS` (default 50ms).
 - Admin UI browser API auth: stores `server.http.auth.token` in `sessionStorage` (`foghorn-api-token`, with one-time migrate from legacy `localStorage`), sends `Authorization: Bearer ...` via shared `apiFetch`, prompts once on HTTP 401, and exposes an **API Token** header control; diagram PNGs load through authenticated blob URLs.
@@ -38,7 +43,13 @@ All notable changes to this project will be documented in this file.
 - DNS UPDATE auth is explicitly **TSIG-only**: `dns_update.zones[].psk` is unsupported and fails closed at Pydantic validation, plugin setup, and `process_update_message`.
 - SOA serial bumps in the shared commit path also refresh `_name_index` and `_zone_soa` so resolver/transfer views stay consistent.
 - Demoted noisy plugin-setup, admin uvicorn-limit, and config-diagram startup lines from INFO to DEBUG; RateLimit periodic stats log line tightened.
-- Package metadata in `pyproject.toml` set to version `0.7.1b` with a shorter project description.
+- Package metadata in `pyproject.toml` set to version `0.7.2`.
+- ProxmoxHosts default plugin poll interval is 300s (was 30s); endpoint `reload_interval_second` inherits the plugin value when unset. TLS verify is applied on the session with a one-time insecure-request notice per URL.
+- Resolver `max_depth` default is `12` (was effectively 16 in dump/runtime paths) and is clamped to `1..32` across the Pydantic model, config dump defaults, and runtime reload parsing.
+- Config dump defaults now match runtime secure defaults more closely: `server.resolver.use_asyncio: true` and `server.http.auth.mode: token`.
+- Config dump secret redaction walks nested mappings/lists recursively for keys named `token` / `password` / `secret` (and any extra `server.http.redact_keys`), not only top-level fields.
+- DoH listener (FastAPI and threaded) no longer exposes `/docs`, `/redoc`, or `/openapi.json` by default.
+- `scripts/generate_dns_update_keys.py` / `make gen-psk-token` and `--psk` hard-error: DNS UPDATE auth is TSIG-only; use `--tsig` / TSIG key generation instead.
 - AXFR/IXFR serving now auto-inherits `server.features.tsig` keys (inline and `key_sources`) when `server.axfr.tsig` / legacy `tsig_keys` define none; AXFR-level keys always win when present.
 - QUERY TSIG now fails closed when enabled with an empty/unusable keyring: TSIG-present queries are rejected with NOTAUTH even in `optional` mode, and keyring build failures report `Failed to build TSIG keyring`.
 - TSIG response signing now passes the verified request message so RFC 2845 `original_id` is correct on cache-hit responses.
@@ -72,6 +83,7 @@ All notable changes to this project will be documented in this file.
 - `docs/README-DEV.md` and `CONTRIBUTING.md` describe the Pydantic-driven schema workflow and `make schema` regenerate step.
 
 ### Tests
+- Added `tests/test_safe_paths.py` for `server.data_root` path containment across JsonLogging, EtcHosts, and helpers.
 - Added `tests/plugins/test_validate_connection.py` for cache/query-log connectivity probes.
 - Added `tests/test_main_preflight_validation.py` for startup backend validation orchestration and fatal load paths.
 - Added `tests/servers/test_plugin_telemetry.py` for per-plugin timing helpers and resolve-path DEBUG/WARNING output.
@@ -144,6 +156,13 @@ All notable changes to this project will be documented in this file.
 - Admin webserver startup now warns for non-loopback plaintext binds, public OpenAPI/Swagger exposure, permissive public CORS settings, and non-loopback threaded fallback usage.
 - API request audit startup now warns when enabled with implicit defaults for `db_path` or retention configuration.
 ### Fixed
+- Plugin pre_resolve/post_resolve exceptions fail closed with SERVFAIL (and optional EDE) instead of continuing resolution as an implicit allow.
+- DNSSEC zone-signing private keys are written with owner-only permissions (0o600); chmod is best-effort so Docker bind mounts still succeed.
+- NSEC NODATA type-bitmap parsing no longer drops the first covered type (parts[1:] for NSEC presentation form).
+- Admin control-plane mutations (config save/reload/restart) are rate-limited in both FastAPI and threaded admin servers.
+- RateLimit per-key window counters use a dedicated bounded LRU cache (maxsize=active_window_max_keys) instead of an unbounded shared cache.
+- Outbound AXFR transfers default to caps of 100,000 RRs and 32 MiB per zone (operator-overridable) to bound hostile upstream transfers.
+- Configurable local file paths can no longer escape server.data_root to read/write sensitive system paths when data_root is configured.
 - Filter allow-after-block exceptions no longer disappear after a block-only list reload on a persistent SQLite `db_path` (force dual-group reload).
 - Filter blank `blocked_keywords` entries no longer match every domain (`"" in name`).
 - Filter post-resolve `replace` with IP family mismatch now removes the blocked answer RR instead of returning it unchanged.
@@ -152,6 +171,9 @@ All notable changes to this project will be documented in this file.
 - Runtime snapshot initialization in `main` now passes `cookies_enabled` / `cookies_mode` / `cookies_secret` / `cookies_secret_old` / `cookies_lifetime_seconds` into `RuntimeSnapshot`, fixing startup after DNS COOKIE support was added.
 - RateLimit webserver stats now resolve runtime reader callbacks by `db_path` using exact, absolute, and normalized suffix matching, preventing missed current-window/profile metrics when configured paths and plugin runtime paths differ.
 - Admin plugin/cache paged tables now retain active search text, sort selection, page size, and enabled filters across auto-refresh cycles, preventing view resets while monitoring mDNS and other plugin pages.
+- DNS UPDATE processing honors RFC 2136 class semantics more correctly: prerequisite and update sections use the effective `deleting` class when present, enforce zone-boundary checks, delete specific RDATA for CLASS NONE, delete RRsets/names for CLASS ANY, and merge zone-class additions instead of wholesale RRset replace.
+- Built-in DNSSEC `ROOT_DNSKEY` trust material is the real IANA root KSK-2017 (key id `20326`, RSASHA256) with a regression test; full operator `trust-anchor` config wiring from main is still incomplete and is not claimed here.
+- Runtime reload fails closed when a *configured* cache backend cannot be loaded or fails `validate_connection()` (raises rather than continuing with an empty/broken cache).
 
 ### Tests
 - Added `tests/server/test_dns_tsig.py` coverage for feature defaults, verify/sign helpers, optional/require modes, bad TSIG rejection, and cache re-sign hygiene.
@@ -182,6 +204,11 @@ All notable changes to this project will be documented in this file.
 - Documented HTTP surface gates and admin TLS generate options in `example_configs/kitchen_sink.yaml` and `example_configs/server_all_options.yaml`.
 - Expanded `docs/RFCs.md` notes for transport, TLS/DoT, DNS Cookies, ECS, extended errors, zone transfers/TSIG, and related feature coverage.
 - Documented `server.features.refuse_any`, recursive destination policy knobs, threaded TCP hardening parity, and `stats.max_store_*` cardinality caps in README, example configs, and query-log hardening docs.
+- README briefly documents `server.http` enablement gates (`enable_api` / `enable_admin` / `enable_schema` / `enable_docs`) and points at DNS COOKIE / QUERY TSIG feature blocks.
+- `docs/API.md` documents HTTP Basic auth (`server.http.auth.mode: basic`) and notes the built-in admin UI is token-oriented.
+- Filter and RateLimit example configs include `time_rules` and `deny_delay` respectively.
+- Operator note: startup backend preflight is fail-closed for configured cache and stats/query-log backends (`docs/README-DEV.md` and README).
+- `AGENTS.md` / `CONTRIBUTING.md` terminology prefers `allowlist` / `blocklist`; project structure paths corrected under `src/foghorn/`.
 
 ## 0.7.1
 ### Added

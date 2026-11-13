@@ -62,6 +62,9 @@ plugins:
 
       deny_response: ip  # options: nxdomain | refused | servfail
                          #     noerror_empty | nodata  | ip
+      # Optional sleep before emit deny (0-5s). Holds a resolver worker thread;
+      # keep 0 unless you intentionally want slow denials.
+      deny_delay: 0
       deny_response_ip4: 0.0.0.0
       deny_response_ip6: '::'
       ttl: 60
