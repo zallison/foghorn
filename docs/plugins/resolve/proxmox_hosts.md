@@ -22,7 +22,15 @@ Address sources (first usable wins per family unless `merge_addresses` is true):
 4. cloud-init `ipconfigN` static addresses
 5. optional endpoint `use_ipv4` / `use_ipv6` overrides
 
-Loopback and link-local addresses are dropped.
+Loopback and link-local addresses are dropped. Optional filters further
+restrict which guest addresses are published:
+
+- `include_cidrs` — when non-empty, only addresses in these networks
+- `exclude_cidrs` — drop addresses in these networks
+- `include_interfaces` — when non-empty, only IPs from these guest NIC names
+  (agent / LXC; case-insensitive). Status/ipconfig fallbacks have no NIC name
+  and are unaffected by this list (CIDR filters still apply).
+- `address_limit` — max addresses per family after filtering (`0` = unlimited)
 
 ## Basic configuration
 
@@ -37,20 +45,23 @@ plugins:
         ips: [10.0.0.0/8]
       suffix: pve.${DOMAIN}
       ttl: 60
-      reload_interval_second: 30
+      reload_interval_second: 300
       endpoints:
+        # One node is enough — /cluster/resources is cluster-wide.
         - url: https://pve1.lan:8006
           token_id: foghorn@pve!dns
           token_secret: "${PVE_TOKEN_SECRET}"
           verify_tls: true
-        - url: https://pve2.lan:8006
-          token_id: foghorn@pve!dns
-          token_secret: "${PVE_TOKEN_SECRET}"
-          verify_tls: true
+        # Optional extras are failover only (tried if pve1 is down):
+        # - url: https://pve2.lan:8006
+        #   token_id: foghorn@pve!dns
+        #   token_secret: "${PVE_TOKEN_SECRET}"
+        #   verify_tls: true
 ```
 
-Multiple endpoints are **failover** only. The first healthy node supplies the
-full cluster view each reload cycle.
+Multiple endpoints are **failover** only. Foghorn talks to the first healthy
+node each reload; that node returns the full cluster guest list. Extra nodes
+are not contacted unless earlier ones fail.
 
 ## Options
 
@@ -64,12 +75,16 @@ full cluster view each reload cycle.
   - `use_ipv4` / `use_ipv6`: Answer with these host IPs for all guests
   - `ttl`, `suffix`, `reload_interval_second`: Per-endpoint overrides
 - `ttl` (default 60)
-- `reload_interval_second` (default 30; `0` disables the poller after initial load)
+- `reload_interval_second` (default 300; `0` disables the poller after initial load)
 - `status` (default `["running"]`)
 - `include_types` (default `["qemu", "lxc"]`)
 - `include_templates` (default false)
 - `use_guest_agent` (default true)
 - `merge_addresses` (default false)
+- `include_cidrs` (default `[]`): CIDR allowlist for guest addresses
+- `exclude_cidrs` (default `[]`): CIDR blocklist for guest addresses
+- `include_interfaces` (default `[]`): guest NIC name allowlist (e.g. `eth0`, `ens18`)
+- `address_limit` (default `0`): max A/AAAA addresses per family (`0` unlimited)
 - `publish_vmid` / `publish_tags` (default false)
 - `discovery` / `expose_txt_in_additional` (default false)
 - `suffix`: DNS suffix, e.g. `pve.example` → `web.pve.example`

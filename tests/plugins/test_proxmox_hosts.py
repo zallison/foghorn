@@ -151,6 +151,34 @@ def test_proxmox_hosts_module_imports():
     assert mod.__name__ == "foghorn.plugins.resolve.proxmox_hosts"
 
 
+def _bare_plugin(**config):
+    """Brief: Build a ProxmoxHosts instance without contacting endpoints.
+
+    Inputs:
+      - config: Extra plugin config kwargs.
+    Outputs:
+      - ProxmoxHosts with filter attrs initialized (no setup poll).
+    """
+
+    mod = importlib.import_module("foghorn.plugins.resolve.proxmox_hosts")
+    plugin = mod.ProxmoxHosts(endpoints=[], reload_interval_second=0, **config)
+    plugin._include_cidrs = plugin._parse_cidr_list(
+        config.get("include_cidrs"), option_name="include_cidrs"
+    )
+    plugin._exclude_cidrs = plugin._parse_cidr_list(
+        config.get("exclude_cidrs"), option_name="exclude_cidrs"
+    )
+    plugin._include_interfaces = plugin._parse_name_list(
+        config.get("include_interfaces")
+    )
+    try:
+        plugin._address_limit = max(0, int(config.get("address_limit", 0)))
+    except (TypeError, ValueError):
+        plugin._address_limit = 0
+    plugin._merge_addresses = bool(config.get("merge_addresses", False))
+    return plugin
+
+
 def test_extract_agent_ips_filters_loopback():
     """Brief: Agent IP extractor drops loopback and keeps guest IPs.
 
@@ -160,9 +188,81 @@ def test_extract_agent_ips_filters_loopback():
       - None.
     """
 
-    mod = importlib.import_module("foghorn.plugins.resolve.proxmox_hosts")
-    v4, v6 = mod.ProxmoxHosts._extract_agent_ips(_agent_payload(WEB_V4, WEB_V6))
+    plugin = _bare_plugin()
+    v4, v6 = plugin._extract_agent_ips(_agent_payload(WEB_V4, WEB_V6))
     assert v4 == [WEB_V4]
+    assert v6 == [WEB_V6]
+
+
+def test_extract_agent_ips_include_exclude_cidrs_and_interfaces():
+    """Brief: CIDR and interface filters drop docker/bridge addresses.
+
+    Inputs:
+      - None.
+    Outputs:
+      - None.
+    """
+
+    lan = WEB_V4
+    docker = str(ipaddress.IPv4Address(0xAC110002))
+    docker_cidr = str(ipaddress.ip_network((0xAC100000, 12)))
+    payload = {
+        "result": [
+            {
+                "name": "eth0",
+                "ip-addresses": [
+                    {"ip-address": lan, "ip-address-type": "ipv4", "prefix": 24},
+                ],
+            },
+            {
+                "name": "docker0",
+                "ip-addresses": [
+                    {"ip-address": docker, "ip-address-type": "ipv4", "prefix": 16},
+                ],
+            },
+        ]
+    }
+
+    # include_cidrs keeps only LAN (/32 of WEB_V4).
+    plugin = _bare_plugin(include_cidrs=[f"{lan}/32"])
+    v4, _ = plugin._extract_agent_ips(payload)
+    assert v4 == [lan]
+
+    # exclude_cidrs drops docker pool.
+    plugin = _bare_plugin(exclude_cidrs=[docker_cidr])
+    v4, _ = plugin._extract_agent_ips(payload)
+    assert v4 == [lan]
+
+    # include_interfaces keeps eth0 only.
+    plugin = _bare_plugin(include_interfaces=["ETH0"])
+    v4, _ = plugin._extract_agent_ips(payload)
+    assert v4 == [lan]
+
+    plugin = _bare_plugin(include_interfaces=["docker0"])
+    v4, _ = plugin._extract_agent_ips(payload)
+    assert v4 == [docker]
+
+
+def test_apply_address_limit_per_family():
+    """Brief: address_limit truncates each address family independently.
+
+    Inputs:
+      - None.
+    Outputs:
+      - None.
+    """
+
+    plugin = _bare_plugin(address_limit=1)
+    v4, v6 = plugin._apply_address_limit(
+        [WEB_V4, DB_V4, OK_V4],
+        [WEB_V6, STATIC_V6],
+    )
+    assert v4 == [WEB_V4]
+    assert v6 == [WEB_V6]
+
+    plugin = _bare_plugin(address_limit=0)
+    v4, v6 = plugin._apply_address_limit([WEB_V4, DB_V4], [WEB_V6])
+    assert v4 == [WEB_V4, DB_V4]
     assert v6 == [WEB_V6]
 
 
@@ -313,13 +413,292 @@ def test_ipconfig_static_parse():
       - None.
     """
 
-    mod = importlib.import_module("foghorn.plugins.resolve.proxmox_hosts")
-    v4, v6 = mod.ProxmoxHosts._extract_ipconfig_ips(
+    plugin = _bare_plugin()
+    # Keep gw value as in original test fixture style.
+    gw = ".".join(STATIC_V4.split(".")[:-1] + ["1"])
+    v4, v6 = plugin._extract_ipconfig_ips(
         {
-            "ipconfig0": f"ip={STATIC_V4}/24,gw=192.0.2.1",
+            "ipconfig0": f"ip={STATIC_V4}/24,gw={gw}",
             "ipconfig1": "ip=dhcp",
             "ipconfig2": f"ip6={STATIC_V6}/64",
         }
     )
     assert v4 == [STATIC_V4]
     assert v6 == [STATIC_V6]
+
+
+def test_proxmox_hosts_address_filters_end_to_end(monkeypatch):
+    """Brief: setup applies include_cidrs + address_limit to published maps.
+
+    Inputs:
+      - monkeypatch: pytest fixture.
+    Outputs:
+      - None.
+    """
+
+    mod = importlib.import_module("foghorn.plugins.resolve.proxmox_hosts")
+    ProxmoxHosts = mod.ProxmoxHosts
+
+    docker_ip = str(ipaddress.IPv4Address(0xAC110002))
+    docker_cidr = str(ipaddress.ip_network((0xAC100000, 12)))
+    payload = {
+        "result": [
+            {
+                "name": "eth0",
+                "ip-addresses": [
+                    {
+                        "ip-address": WEB_V4,
+                        "ip-address-type": "ipv4",
+                        "prefix": 24,
+                    },
+                    {
+                        "ip-address": docker_ip,
+                        "ip-address-type": "ipv4",
+                        "prefix": 16,
+                    },
+                ],
+            }
+        ]
+    }
+    routes = {
+        "cluster/resources?type=vm": [
+            {
+                "node": "pve1",
+                "vmid": 100,
+                "name": "web",
+                "type": "qemu",
+                "status": "running",
+                "template": 0,
+            }
+        ],
+        "nodes/pve1/qemu/100/agent/network-get-interfaces": payload,
+    }
+    fake = _FakeClient(routes)
+
+    plugin = ProxmoxHosts(
+        endpoints=[
+            {
+                "url": "https://pve.example:8006",
+                "token_id": "foghorn@pve!dns",
+                "token_secret": "secret",
+                "verify_tls": False,
+            }
+        ],
+        suffix="pve.example",
+        reload_interval_second=0,
+        exclude_cidrs=[docker_cidr],
+        include_interfaces=["eth0"],
+        address_limit=1,
+    )
+    monkeypatch.setattr(plugin, "_get_client", lambda endpoint: fake)
+    monkeypatch.setattr(mod, "_PveClient", lambda **kwargs: fake)
+    plugin.setup()
+
+    assert plugin._forward_v4["web.pve.example"] == [WEB_V4]
+    plugin.shutdown()
+
+
+def test_pve_client_suppresses_insecure_tls_warning(caplog):
+    """Brief: verify=False suppresses urllib3 flood; one compact log per URL.
+
+    Inputs:
+      - caplog: pytest fixture.
+    Outputs:
+      - None.
+    """
+
+    import logging
+    import warnings
+
+    import urllib3
+
+    mod = importlib.import_module("foghorn.plugins.resolve.proxmox_hosts")
+    # Reset module one-shot state for isolation.
+    mod._INSECURE_TLS_NOTICES.clear()
+    mod._INSECURE_WARNING_FILTER_INSTALLED = False
+
+    with caplog.at_level(logging.WARNING, logger=mod.logger.name):
+        c1 = mod._PveClient(
+            base_url="https://pve-insecure.example:8006",
+            token_id="u@pve!t",
+            token_secret="s",
+            user=None,
+            password=None,
+            verify=False,
+        )
+        c2 = mod._PveClient(
+            base_url="https://pve-insecure.example:8006",
+            token_id="u@pve!t",
+            token_secret="s",
+            user=None,
+            password=None,
+            verify=False,
+        )
+        c1.close()
+        c2.close()
+
+    msgs = [
+        r.getMessage()
+        for r in caplog.records
+        if "TLS verify disabled" in r.getMessage()
+    ]
+    assert len(msgs) == 1
+    assert "pve-insecure.example" in msgs[0]
+
+    assert mod._INSECURE_WARNING_FILTER_INSTALLED is True
+    # Global filters should ignore InsecureRequestWarning (urllib3 flood).
+    assert any(
+        f[0] == "ignore" and f[2] is urllib3.exceptions.InsecureRequestWarning
+        for f in warnings.filters
+    )
+
+
+def test_reload_interval_plugin_level_not_shadowed(monkeypatch):
+    """Brief: plugin-level reload_interval_second is not overridden by endpoint default.
+
+    Inputs:
+      - monkeypatch: pytest fixture.
+    Outputs:
+      - None.
+    """
+
+    mod = importlib.import_module("foghorn.plugins.resolve.proxmox_hosts")
+    ProxmoxHosts = mod.ProxmoxHosts
+
+    # Simulate pydantic model_dump where endpoint reload_interval_second is None
+    # (inherit) rather than a hard-coded 30.
+    dumped = mod.ProxmoxHostsConfig.model_validate(
+        {
+            "reload_interval_second": 300,
+            "endpoints": [
+                {
+                    "url": "https://pve.example:8006",
+                    "token_id": "foghorn@pve!dns",
+                    "token_secret": "secret",
+                    "verify_tls": False,
+                }
+            ],
+        }
+    ).model_dump()
+
+    assert dumped["endpoints"][0]["reload_interval_second"] is None
+
+    routes = {
+        "cluster/resources?type=vm": [],
+    }
+    fake = _FakeClient(routes)
+
+    plugin = ProxmoxHosts(**dumped)
+    monkeypatch.setattr(plugin, "_get_client", lambda endpoint: fake)
+    monkeypatch.setattr(mod, "_PveClient", lambda **kwargs: fake)
+    plugin.setup()
+    assert plugin._reload_interval == 300.0
+    plugin.shutdown()
+
+
+def test_reload_interval_endpoint_override(monkeypatch):
+    """Brief: explicit per-endpoint reload_interval_second overrides plugin level.
+
+    Inputs:
+      - monkeypatch: pytest fixture.
+    Outputs:
+      - None.
+    """
+
+    mod = importlib.import_module("foghorn.plugins.resolve.proxmox_hosts")
+    ProxmoxHosts = mod.ProxmoxHosts
+    fake = _FakeClient({"cluster/resources?type=vm": []})
+    plugin = ProxmoxHosts(
+        reload_interval_second=300,
+        endpoints=[
+            {
+                "url": "https://pve.example:8006",
+                "token_id": "foghorn@pve!dns",
+                "token_secret": "secret",
+                "verify_tls": False,
+                "reload_interval_second": 90,
+            }
+        ],
+    )
+    monkeypatch.setattr(plugin, "_get_client", lambda endpoint: fake)
+    monkeypatch.setattr(mod, "_PveClient", lambda **kwargs: fake)
+    plugin.setup()
+    assert plugin._reload_interval == 90.0
+    plugin.shutdown()
+
+
+def test_reload_logs_only_when_maps_change(monkeypatch, caplog):
+    """Brief: unchanged reload is silent; map changes log once.
+
+    Inputs:
+      - monkeypatch, caplog: pytest fixtures.
+    Outputs:
+      - None.
+    """
+
+    import logging
+
+    mod = importlib.import_module("foghorn.plugins.resolve.proxmox_hosts")
+    ProxmoxHosts = mod.ProxmoxHosts
+
+    routes = {
+        "cluster/resources?type=vm": [
+            {
+                "node": "pve1",
+                "vmid": 100,
+                "name": "web",
+                "type": "qemu",
+                "status": "running",
+                "template": 0,
+            }
+        ],
+        "nodes/pve1/qemu/100/agent/network-get-interfaces": _agent_payload(WEB_V4),
+    }
+    fake = _FakeClient(routes)
+    plugin = ProxmoxHosts(
+        endpoints=[
+            {
+                "url": "https://pve.example:8006",
+                "token_id": "foghorn@pve!dns",
+                "token_secret": "secret",
+                "verify_tls": False,
+            }
+        ],
+        reload_interval_second=0,
+    )
+    monkeypatch.setattr(plugin, "_get_client", lambda endpoint: fake)
+    monkeypatch.setattr(mod, "_PveClient", lambda **kwargs: fake)
+
+    with caplog.at_level(logging.INFO, logger=mod.logger.name):
+        plugin.setup()
+    first = [r for r in caplog.records if "loaded " in r.getMessage()]
+    assert len(first) == 1
+
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger=mod.logger.name):
+        plugin._reload_from_proxmox()
+    second = [r for r in caplog.records if "loaded " in r.getMessage()]
+    assert second == []
+
+    # Change inventory → log again.
+    routes["nodes/pve1/qemu/100/agent/network-get-interfaces"] = _agent_payload(DB_V4)
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger=mod.logger.name):
+        plugin._reload_from_proxmox()
+    third = [r for r in caplog.records if "loaded " in r.getMessage()]
+    assert len(third) == 1
+    plugin.shutdown()
+
+
+def test_default_reload_interval_is_300():
+    """Brief: ProxmoxHostsConfig defaults reload_interval_second to 300.
+
+    Inputs:
+      - None.
+    Outputs:
+      - None.
+    """
+
+    mod = importlib.import_module("foghorn.plugins.resolve.proxmox_hosts")
+    cfg = mod.ProxmoxHostsConfig()
+    assert cfg.reload_interval_second == 300.0

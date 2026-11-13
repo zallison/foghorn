@@ -45,30 +45,37 @@ plugins:
       # ProxmoxHosts-specific options
       suffix: pve.${DOMAIN}
       ttl: 60
-      reload_interval_second: 30
+      reload_interval_second: 300
       status:
         - running
       include_types:
         - qemu
         - lxc
       use_guest_agent: true
+      # Drop docker/bridge noise; keep only LAN-facing addresses:
+      # include_cidrs:
+      #   - 10.0.0.0/8
+      #   - 192.168.0.0/16
+      # exclude_cidrs:
+      #   - 172.16.0.0/12
+      # include_interfaces:
+      #   - eth0
+      #   - ens18
+      # address_limit: 1
       discovery: false
       expose_txt_in_additional: false
-      # Fail over across nodes; any one node can list the whole cluster.
+      # One node is enough (/cluster/resources is cluster-wide). Extra URLs are
+      # failover only and are not contacted unless earlier ones fail.
       endpoints:
         - url: https://pve1.${DOMAIN}:8006
           token_id: foghorn@pve!dns
           token_secret: "${PVE_TOKEN_SECRET}"
           verify_tls: true
           # tls_ca: keys/pve-root-ca.pem
-        - url: https://pve2.${DOMAIN}:8006
-          token_id: foghorn@pve!dns
-          token_secret: "${PVE_TOKEN_SECRET}"
-          verify_tls: true
-        - url: https://pve3.${DOMAIN}:8006
-          token_id: foghorn@pve!dns
-          token_secret: "${PVE_TOKEN_SECRET}"
-          verify_tls: true
+        # - url: https://pve2.${DOMAIN}:8006
+        #   token_id: foghorn@pve!dns
+        #   token_secret: "${PVE_TOKEN_SECRET}"
+        #   verify_tls: true
 
 server:
   listen:
