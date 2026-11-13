@@ -37,8 +37,9 @@ import ipaddress
 import logging
 import threading
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Dict, Final, List, Sequence, Tuple
+from typing import Any, Final
 
 from .config.config_parser import (
     load_plugins,
@@ -79,7 +80,7 @@ class UpstreamHealthConfig:
     max_recheck: float
 
 
-def parse_upstream_health_config(upstream_cfg: Dict[str, Any]) -> UpstreamHealthConfig:
+def parse_upstream_health_config(upstream_cfg: dict[str, Any]) -> UpstreamHealthConfig:
     """Brief: Parse upstream health configuration with defensive defaults.
 
     Inputs:
@@ -136,7 +137,7 @@ def parse_upstream_health_config(upstream_cfg: Dict[str, Any]) -> UpstreamHealth
                 f"upstreams_health profile {profile_name!r} must be a mapping of knobs"
             )
 
-        merged: Dict[str, Any] = dict(base)
+        merged: dict[str, Any] = dict(base)
         for k, v in health_cfg.items():
             if k == "profile":
                 continue
@@ -216,10 +217,10 @@ class RuntimeSnapshot:
         the listener adapter after resolution.
     """
 
-    cfg: Dict[str, Any]
-    plugins: List[object]
-    upstream_addrs: List[Dict[str, Any]]
-    upstream_backup_addrs: List[Dict[str, Any]]
+    cfg: dict[str, Any]
+    plugins: list[object]
+    upstream_addrs: list[dict[str, Any]]
+    upstream_backup_addrs: list[dict[str, Any]]
     upstream_health: UpstreamHealthConfig
     timeout_ms: int
     upstream_strategy: str
@@ -241,10 +242,10 @@ class RuntimeSnapshot:
     cookies_lifetime_seconds: int
     tsig_enabled: bool
     tsig_mode: str
-    tsig_keys: List[Dict[str, str]]
+    tsig_keys: list[dict[str, str]]
     tsig_max_fudge_seconds: int
-    tsig_allow_clients: List[str]
-    tsig_listeners: List[str]
+    tsig_allow_clients: list[str]
+    tsig_listeners: list[str]
     ecs_enabled: bool
     ecs_forward_inbound: bool
     ecs_synthesize_from_client_ip: bool
@@ -252,8 +253,8 @@ class RuntimeSnapshot:
     ecs_source_prefix_v6: int
     ecs_scope_prefix_v4: int
     ecs_scope_prefix_v6: int
-    ecs_trusted_listeners: List[str]
-    ecs_trusted_client_cidrs: List[str]
+    ecs_trusted_listeners: list[str]
+    ecs_trusted_client_cidrs: list[str]
     ecs_use_for_plugin_targeting: bool
     min_cache_ttl: int
     cache_prefetch_enabled: bool
@@ -273,7 +274,7 @@ class RuntimeSnapshot:
     non_proper_tld_mode: str  # 'suffix' (default) | 'exact'
     # AXFR/IXFR policy for TCP/DoT listeners.
     axfr_enabled: bool
-    axfr_allow_clients: List[str]
+    axfr_allow_clients: list[str]
     axfr_max_zone_rrs: int | None
     axfr_max_concurrent_transfers: int
     axfr_rate_limit_per_client_per_second: float
@@ -281,7 +282,7 @@ class RuntimeSnapshot:
     axfr_max_transfer_rate_bytes_per_second: int | None
     axfr_message_max_bytes: int
     axfr_require_tsig: bool
-    axfr_tsig_keys: List[Dict[str, str]]
+    axfr_tsig_keys: list[dict[str, str]]
     generation: int
     applied_at_epoch: float
 
@@ -300,11 +301,11 @@ class ReloadResult:
     ok: bool
     generation: int
     restart_required: bool
-    restart_reasons: List[str]
+    restart_reasons: list[str]
     error: str | None = None
 
 
-def resolve_server_feature_flags(server_cfg: Dict[str, Any]) -> Dict[str, Any]:
+def resolve_server_feature_flags(server_cfg: dict[str, Any]) -> dict[str, Any]:
     """Brief: Resolve canonical server feature flags with legacy-key fallback.
 
     Inputs:
@@ -556,9 +557,9 @@ def resolve_server_feature_flags(server_cfg: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def resolve_axfr_tsig_keys(
-    axfr_cfg: Dict[str, Any],
-    feature_keys: List[Dict[str, str]] | None = None,
-) -> List[Dict[str, str]]:
+    axfr_cfg: dict[str, Any],
+    feature_keys: list[dict[str, str]] | None = None,
+) -> list[dict[str, str]]:
     """Brief: Resolve AXFR TSIG keys using the shared UPDATE key-source resolver.
 
     Inputs:
@@ -591,7 +592,7 @@ def resolve_axfr_tsig_keys(
     source_defs = tsig_cfg.get("key_sources")
     legacy_inline_keys = axfr_cfg.get("tsig_keys")
 
-    combined_inline: List[dict] = []
+    combined_inline: list[dict] = []
     for maybe_keys in (inline_keys, legacy_inline_keys):
         if not isinstance(maybe_keys, list):
             continue
@@ -615,7 +616,7 @@ def resolve_axfr_tsig_keys(
 
     resolved_raw = _update_helpers.resolve_tsig_key_configs(tsig_zone_like_cfg)
 
-    resolved: List[Dict[str, str]] = []
+    resolved: list[dict[str, str]] = []
     for entry in resolved_raw:
         if not isinstance(entry, dict):
             continue
@@ -644,12 +645,12 @@ def resolve_axfr_tsig_keys(
 _LOCK = threading.Lock()
 _ACTIVE: RuntimeSnapshot | None = None
 _CONFIG_PATH: str | None = None
-_CLI_VARS: List[str] = []
+_CLI_VARS: list[str] = []
 _UNKNOWN_KEYS_POLICY: Final[str] = "error"
 
 # Background teardown tracking for old plugin instances.
 _OLD_PLUGINS_LOCK = threading.Lock()
-_OLD_PLUGINS: List[Tuple[float, List[object]]] = []
+_OLD_PLUGINS: list[tuple[float, list[object]]] = []
 _PLUGIN_SHUTDOWN_GRACE_SECONDS = 30.0
 
 
@@ -687,7 +688,7 @@ def set_config_path(config_path: str | None) -> None:
 
 
 def apply_data_root_from_config(
-    cfg: Dict[str, Any] | None,
+    cfg: dict[str, Any] | None,
     *,
     config_path: str | None = None,
 ) -> str | None:
@@ -707,7 +708,7 @@ def apply_data_root_from_config(
 
     from foghorn.utils.safe_paths import resolve_data_root, set_data_root
 
-    server_cfg: Dict[str, Any] = {}
+    server_cfg: dict[str, Any] = {}
     if isinstance(cfg, dict):
         raw_server = cfg.get("server")
         if isinstance(raw_server, dict):
@@ -813,7 +814,7 @@ def get_runtime_snapshot() -> RuntimeSnapshot:
     return _default_snapshot()
 
 
-def load_config_from_disk(*, config_path: str | None = None) -> Dict[str, Any]:
+def load_config_from_disk(*, config_path: str | None = None) -> dict[str, Any]:
     """Brief: Parse and validate configuration from disk without applying it.
 
     Inputs:
@@ -840,10 +841,10 @@ def load_config_from_disk(*, config_path: str | None = None) -> Dict[str, Any]:
 
 
 def analyze_config_change(
-    desired_cfg: Dict[str, Any],
+    desired_cfg: dict[str, Any],
     *,
-    current_cfg: Dict[str, Any] | None = None,
-) -> Dict[str, Any]:
+    current_cfg: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Brief: Analyze whether a desired config implies reload or restart.
 
     Inputs:
@@ -935,7 +936,7 @@ def reload_from_disk(
 
 
 def reload_from_config(
-    cfg: Dict[str, Any], *, mode: str = "reload_only"
+    cfg: dict[str, Any], *, mode: str = "reload_only"
 ) -> ReloadResult:
     """Brief: Apply a new runtime snapshot from an already-parsed config mapping.
 
@@ -1007,7 +1008,7 @@ def _swap_snapshot(snapshot: RuntimeSnapshot) -> None:
 
     global _ACTIVE
 
-    old_plugins: List[object] | None = None
+    old_plugins: list[object] | None = None
     with _LOCK:
         if _ACTIVE is not None:
             old_plugins = list(_ACTIVE.plugins or [])
@@ -1058,10 +1059,10 @@ def _reap_old_plugins_loop() -> None:
 
     while True:
         now = time.time()
-        batch: List[List[object]] = []
+        batch: list[list[object]] = []
         sleep_for_seconds: float | None = None
         with _OLD_PLUGINS_LOCK:
-            remaining: List[Tuple[float, List[object]]] = []
+            remaining: list[tuple[float, list[object]]] = []
             for ts, plugins in _OLD_PLUGINS:
                 age_seconds = now - ts
                 if age_seconds >= _PLUGIN_SHUTDOWN_GRACE_SECONDS:
@@ -1093,7 +1094,7 @@ def _reap_old_plugins_loop() -> None:
 
 
 def _build_snapshot(
-    cfg: Dict[str, Any],
+    cfg: dict[str, Any],
     *,
     stats_collector: object | None,
     generation: int,
@@ -1166,14 +1167,47 @@ def _build_snapshot(
         upstream_max_concurrent = 1
 
     # Cache plugin selection (same precedence as startup).
+    #
+    # When a cache is explicitly configured, load/validate failures fail closed
+    # (raise) so reload does not silently drop the cache backend.
     cache_plugin = None
+    cache_cfg = None
+    if isinstance(server_cfg, dict):
+        cache_cfg = server_cfg.get("cache")
+    if cache_cfg is None and isinstance(cfg, dict):
+        cache_cfg = cfg.get("cache")
+    cache_cfg_configured = cache_cfg is not None
     try:
         from foghorn.plugins.cache.registry import load_cache_plugin
 
-        cache_cfg = server_cfg.get("cache") if isinstance(server_cfg, dict) else None
         cache_plugin = load_cache_plugin(cache_cfg)
-    except Exception:  # pragma: no cover - defensive
+    except Exception as exc:
+        if cache_cfg_configured:
+            raise RuntimeError(
+                f"configured cache backend unavailable during reload: {exc}"
+            ) from exc
+        logger.warning(
+            "Failed to load cache plugin during reload, running without cache: %s",
+            exc,
+        )
         cache_plugin = None
+
+    if cache_plugin is not None:
+        name = type(cache_plugin).__name__
+        try:
+            validate = getattr(cache_plugin, "validate_connection", None)
+            if callable(validate):
+                reachable = bool(validate())
+            else:
+                reachable = True
+        except Exception as exc:
+            raise RuntimeError(
+                f"cache backend {name} validate_connection failed during reload: {exc}"
+            ) from exc
+        if not reachable:
+            raise RuntimeError(
+                f"configured cache backend {name} is unreachable during reload"
+            )
 
     min_cache_ttl = 0
     if cache_plugin is not None:
@@ -1405,8 +1439,8 @@ def _build_snapshot(
 
 
 def _restart_required_reasons(
-    old_cfg: Dict[str, Any], new_cfg: Dict[str, Any]
-) -> List[str]:
+    old_cfg: dict[str, Any], new_cfg: dict[str, Any]
+) -> list[str]:
     """Brief: Determine which config changes require a full restart.
 
     Inputs:
@@ -1423,7 +1457,7 @@ def _restart_required_reasons(
     This is intentionally conservative.
     """
 
-    reasons: List[str] = []
+    reasons: list[str] = []
 
     old_server = old_cfg.get("server") if isinstance(old_cfg, dict) else None
     new_server = new_cfg.get("server") if isinstance(new_cfg, dict) else None
@@ -1454,8 +1488,8 @@ def _restart_required_reasons(
 
 
 def _effective_cfg_for_reload_only(
-    old_cfg: Dict[str, Any], new_cfg: Dict[str, Any]
-) -> Dict[str, Any]:
+    old_cfg: dict[str, Any], new_cfg: dict[str, Any]
+) -> dict[str, Any]:
     """Brief: Compute an effective config that can be applied without restart.
 
     Inputs:

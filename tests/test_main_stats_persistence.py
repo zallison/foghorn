@@ -63,6 +63,14 @@ stats:
         def __init__(self, **kw) -> None:
             constructed["store_kwargs"] = kw
 
+        def validate_connection(self) -> bool:
+            """Brief: Startup preflight probe.
+
+            Inputs: none.
+            Outputs: True.
+            """
+            return True
+
         def close(self) -> None:
             constructed["store_closed"] = True
 
@@ -97,7 +105,7 @@ stats:
         def is_alive(self) -> bool:
             return False
 
-        def join(self, timeout: float | None = None) -> None:  # noqa: ARG002
+        def join(self, timeout: float | None = None) -> None:
             return None
 
     class DummyUDPHandle:
@@ -211,7 +219,7 @@ def test_main_persistence_unconfigured_skips_store(monkeypatch, tmp_path: Path) 
         def is_alive(self) -> bool:
             return False
 
-        def join(self, timeout: float | None = None) -> None:  # noqa: ARG002
+        def join(self, timeout: float | None = None) -> None:
             return None
 
     class DummyUDPHandle:
@@ -229,7 +237,6 @@ def test_main_persistence_unconfigured_skips_store(monkeypatch, tmp_path: Path) 
         # Record that the loader was invoked; in this test config there are no
         # logging.backends, so main() should skip calling the loader entirely.
         constructed["store_constructed"] = True
-        return None
 
     monkeypatch.setattr(main_mod, "StatsCollector", DummyCollector)
     monkeypatch.setattr(main_mod, "StatsReporter", DummyReporter)

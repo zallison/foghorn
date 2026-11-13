@@ -13,14 +13,14 @@ Outputs:
 """
 
 from __future__ import annotations
-from dataclasses import replace
 
 import threading
 import time
+from dataclasses import replace
 
 import pytest
-import foghorn.runtime_config as runtime_config_mod
 
+import foghorn.runtime_config as runtime_config_mod
 from foghorn.runtime_config import (
     _build_snapshot,
     _default_snapshot,
@@ -681,3 +681,108 @@ def test_build_snapshot_passes_context_to_setup_runner(monkeypatch) -> None:
     assert captured["timeout_ms"] == snap.timeout_ms
     assert captured["resolver_mode"] == snap.resolver_mode
     assert captured["upstream_max_concurrent"] == snap.upstream_max_concurrent
+
+
+def test_build_snapshot_configured_cache_load_failure_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Brief: Configured cache that fails to load aborts snapshot build.
+
+    Inputs:
+      - monkeypatch making load_cache_plugin raise.
+
+    Outputs:
+      - None; asserts RuntimeError (no silent cache_plugin=None).
+    """
+
+    import foghorn.plugins.cache.registry as cache_registry
+
+    def boom(_cfg):
+        raise RuntimeError("cannot reach redis")
+
+    monkeypatch.setattr(cache_registry, "load_cache_plugin", boom)
+
+    cfg = {
+        "server": {
+            "resolver": {"mode": "recursive"},
+            "cache": {"module": "redis", "config": {"url": "redis://127.0.0.1:1"}},
+        }
+    }
+    with pytest.raises(RuntimeError, match="cache backend unavailable"):
+        _build_snapshot(cfg, stats_collector=None, generation=0)
+
+
+def test_build_snapshot_configured_cache_validate_failure_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Brief: Configured cache with failing validate_connection aborts reload.
+
+    Inputs:
+      - monkeypatch load_cache_plugin returning an unreachable stub.
+
+    Outputs:
+      - None; asserts RuntimeError naming unreachable cache.
+    """
+
+    import foghorn.plugins.cache.registry as cache_registry
+
+    class _UnreachableCache:
+        min_cache_ttl = 0
+
+        def validate_connection(self) -> bool:
+            return False
+
+    monkeypatch.setattr(
+        cache_registry, "load_cache_plugin", lambda _cfg: _UnreachableCache()
+    )
+
+    cfg = {
+        "server": {
+            "resolver": {"mode": "recursive"},
+            "cache": {"module": "redis"},
+        }
+    }
+    with pytest.raises(RuntimeError, match="unreachable during reload"):
+        _build_snapshot(cfg, stats_collector=None, generation=0)
+
+
+def test_reload_from_config_fails_when_configured_cache_unreachable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Brief: reload_from_config returns ok=False when cache validate fails.
+
+    Inputs:
+      - initialized runtime and unreachable cache stub.
+
+    Outputs:
+      - None; asserts ReloadResult.ok is False and generation unchanged.
+    """
+
+    import foghorn.plugins.cache.registry as cache_registry
+
+    class _UnreachableCache:
+        min_cache_ttl = 0
+
+        def validate_connection(self) -> bool:
+            return False
+
+    clear_runtime()
+    initialize_runtime(snapshot=_default_snapshot(), config_path="/tmp/test.yaml")
+    before = get_runtime_snapshot().generation
+
+    monkeypatch.setattr(
+        cache_registry, "load_cache_plugin", lambda _cfg: _UnreachableCache()
+    )
+
+    result = reload_from_config(
+        {
+            "server": {
+                "resolver": {"mode": "recursive"},
+                "cache": {"module": "redis"},
+            }
+        }
+    )
+    assert result.ok is False
+    assert "unreachable" in str(result.error or "")
+    assert get_runtime_snapshot().generation == before
+    clear_runtime()

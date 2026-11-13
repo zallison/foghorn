@@ -13,14 +13,12 @@ from __future__ import annotations
 import logging
 import signal as _signal
 from types import SimpleNamespace
-from typing import Any, Dict
+from typing import Any
 from unittest.mock import mock_open, patch
 
 import pytest
 
 import foghorn.main as main_mod
-
-
 from foghorn.config.config_parser import normalize_upstream_config
 from foghorn.main import run_setup_plugins, run_shutdown_plugins
 from foghorn.plugins.cache.none import NullCache
@@ -44,7 +42,7 @@ def test_normalize_upstream_config_missing_host_and_optional_fields():
 
     # Optional fields transport/tls/pool should be preserved and timeout_ms is
     # read from server.resolver with a default when omitted.
-    cfg: Dict[str, Any] = {
+    cfg: dict[str, Any] = {
         "upstreams": {
             "endpoints": [
                 {
@@ -161,7 +159,7 @@ def test_run_setup_plugins_provider_phase_and_context(monkeypatch):
         def __init__(self, **kwargs: Any) -> None:
             context_calls.append(kwargs)
 
-        def __enter__(self) -> "FakeSetupDNSContext":
+        def __enter__(self) -> FakeSetupDNSContext:
             return self
 
         def __exit__(self, exc_type, exc, tb) -> None:  # type: ignore[no-untyped-def]
@@ -221,7 +219,7 @@ def test_run_setup_plugins_fallback_default_and_override(monkeypatch):
         def __init__(self, **kwargs: Any) -> None:
             fallback_values.append(bool(kwargs["fallback_to_system"]))
 
-        def __enter__(self) -> "FakeSetupDNSContext":
+        def __enter__(self) -> FakeSetupDNSContext:
             return self
 
         def __exit__(self, exc_type, exc, tb) -> None:  # type: ignore[no-untyped-def]
@@ -417,12 +415,28 @@ def test_main_runs_shutdown_hooks_for_cache_querylog_and_resolve(monkeypatch):
         def shutdown(self) -> None:
             return None
 
+        def validate_connection(self) -> bool:
+            """Brief: Startup preflight probe used by main().
+
+            Inputs: none.
+            Outputs: True (reachable test double).
+            """
+            return True
+
     class QueryLogLike:
         def shutdown(self) -> None:
             return None
 
         def close(self) -> None:
             return None
+
+        def validate_connection(self) -> bool:
+            """Brief: Startup preflight probe used by main().
+
+            Inputs: none.
+            Outputs: True (reachable test double).
+            """
+            return True
 
     class ResolverLike:
         def shutdown(self) -> None:
@@ -924,7 +938,7 @@ def test_main_axfr_non_positive_limits_are_clamped(monkeypatch) -> None:
     assert captured["axfr_tsig_keys"] == []
 
 
-def _capture_sig_handlers() -> Dict[str, Any]:
+def _capture_sig_handlers() -> dict[str, Any]:
     """Brief: Helper to capture SIGUSR1/SIGUSR2 handlers when main() registers them.
 
     Inputs:
@@ -934,14 +948,13 @@ def _capture_sig_handlers() -> Dict[str, Any]:
       - dict with keys 'sigusr1' and 'sigusr2' for later invocation.
     """
 
-    captured: Dict[str, Any] = {"sigusr1": None, "sigusr2": None}
+    captured: dict[str, Any] = {"sigusr1": None, "sigusr2": None}
 
     def fake_signal(sig, handler):
         if sig == _signal.SIGUSR1:
             captured["sigusr1"] = handler
         elif sig == _signal.SIGUSR2:
             captured["sigusr2"] = handler
-        return None
 
     return {"captured": captured, "fake_signal": fake_signal}
 
@@ -1014,7 +1027,7 @@ def test_sigusr1_skip_reset_and_coalescing(monkeypatch, caplog):
         if not called["sent"]:
             called["sent"] = True
             handler(None, None)
-            return None
+            return
 
         # Second sleep: exit after keepalive loop had a chance to process.
         raise KeyboardInterrupt
@@ -1123,7 +1136,6 @@ def test_sigusr1_registration_failure_logs_warning(monkeypatch, caplog):
     def fake_signal(sig, handler):
         if sig == _signal.SIGUSR1:
             raise RuntimeError("no SIGUSR1")
-        return None
 
     monkeypatch.setattr(socketserver, "ThreadingUDPServer", DummyUDPServer)
     monkeypatch.setattr(
@@ -1234,7 +1246,7 @@ def test_sigusr2_error_paths_more(monkeypatch, caplog):
         if not called["sent"]:
             called["sent"] = True
             handler(None, None)
-            return None
+            return
 
         # Second sleep: after processing, set the pending event and ensure the
         # handler returns early (it should only set the Event).
@@ -1336,7 +1348,7 @@ def test_sigusr2_logs_no_collector_active(monkeypatch, caplog):
         if not called["sent"]:
             called["sent"] = True
             handler(None, None)
-            return None
+            return
 
         raise KeyboardInterrupt
 
@@ -1411,7 +1423,6 @@ def test_sigusr2_registration_failure_logs_warning(monkeypatch, caplog):
     def fake_signal(sig, handler):
         if sig == _signal.SIGUSR2:
             raise RuntimeError("no SIGUSR2")
-        return None
 
     monkeypatch.setattr(socketserver, "ThreadingUDPServer", DummyUDPServer)
     monkeypatch.setattr(
@@ -1462,14 +1473,13 @@ def test_sighup_with_udp_enabled_exits_cleanly(monkeypatch, caplog):
         "      port: 53\n"
     )
 
-    captured: Dict[str, Any] = {"sighup": None}
+    captured: dict[str, Any] = {"sighup": None}
 
     def fake_signal(sig, handler):
         import signal as _signal
 
         if sig == _signal.SIGHUP:
             captured["sighup"] = handler
-        return None
 
     import socketserver
     import threading
@@ -1768,7 +1778,7 @@ def test_dot_startup_exception_logs_unhandled_listener_error(monkeypatch, caplog
         "      port: 53\n"
     )
 
-    async def boom_serve_dot(*a: Any, **kw: Any) -> None:  # noqa: ARG001
+    async def boom_serve_dot(*a: Any, **kw: Any) -> None:
         raise RuntimeError("dot boom")
 
     class DummyThread:
@@ -1922,14 +1932,14 @@ def test_asyncio_server_happy_path_runs_and_closes_loop(monkeypatch):
         def serve_forever(self) -> None:
             raise KeyboardInterrupt
 
-    holder: Dict[str, Any] = {}
+    holder: dict[str, Any] = {}
 
     class DummyLoop:
         def __init__(self) -> None:
             self.run_called = False
             self.closed = False
 
-        def run_until_complete(self, coro) -> None:  # noqa: ARG002
+        def run_until_complete(self, coro) -> None:
             self.run_called = True
 
         def close(self) -> None:
@@ -1948,11 +1958,11 @@ def test_asyncio_server_happy_path_runs_and_closes_loop(monkeypatch):
     def fake_get_event_loop() -> DummyLoop:
         return holder["loop"]
 
-    async def fake_serve_tcp(host, port, resolver, **kwargs):  # noqa: ARG002
+    async def fake_serve_tcp(host, port, resolver, **kwargs):
         return None
 
     class DummyThread:
-        def __init__(self, target=None, name=None, daemon=None) -> None:  # noqa: D401
+        def __init__(self, target=None, name=None, daemon=None) -> None:
             """Thread stub that runs target synchronously in tests."""
 
             self._target = target
@@ -2147,7 +2157,7 @@ def test_main_returns_one_on_config_validation_error(monkeypatch, capsys):
         "      port: 53\n"
     )
 
-    def boom_parse_config_file(*_a: Any, **_kw: Any) -> Dict[str, Any]:  # noqa: ANN401
+    def boom_parse_config_file(*_a: Any, **_kw: Any) -> dict[str, Any]:
         raise ValueError("bad config value")
 
     monkeypatch.setattr(main_mod, "parse_config_file", boom_parse_config_file)
@@ -2204,14 +2214,13 @@ def test_main_sigusr_dispatch_uses_unified_hook(monkeypatch, caplog):
 
     plugin = P()
 
-    captured: Dict[str, Any] = {"sigusr1": None, "sigusr2": None}
+    captured: dict[str, Any] = {"sigusr1": None, "sigusr2": None}
 
     def fake_signal(sig, handler):
         if sig == _signal.SIGUSR1:
             captured["sigusr1"] = handler
         elif sig == _signal.SIGUSR2:
             captured["sigusr2"] = handler
-        return None
 
     import socketserver
     import threading
@@ -2242,7 +2251,7 @@ def test_main_sigusr_dispatch_uses_unified_hook(monkeypatch, caplog):
             assert sigusr2 is not None
             sigusr1(None, None)
             sigusr2(None, None)
-            return None
+            return
         raise KeyboardInterrupt
 
     monkeypatch.setattr(socketserver, "ThreadingUDPServer", DummyUDPServer)
@@ -2294,14 +2303,13 @@ def test_sigterm_sigint_hard_kill_timer_and_early_return(monkeypatch, caplog):
         "      port: 53\n"
     )
 
-    captured: Dict[str, Any] = {"sigterm": None, "sigint": None, "force_exit": None}
+    captured: dict[str, Any] = {"sigterm": None, "sigint": None, "force_exit": None}
 
     def fake_signal(sig, handler):
         if sig == _signal.SIGTERM:
             captured["sigterm"] = handler
         elif sig == _signal.SIGINT:
             captured["sigint"] = handler
-        return None
 
     class DummyTimer:
         """Brief: Timer stub that captures the _force_exit callback without running it.
@@ -2314,7 +2322,7 @@ def test_sigterm_sigint_hard_kill_timer_and_early_return(monkeypatch, caplog):
           - None directly; stores callback in captured["force_exit"].
         """
 
-        def __init__(self, interval: float, func, *a, **kw) -> None:  # noqa: ARG002
+        def __init__(self, interval: float, func, *a, **kw) -> None:
             captured["force_exit"] = func
             self.daemon = False
 
@@ -2340,10 +2348,10 @@ def test_sigterm_sigint_hard_kill_timer_and_early_return(monkeypatch, caplog):
         def server_close(self) -> None:
             return None
 
-    kills: Dict[str, Any] = {"calls": []}
-    exits: Dict[str, Any] = {"code": None}
+    kills: dict[str, Any] = {"calls": []}
+    exits: dict[str, Any] = {"code": None}
 
-    def fake_kill(pid: int, sig: int) -> None:  # noqa: ARG001
+    def fake_kill(pid: int, sig: int) -> None:
         kills["calls"].append((pid, sig))
         # Simulate failure so _force_exit falls back to os._exit.
         raise RuntimeError("kill failed")
@@ -2351,7 +2359,6 @@ def test_sigterm_sigint_hard_kill_timer_and_early_return(monkeypatch, caplog):
     def fake_os_exit(code: int) -> None:
         exits["code"] = code
         # Do not actually exit the process in tests.
-        return None
 
     def _sleep_once(_seconds: float) -> None:
         sigterm = captured.get("sigterm")
@@ -2444,7 +2451,7 @@ def test_udp_teardown_logs_shutdown_close_and_join_errors(monkeypatch, caplog):
             raise RuntimeError("close-fail")
 
     class DummyThread:
-        def __init__(self, target=None, name=None, daemon=None) -> None:  # noqa: D401
+        def __init__(self, target=None, name=None, daemon=None) -> None:
             """Thread stub that never starts a real background thread."""
 
             self._target = target
@@ -2458,7 +2465,7 @@ def test_udp_teardown_logs_shutdown_close_and_join_errors(monkeypatch, caplog):
         def is_alive(self) -> bool:
             return False
 
-        def join(self, timeout: float | None = None) -> None:  # noqa: ARG002
+        def join(self, timeout: float | None = None) -> None:
             raise RuntimeError("join-fail")
 
     monkeypatch.setattr(
@@ -2527,7 +2534,7 @@ def test_udp_teardown_outer_exception_logs_unexpected_error(monkeypatch, caplog)
             raise RuntimeError("broken-server-attr")
 
     class DummyThread:
-        def __init__(self, target=None, name=None, daemon=None) -> None:  # noqa: D401
+        def __init__(self, target=None, name=None, daemon=None) -> None:
             """Thread stub that keeps UDP thread inactive for shutdown tests."""
 
             self._target = target
@@ -2540,7 +2547,7 @@ def test_udp_teardown_outer_exception_logs_unexpected_error(monkeypatch, caplog)
         def is_alive(self) -> bool:
             return False
 
-        def join(self, timeout: float | None = None) -> None:  # noqa: ARG002
+        def join(self, timeout: float | None = None) -> None:
             return None
 
     monkeypatch.setattr(
