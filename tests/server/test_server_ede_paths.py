@@ -10,8 +10,6 @@ Outputs:
 
 from __future__ import annotations
 
-from typing import List, Tuple
-
 import pytest
 from dnslib import EDNS0, OPCODE, QTYPE, RCODE, DNSRecord, EDNSOption
 
@@ -34,7 +32,7 @@ def _make_edns_query(name: str = "ede.example", qtype: str = "A") -> DNSRecord:
     return q
 
 
-def _extract_ede_options(resp: DNSRecord) -> List[Tuple[int, str]]:
+def _extract_ede_options(resp: DNSRecord) -> list[tuple[int, str]]:
     """Brief: Return a list of (info_code, text) for all EDE options in resp.
 
     Inputs:
@@ -44,7 +42,7 @@ def _extract_ede_options(resp: DNSRecord) -> List[Tuple[int, str]]:
       - List of (info_code, EXTRA-TEXT) tuples for each EDE (option-code 15).
     """
 
-    out: List[Tuple[int, str]] = []
+    out: list[tuple[int, str]] = []
     for rr in resp.ar or []:
         if getattr(rr, "rtype", None) != QTYPE.OPT:
             continue
@@ -68,7 +66,7 @@ def _extract_ede_options(resp: DNSRecord) -> List[Tuple[int, str]]:
 
 
 class _PreDenyDefault:
-    def pre_resolve(self, qname, qtype, data, ctx):  # noqa: D401
+    def pre_resolve(self, qname, qtype, data, ctx):
         """Inputs: qname/qtype/wire/ctx. Outputs: deny decision without hints."""
 
         return srv.PluginDecision(action="deny")
@@ -78,7 +76,7 @@ class _PreDenyDefault:
 
 
 class _PreDenyRateLimit:
-    def pre_resolve(self, qname, qtype, data, ctx):  # noqa: D401
+    def pre_resolve(self, qname, qtype, data, ctx):
         """Inputs: qname/qtype/wire/ctx. Outputs: deny decision with rate_limit stat."""
 
         return srv.PluginDecision(action="deny", stat="rate_limit")
@@ -88,7 +86,7 @@ class _PreDenyRateLimit:
 
 
 class _PreDenyOverrideEde:
-    def pre_resolve(self, qname, qtype, data, ctx):  # noqa: D401
+    def pre_resolve(self, qname, qtype, data, ctx):
         """Inputs: qname/qtype/wire/ctx. Outputs: deny decision with custom EDE."""
 
         return srv.PluginDecision(
@@ -176,12 +174,12 @@ def test_pre_deny_nxdomain_attaches_expected_ede(
 class _PostDenyDefault:
     post_priority = 1
 
-    def pre_resolve(self, qname, qtype, data, ctx):  # noqa: D401
+    def pre_resolve(self, qname, qtype, data, ctx):
         """Inputs: qname/qtype/wire/ctx. Outputs: no-op pre decision."""
 
-        return None
+        return
 
-    def post_resolve(self, qname, qtype, data, ctx):  # noqa: D401
+    def post_resolve(self, qname, qtype, data, ctx):
         """Inputs: qname/qtype/wire/ctx. Outputs: deny decision without hints."""
 
         return srv.PluginDecision(action="deny")
@@ -190,12 +188,12 @@ class _PostDenyDefault:
 class _PostDenyOverrideEde:
     post_priority = 1
 
-    def pre_resolve(self, qname, qtype, data, ctx):  # noqa: D401
+    def pre_resolve(self, qname, qtype, data, ctx):
         """Inputs: qname/qtype/wire/ctx. Outputs: no-op pre decision."""
 
-        return None
+        return
 
-    def post_resolve(self, qname, qtype, data, ctx):  # noqa: D401
+    def post_resolve(self, qname, qtype, data, ctx):
         """Inputs: qname/qtype/wire/ctx. Outputs: deny decision with custom EDE."""
 
         return srv.PluginDecision(
@@ -237,7 +235,7 @@ def test_post_deny_nxdomain_attaches_expected_ede(
         qtype,
         max_concurrent=None,
         on_attempt_result=None,
-    ):  # noqa: ANN001
+    ):
         return ok, {"host": "1.1.1.1", "port": 53}, "ok"
 
     monkeypatch.setattr(srv, "send_query_with_failover", fake_forward)
@@ -259,6 +257,108 @@ def test_post_deny_nxdomain_attaches_expected_ede(
     exp_code, exp_text = expected
     assert code == exp_code
     assert exp_text in text
+
+
+class _PreRaises:
+    def pre_resolve(self, qname, qtype, data, ctx):
+        """Inputs: qname/qtype/wire/ctx. Outputs: raises to simulate plugin crash."""
+
+        raise RuntimeError("pre_resolve boom")
+
+    def post_resolve(self, qname, qtype, data, ctx):  # pragma: no cover - unused
+        return None
+
+
+class _PostRaises:
+    post_priority = 1
+
+    def pre_resolve(self, qname, qtype, data, ctx):
+        """Inputs: qname/qtype/wire/ctx. Outputs: no-op pre decision."""
+
+        return
+
+    def post_resolve(self, qname, qtype, data, ctx):
+        """Inputs: qname/qtype/wire/ctx. Outputs: raises to simulate plugin crash."""
+
+        raise RuntimeError("post_resolve boom")
+
+
+def test_pre_resolve_exception_fail_closed_servfail(set_runtime_snapshot):
+    """Brief: pre_resolve exceptions return SERVFAIL instead of continuing.
+
+    Inputs:
+      - Plugin whose pre_resolve raises.
+
+    Outputs:
+      - Asserts SERVFAIL (fail-closed) with EDE mentioning the plugin failure.
+    """
+
+    _setup_shared(
+        set_runtime_snapshot,
+        enable_ede=True,
+        plugins=[_PreRaises()],
+        # If fail-open returned, resolution would try upstreams / hit no-upstream SERVFAIL
+        # without the plugin-failure EDE text. An allow path would be worse.
+        upstream_addrs=[{"host": "*******", "port": 53}],
+    )
+
+    q = _make_edns_query("ede-pre-raise.example")
+    result = srv._resolve_core(q.pack(), "*********")
+    resp = DNSRecord.parse(result.wire)
+
+    assert result.rcode_name == "SERVFAIL"
+    assert resp.header.rcode == RCODE.SERVFAIL
+    edes = _extract_ede_options(resp)
+    assert edes, "expected at least one EDE option"
+    code, text = edes[0]
+    assert code == 0
+    assert "pre_resolve plugin failure" in text
+    assert "_PreRaises" in text
+
+
+def test_post_resolve_exception_fail_closed_servfail(monkeypatch, set_runtime_snapshot):
+    """Brief: post_resolve exceptions return SERVFAIL instead of upstream wire.
+
+    Inputs:
+      - Plugin whose post_resolve raises; stubbed successful upstream reply.
+
+    Outputs:
+      - Asserts SERVFAIL (fail-closed) rather than the upstream NOERROR answer.
+    """
+
+    q = _make_edns_query("ede-post-raise.example")
+    ok = q.reply().pack()
+
+    def fake_forward(
+        req,
+        upstreams,
+        timeout_ms,
+        qname,
+        qtype,
+        max_concurrent=None,
+        on_attempt_result=None,
+    ):
+        return ok, {"host": "*******", "port": 53}, "ok"
+
+    monkeypatch.setattr(srv, "send_query_with_failover", fake_forward)
+    _setup_shared(
+        set_runtime_snapshot,
+        enable_ede=True,
+        plugins=[_PostRaises()],
+        upstream_addrs=[{"host": "*******", "port": 53}],
+    )
+
+    result = srv._resolve_core(q.pack(), "*********")
+    resp = DNSRecord.parse(result.wire)
+
+    assert result.rcode_name == "SERVFAIL"
+    assert resp.header.rcode == RCODE.SERVFAIL
+    edes = _extract_ede_options(resp)
+    assert edes, "expected at least one EDE option"
+    code, text = edes[0]
+    assert code == 0
+    assert "post_resolve plugin failure" in text
+    assert "_PostRaises" in text
 
 
 def test_all_upstreams_failed_servfail_has_network_error_ede(
@@ -287,7 +387,7 @@ def test_all_upstreams_failed_servfail_has_network_error_ede(
         qtype,
         max_concurrent=None,
         on_attempt_result=None,
-    ):  # noqa: ANN001
+    ):
         return None, {"host": "8.8.8.8", "port": 53}, "all_failed"
 
     monkeypatch.setattr(srv, "send_query_with_failover", fail_forward)
@@ -322,7 +422,7 @@ def test_resolve_core_outer_exception_attaches_other_ede(
     class Boom(Exception):
         pass
 
-    def boom_init(self, client_ip, listener=None, secure=None):  # noqa: D401, ANN001
+    def boom_init(self, client_ip, listener=None, secure=None):
         """Always raise to simulate an unexpected resolver error."""
 
         raise Boom("boom")
@@ -385,7 +485,7 @@ def test_dnssec_bogus_attaches_dnssec_ede(monkeypatch, set_runtime_snapshot):
         qtype,
         max_concurrent=None,
         on_attempt_result=None,
-    ):  # noqa: ANN001
+    ):
         return ok_wire, {"host": "8.8.8.8", "port": 53}, "ok"
 
     monkeypatch.setattr(srv, "send_query_with_failover", fake_forward)
@@ -430,8 +530,9 @@ def test_notify_over_udp_is_refused_with_ede(set_runtime_snapshot) -> None:
     """
 
     # Instantiate ZoneRecords plugin to handle NOTIFY opcode.
-    import foghorn.plugins.resolve.zone_records as mod
     import tempfile
+
+    import foghorn.plugins.resolve.zone_records as mod
 
     ZoneRecords = mod.ZoneRecords
 
@@ -575,7 +676,7 @@ def test_notify_known_sender_triggers_axfr_refresh(
 
     calls = {"axfr": 0}
 
-    def fake_axfr_transfer(host, port, zone, **kwargs):  # noqa: ANN001,ARG001
+    def fake_axfr_transfer(host, port, zone, **kwargs):
         """Inputs: host/port/zone/kwargs. Outputs: minimal synthetic AXFR RRset."""
 
         from dnslib import RR as _RR
@@ -654,7 +755,7 @@ def test_notify_sends_axfr_to_correct_upstream(
     # Capture all calls to axfr_transfer with their arguments.
     axfr_calls: list = []
 
-    def fake_axfr_transfer(host, port, zone, **kwargs):  # noqa: ANN001
+    def fake_axfr_transfer(host, port, zone, **kwargs):
         """Inputs: host/port/zone/kwargs. Outputs: minimal synthetic AXFR RRset."""
 
         from dnslib import RR as _RR

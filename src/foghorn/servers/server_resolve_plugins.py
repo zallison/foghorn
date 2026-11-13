@@ -24,6 +24,39 @@ from .server_response_utils import (
 logger = logging.getLogger("foghorn.server")
 
 
+def _plugin_failure_servfail(
+    req: object,
+    *,
+    plugin_name: str,
+    phase: str,
+) -> bytes:
+    """Brief: Build a fail-closed SERVFAIL wire for a plugin exception.
+
+    Inputs:
+      - req: Parsed client DNS request (dnslib DNSRecord-like).
+      - plugin_name: Failing plugin class name for logging/EDE text.
+      - phase: "pre_resolve" or "post_resolve".
+
+    Outputs:
+      - bytes: SERVFAIL response wire with request ID preserved and optional EDE.
+
+    Notes:
+      - Plugin exceptions must not continue resolution (deny-by-default / ACL
+        plugins would otherwise fail open). SERVFAIL is the safe abort signal.
+    """
+
+    r = req.reply()
+    r.header.rcode = RCODE.SERVFAIL
+    _echo_client_edns(req, r)
+    _attach_ede_option(
+        req,
+        r,
+        0,  # Other
+        f"{phase} plugin failure: {plugin_name}",
+    )
+    return _set_response_id(r.pack(), req.header.id)
+
+
 def _run_pre_plugins(
     *,
     data: bytes,
@@ -125,10 +158,27 @@ def _run_pre_plugins(
                 record=record_plugin_timing,
             )
         except Exception:
+            plugin_name = type(p).__name__
             logger.error(
-                "pre_resolve failed for plugin %s", type(p).__name__, exc_info=True
+                "pre_resolve failed for plugin %s; returning SERVFAIL (fail-closed)",
+                plugin_name,
+                exc_info=True,
             )
-            decision = None
+            # Fail closed: never treat a plugin crash as an implicit allow.
+            wire = _plugin_failure_servfail(
+                req, plugin_name=plugin_name, phase="pre_resolve"
+            )
+            log_plugin_telemetry(logger, "pre", qname, pre_telemetry)
+            return (
+                pre_plugins,
+                post_plugins,
+                _ResolveCoreResult(
+                    wire=wire,
+                    dnssec_status=None,
+                    upstream_id=None,
+                    rcode_name="SERVFAIL",
+                ),
+            )
         if isinstance(decision, PluginDecision):
             if decision.action == "drop":
                 if stats is not None:
@@ -438,10 +488,23 @@ def _run_post_plugins(
                 record=record_plugin_timing,
             )
         except Exception:
+            plugin_name = type(p).__name__
             logger.error(
-                "post_resolve failed for plugin %s", type(p).__name__, exc_info=True
+                "post_resolve failed for plugin %s; returning SERVFAIL (fail-closed)",
+                plugin_name,
+                exc_info=True,
             )
-            decision = None
+            # Fail closed: do not return the upstream wire past a crashed plugin.
+            wire = _plugin_failure_servfail(
+                req, plugin_name=plugin_name, phase="post_resolve"
+            )
+            log_plugin_telemetry(logger, "post", qname, post_telemetry)
+            return wire, _ResolveCoreResult(
+                wire=wire,
+                dnssec_status=None,
+                upstream_id=upstream_id,
+                rcode_name="SERVFAIL",
+            )
         if isinstance(decision, PluginDecision):
             if decision.action == "drop":
                 if stats is not None:
