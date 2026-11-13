@@ -579,22 +579,35 @@ def test_process_update_message_enforces_tsig_key_allow_names_scope() -> None:
 def test_check_prerequisites_with_none_class_prereq_succeeds_with_empty_records() -> (
     None
 ):
-    # Create a mock RRset as dnspython would parse from UPDATE message
-    # Testing CLASS NONE: record must NOT exist (succeeds with empty records)
+    # Wire-parsed absent prereq: rdclass=zone class, deleting=NONE.
+    # CLASS NONE (effective): record must NOT exist (succeeds with empty records).
     import dns.rdataclass
     import dns.rdatatype
 
     class MockRRset:
-        def __init__(self, name: str, rdtype: int, rdclass: int):
+        def __init__(
+            self,
+            name: str,
+            rdtype: int,
+            rdclass: int,
+            *,
+            deleting: int | None = None,
+        ):
             self.name = name
             self.rdtype = rdtype
             self.rdclass = rdclass
+            self.deleting = deleting
             self.ttl = 0
 
         def __iter__(self):
             return iter([])
 
-    prereq = MockRRset("example.com", dns.rdatatype.A, dns.rdataclass.NONE)
+    prereq = MockRRset(
+        "example.com",
+        dns.rdatatype.A,
+        dns.rdataclass.IN,
+        deleting=dns.rdataclass.NONE,
+    )
     rcode, err = up.check_prerequisites([prereq], records={}, zone_apex="example.com")
     assert rcode == 0
     assert err is None
@@ -961,3 +974,220 @@ def test_process_update_message_refuses_when_psk_configured() -> None:
     )
     msg = DNSRecord.parse(resp)
     assert int(msg.header.rcode) == int(RCODE.REFUSED)
+
+
+def test_update_wire_roundtrip_apply_and_prereqs() -> None:
+    """Brief: Wire-roundtrip UPDATE add/delete/prereq semantics via to_wire/from_wire.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - Asserts apply_update_operations and check_prerequisites honor dnspython
+        wire class mapping (rdclass + deleting) for multi-value delete, rrset
+        delete, name delete, add-merge, and absent/present prerequisites.
+    """
+    import threading
+    from types import SimpleNamespace
+
+    import dns.message
+    import dns.rdataclass
+    import dns.rdatatype
+    import dns.update
+    from dnslib import QTYPE
+
+    zone = "example.com."
+    apex = "example.com"
+
+    def _wire_sections(builder: dns.update.Update):
+        """Brief: Round-trip an Update message and return prereq/update RRsets.
+
+        Inputs:
+          - builder: dns.update.Update message prior to serialization.
+
+        Outputs:
+          - (prereqs, updates) lists from the from_wire message.
+        """
+        parsed = dns.message.from_wire(builder.to_wire())
+        return list(parsed.prerequisite), list(parsed.update)
+
+    # Seed multi-value A and a TXT sibling for name-delete coverage.
+    plugin = SimpleNamespace(
+        records={
+            ("host.example.com", int(QTYPE.A)): (
+                300,
+                ["192.0.2.1", "192.0.2.2", "192.0.2.3"],
+                ["src"],
+            ),
+            ("host.example.com", int(QTYPE.TXT)): (300, ['"keep"'], ["src"]),
+            ("other.example.com", int(QTYPE.A)): (300, ["192.0.2.4"], ["src"]),
+            ("example.com", int(QTYPE.SOA)): (
+                300,
+                ["ns1.example.com. hostmaster.example.com. 1 3600 600 604800 300"],
+                ["src"],
+            ),
+        },
+        _records_lock=threading.RLock(),
+        _name_index={},
+        _wildcard_owners=[],
+        _update_managed_owners=set(),
+        _records_generation=0,
+        _dns_update_config={"replication": {"notify_on_update": False}},
+    )
+
+    # --- prerequisites via wire ---
+    present_ok = dns.update.Update(zone)
+    present_ok.present("host", "A", "192.0.2.1")
+    present_ok.present("host")  # name in use
+    present_ok.absent("missing", "A")  # rrset absent
+    present_ok.absent("ghost")  # name absent
+    prereqs_ok, _ = _wire_sections(present_ok)
+    # Confirm wire shape uses deleting for special classes.
+    eff = [up._effective_rrset_class(rr) for rr in prereqs_ok]
+    assert dns.rdataclass.IN in eff
+    assert dns.rdataclass.NONE in eff
+    assert dns.rdataclass.ANY in eff
+    rcode, err = up.check_prerequisites(prereqs_ok, plugin.records, apex)
+    assert rcode == 0 and err is None
+
+    present_fail = dns.update.Update(zone)
+    present_fail.present("host", "A", "192.0.2.4")  # value not present
+    prereqs_fail, _ = _wire_sections(present_fail)
+    rcode_fail, _ = up.check_prerequisites(prereqs_fail, plugin.records, apex)
+    assert rcode_fail == 1
+
+    absent_fail = dns.update.Update(zone)
+    absent_fail.absent("host", "A")
+    prereqs_abs_fail, _ = _wire_sections(absent_fail)
+    rcode_abs, _ = up.check_prerequisites(prereqs_abs_fail, plugin.records, apex)
+    assert rcode_abs == 1
+
+    # --- updates via wire: multi-value specific delete ---
+    del_one = dns.update.Update(zone)
+    del_one.delete("host", "A", "192.0.2.2")
+    _, updates_del_one = _wire_sections(del_one)
+    assert getattr(updates_del_one[0], "deleting", None) == dns.rdataclass.NONE
+    rcode, err = up.apply_update_operations(updates_del_one, plugin, apex)
+    assert rcode == 0 and err is None
+    assert plugin.records[("host.example.com", int(QTYPE.A))][1] == [
+        "192.0.2.1",
+        "192.0.2.3",
+    ]
+
+    # RRset delete (TYPE specific, CLASS ANY)
+    del_rrset = dns.update.Update(zone)
+    del_rrset.delete("host", "TXT")
+    _, updates_del_rrset = _wire_sections(del_rrset)
+    assert getattr(updates_del_rrset[0], "deleting", None) == dns.rdataclass.ANY
+    rcode, err = up.apply_update_operations(updates_del_rrset, plugin, apex)
+    assert rcode == 0 and err is None
+    assert ("host.example.com", int(QTYPE.TXT)) not in plugin.records
+    assert ("host.example.com", int(QTYPE.A)) in plugin.records
+
+    # Name delete (TYPE ANY, CLASS ANY)
+    del_name = dns.update.Update(zone)
+    del_name.delete("host")
+    _, updates_del_name = _wire_sections(del_name)
+    assert int(updates_del_name[0].rdtype) == int(dns.rdatatype.ANY)
+    assert getattr(updates_del_name[0], "deleting", None) == dns.rdataclass.ANY
+    rcode, err = up.apply_update_operations(updates_del_name, plugin, apex)
+    assert rcode == 0 and err is None
+    assert ("host.example.com", int(QTYPE.A)) not in plugin.records
+
+    # Add/merge (zone class, not deleting) — must merge, not replace
+    plugin.records[("other.example.com", int(QTYPE.A))] = (
+        300,
+        ["192.0.2.4"],
+        ["static"],
+    )
+    add_merge = dns.update.Update(zone)
+    add_merge.add("other", 120, "A", "192.0.2.1")
+    _, updates_add = _wire_sections(add_merge)
+    assert getattr(updates_add[0], "deleting", None) is None
+    assert int(updates_add[0].rdclass) == int(dns.rdataclass.IN)
+    rcode, err = up.apply_update_operations(updates_add, plugin, apex)
+    assert rcode == 0 and err is None
+    ttl, values, sources = plugin.records[("other.example.com", int(QTYPE.A))]
+    assert ttl == 120
+    assert values == ["192.0.2.4", "192.0.2.1"]
+    assert "update" in sources
+
+
+def test_process_update_message_wire_roundtrip_add_merge_with_tsig() -> None:
+    """Brief: End-to-end process_update_message add-merge after wire+TSIG roundtrip.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - Asserts NOERROR and merged A RRset when UPDATE is built via dns.update,
+        serialized, and processed through process_update_message.
+    """
+    import threading
+    from types import SimpleNamespace
+
+    import dns.message
+    import dns.rcode
+    import dns.tsigkeyring
+    import dns.update
+    from dnslib import QTYPE
+
+    key_name = "key.example.com."
+    secret_b64 = "dGVzdHNlY3JldA=="
+    keyring = dns.tsigkeyring.from_text({key_name: secret_b64})
+    existing = "192.0.2.4"
+    added = "192.0.2.1"
+
+    plugin = SimpleNamespace(
+        records={
+            ("host.example.com", int(QTYPE.A)): (300, [existing], ["static"]),
+            ("example.com", int(QTYPE.SOA)): (
+                300,
+                ["ns1.example.com. hostmaster.example.com. 1 3600 600 604800 300"],
+                ["src"],
+            ),
+        },
+        _records_lock=threading.RLock(),
+        _name_index={},
+        _wildcard_owners=[],
+        _update_managed_owners=set(),
+        _records_generation=0,
+        _dns_update_config={"replication": {"notify_on_update": False}},
+    )
+    zone_config = {
+        "tsig": {
+            "keys": [
+                {
+                    "name": key_name,
+                    "algorithm": "hmac-sha256",
+                    "secret": secret_b64,
+                    "allow_names": ["*.example.com", "example.com"],
+                }
+            ]
+        }
+    }
+
+    msg = dns.update.Update("example.com.")
+    msg.use_tsig(keyring=keyring, keyname=key_name, algorithm="hmac-sha256")
+    msg.present("host", "A", existing)
+    msg.absent("ghost.example.com.")
+    msg.add("host", 60, "A", added)
+    wire = msg.to_wire()
+    req = dns.message.from_wire(wire, keyring=keyring)
+
+    # Sanity: wire-parsed update uses zone class without deleting for add.
+    assert getattr(req.update[0], "deleting", None) is None
+
+    resp_wire = up.process_update_message(
+        wire,
+        zone_apex="example.com",
+        zone_config=zone_config,
+        plugin=plugin,
+        client_ip="127.0.0.1",
+        listener="udp",
+    )
+    resp = dns.message.from_wire(resp_wire, keyring=keyring, request_mac=req.mac)
+    assert int(resp.rcode()) == int(dns.rcode.NOERROR)
+    _ttl, values, sources = plugin.records[("host.example.com", int(QTYPE.A))]
+    assert values == [existing, added]
+    assert "update" in sources

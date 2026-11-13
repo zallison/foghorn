@@ -85,13 +85,18 @@ def _plugin(
 
 
 class _RRset:
-    """Brief: Minimal RRset-like object for apply_update_operations adapter tests."""
+    """Brief: Minimal RRset-like object for apply_update_operations adapter tests.
 
-    def __init__(self, *, name, rdtype, rdclass, ttl=60, values=None):
+    Mirrors dnspython wire shape: zone class on ``rdclass``, optional
+    ``deleting`` (NONE/ANY) for delete ops.
+    """
+
+    def __init__(self, *, name, rdtype, rdclass, ttl=60, values=None, deleting=None):
         self.name = name
         self.rdtype = int(rdtype)
         self.rdclass = int(rdclass)
         self.ttl = int(ttl)
+        self.deleting = None if deleting is None else int(deleting)
         self._values = list(values or [])
 
     def __iter__(self):
@@ -822,8 +827,13 @@ def test_commit_records_none_and_name_index_none() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_apply_update_operations_adapter_class_none_and_any_empty() -> None:
-    """Brief: Adapter maps CLASS NONE add and CLASS ANY empty-rrset delete."""
+def test_apply_update_operations_adapter_add_and_rrset_delete() -> None:
+    """Brief: Adapter maps zone-class add and deleting=ANY empty RRset delete.
+
+    Inputs/Outputs:
+      - Wire-like RRsets (rdclass=IN + optional deleting) through apply_update_operations.
+      - Asserts add-merge creates the new A and RRset delete removes the old A.
+    """
     plugin = _plugin(
         records={("old.example.com", int(QTYPE.A)): (300, ["192.0.2.1"], ["s"])}
     )
@@ -832,13 +842,14 @@ def test_apply_update_operations_adapter_class_none_and_any_empty() -> None:
             _RRset(
                 name="new.example.com",
                 rdtype=int(dns.rdatatype.A),
-                rdclass=int(dns.rdataclass.NONE),
+                rdclass=int(dns.rdataclass.IN),
                 values=["203.0.113.8"],
             ),
             _RRset(
                 name="old.example.com",
                 rdtype=int(dns.rdatatype.A),
-                rdclass=int(dns.rdataclass.ANY),
+                rdclass=int(dns.rdataclass.IN),
+                deleting=int(dns.rdataclass.ANY),
                 values=[],
             ),
         ],

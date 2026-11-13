@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import threading
+from collections.abc import Callable
 from types import SimpleNamespace
-from typing import Any, Callable, Optional
+from typing import Any
 
 import dns.exception
 import dns.message
@@ -21,7 +22,7 @@ def _zone_cfg(
     *,
     key_name: str,
     secret_b64: str,
-    extra_keys: Optional[list[Any]] = None,
+    extra_keys: list[Any] | None = None,
 ) -> dict:
     """Brief: Build TSIG zone config used by process_update_message tests.
 
@@ -54,8 +55,8 @@ def _signed_update_wire(
     owner: str = "host",
     ttl: int = 60,
     rtype: str = "A",
-    values: Optional[list[str]] = None,
-    fudge: Optional[int] = None,
+    values: list[str] | None = None,
+    fudge: int | None = None,
 ) -> tuple[bytes, dns.tsigkeyring.Keyring]:
     """Brief: Build a TSIG-signed UPDATE wire payload for branch tests.
 
@@ -84,7 +85,11 @@ def _signed_update_wire(
 
 
 class _RRset:
-    """Brief: Minimal RRset-like object used by helper branch tests."""
+    """Brief: Minimal RRset-like object used by helper branch tests.
+
+    Mirrors dnspython wire-parsed UPDATE RRsets: ``rdclass`` is usually the zone
+    class and special RFC 2136 classes are carried on ``deleting`` (NONE/ANY).
+    """
 
     def __init__(
         self,
@@ -93,12 +98,14 @@ class _RRset:
         rdtype: int,
         rdclass: int,
         ttl: int = 0,
-        values: Optional[list[str]] = None,
+        values: list[str] | None = None,
+        deleting: int | None = None,
     ) -> None:
         self.name = name
         self.rdtype = int(rdtype)
         self.rdclass = int(rdclass)
         self.ttl = int(ttl)
+        self.deleting = None if deleting is None else int(deleting)
         self._values = list(values or [])
 
     def __iter__(self):
@@ -806,16 +813,31 @@ def test_check_prerequisites_branch_matrix(monkeypatch: pytest.MonkeyPatch) -> N
     out_of_zone = _RRset(
         name="outside.net",
         rdtype=int(dns.rdatatype.A),
-        rdclass=int(dns.rdataclass.NONE),
+        rdclass=int(dns.rdataclass.IN),
+        deleting=int(dns.rdataclass.NONE),
         values=[],
     )
     rcode_out, _ = up.check_prerequisites([out_of_zone], records, "example.com")
     assert rcode_out == 9
 
+    # Suffix-only match must not count as in-zone (notexample.com vs example.com).
+    suffix_false_friend = _RRset(
+        name="notexample.com",
+        rdtype=int(dns.rdatatype.A),
+        rdclass=int(dns.rdataclass.IN),
+        deleting=int(dns.rdataclass.NONE),
+        values=[],
+    )
+    rcode_suffix, _ = up.check_prerequisites(
+        [suffix_false_friend], records, "example.com"
+    )
+    assert rcode_suffix == 9
+
     none_any_exists = _RRset(
         name="name.example.com",
         rdtype=int(dns.rdatatype.ANY),
-        rdclass=int(dns.rdataclass.NONE),
+        rdclass=int(dns.rdataclass.IN),
+        deleting=int(dns.rdataclass.NONE),
         values=[],
     )
     rcode_none_any, _ = up.check_prerequisites(
@@ -826,7 +848,8 @@ def test_check_prerequisites_branch_matrix(monkeypatch: pytest.MonkeyPatch) -> N
     none_specific_exists = _RRset(
         name="host.example.com",
         rdtype=int(dns.rdatatype.A),
-        rdclass=int(dns.rdataclass.NONE),
+        rdclass=int(dns.rdataclass.IN),
+        deleting=int(dns.rdataclass.NONE),
         values=[],
     )
     rcode_none_specific, _ = up.check_prerequisites(
@@ -834,6 +857,7 @@ def test_check_prerequisites_branch_matrix(monkeypatch: pytest.MonkeyPatch) -> N
     )
     assert rcode_none_specific == 1
 
+    # TYPE ANY + zone class is not a valid present-name form (use CLASS ANY).
     in_any_missing = _RRset(
         name="missing.example.com",
         rdtype=int(dns.rdatatype.ANY),
@@ -854,12 +878,13 @@ def test_check_prerequisites_branch_matrix(monkeypatch: pytest.MonkeyPatch) -> N
     )
     assert rcode_in_specific == 1
 
+    # Value-dependent present uses zone class + RDATA (ttl is 0 on the wire).
     in_specific_rr_missing = _RRset(
         name="host.example.com",
         rdtype=int(dns.rdatatype.A),
         rdclass=int(dns.rdataclass.IN),
-        ttl=60,
-        values=["192.0.2.99"],
+        ttl=0,
+        values=["192.0.2.60"],
     )
     rcode_rr_missing, _ = up.check_prerequisites(
         [in_specific_rr_missing], records, "example.com"
@@ -869,7 +894,8 @@ def test_check_prerequisites_branch_matrix(monkeypatch: pytest.MonkeyPatch) -> N
     any_any_missing = _RRset(
         name="missing.example.com",
         rdtype=int(dns.rdatatype.ANY),
-        rdclass=int(dns.rdataclass.ANY),
+        rdclass=int(dns.rdataclass.IN),
+        deleting=int(dns.rdataclass.ANY),
         values=[],
     )
     rcode_any_any, _ = up.check_prerequisites([any_any_missing], records, "example.com")
@@ -878,7 +904,8 @@ def test_check_prerequisites_branch_matrix(monkeypatch: pytest.MonkeyPatch) -> N
     any_specific_missing = _RRset(
         name="missing.example.com",
         rdtype=int(dns.rdatatype.A),
-        rdclass=int(dns.rdataclass.ANY),
+        rdclass=int(dns.rdataclass.IN),
+        deleting=int(dns.rdataclass.ANY),
         values=[],
     )
     rcode_any_specific, _ = up.check_prerequisites(
@@ -905,27 +932,32 @@ def test_check_prerequisites_positive_loop_break_paths() -> None:
         ("name.example.com", int(QTYPE.TXT)): (300, ['"v"'], ["src"]),
     }
 
-    in_any_exists = _RRset(
+    # Name-in-use present uses CLASS ANY + TYPE ANY (wire: rdclass=IN, deleting=ANY).
+    name_in_use = _RRset(
         name="name.example.com",
         rdtype=int(dns.rdatatype.ANY),
         rdclass=int(dns.rdataclass.IN),
+        deleting=int(dns.rdataclass.ANY),
         values=[],
     )
+    # Value-dependent present: zone class + RDATA (ttl 0 on wire).
     in_specific_exact = _RRset(
         name="host.example.com",
         rdtype=int(dns.rdatatype.A),
         rdclass=int(dns.rdataclass.IN),
-        ttl=60,
+        ttl=0,
         values=["192.0.2.10"],
     )
-    any_any_exists = _RRset(
+    # RRset-exists present: CLASS ANY + specific type.
+    rrset_exists = _RRset(
         name="host.example.com",
-        rdtype=int(dns.rdatatype.ANY),
-        rdclass=int(dns.rdataclass.ANY),
+        rdtype=int(dns.rdatatype.A),
+        rdclass=int(dns.rdataclass.IN),
+        deleting=int(dns.rdataclass.ANY),
         values=[],
     )
     rcode, err = up.check_prerequisites(
-        [in_any_exists, in_specific_exact, any_any_exists],
+        [name_in_use, in_specific_exact, rrset_exists],
         records,
         "example.com",
     )
@@ -989,7 +1021,8 @@ def test_apply_update_operations_branch_matrix(monkeypatch: pytest.MonkeyPatch) 
             _RRset(
                 name="host.example.com",
                 rdtype=int(dns.rdatatype.ANY),
-                rdclass=int(dns.rdataclass.NONE),
+                rdclass=int(dns.rdataclass.IN),
+                deleting=int(dns.rdataclass.NONE),
                 values=[],
             )
         ],
@@ -1018,7 +1051,7 @@ def test_apply_update_operations_branch_matrix(monkeypatch: pytest.MonkeyPatch) 
                 name="host.example.com",
                 rdtype=int(dns.rdatatype.A),
                 rdclass=99999,
-                values=["192.0.2.10"],
+                values=["**********"],
             )
         ],
         plugin=plugin,
@@ -1028,22 +1061,27 @@ def test_apply_update_operations_branch_matrix(monkeypatch: pytest.MonkeyPatch) 
 
     rcode_delete, err_delete = up.apply_update_operations(
         [
+            # Specific-value delete: CLASS NONE (wire: rdclass=IN, deleting=NONE).
             _RRset(
                 name="del.example.com",
                 rdtype=int(dns.rdatatype.A),
-                rdclass=int(dns.rdataclass.ANY),
-                values=["192.0.2.10"],
+                rdclass=int(dns.rdataclass.IN),
+                deleting=int(dns.rdataclass.NONE),
+                values=["**********"],
             ),
+            # Add/merge: zone class, not deleting.
             _RRset(
                 name="wipe.example.com",
                 rdtype=int(dns.rdatatype.A),
                 rdclass=int(dns.rdataclass.IN),
-                values=["198.51.100.1"],
+                values=["************"],
             ),
+            # Name delete: CLASS ANY + TYPE ANY (wire: rdclass=IN, deleting=ANY).
             _RRset(
                 name="wipe.example.com",
                 rdtype=int(dns.rdatatype.ANY),
-                rdclass=int(dns.rdataclass.ANY),
+                rdclass=int(dns.rdataclass.IN),
+                deleting=int(dns.rdataclass.ANY),
                 values=[],
             ),
         ],
@@ -1216,7 +1254,7 @@ def test_apply_update_operations_detects_conflict_without_mutating_live_records(
             self._plugin_ref = plugin_ref
             self._enter_count = 0
 
-        def __enter__(self) -> "_ConcurrentMutatingLock":
+        def __enter__(self) -> _ConcurrentMutatingLock:
             self._enter_count += 1
             if self._enter_count == 2:
                 self._plugin_ref.records[("race.example.com", int(dns.rdatatype.A))] = (
@@ -1246,8 +1284,9 @@ def test_apply_update_operations_detects_conflict_without_mutating_live_records(
             _RRset(
                 name="del.example.com",
                 rdtype=int(dns.rdatatype.A),
-                rdclass=int(dns.rdataclass.ANY),
-                values=["192.0.2.10"],
+                rdclass=int(dns.rdataclass.IN),
+                deleting=int(dns.rdataclass.NONE),
+                values=["**********"],
             )
         ],
         plugin=plugin,
@@ -1264,7 +1303,7 @@ def test_apply_update_operations_detects_conflict_without_mutating_live_records(
 
 
 def test_apply_update_operations_add_and_single_value_delete_paths() -> None:
-    """Brief: apply_update_operations covers CLASS NONE add and CLASS ANY single-value delete branches."""
+    """Brief: apply_update_operations covers zone-class add and CLASS NONE value delete."""
     plugin = SimpleNamespace(
         records={
             ("example.com", int(QTYPE.SOA)): (
@@ -1272,25 +1311,28 @@ def test_apply_update_operations_add_and_single_value_delete_paths() -> None:
                 ["ns1.example.com. hostmaster.example.com. 1 3600 600 604800 300"],
                 ["src"],
             ),
-            ("single.example.com", int(QTYPE.A)): (300, ["192.0.2.20"], ["src"]),
+            ("single.example.com", int(QTYPE.A)): (300, ["**********"], ["src"]),
         },
         _records_lock=threading.RLock(),
     )
 
     updates = [
+        # Add/merge uses zone class (IN), not CLASS NONE.
         _RRset(
             name="added.example.com",
             rdtype=int(dns.rdatatype.A),
-            rdclass=int(dns.rdataclass.NONE),
+            rdclass=int(dns.rdataclass.IN),
             ttl=60,
-            values=["198.51.100.30"],
+            values=["*************"],
         ),
+        # Specific-value delete uses CLASS NONE (wire: deleting=NONE).
         _RRset(
             name="single.example.com",
             rdtype=int(dns.rdatatype.A),
-            rdclass=int(dns.rdataclass.ANY),
+            rdclass=int(dns.rdataclass.IN),
+            deleting=int(dns.rdataclass.NONE),
             ttl=0,
-            values=["192.0.2.20"],
+            values=["**********"],
         ),
     ]
     rcode, err = up.apply_update_operations(
@@ -1616,12 +1658,14 @@ def test_apply_update_operations_compaction_entries_uses_manifest_delta(
 def test_apply_update_operations_existing_rrset_adds_value_and_tracks_update_source(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Brief: CLASS NONE append path adds a value and injects update source."""
+    """Brief: Zone-class add/merge path adds a value and injects update source."""
+    existing_ip = "10.0.0.1"
+    added_ip = "10.0.0.2"
     plugin = SimpleNamespace(
         records={
             ("host.example.com", int(dns.rdatatype.A)): (
                 300,
-                ["192.0.2.10"],
+                [existing_ip],
                 ["static"],
             )
         },
@@ -1634,9 +1678,9 @@ def test_apply_update_operations_existing_rrset_adds_value_and_tracks_update_sou
             _RRset(
                 name="host.example.com",
                 rdtype=int(dns.rdatatype.A),
-                rdclass=int(dns.rdataclass.NONE),
+                rdclass=int(dns.rdataclass.IN),
                 ttl=60,
-                values=["192.0.2.11"],
+                values=[added_ip],
             )
         ],
         plugin=plugin,
@@ -1646,5 +1690,5 @@ def test_apply_update_operations_existing_rrset_adds_value_and_tracks_update_sou
     assert err is None
     ttl, values, sources = plugin.records[("host.example.com", int(dns.rdatatype.A))]
     assert ttl == 60
-    assert values == ["192.0.2.10", "192.0.2.11"]
+    assert values == [existing_ip, added_ip]
     assert "update" in sources
