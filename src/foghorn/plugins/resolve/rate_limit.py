@@ -6,13 +6,12 @@ import os
 import sqlite3
 import threading
 import time
-from typing import Dict, Mapping, Optional, Tuple
+from collections.abc import Mapping
 
 from dnslib import QTYPE, RCODE, DNSRecord
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from foghorn.plugins.cache.backends.foghorn_ttl import FoghornTTLCache
-from foghorn.plugins.cache.none import NullCache
 from foghorn.plugins.resolve.admin_ui import config_to_items
 from foghorn.plugins.resolve.base import (
     AdminPageSpec,
@@ -22,11 +21,7 @@ from foghorn.plugins.resolve.base import (
     plugin_aliases,
 )
 from foghorn.utils import dns_names, ip_networks
-from foghorn.utils.current_cache import (
-    TTLCacheAdapter,
-    get_current_namespaced_cache,
-    module_namespace,
-)
+from foghorn.utils.current_cache import TTLCacheAdapter, module_namespace
 from foghorn.utils.register_caches import registered_lru_cache
 
 logger = logging.getLogger(__name__)
@@ -187,12 +182,12 @@ class RateLimitConfig(BaseModel):
     window_seconds: int = Field(default=10, ge=1)
     warmup_windows: int = Field(default=6, ge=0)
     alpha: float = Field(default=0.2, ge=0.0, le=1.0)
-    alpha_down: Optional[float] = Field(default=0.2, ge=0.0, le=1.0)
+    alpha_down: float | None = Field(default=0.2, ge=0.0, le=1.0)
     burst_factor: float = Field(default=3.0, ge=1.0)
     burst_windows: int = Field(default=6, ge=0)
     burst_reset_windows: int = Field(default=20, ge=1)
     min_enforce_rps: float = Field(default=50.0, ge=0.0)
-    min_burst_threshold: Optional[float] = Field(default=None, ge=0.0)
+    min_burst_threshold: float | None = Field(default=None, ge=0.0)
     max_enforce_rps: float = Field(default=5000.0, ge=0.0)
     global_max_rps: float = Field(default=0.0, ge=0.0)
     db_path: str = Field(default="./config/var/dbs/rate_limit.db")
@@ -213,8 +208,8 @@ class RateLimitConfig(BaseModel):
     # Seconds to sleep on the request path before a deny response. Hard-capped
     # low: each sleep holds a resolver worker thread and amplifies DoS under load.
     deny_delay: int = Field(default=0, ge=0, le=5)
-    deny_response_ip4: Optional[str] = None
-    deny_response_ip6: Optional[str] = None
+    deny_response_ip4: str | None = None
+    deny_response_ip6: str | None = None
     ttl: int = Field(default=60, ge=0)
     stats_log_interval_seconds: int = Field(default=3600, ge=0)
     stats_window_seconds: int = Field(default=0, ge=0)
@@ -299,7 +294,7 @@ class RateLimitConfig(BaseModel):
         return out
 
     @model_validator(mode="after")
-    def _default_dynamic_thresholds(self) -> "RateLimitConfig":
+    def _default_dynamic_thresholds(self) -> RateLimitConfig:
         """Brief: Populate dependent defaults from already-parsed fields.
 
         Inputs:
@@ -593,8 +588,8 @@ class RateLimit(BasePlugin):
             )
             deny_resp = "nxdomain"
         self.deny_response: str = deny_resp
-        self.deny_response_ip4: Optional[str] = self.config.get("deny_response_ip4")
-        self.deny_response_ip6: Optional[str] = self.config.get("deny_response_ip6")
+        self.deny_response_ip4: str | None = self.config.get("deny_response_ip4")
+        self.deny_response_ip6: str | None = self.config.get("deny_response_ip6")
 
         # TTL for synthetic IP responses when deny_response == 'ip'
         try:
@@ -606,24 +601,18 @@ class RateLimit(BasePlugin):
             self._ttl = 60
 
         # Per-key rolling window counters (key -> "window_id:count").
-        # Rate-limit counters must remain stateful even when DNS response cache
-        # is disabled (cache: none), otherwise each request appears as a
-        # first-in-window request and limits never trigger.
+        # Always use a dedicated bounded in-memory cache so high-cardinality
+        # traffic (spoofed UDP sources / many domains) cannot grow counters
+        # without limit. Entries still expire after ~2 windows via TTL.
         cache_namespace = module_namespace(__file__)
-        self._window_cache = get_current_namespaced_cache(
-            namespace=cache_namespace,
-            cache_plugin=self.config.get("cache"),
+        window_max = max(1, int(getattr(self, "active_window_max_keys", 2048) or 2048))
+        self._window_cache = TTLCacheAdapter(
+            FoghornTTLCache(
+                namespace=cache_namespace,
+                maxsize=window_max,
+                eviction_policy="lru",
+            )
         )
-        window_cache_backend = getattr(self._window_cache, "_backend", None)
-        if isinstance(window_cache_backend, NullCache):
-            logger.warning(
-                "cache backend %s disables stateful counters; "
-                "using internal in-memory counter cache.",
-                type(window_cache_backend).__name__,
-            )
-            self._window_cache = TTLCacheAdapter(
-                FoghornTTLCache(namespace=cache_namespace)
-            )
         self._window_locks = [threading.Lock() for _ in range(256)]
         # Best-effort in-memory snapshot of current-window key counters for
         # admin visibility. This is independent of sqlite profile persistence,
@@ -632,11 +621,11 @@ class RateLimit(BasePlugin):
         # bounded by active_window_max_keys to avoid unbounded per-window
         # memory growth under high-cardinality traffic.
         self._active_window_counts: dict[str, tuple[int, int]] = {}
-        self._active_window_id: Optional[int] = None
+        self._active_window_id: int | None = None
         self._active_window_lock = threading.Lock()
         self._cached_bucket_limits: dict[str, tuple[int, float, float]] = {}
         self._bucket_limit_lock = threading.Lock()
-        self._last_limit_recalc_epoch: Optional[int] = None
+        self._last_limit_recalc_epoch: int | None = None
         self._warn_on_limit_precedence_conflicts()
 
         # SQLite-backed learned profiles
@@ -736,7 +725,7 @@ class RateLimit(BasePlugin):
         key: str,
         default: float,
         minimum: float = 0.0,
-        maximum: Optional[float] = None,
+        maximum: float | None = None,
     ) -> float:
         """Brief: Parse float configuration with range clamping and logging.
 
@@ -858,7 +847,7 @@ class RateLimit(BasePlugin):
             )
             self._conn.commit()
 
-    def _db_get_profile(self, key: str) -> Optional[Tuple[float, float, int]]:
+    def _db_get_profile(self, key: str) -> tuple[float, float, int] | None:
         """Brief: Load (avg_rps, max_rps, samples) for a key from sqlite.
 
         Inputs:
@@ -932,7 +921,7 @@ class RateLimit(BasePlugin):
             return int(global_samples)
         return int(bounded_samples)
 
-    def _db_get_profile_last_update(self, key: str) -> Optional[int]:
+    def _db_get_profile_last_update(self, key: str) -> int | None:
         """Brief: Return last_update epoch seconds for a profile key.
 
         Inputs:
@@ -964,7 +953,7 @@ class RateLimit(BasePlugin):
         floor_max_rps: float,
         floor_samples: int,
         now_ts: int,
-        window_rps: Optional[float] = None,
+        window_rps: float | None = None,
     ) -> None:
         """Brief: Ensure non-global writes cannot outrun the global DB row.
 
@@ -1228,8 +1217,8 @@ class RateLimit(BasePlugin):
             )
             row = cur.fetchone()
             global_row_present = True
-            global_max_rps: Optional[float] = None
-            global_samples: Optional[int] = None
+            global_max_rps: float | None = None
+            global_samples: int | None = None
             if str(key) != str(_GLOBAL_RPS_DB_KEY):
                 try:
                     cur.execute(
@@ -1602,9 +1591,7 @@ class RateLimit(BasePlugin):
             return _to_base_domain(qname)
         return str(client_ip)
 
-    def _increment_window(
-        self, key: str, now: Optional[float] = None
-    ) -> Tuple[int, int]:
+    def _increment_window(self, key: str, now: float | None = None) -> tuple[int, int]:
         """Brief: Increment per-key counter for the current window and update profile.
 
         Inputs:
@@ -1620,8 +1607,8 @@ class RateLimit(BasePlugin):
         window_id = int(now // float(self.window_seconds))
         cache_key = (key, 0)
 
-        prev_window_id: Optional[int] = None
-        prev_count: Optional[int] = None
+        prev_window_id: int | None = None
+        prev_count: int | None = None
         cache_miss = False
         missed_windows = 0
         lock = self._window_lock_for_key(key)
@@ -1694,9 +1681,9 @@ class RateLimit(BasePlugin):
                     self._reset_burst_state(key)
                 else:
                     avg_rps, _max_rps, samples = profile
-                    if int(samples) < int(self.warmup_windows):
-                        self._reset_burst_state(key)
-                    elif float(avg_rps) < float(self.min_enforce_rps):
+                    if int(samples) < int(self.warmup_windows) or float(
+                        avg_rps
+                    ) < float(self.min_enforce_rps):
                         self._reset_burst_state(key)
                     else:
                         self._advance_burst_reset_counter(key, int(missed_windows))
@@ -1848,7 +1835,7 @@ class RateLimit(BasePlugin):
             lock = self._window_lock_for_key(key_text)
             with lock:
                 raw = self._window_cache.get((key_text, 0))
-                stored_window_id: Optional[int] = None
+                stored_window_id: int | None = None
                 if raw is not None:
                     try:
                         text = raw.decode()
@@ -2245,7 +2232,7 @@ class RateLimit(BasePlugin):
         key: str,
         avg_rps: float,
         samples: int,
-        now: Optional[float] = None,
+        now: float | None = None,
     ) -> tuple[float, float]:
         """Brief: Return per-bucket allowed-RPS thresholds with interval refresh.
 
@@ -2414,7 +2401,7 @@ class RateLimit(BasePlugin):
         )
 
     def _prune_deny_log_state(
-        self, now: float, interval: int, keep_key: Optional[str] = None
+        self, now: float, interval: int, keep_key: str | None = None
     ) -> None:
         """Brief: Prune deny-log throttle maps to bound in-memory key growth.
 
@@ -2656,7 +2643,7 @@ class RateLimit(BasePlugin):
                     stat="rate_limit",
                     suppress_query_log=suppress_query_log,
                 )
-            ipaddr: Optional[str] = None
+            ipaddr: str | None = None
             if qtype == QTYPE.A and self.deny_response_ip4:
                 ipaddr = str(self.deny_response_ip4)
             elif qtype == QTYPE.AAAA and self.deny_response_ip6:
@@ -2681,7 +2668,7 @@ class RateLimit(BasePlugin):
 
     def pre_resolve(
         self, qname: str, qtype: int, req: bytes, ctx: PluginContext
-    ) -> Optional[PluginDecision]:
+    ) -> PluginDecision | None:
         """Brief: Apply learning rate limits before DNS resolution.
 
         Inputs:
@@ -3326,7 +3313,7 @@ class RateLimit(BasePlugin):
         page: int = 1,
         page_size: int = 100,
         search: str | None = None,
-    ) -> Dict[str, object]:
+    ) -> dict[str, object]:
         """Brief: Return paginated rate-profile key inventory for admin actions.
 
         Inputs:
@@ -3342,8 +3329,7 @@ class RateLimit(BasePlugin):
             page_i = int(page)
         except Exception:
             page_i = 1
-        if page_i < 1:
-            page_i = 1
+        page_i = max(page_i, 1)
         try:
             page_size_i = int(page_size)
         except Exception:
@@ -3370,7 +3356,7 @@ class RateLimit(BasePlugin):
                 }
             )
 
-        total = int(len(items))
+        total = len(items)
         offset = int((page_i - 1) * page_size_i)
         page_items = items[offset : offset + page_size_i]
         total_pages = (total + page_size_i - 1) // page_size_i if total else 0
@@ -3387,7 +3373,7 @@ class RateLimit(BasePlugin):
         *,
         key: str | None = None,
         include_global: bool = False,
-    ) -> Dict[str, int]:
+    ) -> dict[str, int]:
         """Brief: Clear rate-limit learned profiles and active windows.
 
         Inputs:

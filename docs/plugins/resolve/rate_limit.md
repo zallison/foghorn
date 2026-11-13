@@ -134,7 +134,7 @@ plugins:
 	  # Deny behaviour
 	  deny_response: nxdomain        # nxdomain|refused|servfail|noerror_empty|ip
 	  deny_delay: 0                  # optional sleep before deny (0-5s; holds a worker)
-	  deny_response_ip4: *******
+	  deny_response_ip4: 0.0.0.0
 	  deny_response_ip6: ::1
 	  ttl: 60                        # TTL for synthetic IP answers when using 'ip'
 	  assume_udp_when_listener_missing: true  # apply UDP prefix bucketing when listener is unknown
