@@ -686,6 +686,40 @@ def set_config_path(config_path: str | None) -> None:
         _CONFIG_PATH = str(config_path) if config_path else None
 
 
+def apply_data_root_from_config(
+    cfg: Dict[str, Any] | None,
+    *,
+    config_path: str | None = None,
+) -> str | None:
+    """Brief: Resolve server.data_root from config and publish it process-wide.
+
+    Inputs:
+      - cfg: Parsed configuration mapping (or None).
+      - config_path: Optional config file path for future defaulting.
+
+    Outputs:
+      - str | None: Absolute data_root when configured, else None.
+
+    Notes:
+      - Updates foghorn.utils.safe_paths so plugins and backends enforce
+        containment without each caller re-reading YAML.
+    """
+
+    from foghorn.utils.safe_paths import resolve_data_root, set_data_root
+
+    server_cfg: Dict[str, Any] = {}
+    if isinstance(cfg, dict):
+        raw_server = cfg.get("server")
+        if isinstance(raw_server, dict):
+            server_cfg = raw_server
+    root = resolve_data_root(
+        server_cfg.get("data_root") if isinstance(server_cfg, dict) else None,
+        config_path=config_path or get_config_path(),
+    )
+    set_data_root(root)
+    return root
+
+
 def initialize_runtime(
     *,
     snapshot: RuntimeSnapshot,
@@ -743,6 +777,13 @@ def clear_runtime() -> None:
         _CONFIG_PATH = None
         _CLI_VARS = []
         _UNKNOWN_KEYS_POLICY = "error"
+
+    try:
+        from foghorn.utils.safe_paths import set_data_root
+
+        set_data_root(None)
+    except Exception:
+        pass
 
     with _OLD_PLUGINS_LOCK:
         _OLD_PLUGINS[:] = []
@@ -913,6 +954,13 @@ def reload_from_config(
     current = get_runtime_snapshot()
     restart_reasons = _restart_required_reasons(current.cfg, cfg)
     restart_required = bool(restart_reasons)
+
+    # Publish data_root before building plugins/backends so path containment
+    # matches the incoming configuration.
+    try:
+        apply_data_root_from_config(cfg, config_path=get_config_path())
+    except Exception:
+        logger.debug("Failed to apply data_root during reload", exc_info=True)
 
     effective_cfg = cfg
     if restart_required and str(mode).lower() == "reload_only":

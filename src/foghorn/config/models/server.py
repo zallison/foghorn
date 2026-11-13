@@ -260,10 +260,20 @@ class ServerDnssecConfig(OpenModel):
 
     Inputs:
       - Open mapping for DNSSEC knobs (validation/signing/payload size, etc.).
+      - Common keys include mode, validation, udp_payload_size, and for RFC 5011
+        trust-anchor management: trust_anchor_mode, trust_anchor_store_path.
 
     Outputs:
       - Permissive dnssec object; detailed constraints live in runtime code.
     """
+
+    trust_anchor_store_path: str | None = Field(
+        default=None,
+        description=(
+            "Filesystem path for the RFC 5011 trust-anchor JSON store. When "
+            "server.data_root is set, must resolve under that directory."
+        ),
+    )
 
 
 class HttpAuthConfig(StrictModel):
@@ -478,12 +488,24 @@ class ServerConfig(StrictModel):
 
     Inputs:
       - listen / resolver / cache / dnssec / limits / http / axfr / features.
+      - data_root: Optional base directory for local file path containment.
       - Legacy enable_ede / forward_local aliases.
 
     Outputs:
       - ServerConfig model for FoghornConfig.server.
     """
 
+    data_root: str | None = Field(
+        default=None,
+        description=(
+            "Optional base directory for local file operations. When set, "
+            "configurable paths (DNSSEC trust-anchor store, EtcHosts files, "
+            "JSON query-log file_path, etc.) must resolve under this directory; "
+            "paths that escape it fail startup validation. Relative paths are "
+            "resolved against data_root. When unset, legacy unconstrained path "
+            "resolution is used."
+        ),
+    )
     listen: ServerListenConfig | None = None
     resolver: ServerResolverConfig | None = None
     cache: None | ServerCacheConfig | str = None

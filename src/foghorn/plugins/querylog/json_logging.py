@@ -84,8 +84,10 @@ class JsonLogging(BaseStatsStore):
         self._healthy = False
         self._io_lock = threading.RLock()
 
-        # Normalize and create the target directory if needed.
-        path = os.path.abspath(os.path.expanduser(str(file_path)))
+        # Normalize under server.data_root when configured, then create parents.
+        from foghorn.utils.safe_paths import enforce_data_root_path
+
+        path = enforce_data_root_path(file_path, kind="JSON query-log file_path")
         dir_path = os.path.dirname(path)
         # pragma: nocover - os.path.abspath() yields a parent directory on supported paths.
         if dir_path:  # pragma: no branch

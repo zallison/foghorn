@@ -142,9 +142,10 @@ def main(argv: list[str] | None = None) -> int:
     # Record config path early so plugins can resolve relative TLS/file paths
     # during setup() before initialize_runtime() runs.
     try:
-        from .runtime_config import set_config_path
+        from .runtime_config import apply_data_root_from_config, set_config_path
 
         set_config_path(cfg_path)
+        apply_data_root_from_config(cfg, config_path=cfg_path)
     except Exception:
         pass
     stats_collector: StatsCollector | None
@@ -719,6 +720,7 @@ def main(argv: list[str] | None = None) -> int:
         dnssec_validation=dnssec_validation,
         resolver_mode=resolver_mode,
         upstreams=upstreams,
+        server_cfg=server_cfg if isinstance(server_cfg, dict) else {},
     ):
         return 1
 
@@ -1768,8 +1770,12 @@ def _validate_backend_connections(
         if instance is None:
             continue
         name = type(instance).__name__
+        validator = getattr(instance, "validate_connection", None)
+        if not callable(validator):
+            # Backends without a probe are treated as N/A (not a startup failure).
+            continue
         try:
-            reachable = bool(instance.validate_connection())
+            reachable = bool(validator())
         except Exception as exc:
             logger.critical(
                 "Startup pre-flight check failed for %s backend %s: %s",
@@ -2284,8 +2290,9 @@ def _configure_dnssec_validation_resolver(
     dnssec_validation: str,
     resolver_mode: str,
     upstreams: list,
+    server_cfg: dict | None = None,
 ) -> bool:
-    """Brief: Configure DNSSEC validator resolver routing.
+    """Brief: Configure DNSSEC validator resolver routing and trust anchors.
 
     Inputs:
       - logger: Logger for dependency/mode diagnostics.
@@ -2293,10 +2300,52 @@ def _configure_dnssec_validation_resolver(
       - dnssec_validation: DNSSEC validation strategy.
       - resolver_mode: Effective resolver mode.
       - upstreams: Normalized forward upstreams.
+      - server_cfg: Optional server config mapping for trust-anchor store path.
 
     Outputs:
       - bool: True when startup should continue; False on fatal dependency errors.
     """
+
+    # Best-effort RFC 5011 trust-anchor store configuration. Path containment is
+    # enforced when server.data_root is set.
+    try:
+        from foghorn.dnssec.dnssec_validate import configure_trust_anchors
+        from foghorn.utils.safe_paths import enforce_data_root_path
+
+        dnssec_cfg = {}
+        if isinstance(server_cfg, dict):
+            raw_dnssec = server_cfg.get("dnssec") or {}
+            if isinstance(raw_dnssec, dict):
+                dnssec_cfg = raw_dnssec
+        ta_mode = str(
+            dnssec_cfg.get("trust_anchor_mode")
+            or dnssec_cfg.get("trust_anchors_mode")
+            or "static"
+        ).lower()
+        raw_store = (
+            dnssec_cfg.get("trust_anchor_store_path")
+            or dnssec_cfg.get("store_path")
+            or dnssec_cfg.get("trust_anchors_path")
+        )
+        store_path = None
+        if raw_store is not None and str(raw_store).strip():
+            store_path = enforce_data_root_path(
+                raw_store, kind="DNSSEC trust_anchor_store_path"
+            )
+        hold_add = int(dnssec_cfg.get("hold_down_add_days", 2) or 2)
+        hold_remove = int(dnssec_cfg.get("hold_down_remove_days", 2) or 2)
+        configure_trust_anchors(
+            mode=ta_mode,
+            store_path=store_path,
+            hold_down_add_days=hold_add,
+            hold_down_remove_days=hold_remove,
+        )
+    except ValueError as exc:
+        logger.error("DNSSEC trust-anchor path validation failed: %s", exc)
+        return False
+    except Exception:
+        # Optional path: DNSSEC module may be unavailable in minimal builds.
+        logger.debug("DNSSEC trust-anchor configuration skipped", exc_info=True)
 
     if dnssec_mode == "validate" and dnssec_validation in {"local", "local_extended"}:
         try:

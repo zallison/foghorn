@@ -203,16 +203,24 @@ class EtcHosts(BasePlugin):
         paths: List[str] = []
         if file_paths:
             for p in file_paths:
-                paths.append(os.path.expanduser(str(p)))
+                paths.append(str(p))
         if legacy_path:
-            paths.append(os.path.expanduser(str(legacy_path)))
+            paths.append(str(legacy_path))
         if not paths:
             paths = [
                 "/etc/hosts"
             ]  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-        # De-duplicate while preserving order
+        # De-duplicate while preserving order, then enforce data_root when set.
         paths = list(dict.fromkeys(paths))
-        return paths
+        from foghorn.utils.safe_paths import enforce_data_root_path, get_data_root
+
+        if get_data_root() is not None:
+            # When data_root is configured, every hosts file path must stay under
+            # it (including the historical /etc/hosts default).
+            return [
+                enforce_data_root_path(p, kind="EtcHosts file_paths") for p in paths
+            ]
+        return [os.path.expanduser(p) for p in paths]
 
     def _load_hosts(self) -> None:
         """
