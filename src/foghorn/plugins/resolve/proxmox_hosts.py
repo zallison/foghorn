@@ -13,6 +13,7 @@ import logging
 import re
 import threading
 import time
+import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 from urllib.parse import urljoin
@@ -20,6 +21,7 @@ from urllib.parse import urljoin
 import requests
 from dnslib import AAAA, PTR, QTYPE, RR, TXT, A, DNSHeader, DNSRecord
 from pydantic import BaseModel, ConfigDict, Field
+from urllib3.exceptions import InsecureRequestWarning
 
 from foghorn.plugins.resolve.base import (
     AdminPageSpec,
@@ -30,6 +32,11 @@ from foghorn.plugins.resolve.base import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Hosts we already logged the compact "TLS verify disabled" notice for.
+_INSECURE_TLS_NOTICES: set[str] = set()
+_INSECURE_TLS_NOTICES_LOCK = threading.Lock()
+_INSECURE_WARNING_FILTER_INSTALLED = False
 
 _DNS_LABEL_RE = re.compile(r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$")
 _IPCONFIG_RE = re.compile(
@@ -55,7 +62,7 @@ class ProxmoxEndpointConfig(BaseModel):
       - use_ipv4 / use_ipv6: Optional host IP overrides for all guests
       - ttl: Optional TTL override for this endpoint
       - suffix: Optional DNS suffix override
-      - reload_interval_second: Hint used for global poll interval
+      - reload_interval_second: Optional per-endpoint poll override (None = inherit plugin)
 
     Outputs:
       - ProxmoxEndpointConfig instance.
@@ -72,7 +79,9 @@ class ProxmoxEndpointConfig(BaseModel):
     use_ipv6: str | None = None
     ttl: int | None = Field(default=None, ge=0)
     suffix: str | None = None
-    reload_interval_second: float = Field(default=30.0, ge=0)
+    # None means inherit plugin-level reload_interval_second (do not default here —
+    # that would shadow a plugin-level value after model_dump).
+    reload_interval_second: float | None = Field(default=None, ge=0)
 
 
 class ProxmoxHostsConfig(BaseModel):
@@ -87,6 +96,10 @@ class ProxmoxHostsConfig(BaseModel):
       - include_templates: When true, publish template guests
       - use_guest_agent: Query QEMU agent for NICs
       - merge_addresses: Merge all address sources instead of first-wins
+      - include_cidrs: Optional CIDR allowlist for published addresses
+      - exclude_cidrs: Optional CIDR blocklist for published addresses
+      - include_interfaces: Optional guest NIC name allowlist (agent/LXC)
+      - address_limit: Max addresses published per family (0 = unlimited)
       - publish_vmid / publish_tags: Extra name aliases
       - discovery / expose_txt_in_additional: TXT inventory controls
       - suffix: Default DNS suffix
@@ -98,12 +111,16 @@ class ProxmoxHostsConfig(BaseModel):
 
     endpoints: list[ProxmoxEndpointConfig] = Field(default_factory=list)
     ttl: int = Field(default=60, ge=0)
-    reload_interval_second: float = Field(default=30.0, ge=0)
+    reload_interval_second: float = Field(default=300.0, ge=0)
     status: list[str] = Field(default_factory=lambda: ["running"])
     include_types: list[str] = Field(default_factory=lambda: ["qemu", "lxc"])
     include_templates: bool = False
     use_guest_agent: bool = True
     merge_addresses: bool = False
+    include_cidrs: list[str] = Field(default_factory=list)
+    exclude_cidrs: list[str] = Field(default_factory=list)
+    include_interfaces: list[str] = Field(default_factory=list)
+    address_limit: int = Field(default=0, ge=0)
     publish_vmid: bool = False
     publish_tags: bool = False
     discovery: bool = False
@@ -143,9 +160,36 @@ class _PveClient:
         self.verify = verify
         self.timeout = timeout
         self._session = requests.Session()
+        self._session.verify = verify
         self._ticket: str | None = None
         self._csrf: str | None = None
         self._ticket_expires: float = 0.0
+        # verify=False triggers urllib3 InsecureRequestWarning on every request;
+        # silence that flood and emit one compact notice per URL instead.
+        if verify is False:
+            self._note_insecure_tls()
+
+    def _note_insecure_tls(self) -> None:
+        """Brief: Suppress urllib3 flood; log one compact notice per base URL.
+
+        Inputs:
+          - None (uses self.base_url).
+        Outputs:
+          - None.
+        """
+
+        global _INSECURE_WARNING_FILTER_INSTALLED
+        host = self.base_url.rstrip("/")
+        with _INSECURE_TLS_NOTICES_LOCK:
+            if not _INSECURE_WARNING_FILTER_INSTALLED:
+                warnings.filterwarnings("ignore", category=InsecureRequestWarning)
+                _INSECURE_WARNING_FILTER_INSTALLED = True
+            already = host in _INSECURE_TLS_NOTICES
+            if not already:
+                _INSECURE_TLS_NOTICES.add(host)
+        if already:
+            return
+        logger.warning("TLS verify disabled for %s", host)
 
     def close(self) -> None:
         """Brief: Close the underlying HTTP session.
@@ -344,7 +388,7 @@ class ProxmoxHosts(BasePlugin):
                 logger.warning(message + " (still failing)", *args)
             return
         logger.debug(
-            "ProxmoxHosts: suppressed repeated condition %s (count=%d): " + message,
+            "suppressed repeated condition %s (count=%d): " + message,
             key,
             suppressed,
             *args,
@@ -435,6 +479,61 @@ class ProxmoxHosts(BasePlugin):
         return encoded.decode("utf-8", errors="ignore")
 
     @staticmethod
+    def _parse_cidr_list(raw: object, *, option_name: str) -> list[Any]:
+        """Brief: Parse a config list of CIDR/network strings.
+
+        Inputs:
+          - raw: str, list, or None from config.
+          - option_name: Config key name for warnings.
+        Outputs:
+          - list of ipaddress network objects (IPv4Network/IPv6Network).
+        """
+
+        if raw is None:
+            items: list[object] = []
+        elif isinstance(raw, str):
+            items = [raw]
+        elif isinstance(raw, list):
+            items = list(raw)
+        else:
+            items = [raw]
+
+        networks: list[Any] = []
+        for item in items:
+            text = str(item or "").strip()
+            if not text:
+                continue
+            try:
+                networks.append(ipaddress.ip_network(text, strict=False))
+            except ValueError:
+                logger.warning("ignoring invalid %s entry %r", option_name, item)
+        return networks
+
+    @staticmethod
+    def _parse_name_list(raw: object) -> list[str]:
+        """Brief: Normalize a string/list config value to lowercase names.
+
+        Inputs:
+          - raw: str, list, or None.
+        Outputs:
+          - Deduped lowercase non-empty strings.
+        """
+
+        if raw is None:
+            items: list[object] = []
+        elif isinstance(raw, str):
+            items = [raw]
+        elif isinstance(raw, list):
+            items = list(raw)
+        else:
+            items = [raw]
+        out: list[str] = []
+        for item in items:
+            name = str(item or "").strip().lower()
+            if name and name not in out:
+                out.append(name)
+        return out
+
     @staticmethod
     def _is_usable_ip(ip_text: str) -> bool:
         """Brief: Filter loopback, link-local, and invalid addresses.
@@ -442,7 +541,7 @@ class ProxmoxHosts(BasePlugin):
         Inputs:
           - ip_text: Address string.
         Outputs:
-          - True when the address should be published.
+          - True when the address is structurally publishable.
         """
 
         try:
@@ -452,6 +551,62 @@ class ProxmoxHosts(BasePlugin):
         if ip.is_loopback or ip.is_link_local or ip.is_unspecified or ip.is_multicast:
             return False
         return True
+
+    def _accept_ip(self, ip_text: str) -> bool:
+        """Brief: Apply basic + include_cidrs / exclude_cidrs filters.
+
+        Inputs:
+          - ip_text: Address string.
+        Outputs:
+          - True when the address should be published.
+        """
+
+        text = str(ip_text).strip()
+        if not self._is_usable_ip(text):
+            return False
+        try:
+            ip = ipaddress.ip_address(text)
+        except ValueError:
+            return False
+
+        include = getattr(self, "_include_cidrs", None) or []
+        if include and not any(ip in net for net in include):
+            return False
+        exclude = getattr(self, "_exclude_cidrs", None) or []
+        if exclude and any(ip in net for net in exclude):
+            return False
+        return True
+
+    def _interface_allowed(self, name: str) -> bool:
+        """Brief: Whether a guest NIC name may contribute addresses.
+
+        Inputs:
+          - name: Interface name from guest agent / LXC.
+        Outputs:
+          - True when include_interfaces is empty or name matches.
+        """
+
+        allow = getattr(self, "_include_interfaces", None) or []
+        if not allow:
+            return True
+        key = str(name or "").strip().lower()
+        return key in allow
+
+    def _apply_address_limit(
+        self, v4: list[str], v6: list[str]
+    ) -> tuple[list[str], list[str]]:
+        """Brief: Truncate per-family address lists when address_limit > 0.
+
+        Inputs:
+          - v4 / v6: Ordered address lists.
+        Outputs:
+          - Possibly truncated (v4, v6).
+        """
+
+        limit = int(getattr(self, "_address_limit", 0) or 0)
+        if limit <= 0:
+            return v4, v6
+        return v4[:limit], v6[:limit]
 
     @staticmethod
     def _resolve_tls_path(path: str) -> str:
@@ -510,6 +665,23 @@ class ProxmoxHosts(BasePlugin):
         self._publish_vmid = bool(self.config.get("publish_vmid", False))
         self._publish_tags = bool(self.config.get("publish_tags", False))
         self._include_templates = bool(self.config.get("include_templates", False))
+        self._include_cidrs = self._parse_cidr_list(
+            self.config.get("include_cidrs"), option_name="include_cidrs"
+        )
+        self._exclude_cidrs = self._parse_cidr_list(
+            self.config.get("exclude_cidrs"), option_name="exclude_cidrs"
+        )
+        self._include_interfaces = self._parse_name_list(
+            self.config.get("include_interfaces")
+        )
+        try:
+            self._address_limit = max(0, int(self.config.get("address_limit", 0)))
+        except (TypeError, ValueError):
+            logger.warning(
+                "invalid address_limit %r; using 0 (unlimited)",
+                self.config.get("address_limit"),
+            )
+            self._address_limit = 0
         try:
             self._max_workers = max(1, min(32, int(self.config.get("max_workers", 4))))
         except (TypeError, ValueError):
@@ -546,9 +718,7 @@ class ProxmoxHosts(BasePlugin):
             if key in ("ct", "container"):
                 key = "lxc"
             if key not in allowed_types:
-                logger.warning(
-                    "ProxmoxHosts: ignoring unsupported include_types %r", item
-                )
+                logger.warning("ignoring unsupported include_types %r", item)
                 continue
             if key not in include_types:
                 include_types.append(key)
@@ -558,11 +728,11 @@ class ProxmoxHosts(BasePlugin):
         endpoints_cfg: list[dict[str, object]] = []
         for item in raw_endpoints:
             if not isinstance(item, dict):
-                logger.warning("ProxmoxHosts: ignoring non-mapping endpoint %r", item)
+                logger.warning("ignoring non-mapping endpoint %r", item)
                 continue
             url_raw = str(item.get("url") or "").strip()
             if not url_raw:
-                logger.warning("ProxmoxHosts: endpoint missing url; skipping %r", item)
+                logger.warning("endpoint missing url; skipping %r", item)
                 continue
             if not url_raw.startswith(("http://", "https://")):
                 url_raw = "https://" + url_raw
@@ -575,20 +745,26 @@ class ProxmoxHosts(BasePlugin):
                 password = str(password)
             if not ((token_id and token_secret) or (user and password is not None)):
                 logger.warning(
-                    "ProxmoxHosts: endpoint %s needs "
-                    "token_id+token_secret or user+password",
+                    "endpoint %s needs " "token_id+token_secret or user+password",
                     url_raw,
                 )
                 continue
 
-            interval_raw = item.get(
-                "reload_interval_second",
-                self.config.get("reload_interval_second", 30.0),
-            )
+            # Prefer explicit per-endpoint interval; otherwise inherit plugin-level.
+            # Treat missing/None as inherit (pydantic must not inject a 30 default).
+            if (
+                "reload_interval_second" in item
+                and item.get("reload_interval_second") is not None
+            ):
+                interval_raw = item.get("reload_interval_second")
+            else:
+                interval_raw = self.config.get("reload_interval_second", 300.0)
             try:
-                interval = float(interval_raw)
+                interval = float(interval_raw)  # type: ignore[arg-type]
             except (TypeError, ValueError):
-                interval = 30.0
+                interval = float(
+                    self.config.get("reload_interval_second", 300.0) or 300.0
+                )
             if interval < 0:
                 interval = 0.0
 
@@ -601,9 +777,9 @@ class ProxmoxHosts(BasePlugin):
                     if ip_obj.version == 4:
                         host_ipv4 = str(ip_obj)
                     else:
-                        logger.warning("ProxmoxHosts: use_ipv4=%r is not IPv4", raw_v4)
+                        logger.warning("use_ipv4=%r is not IPv4", raw_v4)
                 except ValueError:
-                    logger.warning("ProxmoxHosts: invalid use_ipv4 %r", raw_v4)
+                    logger.warning("invalid use_ipv4 %r", raw_v4)
             raw_v6 = item.get("use_ipv6")
             if raw_v6:
                 try:
@@ -611,9 +787,9 @@ class ProxmoxHosts(BasePlugin):
                     if ip_obj.version == 6:
                         host_ipv6 = str(ip_obj)
                     else:
-                        logger.warning("ProxmoxHosts: use_ipv6=%r is not IPv6", raw_v6)
+                        logger.warning("use_ipv6=%r is not IPv6", raw_v6)
                 except ValueError:
-                    logger.warning("ProxmoxHosts: invalid use_ipv6 %r", raw_v6)
+                    logger.warning("invalid use_ipv6 %r", raw_v6)
 
             ttl_override = None
             ttl_raw = item.get("ttl")
@@ -622,9 +798,7 @@ class ProxmoxHosts(BasePlugin):
                     ttl_val = int(ttl_raw)
                     ttl_override = ttl_val if ttl_val >= 0 else None
                 except (TypeError, ValueError):
-                    logger.warning(
-                        "ProxmoxHosts: invalid ttl %r for %s", ttl_raw, url_raw
-                    )
+                    logger.warning("invalid ttl %r for %s", ttl_raw, url_raw)
 
             verify_tls = bool(item.get("verify_tls", True))
             tls_ca = str(item.get("tls_ca") or "").strip() or None
@@ -659,9 +833,7 @@ class ProxmoxHosts(BasePlugin):
             )
 
         if not endpoints_cfg:
-            logger.warning(
-                "ProxmoxHosts: no usable endpoints configured; plugin will stay empty"
-            )
+            logger.warning("no usable endpoints configured; plugin will stay empty")
 
         self._endpoints = endpoints_cfg
         self._lock = threading.RLock()
@@ -676,38 +848,30 @@ class ProxmoxHosts(BasePlugin):
         self._guests_meta: list[dict[str, object]] = []
         self._stop_event = threading.Event()
         self._clients: dict[str, _PveClient] = {}
-
-        for ep in self._endpoints:
-            url = str(ep["url"])
-            try:
-                client = _PveClient(
-                    base_url=url,
-                    token_id=ep.get("token_id"),  # type: ignore[arg-type]
-                    token_secret=ep.get("token_secret"),  # type: ignore[arg-type]
-                    user=ep.get("user"),  # type: ignore[arg-type]
-                    password=ep.get("password"),  # type: ignore[arg-type]
-                    verify=ep["verify"],  # type: ignore[arg-type]
-                )
-                self._clients[url] = client
-                logger.info("ProxmoxHosts: configured endpoint %s", url)
-            except Exception as exc:
-                self._note_condition_failure(
-                    f"endpoint:{url}",
-                    "ProxmoxHosts: failed to init client for %s: %s",
-                    url,
-                    exc,
-                )
+        # Clients are created lazily on first use. One healthy node is enough for
+        # the whole cluster (/cluster/resources); extra endpoints are failover only.
+        if self._endpoints:
+            logger.info(
+                "configured %d endpoint(s); cluster inventory via first healthy node",
+                len(self._endpoints),
+            )
 
         positive = [
             float(ep["interval"]) for ep in self._endpoints if float(ep["interval"]) > 0
         ]
-        cfg_interval = float(self.config.get("reload_interval_second", 30.0) or 0.0)
         if positive:
             self._reload_interval = min(positive)
-        elif cfg_interval > 0:
-            self._reload_interval = cfg_interval
         else:
-            self._reload_interval = 0.0
+            try:
+                self._reload_interval = float(
+                    self.config.get("reload_interval_second", 300.0) or 0.0
+                )
+            except (TypeError, ValueError):
+                self._reload_interval = 300.0
+            if self._reload_interval < 0:
+                self._reload_interval = 0.0
+
+        logger.info("reload interval %.1fs", float(self._reload_interval))
 
         self._reload_from_proxmox()
 
@@ -738,13 +902,12 @@ class ProxmoxHosts(BasePlugin):
                 self._reload_from_proxmox()
                 self._note_condition_ok(
                     "periodic-reload-error",
-                    "ProxmoxHosts: periodic reload recovered",
+                    "periodic reload recovered",
                 )
             except Exception as exc:
                 self._note_condition_failure(
                     "periodic-reload-error",
-                    "ProxmoxHosts: error during periodic reload; "
-                    "keeping previous maps: %s",
+                    "error during periodic reload; " "keeping previous maps: %s",
                     exc,
                 )
 
@@ -792,12 +955,13 @@ class ProxmoxHosts(BasePlugin):
         except Exception as exc:
             self._note_condition_failure(
                 f"endpoint:{url}",
-                "ProxmoxHosts: failed to create client for %s: %s",
+                "failed to create client for %s: %s",
                 url,
                 exc,
             )
             return None
         self._clients[url] = client
+        logger.info("using endpoint %s", url)
         return client
 
     def _fetch_cluster_vms(self, client: _PveClient) -> list[dict[str, Any]]:
@@ -835,14 +999,13 @@ class ProxmoxHosts(BasePlugin):
             return []
         return [x for x in data if isinstance(x, dict)]
 
-    @staticmethod
-    def _extract_agent_ips(payload: Any) -> tuple[list[str], list[str]]:
+    def _extract_agent_ips(self, payload: Any) -> tuple[list[str], list[str]]:
         """Brief: Parse guest-agent network-get-interfaces payload.
 
         Inputs:
           - payload: API ``data`` (often ``{result: [...]}``).
         Outputs:
-          - (ipv4_list, ipv6_list) usable addresses.
+          - (ipv4_list, ipv6_list) usable addresses after filters.
         """
 
         v4: list[str] = []
@@ -858,6 +1021,8 @@ class ProxmoxHosts(BasePlugin):
             name = str(iface.get("name") or "")
             if name == "lo" or name.startswith("lo."):
                 continue
+            if not self._interface_allowed(name):
+                continue
             addrs = iface.get("ip-addresses") or iface.get("ip_addresses") or []
             if not isinstance(addrs, list):
                 continue
@@ -867,7 +1032,7 @@ class ProxmoxHosts(BasePlugin):
                 ip_text = str(
                     entry.get("ip-address") or entry.get("ip_address") or ""
                 ).strip()
-                if not ip_text or not ProxmoxHosts._is_usable_ip(ip_text):
+                if not ip_text or not self._accept_ip(ip_text):
                     continue
                 try:
                     ip_obj = ipaddress.ip_address(ip_text)
@@ -880,14 +1045,13 @@ class ProxmoxHosts(BasePlugin):
                     v6.append(ip_text)
         return v4, v6
 
-    @staticmethod
-    def _extract_lxc_interface_ips(payload: Any) -> tuple[list[str], list[str]]:
+    def _extract_lxc_interface_ips(self, payload: Any) -> tuple[list[str], list[str]]:
         """Brief: Parse LXC /interfaces response for guest IPs.
 
         Inputs:
           - payload: API data list/dict.
         Outputs:
-          - (ipv4_list, ipv6_list).
+          - (ipv4_list, ipv6_list) after filters.
         """
 
         v4: list[str] = []
@@ -900,14 +1064,16 @@ class ProxmoxHosts(BasePlugin):
         for iface in items:
             if not isinstance(iface, dict):
                 continue
-            for key in ("inet", "ip", "address", "hwaddr"):
-                # Prefer explicit inet / inet6 style fields.
-                pass
+            name = str(iface.get("name") or iface.get("ifname") or "")
+            if name == "lo" or name.startswith("lo."):
+                continue
+            if not self._interface_allowed(name):
+                continue
             inet = iface.get("inet") or iface.get("ip") or iface.get("address")
             if isinstance(inet, str):
-                # May be "10.0.0.5/24"
+                # May be "addr/24"
                 ip_text = inet.split("/", 1)[0].strip()
-                if ProxmoxHosts._is_usable_ip(ip_text):
+                if self._accept_ip(ip_text):
                     try:
                         if (
                             ipaddress.ip_address(ip_text).version == 4
@@ -919,7 +1085,7 @@ class ProxmoxHosts(BasePlugin):
             inet6 = iface.get("inet6")
             if isinstance(inet6, str):
                 ip_text = inet6.split("/", 1)[0].strip()
-                if ProxmoxHosts._is_usable_ip(ip_text):
+                if self._accept_ip(ip_text):
                     try:
                         if (
                             ipaddress.ip_address(ip_text).version == 6
@@ -931,7 +1097,7 @@ class ProxmoxHosts(BasePlugin):
             # Some PVE versions return ip-addresses like the agent.
             nested = iface.get("ip-addresses")
             if nested:
-                a4, a6 = ProxmoxHosts._extract_agent_ips({"result": [iface]})
+                a4, a6 = self._extract_agent_ips({"result": [iface]})
                 for ip in a4:
                     if ip not in v4:
                         v4.append(ip)
@@ -940,8 +1106,9 @@ class ProxmoxHosts(BasePlugin):
                         v6.append(ip)
         return v4, v6
 
-    @staticmethod
-    def _extract_ipconfig_ips(config: dict[str, Any]) -> tuple[list[str], list[str]]:
+    def _extract_ipconfig_ips(
+        self, config: dict[str, Any]
+    ) -> tuple[list[str], list[str]]:
         """Brief: Parse cloud-init ipconfigN static addresses from guest config.
 
         Inputs:
@@ -960,7 +1127,7 @@ class ProxmoxHosts(BasePlugin):
                 ip_text = match.group(1).strip()
                 if ip_text.lower() in {"dhcp", "manual"}:
                     continue
-                if ProxmoxHosts._is_usable_ip(ip_text):
+                if self._accept_ip(ip_text):
                     try:
                         if (
                             ipaddress.ip_address(ip_text).version == 4
@@ -973,7 +1140,7 @@ class ProxmoxHosts(BasePlugin):
                 ip_text = match.group(1).strip()
                 if ip_text.lower() in {"dhcp", "dhcpv6", "auto", "manual"}:
                     continue
-                if ProxmoxHosts._is_usable_ip(ip_text):
+                if self._accept_ip(ip_text):
                     try:
                         if (
                             ipaddress.ip_address(ip_text).version == 6
@@ -1034,7 +1201,7 @@ class ProxmoxHosts(BasePlugin):
                 _take(a4, a6)
             except Exception as exc:
                 logger.debug(
-                    "ProxmoxHosts: agent NICs failed for %s/%s: %s",
+                    "agent NICs failed for %s/%s: %s",
                     node,
                     vmid,
                     exc,
@@ -1063,7 +1230,7 @@ class ProxmoxHosts(BasePlugin):
                 _take(a4, a6)
             except Exception as exc:
                 logger.debug(
-                    "ProxmoxHosts: lxc interfaces failed for %s/%s: %s",
+                    "lxc interfaces failed for %s/%s: %s",
                     node,
                     vmid,
                     exc,
@@ -1077,7 +1244,7 @@ class ProxmoxHosts(BasePlugin):
                 if isinstance(status, dict):
                     for key in ("ip", "agent-ip"):
                         val = status.get(key)
-                        if not isinstance(val, str) or not self._is_usable_ip(val):
+                        if not isinstance(val, str) or not self._accept_ip(val):
                             continue
                         ip_obj = ipaddress.ip_address(val)
                         if ip_obj.version == 4:
@@ -1114,12 +1281,13 @@ class ProxmoxHosts(BasePlugin):
                             v6 = list(c6)
             except Exception as exc:
                 logger.debug(
-                    "ProxmoxHosts: config fallback failed for %s/%s: %s",
+                    "config fallback failed for %s/%s: %s",
                     node,
                     vmid,
                     exc,
                 )
 
+        v4, v6 = self._apply_address_limit(v4, v6)
         return v4, v6, agent_hostname
 
     def _normalize_name_label(self, value: str) -> str:
@@ -1241,14 +1409,14 @@ class ProxmoxHosts(BasePlugin):
                 resources = self._fetch_cluster_vms(client)
                 self._note_condition_ok(
                     f"endpoint:{url}",
-                    "ProxmoxHosts: endpoint %s is reachable again",
+                    "endpoint %s is reachable again",
                     url,
                 )
             except Exception as exc:
                 last_error = exc
                 self._note_condition_failure(
                     f"endpoint:{url}",
-                    "ProxmoxHosts: failed listing VMs on %s: %s",
+                    "failed listing VMs on %s: %s",
                     url,
                     exc,
                 )
@@ -1296,7 +1464,7 @@ class ProxmoxHosts(BasePlugin):
                         try:
                             results.append(fut.result())
                         except Exception as exc:
-                            logger.debug("ProxmoxHosts: guest worker failed: %s", exc)
+                            logger.debug("guest worker failed: %s", exc)
 
             for guest, v4_list, v6_list, agent_hn in results:
                 if host_ipv4 is not None:
@@ -1305,7 +1473,7 @@ class ProxmoxHosts(BasePlugin):
                     v6_list = [str(host_ipv6)]
                 if not v4_list and not v6_list:
                     logger.debug(
-                        "ProxmoxHosts: no IPs for %s (vmid=%s); skipping",
+                        "no IPs for %s (vmid=%s); skipping",
                         guest.get("name"),
                         guest.get("vmid"),
                     )
@@ -1377,14 +1545,15 @@ class ProxmoxHosts(BasePlugin):
                     new_ttl_txt[nodes_owner] = int(self._ttl)
 
             loaded = True
-            # First successful endpoint wins for this cycle (cluster-wide view).
+            # One node answers for the whole cluster; stop after first success.
+            logger.debug("cluster inventory loaded from %s", url)
             break
 
         if not loaded:
             if last_error is not None:
                 self._note_condition_failure(
                     "cluster-reload",
-                    "ProxmoxHosts: all endpoints failed; keeping previous mappings: %s",
+                    "all endpoints failed; keeping previous mappings: %s",
                     last_error,
                 )
             return
@@ -1392,8 +1561,7 @@ class ProxmoxHosts(BasePlugin):
         if not new_v4 and not new_v6:
             self._note_condition_failure(
                 "no-guest-ip-mappings",
-                "ProxmoxHosts: reload succeeded but no guest "
-                "hostname/IP mappings were added",
+                "reload succeeded but no guest " "hostname/IP mappings were added",
             )
         else:
             self._note_condition_ok("no-guest-ip-mappings")
@@ -1401,14 +1569,36 @@ class ProxmoxHosts(BasePlugin):
 
         if new_txt:
             for owner, lines in new_txt.items():
+                # Sort body lines so parallel guest fetch order is stable.
+                body = sorted(lines)
                 if owner.startswith("_nodes"):
-                    lines.insert(0, f"nodes={len(lines)}")
+                    lines[:] = [f"nodes={len(body)}", *body]
                 elif owner.startswith("_guests"):
-                    lines.insert(0, f"guests={len(lines)}")
+                    lines[:] = [f"guests={len(body)}", *body]
                 else:
-                    lines.insert(0, f"records={len(lines)}")
+                    lines[:] = [f"records={len(body)}", *body]
+
+        # Guest worker pool order is nondeterministic; sort for stable snapshots.
+        guests_meta.sort(
+            key=lambda g: (
+                str(g.get("node") or ""),
+                int(g.get("vmid") or 0),
+                str(g.get("name") or ""),
+            )
+        )
 
         with self._lock:
+            # DNS-facing maps only — ignore worker ordering noise.
+            changed = (
+                new_v4 != getattr(self, "_forward_v4", {})
+                or new_v6 != getattr(self, "_forward_v6", {})
+                or new_reverse != getattr(self, "_reverse", {})
+                or new_ttl_v4 != getattr(self, "_ttl_v4", {})
+                or new_ttl_v6 != getattr(self, "_ttl_v6", {})
+                or new_ttl_ptr != getattr(self, "_ttl_ptr", {})
+                or new_txt != getattr(self, "_aggregate_txt", {})
+                or new_ttl_txt != getattr(self, "_ttl_txt", {})
+            )
             self._forward_v4 = new_v4
             self._forward_v6 = new_v6
             self._reverse = new_reverse
@@ -1419,13 +1609,15 @@ class ProxmoxHosts(BasePlugin):
             self._ttl_txt = new_ttl_txt
             self._guests_meta = guests_meta
 
-        logger.info(
-            "ProxmoxHosts: loaded %d guests (%d A, %d AAAA, %d PTR names)",
-            len(guests_meta),
-            len(new_v4),
-            len(new_v6),
-            len(new_reverse),
-        )
+        # Stay quiet on unchanged periodic polls; log only when maps differ.
+        if changed:
+            logger.info(
+                "loaded %d guests (%d A, %d AAAA, %d PTR names)",
+                len(guests_meta),
+                len(new_v4),
+                len(new_v6),
+                len(new_reverse),
+            )
 
     def get_admin_pages(self) -> list[AdminPageSpec]:
         """Brief: Describe the ProxmoxHosts admin page.
@@ -1572,7 +1764,7 @@ class ProxmoxHosts(BasePlugin):
             try:
                 request = DNSRecord.parse(req)
             except Exception as exc:
-                logger.warning("ProxmoxHosts: parse failure for A %s: %s", qname, exc)
+                logger.warning("parse failure for A %s: %s", qname, exc)
                 return None
             reply = DNSRecord(
                 DNSHeader(id=request.header.id, qr=1, aa=1, ra=1), q=request.q
@@ -1618,9 +1810,7 @@ class ProxmoxHosts(BasePlugin):
             try:
                 request = DNSRecord.parse(req)
             except Exception as exc:
-                logger.warning(
-                    "ProxmoxHosts: parse failure for AAAA %s: %s", qname, exc
-                )
+                logger.warning("parse failure for AAAA %s: %s", qname, exc)
                 return None
             reply = DNSRecord(
                 DNSHeader(id=request.header.id, qr=1, aa=1, ra=1), q=request.q
@@ -1668,7 +1858,7 @@ class ProxmoxHosts(BasePlugin):
             try:
                 request = DNSRecord.parse(req)
             except Exception as exc:
-                logger.warning("ProxmoxHosts: parse failure for TXT %s: %s", qname, exc)
+                logger.warning("parse failure for TXT %s: %s", qname, exc)
                 return None
             reply = DNSRecord(
                 DNSHeader(id=request.header.id, qr=1, aa=1, ra=1), q=request.q
@@ -1714,7 +1904,7 @@ class ProxmoxHosts(BasePlugin):
             try:
                 request = DNSRecord.parse(req)
             except Exception as exc:
-                logger.warning("ProxmoxHosts: parse failure for PTR %s: %s", qname, exc)
+                logger.warning("parse failure for PTR %s: %s", qname, exc)
                 return None
             reply = DNSRecord(
                 DNSHeader(id=request.header.id, qr=1, aa=1, ra=1), q=request.q
