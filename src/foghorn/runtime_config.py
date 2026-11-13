@@ -1129,9 +1129,14 @@ def _build_snapshot(
         resolver_mode = "master"
 
     try:
-        recursive_max_depth = int(resolver_cfg.get("max_depth", 16))
+        recursive_max_depth = int(resolver_cfg.get("max_depth", 12))
     except Exception:
-        recursive_max_depth = 16  # pragma: no cover - defensive
+        recursive_max_depth = 12  # pragma: no cover - defensive
+    # Canonical clamp shared with startup and config dump (1..32).
+    if recursive_max_depth < 1:
+        recursive_max_depth = 1
+    elif recursive_max_depth > 32:
+        recursive_max_depth = 32
     try:
         recursive_timeout_ms = int(resolver_cfg.get("timeout_ms", 2000))
     except Exception:
@@ -1589,7 +1594,7 @@ def _default_snapshot() -> RuntimeSnapshot:
         upstream_strategy="failover",
         upstream_max_concurrent=1,
         resolver_mode="forward",
-        recursive_max_depth=16,
+        recursive_max_depth=12,
         recursive_timeout_ms=2000,
         recursive_per_try_timeout_ms=2000,
         dnssec_mode="ignore",

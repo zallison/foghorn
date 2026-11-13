@@ -317,7 +317,7 @@ def test_build_snapshot_resolver_mode_defaults() -> None:
     cfg = {"server": {"resolver": {"mode": "recursive"}, "upstreams": []}}
     snap = _build_snapshot(cfg, stats_collector=None, generation=0)
     assert snap.resolver_mode == "recursive"
-    assert snap.recursive_max_depth == 16
+    assert snap.recursive_max_depth == 12
 
 
 def test_build_snapshot_invalid_numeric_values() -> None:
@@ -334,7 +334,7 @@ def test_build_snapshot_invalid_numeric_values() -> None:
     }
     snap = _build_snapshot(cfg, stats_collector=None, generation=0)
     assert snap.recursive_timeout_ms == 2000
-    assert snap.recursive_max_depth == 16
+    assert snap.recursive_max_depth == 12
 
 
 def test_build_snapshot_recursive_mode_no_upstreams() -> None:
@@ -681,6 +681,38 @@ def test_build_snapshot_passes_context_to_setup_runner(monkeypatch) -> None:
     assert captured["timeout_ms"] == snap.timeout_ms
     assert captured["resolver_mode"] == snap.resolver_mode
     assert captured["upstream_max_concurrent"] == snap.upstream_max_concurrent
+
+
+def test_build_snapshot_clamps_max_depth() -> None:
+    """Brief: Reload snapshot clamps resolver.max_depth to 1..32 with default 12.
+
+    Inputs:
+      - configs with low/high/default max_depth.
+
+    Outputs:
+      - None; asserts clamp and default behavior.
+    """
+
+    low = _build_snapshot(
+        {"server": {"resolver": {"mode": "recursive", "max_depth": 0}}},
+        stats_collector=None,
+        generation=0,
+    )
+    assert low.recursive_max_depth == 1
+
+    high = _build_snapshot(
+        {"server": {"resolver": {"mode": "recursive", "max_depth": 64}}},
+        stats_collector=None,
+        generation=0,
+    )
+    assert high.recursive_max_depth == 32
+
+    default = _build_snapshot(
+        {"server": {"resolver": {"mode": "recursive"}}},
+        stats_collector=None,
+        generation=0,
+    )
+    assert default.recursive_max_depth == 12
 
 
 def test_build_snapshot_configured_cache_load_failure_fail_closed(

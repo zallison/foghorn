@@ -231,7 +231,12 @@ class ServerResolverConfig(OpenModel):
         description="Resolver mode: forward | recursive | master (none).",
     )
     timeout_ms: int = Field(default=2000, ge=0)
-    max_depth: int = Field(default=16, ge=1)
+    max_depth: int = Field(
+        default=12,
+        ge=1,
+        le=32,
+        description="Recursive resolver max depth (clamped 1..32 at runtime).",
+    )
     allow_private_destinations: bool = Field(default=True)
     destination_allowlist: list[str] = Field(default_factory=list)
     per_try_timeout_ms: int = Field(default=2000, ge=0)

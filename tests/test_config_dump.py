@@ -417,3 +417,139 @@ def test_expand_upstreams_defaults_non_mapping_is_left_untouched() -> None:
     out = {"upstreams": "not-a-dict"}
     config_dump._expand_upstreams_defaults(out)
     assert out["upstreams"] == "not-a-dict"
+
+
+def test_build_effective_config_for_display_redacts_secrets() -> None:
+    """Brief: Display dump masks token/password/secret across nested blocks.
+
+    Inputs:
+      - cfg with http.auth, AXFR TSIG, features cookies/tsig, logging backend password.
+
+    Outputs:
+      - None; asserts sensitive values become '***' and non-secrets remain.
+    """
+
+    cfg = {
+        "server": {
+            "http": {
+                "host": "127.0.0.1",
+                "auth": {
+                    "mode": "token",
+                    "token": "super-secret-token",
+                    "password": "basic-pass",
+                },
+            },
+            "features": {
+                "cookies": {"secret": "cookie-secret", "secret_old": "old-cookie"},
+                "tsig": {
+                    "enabled": True,
+                    "keys": [{"name": "k.", "secret": "tsig-secret"}],
+                },
+            },
+            "axfr": {
+                "tsig": {
+                    "keys": [{"name": "axfr.", "secret": "axfr-secret"}],
+                }
+            },
+        },
+        "logging": {
+            "backends": [
+                {
+                    "backend": "postgres",
+                    "config": {"password": "db-password", "host": "db.example"},
+                }
+            ]
+        },
+    }
+
+    out = config_dump.build_effective_config_for_display(cfg)
+
+    auth = out["server"]["http"]["auth"]
+    assert auth["token"] == "***"
+    assert auth["password"] == "***"
+    assert auth["mode"] == "token"
+
+    cookies = out["server"]["features"]["cookies"]
+    assert cookies["secret"] == "***"
+    assert cookies["secret_old"] == "***"
+
+    assert out["server"]["features"]["tsig"]["keys"][0]["secret"] == "***"
+    assert out["server"]["axfr"]["tsig"]["keys"][0]["secret"] == "***"
+    assert out["server"]["axfr"]["tsig"]["keys"][0]["name"] == "axfr."
+
+    backend_cfg = out["logging"]["backends"][0]["config"]
+    assert backend_cfg["password"] == "***"
+    assert backend_cfg["host"] == "db.example"
+
+    # Input must remain untouched (deep-copy + redaction on the copy).
+    assert cfg["server"]["http"]["auth"]["token"] == "super-secret-token"
+
+
+def test_build_effective_config_for_display_honors_extra_redact_keys() -> None:
+    """Brief: server.http.redact_keys extends the default display redaction set.
+
+    Inputs:
+      - cfg with custom redact_keys including 'username'.
+
+    Outputs:
+      - None; asserts username is masked while unrelated keys stay.
+    """
+
+    cfg = {
+        "server": {
+            "http": {
+                "host": "127.0.0.1",
+                "redact_keys": ["token", "password", "secret", "username"],
+                "auth": {
+                    "mode": "basic",
+                    "username": "admin",
+                    "password": "pw",
+                    "token": None,
+                },
+            }
+        }
+    }
+    out = config_dump.build_effective_config_for_display(cfg)
+    auth = out["server"]["http"]["auth"]
+    assert auth["username"] == "***"
+    assert auth["password"] == "***"
+    assert auth["mode"] == "basic"
+
+
+def test_expand_server_http_defaults_auth_mode_token() -> None:
+    """Brief: Dump defaults match secure HttpAuthConfig (auth.mode=token).
+
+    Inputs:
+      - empty http mapping.
+
+    Outputs:
+      - None; asserts auth.mode defaults to token.
+    """
+
+    server_cfg: dict = {"http": {"host": "127.0.0.1"}}
+    config_dump._expand_server_http_defaults(server_cfg)
+    assert server_cfg["http"]["auth"]["mode"] == "token"
+
+
+def test_expand_server_resolver_defaults_clamps_max_depth() -> None:
+    """Brief: max_depth is clamped to the canonical 1..32 range.
+
+    Inputs:
+      - resolver blocks with out-of-range max_depth values.
+
+    Outputs:
+      - None; asserts low/high values are clamped and default is 12.
+    """
+
+    low = {"resolver": {"max_depth": 0}}
+    config_dump._expand_server_resolver_defaults(low)
+    assert low["resolver"]["max_depth"] == 1
+
+    high = {"resolver": {"max_depth": 99}}
+    config_dump._expand_server_resolver_defaults(high)
+    assert high["resolver"]["max_depth"] == 32
+
+    default = {"resolver": {}}
+    config_dump._expand_server_resolver_defaults(default)
+    assert default["resolver"]["max_depth"] == 12
+    assert default["resolver"]["use_asyncio"] is True

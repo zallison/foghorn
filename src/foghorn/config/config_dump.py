@@ -46,7 +46,8 @@ def build_effective_config_for_display(cfg: dict[str, Any]) -> dict[str, Any]:
     Outputs:
       - dict: Deep-copied configuration mapping with core runtime defaults
         inserted. Only keys already used by foghorn.main / admin webserver are
-        filled; unknown keys are preserved.
+        filled; unknown keys are preserved. Sensitive values (token/password/
+        secret and any server.http.redact_keys) are redacted to '***'.
       - When cfg is not a mapping, returns an empty dict.
 
     Example:
@@ -79,7 +80,84 @@ def build_effective_config_for_display(cfg: dict[str, Any]) -> dict[str, Any]:
     _expand_upstreams_defaults(out)
     _expand_logging_defaults(out)
 
-    return out
+    return _redact_secrets_for_display(out)
+
+
+_DEFAULT_DISPLAY_REDACT_KEYS: tuple[str, ...] = ("token", "password", "secret")
+
+
+def _redact_secrets_for_display(cfg: dict[str, Any]) -> dict[str, Any]:
+    """Brief: Recursively redact secret-like keys for display dumps.
+
+    Inputs:
+      - cfg: Effective config mapping (not mutated when sanitize_config succeeds).
+
+    Outputs:
+      - dict: Config with values for token/password/secret (plus any keys listed
+        under server.http.redact_keys) replaced by '***'. Covers http.auth,
+        AXFR/feature TSIG secrets, logging backend passwords, and nested maps.
+
+    Notes:
+      - Prefers the admin webserver sanitize_config helper when importable.
+    """
+
+    if not isinstance(cfg, dict):
+        return {}
+
+    redact_keys: list[str] = list(_DEFAULT_DISPLAY_REDACT_KEYS)
+    try:
+        server_cfg = cfg.get("server")
+        http_cfg = server_cfg.get("http") if isinstance(server_cfg, dict) else None
+        extra = http_cfg.get("redact_keys") if isinstance(http_cfg, dict) else None
+        if isinstance(extra, (list, tuple)):
+            for item in extra:
+                key = str(item).strip()
+                if key and key not in redact_keys:
+                    redact_keys.append(key)
+        elif extra is not None:
+            key = str(extra).strip()
+            if key and key not in redact_keys:
+                redact_keys.append(key)
+    except Exception:
+        pass
+
+    try:
+        from foghorn.servers.webserver.config_helpers import sanitize_config
+
+        return sanitize_config(cfg, redact_keys=redact_keys)
+    except Exception:
+        return _fallback_redact_secrets(cfg, redact_keys)
+
+
+def _fallback_redact_secrets(
+    cfg: dict[str, Any], redact_keys: list[str]
+) -> dict[str, Any]:
+    """Brief: In-process secret redaction when sanitize_config is unavailable.
+
+    Inputs:
+      - cfg: Config mapping to copy and redact.
+      - redact_keys: Exact key names whose values become '***'.
+
+    Outputs:
+      - dict: Deep-copied config with matching keys redacted.
+    """
+
+    redacted = copy.deepcopy(cfg)
+    targets = {str(k) for k in redact_keys if str(k)}
+
+    def _walk(node: Any) -> None:
+        if isinstance(node, dict):
+            for key, value in list(node.items()):
+                if str(key) in targets:
+                    node[key] = "***"
+                else:
+                    _walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                _walk(item)
+
+    _walk(redacted)
+    return redacted
 
 
 def dump_config_text(cfg: dict[str, Any], *, fmt: str = "yaml") -> str:
@@ -183,8 +261,8 @@ def _expand_server_listen_defaults(server_cfg: dict[str, Any]) -> None:
         "host": default_host,
         "port": default_port or 5335,
         "overload_response": udp_overload_default,
-        # Runtime defaults (see foghorn.main).
-        "use_asyncio": False,
+        # Runtime defaults (see foghorn.main / ListenerUdp model).
+        "use_asyncio": True,
         "allow_threaded_fallback": True,
         "exit_on_asyncio_failure": False,
         "max_inflight": 1024,
@@ -291,6 +369,11 @@ def _expand_server_resolver_defaults(server_cfg: dict[str, Any]) -> None:
         max_depth = int(resolver_cfg.get("max_depth", 12))
     except (TypeError, ValueError):
         max_depth = 12
+    # Canonical clamp shared with startup/reload (1..32).
+    if max_depth < 1:
+        max_depth = 1
+    elif max_depth > 32:
+        max_depth = 32
     resolver_cfg["max_depth"] = max_depth
 
     resolver_cfg["use_asyncio"] = bool(resolver_cfg.get("use_asyncio", True))
@@ -418,7 +501,8 @@ def _expand_server_http_defaults(server_cfg: dict[str, Any]) -> None:
     if not isinstance(auth_cfg, dict):
         auth_cfg = {}
         http_cfg["auth"] = auth_cfg
-    auth_cfg.setdefault("mode", "none")
+    # Match HttpAuthConfig secure default (mode=token).
+    auth_cfg.setdefault("mode", "token")
     auth_cfg.setdefault("token", None)
     auth_cfg.setdefault("username", None)
     auth_cfg.setdefault("password", None)

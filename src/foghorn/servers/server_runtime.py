@@ -1,16 +1,14 @@
 """DNSServer runtime wrapper extracted from server module."""
 
 import ipaddress
-
 import logging
 import socketserver
 from urllib.parse import urlparse
-from typing import Dict, List
 
 from foghorn.plugins.resolve import base as plugin_base
 from foghorn.plugins.resolve.base import BasePlugin
-from .dns_runtime_state import DNSRuntimeState
 
+from .dns_runtime_state import DNSRuntimeState
 from .udp_server import DNSUDPHandler
 
 logger = logging.getLogger("foghorn.server")
@@ -187,8 +185,8 @@ class DNSServer:
         self,
         host: str,
         port: int,
-        upstreams: List[Dict],
-        plugins: List[BasePlugin],
+        upstreams: list[dict],
+        plugins: list[BasePlugin],
         timeout: float = 2.0,
         timeout_ms: int = 2000,
         min_cache_ttl: int = 60,
@@ -201,7 +199,7 @@ class DNSServer:
         upstream_strategy: str = "failover",
         upstream_max_concurrent: int = 1,
         resolver_mode: str = "forward",
-        recursive_max_depth: int = 16,
+        recursive_max_depth: int = 12,
         recursive_timeout_ms: int = 2000,
         recursive_per_try_timeout_ms: int = 2000,
         cache_prefetch_enabled: bool = False,
@@ -305,10 +303,10 @@ class DNSServer:
                 )
         except Exception:
             logger.warning(
-                "Invalid recursive_max_depth=%r; using default 16",
+                "Invalid recursive_max_depth=%r; using default 12",
                 recursive_max_depth,
             )
-            DNSRuntimeState.recursive_max_depth = 16
+            DNSRuntimeState.recursive_max_depth = 12
         DNSRuntimeState.recursive_timeout_ms = int(recursive_timeout_ms)
         DNSRuntimeState.recursive_per_try_timeout_ms = int(recursive_per_try_timeout_ms)
 
@@ -495,9 +493,7 @@ class DNSServer:
             try:
                 network = ipaddress.ip_network(text, strict=False)
             except ValueError:
-                logger.warning(
-                    "Ignoring invalid ecs_trusted_client_cidrs entry"
-                )
+                logger.warning("Ignoring invalid ecs_trusted_client_cidrs entry")
                 continue
             normalized_cidrs.append(str(network))
         DNSRuntimeState.ecs_trusted_client_cidrs = normalized_cidrs
