@@ -267,14 +267,53 @@ def _validate_actions(
     return validated
 
 
+def _effective_max_line_bytes(max_line_bytes: Optional[int] = None) -> int:
+    """Brief: Resolve the effective journal/snapshot line size budget.
+
+    Inputs:
+      - max_line_bytes: Optional override. None uses DEFAULT_MAX_JOURNAL_LINE_BYTES.
+        0 disables the line-size cap.
+
+    Outputs:
+      - int: Effective max line bytes (0 means unlimited).
+    """
+    if max_line_bytes is None:
+        return int(DEFAULT_MAX_JOURNAL_LINE_BYTES)
+    try:
+        return max(0, int(max_line_bytes))
+    except (TypeError, ValueError):
+        return int(DEFAULT_MAX_JOURNAL_LINE_BYTES)
+
+
+def _tail_scan_window_bytes(max_line_bytes: int) -> int:
+    """Brief: Choose a journal tail-scan window that can include one full line.
+
+    Inputs:
+      - max_line_bytes: Effective max journal line size (0 = unlimited).
+
+    Outputs:
+      - int: Bytes to read from the file tail when recovering last seq/hash.
+    """
+    baseline = 2 * 1024 * 1024
+    if max_line_bytes <= 0:
+        # Unlimited lines: generous safety window rather than the whole file.
+        return max(baseline, 64 * 1024 * 1024)
+    return max(baseline, int(max_line_bytes) * 2 + 4096)
+
+
 def _scan_journal_tail(
-    journal_path: str, *, max_bytes: int = 1024 * 1024
+    journal_path: str,
+    *,
+    max_bytes: int = 2 * 1024 * 1024,
+    max_line_bytes: Optional[int] = None,
 ) -> Tuple[int, Optional[str]]:
     """Brief: Scan journal tail to find last seq and hash.
 
     Inputs:
       - journal_path: Path to journal file.
-      - max_bytes: Max bytes to read from file tail.
+      - max_bytes: Max bytes to read from file tail (raised when max_line_bytes
+        needs a larger window).
+      - max_line_bytes: Optional per-line budget used to size the tail window.
 
     Outputs:
       - Tuple of (last_seq, last_hash).
@@ -282,14 +321,18 @@ def _scan_journal_tail(
     if not os.path.exists(journal_path):
         return 0, None
     try:
+        line_budget = _effective_max_line_bytes(max_line_bytes)
+        window = max(int(max_bytes), _tail_scan_window_bytes(line_budget))
         size = os.path.getsize(journal_path)
-        start = max(0, size - int(max_bytes))
+        start = max(0, size - int(window))
         with open(journal_path, "r", encoding="utf-8") as fh:
             fh.seek(start)
             if start > 0:
                 fh.readline()
             lines = [line.strip() for line in fh if line.strip()]
         for line in reversed(lines):
+            if line_budget > 0 and len(line) > line_budget:
+                continue
             try:
                 data = json.loads(line)
                 seq = int(data.get("seq", 0) or 0)
@@ -451,7 +494,9 @@ class JournalWriter:
         self._last_fsync_ns: int = 0
         self._last_manifest_write_ns: int = 0
         self._last_size_warn_ns: int = 0
-        self._initialize_state()
+        # Seq/hash recovered under the zone flock (acquire_lock) to avoid TOCTOU.
+        self._state_initialized = False
+        self._max_line_bytes_for_scan: int = int(DEFAULT_MAX_JOURNAL_LINE_BYTES)
 
     def _ensure_dir(self) -> None:
         """Brief: Ensure journal directory exists with correct permissions.
@@ -472,14 +517,26 @@ class JournalWriter:
                 )
                 raise
 
-    def _initialize_state(self) -> None:
+    def _initialize_state(self, *, max_line_bytes: Optional[int] = None) -> None:
         """Brief: Initialize sequence and hash state from manifest and journal tail.
+
         Inputs:
-          - None.
+          - max_line_bytes: Optional per-line budget for tail recovery.
 
         Outputs:
           - None; initializes internal sequence and hash tracking.
+
+        Notes:
+          - Call while the zone flock is held (or when no concurrent writers
+            are possible) so seq/prev_hash cannot race across writers.
         """
+        if max_line_bytes is not None:
+            self._max_line_bytes_for_scan = _effective_max_line_bytes(max_line_bytes)
+
+        self._sequences = {}
+        self._last_hash = None
+        last_seq = 0
+
         try:
             manifest = load_manifest(self.zone_apex, self.base_dir)
             last_seq = int(getattr(manifest, "last_seq", 0) or 0)
@@ -488,7 +545,8 @@ class JournalWriter:
 
         try:
             last_seq_journal, last_hash = _scan_journal_tail(
-                self.journal_path, max_bytes=2 * 1024 * 1024
+                self.journal_path,
+                max_line_bytes=self._max_line_bytes_for_scan,
             )
             if last_seq_journal > last_seq:
                 last_seq = last_seq_journal
@@ -499,6 +557,7 @@ class JournalWriter:
 
         if last_seq > 0:
             self._sequences[JournalEntry] = int(last_seq)
+        self._state_initialized = True
 
     def _maybe_persist_sequence(self, seq: int, interval_ms: int = 5000) -> None:
         """Brief: Persist last sequence to manifest on an interval.
@@ -561,6 +620,10 @@ class JournalWriter:
           - bool: True if lock acquired, False otherwise.
         """
         if not hasattr(fcntl, "LOCK_EX"):
+            try:
+                self._initialize_state()
+            except Exception:  # pragma: no cover - defensive recovery
+                self._state_initialized = False
             return True
 
         try:
@@ -582,6 +645,12 @@ class JournalWriter:
             ):  # pragma: no cover - nocover: lock metadata write is best effort
                 pass
             setattr(self, "_lock_fh", fh)
+            # Refresh seq/hash only after the flock is held so concurrent
+            # JournalWriter instances cannot share a stale chain base.
+            try:
+                self._initialize_state()
+            except Exception:  # pragma: no cover - defensive recovery
+                self._state_initialized = False
             return True
         except (OSError, BlockingIOError):
             try:
@@ -714,6 +783,17 @@ class JournalWriter:
             logger.warning("Invalid or empty journal actor for zone %s", self.zone_apex)
             return None
 
+        # Align recovery/read budgets with the configured transaction cap.
+        # max_transaction_bytes == 0 means unlimited (no hidden 1 MiB cap).
+        line_budget = (
+            int(max_transaction_bytes) if int(max_transaction_bytes) > 0 else 0
+        )
+        self._max_line_bytes_for_scan = line_budget
+
+        if not self._state_initialized:
+            # Tests / single-process paths that skip acquire_lock still need a base.
+            self._initialize_state(max_line_bytes=line_budget)
+
         seq = self.next_sequence(JournalEntry)
         op_id = str(uuid.uuid4())
         ts_unix_ns = time.time_ns()
@@ -737,14 +817,15 @@ class JournalWriter:
         ).hexdigest()
 
         line = json.dumps(entry.to_dict(), separators=(",", ":"))
-        if (
-            max_transaction_bytes > 0
-            and len(line.encode("utf-8")) > max_transaction_bytes
-        ):
+        line_bytes = len(line.encode("utf-8"))
+        if max_transaction_bytes > 0 and line_bytes > max_transaction_bytes:
             logger.warning(
                 "Journal entry exceeds max_transaction_bytes for zone %s",
                 self.zone_apex,
             )
+            # Roll back reserved sequence so a rejected entry does not gap recovery.
+            with self._lock:
+                self._sequences[JournalEntry] = max(0, int(seq) - 1)
             return None
         try:
             if self._file_handle is None or self._file_handle.closed:
@@ -761,6 +842,8 @@ class JournalWriter:
 
         except (OSError, IOError) as exc:
             logger.error("Failed to write journal entry: %s", exc)
+            with self._lock:
+                self._sequences[JournalEntry] = max(0, int(seq) - 1)
             return None
 
     def close(self) -> None:
@@ -1094,6 +1177,7 @@ def replay_journal_to_records(
     records: Dict[tuple[str, int], tuple[int, List[str], List[str]]],
     *,
     start_seq: int = 0,
+    max_line_bytes: Optional[int] = None,
 ) -> tuple[Dict[tuple[str, int], tuple[int, List[str], List[str]]], int]:
     """Brief: Replay zone journal onto records and return highest applied seq.
 
@@ -1102,11 +1186,15 @@ def replay_journal_to_records(
       - base_dir: Journal base directory.
       - records: Baseline records mapping.
       - start_seq: Minimum sequence number to replay.
+      - max_line_bytes: Optional line budget shared by snapshot + journal read.
 
     Outputs:
       - Tuple of (updated_records, last_applied_seq).
     """
-    snapshot_records, snapshot_seq = load_snapshot(zone_apex, base_dir)
+    line_budget = _effective_max_line_bytes(max_line_bytes)
+    snapshot_records, snapshot_seq = load_snapshot(
+        zone_apex, base_dir, max_line_bytes=line_budget
+    )
     updated = dict(records or {})
     if snapshot_records:
         updated = replace_zone_records(
@@ -1117,7 +1205,9 @@ def replay_journal_to_records(
     effective_start_seq = max(int(start_seq), int(snapshot_seq) + 1, 1)
     reader = JournalReader(zone_apex=zone_apex, base_dir=base_dir)
     last_seq = max(int(start_seq), int(snapshot_seq))
-    for entry in reader.iter_entries(start_seq=effective_start_seq):
+    for entry in reader.iter_entries(
+        start_seq=effective_start_seq, max_line_bytes=line_budget
+    ):
         updated = apply_actions_to_records(updated, entry.actions)
         last_seq = max(last_seq, int(entry.seq))
     return updated, last_seq
@@ -1129,6 +1219,7 @@ def save_snapshot(
     records: Dict[tuple[str, int], tuple[int, List[str], List[str]]],
     *,
     seq: int,
+    max_line_bytes: Optional[int] = None,
 ) -> bool:
     """Brief: Persist a compact snapshot atomically for a zone.
 
@@ -1137,15 +1228,19 @@ def save_snapshot(
       - base_dir: Journal base directory.
       - records: Current records map.
       - seq: High-watermark seq covered by this snapshot.
+      - max_line_bytes: Max JSON row size; None uses default, 0 disables.
 
     Outputs:
-      - bool: True when snapshot persisted.
+      - bool: True when snapshot persisted. False when any row exceeds the
+        line budget (fail closed so compaction does not rotate the journal
+        onto an unreadable snapshot).
     """
     try:
         zone = _normalize_zone_apex(zone_apex)
     except ValueError:
         return False
 
+    line_budget = _effective_max_line_bytes(max_line_bytes)
     zone_dir = os.path.join(base_dir, zone)
     snapshot_path = os.path.join(zone_dir, "snapshot.ndjson")
     tmp_path = snapshot_path + ".tmp"
@@ -1161,7 +1256,11 @@ def save_snapshot(
                 "schema_version": JOURNAL_SCHEMA_VERSION,
                 "snapshot_seq": int(seq),
             }
-            fh.write(json.dumps(header, separators=(",", ":")) + "\n")
+            header_line = json.dumps(header, separators=(",", ":"))
+            if line_budget > 0 and len(header_line) > line_budget:
+                logger.error("Snapshot header exceeds max_line_bytes for zone %s", zone)
+                raise ValueError("snapshot header too large")
+            fh.write(header_line + "\n")
             for (owner, qtype), (ttl, values, sources) in sorted(records.items()):
                 row = {
                     "owner": dns_names.normalize_name(owner),
@@ -1170,12 +1269,21 @@ def save_snapshot(
                     "values": [str(v) for v in list(values or [])],
                     "sources": [str(s) for s in list(sources or [])],
                 }
-                fh.write(json.dumps(row, separators=(",", ":")) + "\n")
+                row_line = json.dumps(row, separators=(",", ":"))
+                if line_budget > 0 and len(row_line) > line_budget:
+                    logger.error(
+                        "Snapshot row exceeds max_line_bytes for zone %s owner=%s qtype=%s",
+                        zone,
+                        row["owner"],
+                        row["qtype"],
+                    )
+                    raise ValueError("snapshot row too large")
+                fh.write(row_line + "\n")
             fh.flush()
             os.fsync(fh.fileno())
         os.replace(tmp_path, snapshot_path)
         return True
-    except (OSError, IOError):
+    except (OSError, IOError, ValueError):
         if os.path.exists(tmp_path):
             try:
                 os.unlink(tmp_path)
@@ -1189,21 +1297,27 @@ def save_snapshot(
 def load_snapshot(
     zone_apex: str,
     base_dir: str,
+    *,
+    max_line_bytes: Optional[int] = None,
 ) -> tuple[Dict[tuple[str, int], tuple[int, List[str], List[str]]], int]:
     """Brief: Load a compact snapshot for a zone.
 
     Inputs:
       - zone_apex: Zone apex.
       - base_dir: Journal base directory.
+      - max_line_bytes: Max JSON row size; None uses default, 0 disables.
 
     Outputs:
-      - Tuple of (records, snapshot_seq).
+      - Tuple of (records, snapshot_seq). Missing file yields ({}, 0).
+        Corrupt/oversize existing snapshots also yield ({}, 0) after an error
+        log so callers do not treat a failed load as a successful empty snapshot.
     """
     try:
         zone = _normalize_zone_apex(zone_apex)
     except ValueError:
         return {}, 0
 
+    line_budget = _effective_max_line_bytes(max_line_bytes)
     snapshot_path = os.path.join(base_dir, zone, "snapshot.ndjson")
     if not os.path.exists(snapshot_path):
         return {}, 0
@@ -1214,10 +1328,11 @@ def load_snapshot(
         with open(snapshot_path, "r", encoding="utf-8") as fh:
             first = fh.readline().strip()
             if first:
-                if (
-                    DEFAULT_MAX_JOURNAL_LINE_BYTES > 0
-                    and len(first) > DEFAULT_MAX_JOURNAL_LINE_BYTES
-                ):
+                if line_budget > 0 and len(first) > line_budget:
+                    logger.error(
+                        "Snapshot header exceeds max_line_bytes for zone %s; ignoring snapshot",
+                        zone,
+                    )
                     return {}, 0
                 head = json.loads(first)
                 snapshot_seq = int(head.get("snapshot_seq", 0) or 0)
@@ -1225,10 +1340,11 @@ def load_snapshot(
                 raw = line.strip()
                 if not raw:
                     continue
-                if (
-                    DEFAULT_MAX_JOURNAL_LINE_BYTES > 0
-                    and len(raw) > DEFAULT_MAX_JOURNAL_LINE_BYTES
-                ):
+                if line_budget > 0 and len(raw) > line_budget:
+                    logger.error(
+                        "Snapshot row exceeds max_line_bytes for zone %s; ignoring snapshot",
+                        zone,
+                    )
                     return {}, 0
                 row = json.loads(raw)
                 key = (
@@ -1240,7 +1356,10 @@ def load_snapshot(
                     [str(v) for v in list(row.get("values", []) or [])],
                     [str(s) for s in list(row.get("sources", []) or [])],
                 )
-    except (OSError, IOError, ValueError, json.JSONDecodeError):
+    except (OSError, IOError, ValueError, json.JSONDecodeError) as exc:
+        logger.error(
+            "Failed to load snapshot for zone %s: %s", zone_apex, exc, exc_info=True
+        )
         return {}, 0
     return records, snapshot_seq
 
@@ -1272,6 +1391,8 @@ def compact_zone_journal(
     old_path = os.path.join(zone_dir, "journal.old")
 
     zone_records = filter_records_for_zone(records, zone)
+    # Fail closed: never rotate the journal if the snapshot cannot be written
+    # within the line budget (avoids silent dynamic-state loss on restart).
     if not save_snapshot(zone, base_dir, zone_records, seq=seq):
         return False
 

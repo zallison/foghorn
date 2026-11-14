@@ -1075,8 +1075,11 @@ def test_journal_writer_initialize_state_and_persist_warn_branches(
         journal, "_scan_journal_tail", lambda *_a, **_k: (7, "tail-hash")
     )
     writer = journal.JournalWriter(zone_apex="example.com", base_dir=str(tmp_path))
+    # Seq/hash recovery runs under acquire_lock (or lazy append), not __init__.
+    assert writer.acquire_lock() is True
     assert writer._sequences[journal.JournalEntry] == 7
     assert writer._last_hash == "tail-hash"
+    writer.release_lock()
 
     monkeypatch.setattr(
         journal,
@@ -1089,8 +1092,10 @@ def test_journal_writer_initialize_state_and_persist_warn_branches(
         lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("scan boom")),
     )
     writer_err = journal.JournalWriter(zone_apex="example.net", base_dir=str(tmp_path))
+    assert writer_err.acquire_lock() is True
     assert writer_err._sequences == {}
     assert writer_err._last_hash is None
+    writer_err.release_lock()
 
     saved_seq: list[int] = []
     monkeypatch.setattr(journal, "load_manifest", lambda *_a, **_k: journal.Manifest())
@@ -1374,3 +1379,117 @@ def test_compact_zone_journal_write_and_manifest_failures(
         )
         is False
     )
+
+
+def test_save_snapshot_rejects_oversized_row(tmp_path) -> None:
+    """Brief: save_snapshot fails closed when a row exceeds max_line_bytes.
+
+    Inputs:
+      - tmp_path: Pytest temp directory.
+
+    Outputs:
+      - None; asserts False and no snapshot file when a fat RRset is present.
+    """
+    base_dir = str(tmp_path)
+    zone = "fat.example"
+    records = {
+        ("host.fat.example", 16): (
+            60,
+            ["x" * 4096],
+            ["update"],
+        )
+    }
+    assert (
+        journal.save_snapshot(zone, base_dir, records, seq=3, max_line_bytes=512)
+        is False
+    )
+    snapshot_path = os.path.join(base_dir, zone, "snapshot.ndjson")
+    assert not os.path.exists(snapshot_path)
+
+
+def test_compact_zone_journal_fails_closed_on_fat_snapshot(tmp_path) -> None:
+    """Brief: Compaction must not rotate the journal when snapshot write fails.
+
+    Inputs:
+      - tmp_path: Pytest temp directory.
+
+    Outputs:
+      - None; asserts journal content preserved when snapshot row is oversize.
+    """
+    base_dir = str(tmp_path)
+    zone = "keep.example"
+    zone_dir = os.path.join(base_dir, zone)
+    os.makedirs(zone_dir, exist_ok=True)
+    journal_path = os.path.join(zone_dir, "journal.ndjson")
+    with open(journal_path, "w", encoding="utf-8") as fh:
+        fh.write('{"seq":1,"marker":"keep-me"}\\n')
+
+    # Force a tiny line budget so the fat TXT value cannot be snapshotted.
+    original = journal.DEFAULT_MAX_JOURNAL_LINE_BYTES
+    try:
+        journal.DEFAULT_MAX_JOURNAL_LINE_BYTES = 128
+        ok = journal.compact_zone_journal(
+            zone_apex=zone,
+            base_dir=base_dir,
+            records={("a.keep.example", 16): (60, ["y" * 4096], ["update"])},
+            seq=9,
+        )
+    finally:
+        journal.DEFAULT_MAX_JOURNAL_LINE_BYTES = original
+
+    assert ok is False
+    with open(journal_path, "r", encoding="utf-8") as fh:
+        assert "keep-me" in fh.read()
+
+
+def test_journal_writer_refreshes_state_under_lock(tmp_path) -> None:
+    """Brief: Second writer under lock sees first writer's seq/hash base.
+
+    Inputs:
+      - tmp_path: Pytest temp directory.
+
+    Outputs:
+      - None; asserts sequential seq assignment across lock handoff.
+    """
+    base_dir = str(tmp_path)
+    zone = "chain.example"
+    w1 = journal.JournalWriter(zone_apex=zone, base_dir=base_dir)
+    assert w1.acquire_lock() is True
+    e1 = w1.append_entry(
+        actions=[
+            {
+                "type": "rr_add",
+                "owner": "a.chain.example",
+                "qtype": 1,
+                "ttl": 60,
+                "value": "192.0.2.1",
+            }
+        ],
+        actor={"client_ip": "192.0.2.10"},
+        max_transaction_bytes=1024 * 1024,
+    )
+    assert e1 is not None
+    assert e1.seq == 1
+    w1.release_lock()
+    w1.close()
+
+    w2 = journal.JournalWriter(zone_apex=zone, base_dir=base_dir)
+    assert w2.acquire_lock() is True
+    e2 = w2.append_entry(
+        actions=[
+            {
+                "type": "rr_add",
+                "owner": "b.chain.example",
+                "qtype": 1,
+                "ttl": 60,
+                "value": "192.0.2.2",
+            }
+        ],
+        actor={"client_ip": "192.0.2.11"},
+        max_transaction_bytes=1024 * 1024,
+    )
+    assert e2 is not None
+    assert e2.seq == 2
+    assert e2.prev_hash is not None
+    w2.release_lock()
+    w2.close()
