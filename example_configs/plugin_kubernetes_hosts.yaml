@@ -1,0 +1,54 @@
+# Example: KubernetesHosts resolve plugin
+#
+# Auth options (pick one):
+#   - in_cluster: true
+#   - kubeconfig: /path/to/kubeconfig
+#   - api_server + token (+ optional ca_cert / tls_verify)
+
+vars:
+  DOMAIN: cluster.local
+  UPSTREAM_IP: "1.1.1.1"
+
+upstreams:
+  endpoints:
+    - host: "${UPSTREAM_IP}"
+      port: 53
+
+logging:
+  python:
+    level: info
+
+plugins:
+  - type: kubernetes_hosts
+    id: k8s-lan
+    enabled: true
+    comment: "Publish Service/Pod IPs from the local cluster."
+    hooks:
+      pre_resolve: 40
+    config:
+      abort_on_failure: false
+      targets:
+        ips:
+          - "0.0.0.0/0"
+        listeners: any
+        qtypes: [A, AAAA, PTR, TXT]
+        opcodes: [QUERY]
+      in_cluster: true
+      tls_verify: true
+      namespaces:
+        - default
+      include_services: true
+      include_pods: true
+      suffix: "${DOMAIN}"
+      ttl: 30
+      poll_interval_seconds: 30
+      use_ipv4: true
+      use_ipv6: true
+      expose_txt_in_additional: false
+
+server:
+  listen:
+    udp:
+      enabled: true
+      address: "0.0.0.0"
+      port: 53
