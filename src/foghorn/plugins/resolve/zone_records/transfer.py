@@ -18,6 +18,7 @@ import dns.tsigkeyring
 
 from dnslib import QTYPE, RCODE, RR, DNSHeader, DNSRecord
 
+from foghorn.servers.tsig_utils import normalize_tsig_algorithm
 from foghorn.utils.register_caches import registered_lru_cache
 
 logger = logging.getLogger(__name__)
@@ -168,29 +169,6 @@ def _get_axfr_policy() -> dict:
         }
 
 
-def _normalize_tsig_algorithm(algorithm: str) -> str:
-    """Brief: Normalize TSIG algorithm names to canonical short forms.
-
-    Inputs:
-      - algorithm: TSIG algorithm name from config.
-
-    Outputs:
-      - str: Canonical algorithm string used by dnspython.
-    """
-    alg = str(algorithm or "").strip().rstrip(".").lower()
-    if "hmac-sha512" in alg:
-        return "hmac-sha512"
-    if "hmac-sha384" in alg:
-        return "hmac-sha384"
-    if "hmac-sha256" in alg:
-        return "hmac-sha256"
-    if "hmac-sha1" in alg:
-        return "hmac-sha1"
-    if "hmac-md5" in alg:
-        return "hmac-md5"
-    return alg or "hmac-sha256"
-
-
 def _prepare_axfr_tsig_signer(
     req_wire: Optional[bytes],
     policy: dict,
@@ -223,7 +201,7 @@ def _prepare_axfr_tsig_signer(
         secret = key.get("secret")
         if not name or not secret:
             continue
-        algorithm = _normalize_tsig_algorithm(key.get("algorithm", "hmac-sha256"))
+        algorithm = normalize_tsig_algorithm(key.get("algorithm", "hmac-sha256"))
         usable_keys.append(
             {
                 "name": str(name),
@@ -266,12 +244,12 @@ def _prepare_axfr_tsig_signer(
         return None, None
 
     keyname = str(getattr(request, "keyname", ""))
-    keyalgorithm = _normalize_tsig_algorithm(getattr(request, "keyalgorithm", ""))
+    keyalgorithm = normalize_tsig_algorithm(getattr(request, "keyalgorithm", ""))
     selected = None
     for key in usable_keys:
         if str(key.get("name", "")).rstrip(".").lower() != keyname.rstrip(".").lower():
             continue
-        if _normalize_tsig_algorithm(key.get("algorithm", "")) != keyalgorithm:
+        if normalize_tsig_algorithm(key.get("algorithm", "")) != keyalgorithm:
             continue
         selected = key
         break

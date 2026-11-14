@@ -12,42 +12,21 @@ from __future__ import annotations
 
 import ipaddress
 import logging
-import re
-import threading
-import time
 from collections.abc import Iterable
 
-from dnslib import AAAA, PTR, QTYPE, RR, TXT, A, DNSHeader, DNSRecord
 from pydantic import BaseModel, ConfigDict, Field
-
-try:  # cachetools is an optional dependency; fall back to shim when missing.
-    from cachetools import Cache, LRUCache, TTLCache  # type: ignore[import]
-
-    from foghorn.utils.register_caches import registered_cached
-except (
-    Exception
-):  # pragma: nocover defensive: optional cachetools dependency may be absent in some environments
-
-    class TTLCache(dict):  # type: ignore[override]
-        def __init__(self, *args, **kwargs) -> None:
-            """Lightweight TTLCache shim when cachetools is unavailable."""
-            super().__init__()
-
-    def registered_cached(*, cache, **kwargs):  # type: ignore[no-redef]
-        """No-op registered_cached decorator used when cachetools is unavailable."""
-
-        def decorator(func):
-            return func
-
-        return decorator
-
 
 from foghorn.plugins.resolve.base import (
     AdminPageSpec,
-    BasePlugin,
-    PluginContext,
-    PluginDecision,
     plugin_aliases,
+)
+from foghorn.plugins.resolve.hosts_common import (
+    DynamicHostsPlugin,
+    discovery_owner,
+    is_valid_dns_label,
+    normalize_suffix,
+    resolve_plugin_tls_path,
+    sanitize_txt_chunk,
 )
 
 try:  # docker SDK is optional at import time; plugin degrades gracefully.
@@ -64,11 +43,6 @@ except (
 
 
 logger = logging.getLogger(__name__)
-
-# Short-lived caches for suffix owner helpers. These are pure string transforms
-# used during periodic reload and do not affect resolver statistics semantics.
-_DOCKER_AGG_OWNER_CACHE: Cache = LRUCache(maxsize=1024)
-_DOCKER_HOSTS_OWNER_CACHE: Cache = LRUCache(maxsize=1024)
 
 
 class DockerEndpointConfig(BaseModel):
@@ -157,7 +131,7 @@ class DockerHostsConfig(BaseModel):
 
 
 @plugin_aliases("docker-hosts", "docker_hosts", "docker")
-class DockerHosts(BasePlugin):
+class DockerHosts(DynamicHostsPlugin):
     """Resolve container hostnames and reverse IPs via Docker inspect.
 
     Brief:
@@ -192,155 +166,16 @@ class DockerHosts(BasePlugin):
 
         return DockerHostsConfig
 
-    def _ensure_condition_log_state(self) -> None:
-        """Brief: Lazily initialize sticky condition-log lock and maps.
+    def _reload_maps(self) -> None:
+        """Brief: Reload maps from Docker (DynamicHostsPlugin hook).
 
         Inputs:
           - None.
-
         Outputs:
-          - None; creates lock/maps when setup() has not run yet (tests/helpers).
+          - None.
         """
 
-        if not hasattr(self, "_condition_log_lock") or self._condition_log_lock is None:
-            self._condition_log_lock = threading.Lock()
-        if (
-            not hasattr(self, "_condition_failed_by_key")
-            or self._condition_failed_by_key is None
-        ):
-            self._condition_failed_by_key = {}
-        if (
-            not hasattr(self, "_condition_suppressed_by_key")
-            or self._condition_suppressed_by_key is None
-        ):
-            self._condition_suppressed_by_key = {}
-        if (
-            not hasattr(self, "_condition_last_warned_by_key")
-            or self._condition_last_warned_by_key is None
-        ):
-            self._condition_last_warned_by_key = {}
-        if not hasattr(self, "_condition_rewarn_interval_seconds"):
-            self._condition_rewarn_interval_seconds = 3600.0
-
-    def _note_condition_failure(self, key: str, message: str, *args: object) -> None:
-        """Brief: Log sticky-condition failures without flooding reload loops.
-
-        Used for sticky problems (unreachable Docker endpoints, empty mappings).
-        Operators get a WARNING on first failure, quiet repeats (DEBUG), and an
-        hourly WARNING reminder while the condition remains true.
-
-        Inputs:
-          - key: Stable identifier for the condition (for example
-            "endpoint:unix:///var/run/docker.sock").
-          - message: Log message template passed to logger.warning().
-          - args: Optional %-format arguments for message.
-
-        Outputs:
-          - None; logs on healthy->failing transition, re-warns at most once per
-            `_condition_rewarn_interval_seconds` while still failing, otherwise
-            increments a suppressed-repeat counter (DEBUG only).
-
-        Example:
-          self._note_condition_failure(
-              f"endpoint:{url}",
-              "failed to list containers for %s: %s",
-              url,
-              exc,
-          )
-        """
-
-        self._ensure_condition_log_state()
-        now = time.monotonic()
-        interval = float(getattr(self, "_condition_rewarn_interval_seconds", 3600.0))
-        with self._condition_log_lock:
-            prev_failed = bool(self._condition_failed_by_key.get(key, False))
-            last_warned = self._condition_last_warned_by_key.get(key)
-            if prev_failed:
-                should_rewarn = interval > 0 and (
-                    last_warned is None or (now - last_warned) >= interval
-                )
-                if should_rewarn:
-                    # Count only quiet repeats since the previous WARNING.
-                    suppressed = self._condition_suppressed_by_key.get(key, 0)
-                    self._condition_suppressed_by_key[key] = 0
-                    self._condition_last_warned_by_key[key] = now
-                else:
-                    self._condition_suppressed_by_key[key] = (
-                        self._condition_suppressed_by_key.get(key, 0) + 1
-                    )
-                    suppressed = self._condition_suppressed_by_key[key]
-            else:
-                self._condition_failed_by_key[key] = True
-                self._condition_suppressed_by_key[key] = 0
-                self._condition_last_warned_by_key[key] = now
-                suppressed = 0
-                should_rewarn = False
-
-        if not prev_failed:
-            logger.warning(message, *args)
-            return
-
-        if should_rewarn:
-            if suppressed > 0:
-                logger.warning(
-                    message + " (still failing; suppressed %d repeated warning(s))",
-                    *args,
-                    suppressed,
-                )
-            else:
-                logger.warning(message + " (still failing)", *args)
-            return
-
-        logger.debug(
-            "suppressed repeated condition %s (count=%d): " + message,
-            key,
-            suppressed,
-            *args,
-        )
-
-    def _note_condition_ok(
-        self,
-        key: str,
-        recovery_message: str | None = None,
-        *args: object,
-    ) -> None:
-        """Brief: Clear a sticky failure condition and log recovery once.
-
-        Inputs:
-          - key: Same identifier passed to _note_condition_failure().
-          - recovery_message: Optional logger.info() template emitted only when
-            clearing a previously failed condition. When omitted, recovery is
-            silent aside from clearing internal state.
-          - args: Optional %-format arguments for recovery_message.
-
-        Outputs:
-          - None; logs INFO on failing->healthy transition when recovery_message
-            is provided (includes suppressed repeat count when > 0).
-        """
-
-        self._ensure_condition_log_state()
-        with self._condition_log_lock:
-            was_failed = bool(self._condition_failed_by_key.get(key, False))
-            suppressed = int(self._condition_suppressed_by_key.get(key, 0) or 0)
-            self._condition_failed_by_key[key] = False
-            self._condition_suppressed_by_key[key] = 0
-            self._condition_last_warned_by_key.pop(key, None)
-
-        if not was_failed or not recovery_message:
-            return
-
-        if suppressed > 0:
-            logger.info(
-                recovery_message + " (suppressed %d repeated failure warning(s))",
-                *args,
-                suppressed,
-            )
-            return
-
-        if args:
-            logger.info(recovery_message, *args)
-        else:
-            logger.info("%s", recovery_message)
+        self._reload_from_docker()
 
     def setup(self) -> None:
         """Brief: Initialize DockerHosts and build the initial container mapping.
@@ -356,15 +191,8 @@ class DockerHosts(BasePlugin):
             aggregate TXT entries based on current Docker containers.
         """
 
-        # Runtime configuration
-        self._ttl = int(self.config.get("ttl", 300))
-        # Sticky condition logging: warn on first failure, hourly while still
-        # failing, info once on recovery.
-        self._condition_log_lock = threading.Lock()
-        self._condition_failed_by_key: dict[str, bool] = {}
-        self._condition_suppressed_by_key: dict[str, int] = {}
-        self._condition_last_warned_by_key: dict[str, float] = {}
-        self._condition_rewarn_interval_seconds = 3600.0
+        # Runtime configuration + shared host maps / condition logging.
+        self._init_dynamic_hosts_state(default_ttl=int(self.config.get("ttl", 300)))
 
         # Health/status allowlist. Containers whose effective health/status is
         # not in this list are skipped.
@@ -406,18 +234,7 @@ class DockerHosts(BasePlugin):
         # Optional default suffix applied to container names when no
         # per-endpoint suffix is provided, e.g. "docker.mycorp" so that a
         # container named "web" is published as "web.docker.mycorp".
-        suffix_raw = self.config.get("suffix")
-        if suffix_raw:
-            base_suffix = str(suffix_raw).strip().strip(".")
-            if base_suffix:
-                # Normalize any internal runs of dots and remove empty labels so
-                # values like "docker..zaa" become "docker.zaa".
-                parts = [p for p in base_suffix.split(".") if p]
-                self._suffix = ".".join(parts).lower() if parts else ""
-            else:
-                self._suffix = ""
-        else:
-            self._suffix = ""
+        self._suffix = normalize_suffix(self.config.get("suffix"))
 
         # Optional per-container TXT customisation driven by docker inspect
         # JSONPath-like expressions. When txt_fields is provided, each entry
@@ -556,16 +373,7 @@ class DockerHosts(BasePlugin):
 
             # Optional per-endpoint suffix; when absent, we fall back to the
             # plugin-level suffix stored in self._suffix.
-            ep_suffix_raw = item.get("suffix")
-            if ep_suffix_raw:
-                ep_suffix_base = str(ep_suffix_raw).strip().strip(".")
-                if ep_suffix_base:
-                    parts = [p for p in ep_suffix_base.split(".") if p]
-                    ep_suffix = ".".join(parts).lower() if parts else ""
-                else:
-                    ep_suffix = ""
-            else:
-                ep_suffix = ""
+            ep_suffix = normalize_suffix(item.get("suffix"))
 
             endpoints_cfg.append(
                 {
@@ -602,21 +410,8 @@ class DockerHosts(BasePlugin):
 
         self._endpoints: list[dict[str, object]] = endpoints_cfg
 
-        # Shared state protected by a re-entrant lock so future refresh hooks can
-        # safely update mappings.
-        self._lock = threading.RLock()
-        self._forward_v4: dict[str, list[str]] = {}
-        self._forward_v6: dict[str, list[str]] = {}
-        self._reverse: dict[str, str] = {}
-        # Per-name TTL maps populated by _reload_from_docker.
-        self._ttl_v4: dict[str, int] = {}
-        self._ttl_v6: dict[str, int] = {}
-        self._ttl_ptr: dict[str, int] = {}
-        self._aggregate_txt: dict[str, list[str]] = {}
-        self._ttl_txt: dict[str, int] = {}
         # Per-host exported ports (hostports) for admin UI display.
         self._hostports: dict[str, list[str]] = {}
-        self._stop_event = threading.Event()
 
         # Docker clients per endpoint URL (when docker SDK is available)
         self._clients: dict[str, object] = {}
@@ -652,64 +447,7 @@ class DockerHosts(BasePlugin):
         # Optionally start a background refresher to keep mappings up to date
         # without relying on signals. When reload_interval is 0 or negative, the
         # periodic loop is disabled and only the initial snapshot is used.
-        if self._reload_interval > 0:
-            t = threading.Thread(
-                target=self._reload_loop,
-                name="DockerHostsPoller",
-                daemon=True,
-            )
-            t.start()
-
-    def _reload_loop(self) -> None:
-        """Brief: Periodically refresh container mappings on a fixed interval.
-
-        Inputs:
-          - None (uses self._reload_interval and _reload_from_docker()).
-
-        Outputs:
-          - None; runs in a background daemon thread until process exit.
-        """
-
-        # Simple loop: sleep for the configured interval, then attempt a reload.
-        # Any unexpected exceptions are logged and do not terminate the thread.
-        interval = float(getattr(self, "_reload_interval", 0.0))
-        if interval <= 0:
-            return
-
-        while True:
-            if self._stop_event.wait(timeout=interval):
-                return
-            try:
-                self._reload_from_docker()
-                self._note_condition_ok(
-                    "periodic-reload-error",
-                    "periodic reload recovered",
-                )
-            except (
-                Exception
-            ) as exc:  # pragma: nocover defensive: periodic reload failures are logged but not worth fragile tests
-                # Avoid emitting a full stack trace for periodic reload failures so
-                # that transient Docker connectivity issues do not flood logs.
-                self._note_condition_failure(
-                    "periodic-reload-error",
-                    "error during periodic reload; keeping previous mappings: %s",
-                    exc,
-                )
-
-    def shutdown(self) -> None:
-        """Brief: Signal background refresh thread to stop.
-
-        Inputs:
-          - None.
-
-        Outputs:
-          - None.
-        """
-
-        try:
-            self._stop_event.set()
-        except Exception:
-            return
+        self._start_reload_loop(thread_name="DockerHostsPoller")
 
     def _iter_containers_for_endpoint(
         self, endpoint: dict[str, object]
@@ -778,44 +516,6 @@ class DockerHosts(BasePlugin):
         return result
 
     @staticmethod
-    def _resolve_tls_path(path: str) -> str:
-        """Brief: Resolve a Docker TLS path relative to config dir / CWD.
-
-        Inputs:
-          - path: Absolute or relative cert/key/CA path from endpoint config.
-
-        Outputs:
-          - str: Resolved filesystem path (may not exist yet).
-
-        Notes:
-          - Matches server.http / listen.dot path resolution via
-            resolve_tls_path so relative keys/ paths work under Docker
-            (CWD=/foghorn, config=/foghorn/config/config.yaml).
-        """
-
-        import os
-
-        from foghorn.servers.webserver.tls_certs import resolve_tls_path
-
-        config_path = None
-        try:
-            from foghorn.runtime_config import get_config_path
-
-            config_path = get_config_path()
-        except Exception:
-            config_path = None
-        if not config_path:
-            for candidate in (
-                os.environ.get("FOGHORN_CONFIG"),
-                "config/config.yaml",
-                "/foghorn/config/config.yaml",
-            ):
-                if candidate and os.path.isfile(candidate):
-                    config_path = candidate
-                    break
-        return resolve_tls_path(path, config_path=config_path)
-
-    @staticmethod
     def _build_tls_config(endpoint: dict[str, object]) -> object | None:
         """Brief: Build docker TLSConfig from endpoint settings.
 
@@ -858,11 +558,11 @@ class DockerHosts(BasePlugin):
 
         # Resolve relative paths against the config directory (same as DoT/HTTP).
         if tls_cert:
-            tls_cert = DockerHosts._resolve_tls_path(tls_cert)
+            tls_cert = resolve_plugin_tls_path(tls_cert)
         if tls_key:
-            tls_key = DockerHosts._resolve_tls_path(tls_key)
+            tls_key = resolve_plugin_tls_path(tls_key)
         if tls_ca:
-            tls_ca = DockerHosts._resolve_tls_path(tls_ca)
+            tls_ca = resolve_plugin_tls_path(tls_ca)
 
         # Stash resolved paths so _build_docker_client mounts the same files.
         endpoint["tls_cert"] = tls_cert
@@ -1051,30 +751,6 @@ class DockerHosts(BasePlugin):
         return docker.DockerClient(base_url=url)
 
     @staticmethod
-    def _is_valid_dns_name(name: str) -> bool:
-        """Brief: Validate a normalized DNS *label* before suffix expansion.
-
-        Inputs:
-          - name: Candidate hostname label (single label; no suffix) without
-            leading/trailing dots.
-
-        Outputs:
-          - bool indicating whether the label is publishable.
-        """
-        label = str(name or "").strip().strip(".").lower()
-        if not label:
-            return False
-        # Names are validated as a single label here; suffix/TLD is appended
-        # later when building owner names.
-        if "." in label:
-            return False
-        if len(label) > 63:
-            return False
-
-        label_re = re.compile(r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$")
-        return bool(label_re.match(label))
-
-    @staticmethod
     def _is_valid_container_id_alias(name: str) -> bool:
         """Brief: Validate a full Docker container ID alias.
 
@@ -1092,22 +768,6 @@ class DockerHosts(BasePlugin):
             if ch not in "0123456789abcdef":
                 return False
         return True
-
-    @staticmethod
-    def _sanitize_txt_chunk(text: str, max_bytes: int = 253) -> str:
-        """Brief: Remove control characters and clamp TXT chunk UTF-8 bytes.
-
-        Inputs:
-          - text: Raw text to emit as a DNS TXT character-string.
-          - max_bytes: Maximum UTF-8 byte budget for the chunk.
-
-        Outputs:
-          - Sanitized text chunk.
-        """
-
-        cleaned = re.sub(r"[\x00-\x1f\x7f]", "", str(text or ""))
-        encoded = cleaned.encode("utf-8")[:max_bytes]
-        return encoded.decode("utf-8", errors="ignore")
 
     def _reload_from_docker(self) -> None:
         """Brief: Rebuild in-memory host/IP maps by inspecting all containers.
@@ -1153,9 +813,7 @@ class DockerHosts(BasePlugin):
             # the endpoint under _hosts.<suffix> (or _hosts).
             if self._discovery:
                 ep_suffix = endpoint.get("suffix") or getattr(self, "_suffix", "")
-                record_owner = self._hosts_owner_for_suffix(
-                    str(ep_suffix or "").strip()
-                )
+                record_owner = discovery_owner("_hosts", str(ep_suffix or "").strip())
                 host_ipv4 = endpoint.get("host_ipv4") or ""
                 host_ipv6 = endpoint.get("host_ipv6") or ""
                 parts: list[str] = []
@@ -1312,7 +970,7 @@ class DockerHosts(BasePlugin):
                     normalized_candidates.append((key, is_container_id_alias))
                 valid_names: list[str] = []
                 for key, is_container_id_alias in normalized_candidates:
-                    if self._is_valid_dns_name(key):
+                    if is_valid_dns_label(key):
                         valid_names.append(key)
                         continue
                     if is_container_id_alias and self._is_valid_container_id_alias(key):
@@ -1372,7 +1030,7 @@ class DockerHosts(BasePlugin):
                 base_canonical = (
                     str(base_canonical).strip(".").lower().replace("_", "-")
                 )
-                if not self._is_valid_dns_name(base_canonical):
+                if not is_valid_dns_label(base_canonical):
                     base_canonical = normalized_names[0]
 
                 if ep_suffix:
@@ -1465,8 +1123,8 @@ class DockerHosts(BasePlugin):
                 # Optional aggregate TXT record (_containers.<suffix>) that
                 # summarizes all containers.
                 if self._discovery:
-                    record_owner = self._aggregate_owner_for_suffix(
-                        str(ep_suffix or "").strip()
+                    record_owner = discovery_owner(
+                        "_containers", str(ep_suffix or "").strip()
                     )
                     new_txt.setdefault(record_owner, []).append(line)
                     new_ttl_txt[record_owner] = int(self._ttl)
@@ -1812,50 +1470,6 @@ class DockerHosts(BasePlugin):
             if s:
                 return str(s).strip().lower()
         return "running"
-
-    @staticmethod
-    @registered_cached(cache=_DOCKER_AGG_OWNER_CACHE)
-    def _aggregate_owner_for_suffix(suffix: str) -> str:
-        """Brief: Build the container aggregate TXT owner name for a suffix.
-
-        Inputs:
-          - suffix: DNS suffix (may be empty, may contain trailing dots).
-
-        Outputs:
-          - Normalized owner name for the aggregate TXT record.
-            - With suffix: "_containers.<suffix>"
-            - Without suffix: "_containers"
-        """
-
-        # Normalize suffix so that it never begins or ends with a dot and
-        # collapse any repeated dots (e.g. "docker..zaa" -> "docker.zaa").
-        raw = str(suffix).strip().strip(".")
-        parts = [p for p in raw.split(".") if p]
-        suf = ".".join(parts).lower()
-        if suf:
-            return f"_containers.{suf}"
-        return "_containers"
-
-    @staticmethod
-    @registered_cached(cache=_DOCKER_HOSTS_OWNER_CACHE)
-    def _hosts_owner_for_suffix(suffix: str) -> str:
-        """Brief: Build the host-level TXT owner name for a suffix.
-
-        Inputs:
-          - suffix: DNS suffix (may be empty, may contain trailing dots).
-
-        Outputs:
-          - Normalized owner name for the host summary TXT record.
-            - With suffix: "_hosts.<suffix>"
-            - Without suffix: "_hosts"
-        """
-
-        raw = str(suffix).strip().strip(".")
-        parts = [p for p in raw.split(".") if p]
-        suf = ".".join(parts).lower()
-        if suf:
-            return f"_hosts.{suf}"
-        return "_hosts"
 
     @staticmethod
     def _format_aggregate_line(
@@ -2268,7 +1882,7 @@ class DockerHosts(BasePlugin):
             len(s) > max_len
         ):  # pragma: nocover defensive: guards against excessively long TXT lines in pathological configurations
             s = s[: max_len - 3] + "..."
-        s = DockerHosts._sanitize_txt_chunk(s)
+        s = sanitize_txt_chunk(s)
         return s, hostports
 
     @staticmethod
@@ -2332,288 +1946,3 @@ class DockerHosts(BasePlugin):
         _add_ip(v6_set, net_settings.get("GlobalIPv6Address"))
 
         return hostname, v4_set, v6_set
-
-    def _make_ip_response(
-        self,
-        qname: str,
-        qtype: int,
-        req: bytes,
-        addrs: list[str],
-        ttl: int,
-    ) -> bytes | None:
-        """Brief: Build a minimal A/AAAA DNS response for a single owner.
-
-        Inputs:
-          - qname: Owner name for the DNS question (as a string).
-          - qtype: Numeric QTYPE (typically QTYPE.A or QTYPE.AAAA).
-          - req: Raw DNS request wire bytes.
-          - addrs: List of IP address strings to include as answers.
-          - ttl: Integer TTL (seconds) to apply to each answer RR.
-
-        Outputs:
-          - Optional[bytes]: Packed DNS response bytes on success, or None when
-            the incoming packet cannot be parsed.
-
-        Notes:
-          - This helper is used by tests to exercise parse-failure behaviour and
-            keeps the response-building logic in one place.
-        """
-
-        try:
-            request = DNSRecord.parse(req)
-        except Exception as exc:
-            log = getattr(self, "logger", logger)
-            log.warning(
-                "parse failure building response for %s %s: %s",
-                qname,
-                QTYPE.get(qtype, str(qtype)),
-                exc,
-            )
-            return None
-
-        reply = DNSRecord(
-            DNSHeader(id=request.header.id, qr=1, aa=1, ra=1), q=request.q
-        )
-
-        if not addrs:
-            return reply.pack()
-
-        for ipaddr in addrs:
-            if qtype == QTYPE.AAAA:
-                rdata = AAAA(ipaddr)
-                rtype = QTYPE.AAAA
-            else:
-                # Default to A for unknown/other qtypes; callers only use A/AAAA.
-                rdata = A(ipaddr)
-                rtype = QTYPE.A
-
-            reply.add_answer(
-                RR(
-                    rname=request.q.qname,
-                    rtype=rtype,
-                    rclass=1,
-                    ttl=int(ttl),
-                    rdata=rdata,
-                )
-            )
-
-        return reply.pack()
-
-    def pre_resolve(
-        self, qname: str, qtype: int, req: bytes, ctx: PluginContext
-    ) -> PluginDecision | None:
-        """Brief: Answer A/AAAA/PTR (and optional TXT) queries using Docker mappings.
-
-        Inputs:
-          - qname: The queried domain name.
-          - qtype: DNS query type (A, AAAA, PTR, etc.).
-          - req: Raw DNS request wire bytes.
-          - ctx: PluginContext for the client request.
-
-        Outputs:
-          - PluginDecision("override") when a matching container mapping is
-            found; otherwise None to allow normal resolution.
-        """
-
-        if not self.targets(ctx):
-            return None
-
-        # Normalize queried name: trim leading/trailing dots and lowercase so
-        # that stray leading dots do not prevent lookups (e.g. ".foo.example").
-        name = qname.strip(".").lower()
-
-        if qtype == QTYPE.A:
-            # For docker hostnames, answer A queries and also include any
-            # per-host TXT summaries in the same reply.
-            with self._lock:
-                a_candidates = list(self._forward_v4.get(name, []))
-                a_ttl = int(self._ttl_v4.get(name, self._ttl))
-                txts = list(self._aggregate_txt.get(name, []))
-                txt_ttl = int(self._ttl_txt.get(name, self._ttl))
-
-            if not a_candidates and not txts:
-                return None
-
-            try:
-                request = DNSRecord.parse(req)
-            except Exception as exc:
-                logger.warning("parse failure for A %s: %s", qname, exc)
-                return None
-
-            reply = DNSRecord(
-                DNSHeader(id=request.header.id, qr=1, aa=1, ra=1), q=request.q
-            )
-
-            for ipaddr in a_candidates:
-                reply.add_answer(
-                    RR(
-                        rname=request.q.qname,
-                        rtype=QTYPE.A,
-                        rclass=1,
-                        ttl=a_ttl,
-                        rdata=A(ipaddr),
-                    )
-                )
-
-            if self._expose_txt_in_additional:
-                for line in txts:
-                    reply.add_ar(
-                        RR(
-                            rname=request.q.qname,
-                            rtype=QTYPE.TXT,
-                            rclass=1,
-                            ttl=txt_ttl,
-                            rdata=TXT([self._sanitize_txt_chunk(str(line))]),
-                        )
-                    )
-                try:
-                    if len(reply.pack()) > 512:
-                        reply.ar = []
-                        reply.header.tc = 1
-                except Exception:
-                    reply.ar = []
-                    reply.header.tc = 1
-
-            return PluginDecision(action="override", response=reply.pack())
-
-        if qtype == QTYPE.AAAA:
-            # For docker hostnames, answer AAAA queries and also include any
-            # per-host TXT summaries in the same reply.
-            with self._lock:
-                aaaa_candidates = list(self._forward_v6.get(name, []))
-                aaaa_ttl = int(self._ttl_v6.get(name, self._ttl))
-                txts = list(self._aggregate_txt.get(name, []))
-                txt_ttl = int(self._ttl_txt.get(name, self._ttl))
-
-            if not aaaa_candidates and not txts:
-                return None
-
-            try:
-                request = DNSRecord.parse(req)
-            except Exception as exc:
-                logger.warning("parse failure for AAAA %s: %s", qname, exc)
-                return None
-
-            reply = DNSRecord(
-                DNSHeader(id=request.header.id, qr=1, aa=1, ra=1), q=request.q
-            )
-
-            for ipaddr in aaaa_candidates:
-                reply.add_answer(
-                    RR(
-                        rname=request.q.qname,
-                        rtype=QTYPE.AAAA,
-                        rclass=1,
-                        ttl=aaaa_ttl,
-                        rdata=AAAA(ipaddr),
-                    )
-                )
-
-            if self._expose_txt_in_additional:
-                for line in txts:
-                    reply.add_ar(
-                        RR(
-                            rname=request.q.qname,
-                            rtype=QTYPE.TXT,
-                            rclass=1,
-                            ttl=txt_ttl,
-                            rdata=TXT([self._sanitize_txt_chunk(str(line))]),
-                        )
-                    )
-                try:
-                    if len(reply.pack()) > 512:
-                        reply.ar = []
-                        reply.header.tc = 1
-                except Exception:
-                    reply.ar = []
-                    reply.header.tc = 1
-
-            return PluginDecision(action="override", response=reply.pack())
-
-        if qtype == QTYPE.TXT:
-            # When TXT is requested for a docker host, also include any A/AAAA
-            # records for that host in the same response.
-            with self._lock:
-                txts = list(self._aggregate_txt.get(name, []))
-                txt_ttl = int(self._ttl_txt.get(name, self._ttl))
-                a_candidates = list(self._forward_v4.get(name, []))
-                a_ttl = int(self._ttl_v4.get(name, self._ttl))
-                aaaa_candidates = list(self._forward_v6.get(name, []))
-                aaaa_ttl = int(self._ttl_v6.get(name, self._ttl))
-
-            if not txts and not a_candidates and not aaaa_candidates:
-                return None
-
-            try:
-                request = DNSRecord.parse(req)
-            except Exception as exc:
-                logger.warning("parse failure for TXT %s: %s", qname, exc)
-                return None
-
-            reply = DNSRecord(
-                DNSHeader(id=request.header.id, qr=1, aa=1, ra=1), q=request.q
-            )
-
-            for line in txts:
-                reply.add_answer(
-                    RR(
-                        rname=request.q.qname,
-                        rtype=QTYPE.TXT,
-                        rclass=1,
-                        ttl=txt_ttl,
-                        rdata=TXT([self._sanitize_txt_chunk(str(line))]),
-                    )
-                )
-
-            for ipaddr in a_candidates:
-                reply.add_answer(
-                    RR(
-                        rname=request.q.qname,
-                        rtype=QTYPE.A,
-                        rclass=1,
-                        ttl=a_ttl,
-                        rdata=A(ipaddr),
-                    )
-                )
-
-            for ipaddr in aaaa_candidates:
-                reply.add_answer(
-                    RR(
-                        rname=request.q.qname,
-                        rtype=QTYPE.AAAA,
-                        rclass=1,
-                        ttl=aaaa_ttl,
-                        rdata=AAAA(ipaddr),
-                    )
-                )
-
-            return PluginDecision(action="override", response=reply.pack())
-
-        if qtype == QTYPE.PTR:
-            with self._lock:
-                hostname = self._reverse.get(name)
-                ttl = int(self._ttl_ptr.get(name, self._ttl))
-            if not hostname:
-                return None
-
-            try:
-                request = DNSRecord.parse(req)
-            except Exception as exc:
-                logger.warning("parse failure for PTR %s: %s", qname, exc)
-                return None
-
-            reply = DNSRecord(
-                DNSHeader(id=request.header.id, qr=1, aa=1, ra=1), q=request.q
-            )
-            reply.add_answer(
-                RR(
-                    rname=request.q.qname,
-                    rtype=QTYPE.PTR,
-                    rclass=1,
-                    ttl=ttl,
-                    rdata=PTR(str(hostname).rstrip(".") + "."),
-                )
-            )
-            return PluginDecision(action="override", response=reply.pack())
-
-        return None

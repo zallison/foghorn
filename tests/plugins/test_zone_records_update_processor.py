@@ -24,10 +24,12 @@ from dnslib import QTYPE, RCODE, DNSRecord
 
 from foghorn.plugins.resolve.zone_records import update_helpers as uh
 from foghorn.plugins.resolve.zone_records import update_processor as up
+from foghorn.servers.tsig_utils import normalize_tsig_algorithm
+from foghorn.utils import dns_names
 
 
 def test_normalize_dns_name_strips_dot_and_lowercases() -> None:
-    assert up._normalize_dns_name("Example.COM.") == "example.com"
+    assert dns_names.normalize_name("Example.COM.") == "example.com"
 
 
 @pytest.mark.parametrize(
@@ -42,7 +44,7 @@ def test_normalize_dns_name_strips_dot_and_lowercases() -> None:
     ],
 )
 def test_normalize_tsig_algorithm_variants(raw: str, expected: str) -> None:
-    assert up._normalize_tsig_algorithm(raw) == expected
+    assert normalize_tsig_algorithm(raw) == expected
 
 
 def test_verify_psk_auth_rejects_insecure_listener() -> None:

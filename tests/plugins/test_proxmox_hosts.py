@@ -15,6 +15,7 @@ import ipaddress
 from dnslib import QTYPE, DNSRecord
 
 from foghorn.plugins.resolve.base import PluginContext
+from foghorn.plugins.resolve import hosts_common
 
 # RFC 5737 / 3849 documentation addresses (safe in tests).
 WEB_V4 = "192.0.2.10"
@@ -162,13 +163,13 @@ def _bare_plugin(**config):
 
     mod = importlib.import_module("foghorn.plugins.resolve.proxmox_hosts")
     plugin = mod.ProxmoxHosts(endpoints=[], reload_interval_second=0, **config)
-    plugin._include_cidrs = plugin._parse_cidr_list(
+    plugin._include_cidrs = hosts_common.parse_cidr_list(
         config.get("include_cidrs"), option_name="include_cidrs"
     )
-    plugin._exclude_cidrs = plugin._parse_cidr_list(
+    plugin._exclude_cidrs = hosts_common.parse_cidr_list(
         config.get("exclude_cidrs"), option_name="exclude_cidrs"
     )
-    plugin._include_interfaces = plugin._parse_name_list(
+    plugin._include_interfaces = hosts_common.parse_str_list(
         config.get("include_interfaces")
     )
     try:
@@ -253,15 +254,18 @@ def test_apply_address_limit_per_family():
     """
 
     plugin = _bare_plugin(address_limit=1)
-    v4, v6 = plugin._apply_address_limit(
+    v4, v6 = hosts_common.apply_address_limit(
         [WEB_V4, DB_V4, OK_V4],
         [WEB_V6, STATIC_V6],
+        int(plugin._address_limit),
     )
     assert v4 == [WEB_V4]
     assert v6 == [WEB_V6]
 
     plugin = _bare_plugin(address_limit=0)
-    v4, v6 = plugin._apply_address_limit([WEB_V4, DB_V4], [WEB_V6])
+    v4, v6 = hosts_common.apply_address_limit(
+        [WEB_V4, DB_V4], [WEB_V6], int(plugin._address_limit)
+    )
     assert v4 == [WEB_V4, DB_V4]
     assert v6 == [WEB_V6]
 

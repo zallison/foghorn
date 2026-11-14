@@ -18,6 +18,7 @@ import pytest
 from dnslib import DNSRecord, QTYPE, RCODE, RR
 
 from foghorn.plugins.resolve.zone_records import transfer
+from foghorn.servers.tsig_utils import normalize_tsig_algorithm
 
 
 class _PluginNoLock:
@@ -264,7 +265,7 @@ def test_get_axfr_policy_reads_and_clamps_runtime_snapshot(
     ],
 )
 def test_normalize_tsig_algorithm_variants(raw: str, expected: str) -> None:
-    """Brief: _normalize_tsig_algorithm normalizes known names and preserves unknowns.
+    """Brief: normalize_tsig_algorithm normalizes known names and preserves unknowns.
 
     Inputs:
       - raw: Raw algorithm text.
@@ -273,7 +274,7 @@ def test_normalize_tsig_algorithm_variants(raw: str, expected: str) -> None:
       - Asserts normalized value.
     """
 
-    assert transfer._normalize_tsig_algorithm(raw) == expected
+    assert normalize_tsig_algorithm(raw) == expected
 
 
 def test_prepare_axfr_tsig_signer_basic_policy_paths() -> None:

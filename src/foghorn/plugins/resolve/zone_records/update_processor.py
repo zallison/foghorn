@@ -33,42 +33,15 @@ import dns.tsig
 import dns.tsigkeyring
 from dnslib import QTYPE, RR, DNSRecord
 
-from foghorn.utils.register_caches import registered_ttl_cache
+from foghorn.plugins.resolve.zone_records.helpers import owner_in_zone
+from foghorn.servers.tsig_utils import normalize_tsig_algorithm
+from foghorn.utils import dns_names
+
 
 logger = logging.getLogger(__name__)
 
 # Timestamp skew fudge (in seconds). BIND and dnspython default to 300.
 TSIG_TIMESTAMP_FUDGE = 300
-
-
-@registered_ttl_cache(maxsize=4096, ttl=3600)
-def _normalize_dns_name(name: str) -> str:
-    """Brief: Normalize a DNS name for comparisons.
-
-    Inputs:
-      - name: DNS name, with or without trailing dot.
-
-    Outputs:
-      - Lowercased name without trailing dot.
-    """
-    from foghorn.utils import dns_names
-
-    return dns_names.normalize_name(name)
-
-
-@registered_ttl_cache(maxsize=1024, ttl=3600)
-def _normalize_tsig_algorithm(alg: str) -> str:
-    """Brief: Normalize a TSIG algorithm name via the shared tsig_utils helper.
-
-    Inputs:
-      - alg: TSIG algorithm text (e.g. 'hmac-sha256.', 'hmac-md5.sig-alg.reg.int.').
-
-    Outputs:
-      - Normalized algorithm identifier (e.g. 'hmac-sha256', 'hmac-md5').
-    """
-    from foghorn.servers.tsig_utils import normalize_tsig_algorithm
-
-    return normalize_tsig_algorithm(alg)
 
 
 def verify_tsig_auth(
@@ -472,7 +445,7 @@ def process_update_message(
     # 2) Zone section validation: must contain exactly one SOA RR, and the owner
     # must match the configured zone apex.
     try:
-        apex_norm = _normalize_dns_name(zone_apex)
+        apex_norm = dns_names.normalize_name(zone_apex)
     except (
         Exception
     ):  # pragma: no cover - nocover: defensive zone_apex normalization fallback
@@ -508,7 +481,7 @@ def process_update_message(
         return resp.to_wire()
 
     try:
-        zone_owner_norm = _normalize_dns_name(getattr(zone_rrset, "name", ""))
+        zone_owner_norm = dns_names.normalize_name(getattr(zone_rrset, "name", ""))
     except (
         Exception
     ):  # pragma: no cover - nocover: defensive normalization of zone owner
@@ -602,8 +575,8 @@ def process_update_message(
 
         # Enforce configured algorithm mapping for this key.
         try:
-            keyname_norm = _normalize_dns_name(getattr(request_msg, "keyname", ""))
-            keyalg_norm = _normalize_tsig_algorithm(
+            keyname_norm = dns_names.normalize_name(getattr(request_msg, "keyname", ""))
+            keyalg_norm = normalize_tsig_algorithm(
                 getattr(request_msg, "keyalgorithm", "")
             )
         except Exception:
@@ -616,12 +589,10 @@ def process_update_message(
             ):  # pragma: no cover - nocover: normalized TSIG key configs are dicts
                 continue
             if (
-                _normalize_dns_name(cfg.get("name", "")) != keyname_norm
+                dns_names.normalize_name(cfg.get("name", "")) != keyname_norm
             ):  # pragma: no cover - nocover: depends on mixed-key config ordering/shape
                 continue
-            expected_alg = _normalize_tsig_algorithm(
-                cfg.get("algorithm", "hmac-sha256")
-            )
+            expected_alg = normalize_tsig_algorithm(cfg.get("algorithm", "hmac-sha256"))
             if expected_alg and expected_alg != keyalg_norm:
                 resp = dns.message.make_response(request_msg)
                 resp.set_rcode(dns.rcode.NOTAUTH)
@@ -724,7 +695,7 @@ def process_update_message(
             return resp.to_wire()
 
         for rrset in updates:
-            owner_text = _normalize_dns_name(getattr(rrset, "name", ""))
+            owner_text = dns_names.normalize_name(getattr(rrset, "name", ""))
             if max_owner_length > 0 and len(owner_text) > max_owner_length:
                 resp = dns.message.make_response(request_msg)
                 resp.set_rcode(dns.rcode.REFUSED)
@@ -874,7 +845,7 @@ def process_update_message(
         auth_scope_config = ctx.psk_token_config
     auth_scope_cache_prefix: str | None = None
     if isinstance(ctx.tsig_key_config, dict):
-        key_name = _normalize_dns_name(ctx.tsig_key_config.get("name", ""))
+        key_name = dns_names.normalize_name(ctx.tsig_key_config.get("name", ""))
         auth_scope_cache_prefix = f"{apex_norm}_tsig_{key_name or 'unnamed'}"
     elif isinstance(ctx.psk_token_config, dict):
         token = str(ctx.psk_token_config.get("token", ""))
@@ -889,7 +860,7 @@ def process_update_message(
     for update_rrset in updates:
         # Get owner name from the RRset
         try:
-            owner_norm = _normalize_dns_name(str(update_rrset.name))
+            owner_norm = dns_names.normalize_name(str(update_rrset.name))
         except Exception:
             owner_norm = ""
 
@@ -1091,7 +1062,7 @@ def verify_client_authorization(
     if not allow_clients and not allow_clients_files:
         return True, None
 
-    cache_key = f"{_normalize_dns_name(ctx.zone_apex)}_allow_clients"
+    cache_key = f"{dns_names.normalize_name(ctx.zone_apex)}_allow_clients"
     clients_list = uh.get_cached_combined_list(
         plugin=ctx.plugin,
         cache_key=cache_key,
@@ -1132,7 +1103,7 @@ def verify_name_authorization(
     """
     from foghorn.plugins.resolve.zone_records import update_helpers as uh
 
-    zone_prefix = f"{_normalize_dns_name(zone_apex)}_zone" if zone_apex else "zone"
+    zone_prefix = f"{dns_names.normalize_name(zone_apex)}_zone" if zone_apex else "zone"
     auth_prefix = auth_scope_cache_prefix or "auth_scope"
     scopes: list[tuple[dict, str]] = []
     if isinstance(zone_config, dict):
@@ -1203,7 +1174,7 @@ def verify_value_authorization(
     from foghorn.plugins.resolve.zone_records import update_helpers as uh
     from foghorn.utils import ip_networks
 
-    zone_prefix = f"{_normalize_dns_name(zone_apex)}_zone" if zone_apex else "zone"
+    zone_prefix = f"{dns_names.normalize_name(zone_apex)}_zone" if zone_apex else "zone"
     auth_prefix = auth_scope_cache_prefix or "auth_scope"
     scopes: list[tuple[dict, str]] = []
     if isinstance(zone_config, dict):
@@ -1289,21 +1260,6 @@ def _effective_rrset_class(rrset: object) -> int:
         return 0
 
 
-def _owner_in_zone(owner_norm: str, apex_norm: str) -> bool:
-    """Brief: Return whether owner equals apex or is a proper descendant.
-
-    Inputs:
-      - owner_norm: Normalized owner name (no trailing dot).
-      - apex_norm: Normalized zone apex (no trailing dot).
-
-    Outputs:
-      - True when owner is inside the zone boundary.
-    """
-    if not apex_norm:
-        return True
-    return owner_norm == apex_norm or owner_norm.endswith("." + apex_norm)
-
-
 def check_prerequisites(
     prereqs: list[RR],
     records: dict,
@@ -1331,13 +1287,13 @@ def check_prerequisites(
         * zone class (IN) without RDATA: RRset must exist
     """
     try:
-        apex_norm = _normalize_dns_name(zone_apex)
+        apex_norm = dns_names.normalize_name(zone_apex)
     except Exception:
         apex_norm = ""
 
     for prereq_rrset in prereqs:
         try:
-            owner_norm = _normalize_dns_name(str(prereq_rrset.name))
+            owner_norm = dns_names.normalize_name(str(prereq_rrset.name))
         except (
             Exception
         ):  # pragma: no cover - nocover: defensive malformed owner objects in prereq rrsets
@@ -1347,7 +1303,7 @@ def check_prerequisites(
         qclass = _effective_rrset_class(prereq_rrset)
 
         # Ensure owner is within the zone (apex or proper subdomain).
-        if not _owner_in_zone(owner_norm, apex_norm):
+        if not owner_in_zone(owner_norm, apex_norm):
             return 9, f"Prerequisite owner {owner_norm} not in zone {apex_norm}"
 
         record_key = (owner_norm, qtype_int)
@@ -1494,7 +1450,7 @@ def apply_update_operations(
         return 2, "Journal unavailable"
 
     try:
-        apex_norm = _normalize_dns_name(zone_apex)
+        apex_norm = dns_names.normalize_name(zone_apex)
     except Exception:
         apex_norm = ""
 
@@ -1503,7 +1459,7 @@ def apply_update_operations(
 
     for update_rrset in list(updates or []):
         try:
-            owner_norm = _normalize_dns_name(str(update_rrset.name))
+            owner_norm = dns_names.normalize_name(str(update_rrset.name))
         except Exception:
             return 1, "Invalid owner name in update RRset"
 
@@ -1515,7 +1471,7 @@ def apply_update_operations(
         except (TypeError, ValueError):
             ttl = default_ttl
 
-        if apex_norm and not _owner_in_zone(owner_norm, apex_norm):
+        if apex_norm and not owner_in_zone(owner_norm, apex_norm):
             return 9, f"Update owner {owner_norm} not in zone {apex_norm}"
 
         rdata_values = [str(rdata) for rdata in update_rrset]

@@ -17,6 +17,9 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from dnslib import QTYPE
 
+from foghorn.plugins.resolve.zone_records.helpers import owner_in_zone
+from foghorn.utils import dns_names
+
 logger = logging.getLogger(__name__)
 
 RecordKey = Tuple[str, int]
@@ -45,20 +48,6 @@ class CommitResult:
     touched_owners: List[str] = field(default_factory=list)
     deleted_rrsets: int = 0
     changed: bool = False
-
-
-def _normalize_dns_name(name: str) -> str:
-    """Brief: Normalize a DNS name for comparisons.
-
-    Inputs:
-      - name: DNS name, with or without trailing dot.
-
-    Outputs:
-      - Lowercased name without trailing dot.
-    """
-    from foghorn.utils import dns_names
-
-    return dns_names.normalize_name(name)
 
 
 def _normalize_record_entry_for_compare(
@@ -161,7 +150,7 @@ def _read_soa_serial(
         soa_code = int(QTYPE.SOA)
     except Exception:
         soa_code = 6
-    key = (_normalize_dns_name(zone_name), int(soa_code))
+    key = (dns_names.normalize_name(zone_name), int(soa_code))
     entry = records_map.get(key)
     if entry is None:
         return None
@@ -201,7 +190,7 @@ def bump_soa_serial_for_zone(
         soa_code = int(QTYPE.SOA)
     except Exception:
         soa_code = 6
-    apex_norm = _normalize_dns_name(zone_name)
+    apex_norm = dns_names.normalize_name(zone_name)
     key = (apex_norm, int(soa_code))
     if key not in records_map:
         return None
@@ -257,7 +246,7 @@ def resolve_zone_apex_for_owner(plugin: object, owner: str) -> str:
     Notes:
       - Prefers dns_update.zones match, then longest _zone_soa apex match.
     """
-    owner_norm = _normalize_dns_name(owner)
+    owner_norm = dns_names.normalize_name(owner)
     if not owner_norm:
         return ""
 
@@ -269,7 +258,7 @@ def resolve_zone_apex_for_owner(plugin: object, owner: str) -> str:
             for item in zones:
                 if not isinstance(item, dict):
                     continue
-                zone_name = _normalize_dns_name(item.get("zone", ""))
+                zone_name = dns_names.normalize_name(item.get("zone", ""))
                 if not zone_name:
                     continue
                 if owner_norm == zone_name or owner_norm.endswith(f".{zone_name}"):
@@ -281,7 +270,7 @@ def resolve_zone_apex_for_owner(plugin: object, owner: str) -> str:
     if isinstance(zone_soa, dict) and zone_soa:
         matches = []
         for apex in zone_soa.keys():
-            zone_name = _normalize_dns_name(apex)
+            zone_name = dns_names.normalize_name(apex)
             if not zone_name:
                 continue
             if owner_norm == zone_name or owner_norm.endswith(f".{zone_name}"):
@@ -289,21 +278,6 @@ def resolve_zone_apex_for_owner(plugin: object, owner: str) -> str:
         if matches:
             return max(matches, key=len)
     return ""
-
-
-def _owner_in_zone(owner_norm: str, apex_norm: str) -> bool:
-    """Brief: Return whether owner is inside zone apex.
-
-    Inputs:
-      - owner_norm: Normalized owner.
-      - apex_norm: Normalized apex.
-
-    Outputs:
-      - True when owner equals apex or is a descendant.
-    """
-    if not apex_norm:
-        return True
-    return owner_norm == apex_norm or owner_norm.endswith(f".{apex_norm}")
 
 
 def commit_record_actions(
@@ -348,7 +322,7 @@ def commit_record_actions(
         return CommitResult(ok=False, rcode=2, error="Journal unavailable")
 
     try:
-        apex_norm = _normalize_dns_name(zone_apex) if zone_apex else ""
+        apex_norm = dns_names.normalize_name(zone_apex) if zone_apex else ""
     except Exception:
         apex_norm = ""
 
@@ -438,7 +412,9 @@ def commit_record_actions(
     for raw_action in action_list:
         action_type = str(raw_action.get("type", "") or "")
         try:
-            owner_norm = _normalize_dns_name(str(raw_action.get("owner", "") or ""))
+            owner_norm = dns_names.normalize_name(
+                str(raw_action.get("owner", "") or "")
+            )
         except Exception:
             return CommitResult(
                 ok=False,
@@ -456,7 +432,7 @@ def commit_record_actions(
         if (
             enforce_zone_boundary
             and apex_norm
-            and not _owner_in_zone(owner_norm, apex_norm)
+            and not owner_in_zone(owner_norm, apex_norm)
         ):
             return CommitResult(
                 ok=False,

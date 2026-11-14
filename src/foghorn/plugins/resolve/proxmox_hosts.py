@@ -19,16 +19,23 @@ from typing import Any
 from urllib.parse import urljoin
 
 import requests
-from dnslib import AAAA, PTR, QTYPE, RR, TXT, A, DNSHeader, DNSRecord
 from pydantic import BaseModel, ConfigDict, Field
 from urllib3.exceptions import InsecureRequestWarning
 
 from foghorn.plugins.resolve.base import (
     AdminPageSpec,
-    BasePlugin,
-    PluginContext,
-    PluginDecision,
     plugin_aliases,
+)
+from foghorn.plugins.resolve.hosts_common import (
+    DynamicHostsPlugin,
+    apply_address_limit,
+    ip_passes_cidr_filters,
+    is_valid_dns_label,
+    normalize_publishable_hostname,
+    normalize_suffix,
+    parse_cidr_list,
+    parse_str_list,
+    resolve_plugin_tls_path,
 )
 
 logger = logging.getLogger(__name__)
@@ -38,7 +45,6 @@ _INSECURE_TLS_NOTICES: set[str] = set()
 _INSECURE_TLS_NOTICES_LOCK = threading.Lock()
 _INSECURE_WARNING_FILTER_INSTALLED = False
 
-_DNS_LABEL_RE = re.compile(r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$")
 _IPCONFIG_RE = re.compile(
     r"(?:^|,)\s*ip=([^,/\s]+)(?:/(\d+))?",
     re.IGNORECASE,
@@ -285,7 +291,7 @@ class _PveClient:
 
 
 @plugin_aliases("proxmox_hosts", "proxmox-hosts", "proxmox", "pve")
-class ProxmoxHosts(BasePlugin):
+class ProxmoxHosts(DynamicHostsPlugin):
     """Resolve Proxmox VE guest names via the cluster API.
 
     Brief:
@@ -310,250 +316,8 @@ class ProxmoxHosts(BasePlugin):
 
         return ProxmoxHostsConfig
 
-    def _ensure_condition_log_state(self) -> None:
-        """Brief: Lazily initialize sticky condition-log lock and maps.
-
-        Inputs:
-          - None.
-        Outputs:
-          - None.
-        """
-
-        if not hasattr(self, "_condition_log_lock") or self._condition_log_lock is None:
-            self._condition_log_lock = threading.Lock()
-        if (
-            not hasattr(self, "_condition_failed_by_key")
-            or self._condition_failed_by_key is None
-        ):
-            self._condition_failed_by_key = {}
-        if (
-            not hasattr(self, "_condition_suppressed_by_key")
-            or self._condition_suppressed_by_key is None
-        ):
-            self._condition_suppressed_by_key = {}
-        if (
-            not hasattr(self, "_condition_last_warned_by_key")
-            or self._condition_last_warned_by_key is None
-        ):
-            self._condition_last_warned_by_key = {}
-
-    def _note_condition_failure(self, key: str, message: str, *args: object) -> None:
-        """Brief: Log sticky failures without flooding reload loops.
-
-        Inputs:
-          - key: Stable condition id.
-          - message: logger.warning template.
-          - args: Format args.
-        Outputs:
-          - None.
-        """
-
-        self._ensure_condition_log_state()
-        now = time.monotonic()
-        interval = float(getattr(self, "_condition_rewarn_interval_seconds", 3600.0))
-        with self._condition_log_lock:
-            prev_failed = bool(self._condition_failed_by_key.get(key, False))
-            last_warned = self._condition_last_warned_by_key.get(key)
-            if prev_failed:
-                should_rewarn = interval > 0 and (
-                    last_warned is None or (now - last_warned) >= interval
-                )
-                if should_rewarn:
-                    suppressed = self._condition_suppressed_by_key.get(key, 0)
-                    self._condition_suppressed_by_key[key] = 0
-                    self._condition_last_warned_by_key[key] = now
-                else:
-                    self._condition_suppressed_by_key[key] = (
-                        self._condition_suppressed_by_key.get(key, 0) + 1
-                    )
-                    suppressed = self._condition_suppressed_by_key[key]
-            else:
-                self._condition_failed_by_key[key] = True
-                self._condition_suppressed_by_key[key] = 0
-                self._condition_last_warned_by_key[key] = now
-                suppressed = 0
-                should_rewarn = False
-
-        if not prev_failed:
-            logger.warning(message, *args)
-            return
-        if should_rewarn:
-            if suppressed > 0:
-                logger.warning(
-                    message + " (still failing; suppressed %d repeated warning(s))",
-                    *args,
-                    suppressed,
-                )
-            else:
-                logger.warning(message + " (still failing)", *args)
-            return
-        logger.debug(
-            "suppressed repeated condition %s (count=%d): " + message,
-            key,
-            suppressed,
-            *args,
-        )
-
-    def _note_condition_ok(
-        self,
-        key: str,
-        recovery_message: str | None = None,
-        *args: object,
-    ) -> None:
-        """Brief: Clear a sticky failure and optionally log recovery.
-
-        Inputs:
-          - key: Same id passed to _note_condition_failure.
-          - recovery_message: Optional INFO template.
-          - args: Format args.
-        Outputs:
-          - None.
-        """
-
-        self._ensure_condition_log_state()
-        with self._condition_log_lock:
-            was_failed = bool(self._condition_failed_by_key.get(key, False))
-            suppressed = int(self._condition_suppressed_by_key.get(key, 0) or 0)
-            self._condition_failed_by_key[key] = False
-            self._condition_suppressed_by_key[key] = 0
-            self._condition_last_warned_by_key.pop(key, None)
-
-        if not was_failed or not recovery_message:
-            return
-        if suppressed > 0:
-            logger.info(
-                recovery_message + " (suppressed %d repeated failure warning(s))",
-                *args,
-                suppressed,
-            )
-            return
-        if args:
-            logger.info(recovery_message, *args)
-        else:
-            logger.info("%s", recovery_message)
-
-    @staticmethod
-    def _normalize_suffix(raw: object) -> str:
-        """Brief: Normalize a DNS suffix to lowercase dotted labels.
-
-        Inputs:
-          - raw: Config value.
-        Outputs:
-          - Normalized suffix without leading/trailing dots, or empty string.
-        """
-
-        text = str(raw or "").strip().strip(".")
-        if not text:
-            return ""
-        parts = [p for p in text.split(".") if p]
-        return ".".join(parts).lower() if parts else ""
-
-    @staticmethod
-    def _is_valid_dns_label(name: str) -> bool:
-        """Brief: Validate a single DNS label for publication.
-
-        Inputs:
-          - name: Candidate label without dots.
-        Outputs:
-          - True when publishable.
-        """
-
-        label = str(name or "").strip().strip(".").lower()
-        if not label or "." in label or len(label) > 63:
-            return False
-        return bool(_DNS_LABEL_RE.match(label))
-
-    @staticmethod
-    def _sanitize_txt_chunk(text: str, max_bytes: int = 253) -> str:
-        """Brief: Remove control characters and clamp TXT UTF-8 size.
-
-        Inputs:
-          - text: Raw TXT chunk.
-          - max_bytes: Max UTF-8 bytes.
-        Outputs:
-          - Sanitized string.
-        """
-
-        cleaned = re.sub(r"[\x00-\x1f\x7f]", "", str(text or ""))
-        encoded = cleaned.encode("utf-8")[:max_bytes]
-        return encoded.decode("utf-8", errors="ignore")
-
-    @staticmethod
-    def _parse_cidr_list(raw: object, *, option_name: str) -> list[Any]:
-        """Brief: Parse a config list of CIDR/network strings.
-
-        Inputs:
-          - raw: str, list, or None from config.
-          - option_name: Config key name for warnings.
-        Outputs:
-          - list of ipaddress network objects (IPv4Network/IPv6Network).
-        """
-
-        if raw is None:
-            items: list[object] = []
-        elif isinstance(raw, str):
-            items = [raw]
-        elif isinstance(raw, list):
-            items = list(raw)
-        else:
-            items = [raw]
-
-        networks: list[Any] = []
-        for item in items:
-            text = str(item or "").strip()
-            if not text:
-                continue
-            try:
-                networks.append(ipaddress.ip_network(text, strict=False))
-            except ValueError:
-                logger.warning("ignoring invalid %s entry %r", option_name, item)
-        return networks
-
-    @staticmethod
-    def _parse_name_list(raw: object) -> list[str]:
-        """Brief: Normalize a string/list config value to lowercase names.
-
-        Inputs:
-          - raw: str, list, or None.
-        Outputs:
-          - Deduped lowercase non-empty strings.
-        """
-
-        if raw is None:
-            items: list[object] = []
-        elif isinstance(raw, str):
-            items = [raw]
-        elif isinstance(raw, list):
-            items = list(raw)
-        else:
-            items = [raw]
-        out: list[str] = []
-        for item in items:
-            name = str(item or "").strip().lower()
-            if name and name not in out:
-                out.append(name)
-        return out
-
-    @staticmethod
-    def _is_usable_ip(ip_text: str) -> bool:
-        """Brief: Filter loopback, link-local, and invalid addresses.
-
-        Inputs:
-          - ip_text: Address string.
-        Outputs:
-          - True when the address is structurally publishable.
-        """
-
-        try:
-            ip = ipaddress.ip_address(str(ip_text).strip())
-        except ValueError:
-            return False
-        if ip.is_loopback or ip.is_link_local or ip.is_unspecified or ip.is_multicast:
-            return False
-        return True
-
     def _accept_ip(self, ip_text: str) -> bool:
-        """Brief: Apply basic + include_cidrs / exclude_cidrs filters.
+        """Brief: Apply usable-IP + include/exclude CIDR filters.
 
         Inputs:
           - ip_text: Address string.
@@ -561,21 +325,11 @@ class ProxmoxHosts(BasePlugin):
           - True when the address should be published.
         """
 
-        text = str(ip_text).strip()
-        if not self._is_usable_ip(text):
-            return False
-        try:
-            ip = ipaddress.ip_address(text)
-        except ValueError:
-            return False
-
-        include = getattr(self, "_include_cidrs", None) or []
-        if include and not any(ip in net for net in include):
-            return False
-        exclude = getattr(self, "_exclude_cidrs", None) or []
-        if exclude and any(ip in net for net in exclude):
-            return False
-        return True
+        return ip_passes_cidr_filters(
+            ip_text,
+            include_cidrs=getattr(self, "_include_cidrs", None),
+            exclude_cidrs=getattr(self, "_exclude_cidrs", None),
+        )
 
     def _interface_allowed(self, name: str) -> bool:
         """Brief: Whether a guest NIC name may contribute addresses.
@@ -592,54 +346,6 @@ class ProxmoxHosts(BasePlugin):
         key = str(name or "").strip().lower()
         return key in allow
 
-    def _apply_address_limit(
-        self, v4: list[str], v6: list[str]
-    ) -> tuple[list[str], list[str]]:
-        """Brief: Truncate per-family address lists when address_limit > 0.
-
-        Inputs:
-          - v4 / v6: Ordered address lists.
-        Outputs:
-          - Possibly truncated (v4, v6).
-        """
-
-        limit = int(getattr(self, "_address_limit", 0) or 0)
-        if limit <= 0:
-            return v4, v6
-        return v4[:limit], v6[:limit]
-
-    @staticmethod
-    def _resolve_tls_path(path: str) -> str:
-        """Brief: Resolve a TLS CA path relative to config dir / CWD.
-
-        Inputs:
-          - path: Absolute or relative CA path.
-        Outputs:
-          - Resolved filesystem path.
-        """
-
-        import os
-
-        from foghorn.servers.webserver.tls_certs import resolve_tls_path
-
-        config_path = None
-        try:
-            from foghorn.runtime_config import get_config_path
-
-            config_path = get_config_path()
-        except Exception:
-            config_path = None
-        if not config_path:
-            for candidate in (
-                os.environ.get("FOGHORN_CONFIG"),
-                "config/config.yaml",
-                "/foghorn/config/config.yaml",
-            ):
-                if candidate and os.path.isfile(candidate):
-                    config_path = candidate
-                    break
-        return resolve_tls_path(path, config_path=config_path)
-
     def setup(self) -> None:
         """Brief: Initialize ProxmoxHosts and build the initial guest mapping.
 
@@ -649,13 +355,8 @@ class ProxmoxHosts(BasePlugin):
           - None; populates maps and starts the poller when interval > 0.
         """
 
-        self._ttl = int(self.config.get("ttl", 60))
-        self._condition_log_lock = threading.Lock()
-        self._condition_failed_by_key: dict[str, bool] = {}
-        self._condition_suppressed_by_key: dict[str, int] = {}
-        self._condition_last_warned_by_key: dict[str, float] = {}
-
-        self._suffix = self._normalize_suffix(self.config.get("suffix"))
+        self._init_dynamic_hosts_state(default_ttl=int(self.config.get("ttl", 60)))
+        self._suffix = normalize_suffix(self.config.get("suffix"))
         self._discovery = bool(self.config.get("discovery", False))
         self._expose_txt_in_additional = bool(
             self.config.get("expose_txt_in_additional", False)
@@ -665,15 +366,13 @@ class ProxmoxHosts(BasePlugin):
         self._publish_vmid = bool(self.config.get("publish_vmid", False))
         self._publish_tags = bool(self.config.get("publish_tags", False))
         self._include_templates = bool(self.config.get("include_templates", False))
-        self._include_cidrs = self._parse_cidr_list(
+        self._include_cidrs = parse_cidr_list(
             self.config.get("include_cidrs"), option_name="include_cidrs"
         )
-        self._exclude_cidrs = self._parse_cidr_list(
+        self._exclude_cidrs = parse_cidr_list(
             self.config.get("exclude_cidrs"), option_name="exclude_cidrs"
         )
-        self._include_interfaces = self._parse_name_list(
-            self.config.get("include_interfaces")
-        )
+        self._include_interfaces = parse_str_list(self.config.get("include_interfaces"))
         try:
             self._address_limit = max(0, int(self.config.get("address_limit", 0)))
         except (TypeError, ValueError):
@@ -803,7 +502,7 @@ class ProxmoxHosts(BasePlugin):
             verify_tls = bool(item.get("verify_tls", True))
             tls_ca = str(item.get("tls_ca") or "").strip() or None
             if tls_ca:
-                tls_ca = self._resolve_tls_path(tls_ca)
+                tls_ca = resolve_plugin_tls_path(tls_ca)
             verify: bool | str
             if not verify_tls:
                 verify = False
@@ -813,7 +512,7 @@ class ProxmoxHosts(BasePlugin):
                 verify = True
 
             ep_suffix = (
-                self._normalize_suffix(item.get("suffix")) if item.get("suffix") else ""
+                normalize_suffix(item.get("suffix")) if item.get("suffix") else ""
             )
 
             endpoints_cfg.append(
@@ -836,17 +535,7 @@ class ProxmoxHosts(BasePlugin):
             logger.warning("no usable endpoints configured; plugin will stay empty")
 
         self._endpoints = endpoints_cfg
-        self._lock = threading.RLock()
-        self._forward_v4: dict[str, list[str]] = {}
-        self._forward_v6: dict[str, list[str]] = {}
-        self._reverse: dict[str, str] = {}
-        self._ttl_v4: dict[str, int] = {}
-        self._ttl_v6: dict[str, int] = {}
-        self._ttl_ptr: dict[str, int] = {}
-        self._aggregate_txt: dict[str, list[str]] = {}
-        self._ttl_txt: dict[str, int] = {}
         self._guests_meta: list[dict[str, object]] = []
-        self._stop_event = threading.Event()
         self._clients: dict[str, _PveClient] = {}
         # Clients are created lazily on first use. One healthy node is enough for
         # the whole cluster (/cluster/resources); extra endpoints are failover only.
@@ -875,60 +564,7 @@ class ProxmoxHosts(BasePlugin):
 
         self._reload_from_proxmox()
 
-        if self._reload_interval > 0:
-            t = threading.Thread(
-                target=self._reload_loop,
-                name="ProxmoxHostsPoller",
-                daemon=True,
-            )
-            t.start()
-
-    def _reload_loop(self) -> None:
-        """Brief: Periodically refresh guest mappings.
-
-        Inputs:
-          - None.
-        Outputs:
-          - None; runs until stop_event is set.
-        """
-
-        interval = float(getattr(self, "_reload_interval", 0.0))
-        if interval <= 0:
-            return
-        while True:
-            if self._stop_event.wait(timeout=interval):
-                return
-            try:
-                self._reload_from_proxmox()
-                self._note_condition_ok(
-                    "periodic-reload-error",
-                    "periodic reload recovered",
-                )
-            except Exception as exc:
-                self._note_condition_failure(
-                    "periodic-reload-error",
-                    "error during periodic reload; " "keeping previous maps: %s",
-                    exc,
-                )
-
-    def shutdown(self) -> None:
-        """Brief: Stop the poller and close HTTP clients.
-
-        Inputs:
-          - None.
-        Outputs:
-          - None.
-        """
-
-        try:
-            self._stop_event.set()
-        except Exception:
-            pass
-        for client in list(getattr(self, "_clients", {}).values()):
-            try:
-                client.close()
-            except Exception:
-                continue
+        self._start_reload_loop(thread_name="ProxmoxHostsPoller")
 
     def _get_client(self, endpoint: dict[str, object]) -> _PveClient | None:
         """Brief: Return or create an API client for an endpoint.
@@ -1287,30 +923,10 @@ class ProxmoxHosts(BasePlugin):
                     exc,
                 )
 
-        v4, v6 = self._apply_address_limit(v4, v6)
+        v4, v6 = apply_address_limit(
+            v4, v6, int(getattr(self, "_address_limit", 0) or 0)
+        )
         return v4, v6, agent_hostname
-
-    def _normalize_name_label(self, value: str) -> str:
-        """Brief: Normalize a candidate hostname to a DNS label.
-
-        Inputs:
-          - value: Raw name (may contain dots; first label used when multi-label).
-        Outputs:
-          - Lowercase label with underscores converted, or empty if invalid.
-        """
-
-        text = str(value or "").strip().strip(".").lower().replace("_", "-")
-        if not text:
-            return ""
-        # Multi-label guest names: keep full name if all labels valid, else first.
-        if "." in text:
-            parts = [p for p in text.split(".") if p]
-            if parts and all(self._is_valid_dns_label(p) for p in parts):
-                return ".".join(parts)
-            text = parts[0] if parts else ""
-        if self._is_valid_dns_label(text):
-            return text
-        return ""
 
     def _names_for_guest(
         self,
@@ -1331,21 +947,21 @@ class ProxmoxHosts(BasePlugin):
         gtype = str(guest.get("type") or "qemu").lower()
         vmid = guest.get("vmid")
         raw_name = str(guest.get("name") or "").strip()
-        base = self._normalize_name_label(raw_name)
+        base = normalize_publishable_hostname(raw_name)
         if not base and agent_hostname:
-            base = self._normalize_name_label(agent_hostname)
+            base = normalize_publishable_hostname(agent_hostname)
         if not base:
             prefix = "ct" if gtype == "lxc" else "vm"
             base = f"{prefix}{vmid}"
 
         labels: list[str] = [base]
         if agent_hostname:
-            alt = self._normalize_name_label(agent_hostname)
+            alt = normalize_publishable_hostname(agent_hostname)
             if alt and alt not in labels:
                 labels.append(alt)
         if self._publish_vmid and vmid is not None:
             vlabel = f"vm{vmid}" if gtype != "lxc" else f"ct{vmid}"
-            if self._is_valid_dns_label(vlabel) and vlabel not in labels:
+            if is_valid_dns_label(vlabel) and vlabel not in labels:
                 labels.append(vlabel)
         if self._publish_tags:
             tags_raw = guest.get("tags")
@@ -1355,7 +971,7 @@ class ProxmoxHosts(BasePlugin):
             elif isinstance(tags_raw, list):
                 tag_parts = [str(t) for t in tags_raw]
             for tag in tag_parts:
-                tlabel = self._normalize_name_label(tag)
+                tlabel = normalize_publishable_hostname(tag)
                 if tlabel and tlabel not in labels:
                     labels.append(tlabel)
 
@@ -1733,191 +1349,3 @@ class ProxmoxHosts(BasePlugin):
                 "suffix": self._suffix or None,
             }
         return {"summary": summary, "guests": guests}
-
-    def pre_resolve(
-        self, qname: str, qtype: int, req: bytes, ctx: PluginContext
-    ) -> PluginDecision | None:
-        """Brief: Answer A/AAAA/PTR/TXT from Proxmox guest maps.
-
-        Inputs:
-          - qname: Queried name.
-          - qtype: DNS type.
-          - req: Wire request.
-          - ctx: Plugin context.
-        Outputs:
-          - PluginDecision(override) or None.
-        """
-
-        if not self.targets(ctx):
-            return None
-
-        name = qname.strip(".").lower()
-
-        if qtype == QTYPE.A:
-            with self._lock:
-                addrs = list(self._forward_v4.get(name, []))
-                ttl = int(self._ttl_v4.get(name, self._ttl))
-                txts = list(self._aggregate_txt.get(name, []))
-                txt_ttl = int(self._ttl_txt.get(name, self._ttl))
-            if not addrs and not txts:
-                return None
-            try:
-                request = DNSRecord.parse(req)
-            except Exception as exc:
-                logger.warning("parse failure for A %s: %s", qname, exc)
-                return None
-            reply = DNSRecord(
-                DNSHeader(id=request.header.id, qr=1, aa=1, ra=1), q=request.q
-            )
-            for ipaddr in addrs:
-                reply.add_answer(
-                    RR(
-                        rname=request.q.qname,
-                        rtype=QTYPE.A,
-                        rclass=1,
-                        ttl=ttl,
-                        rdata=A(ipaddr),
-                    )
-                )
-            if self._expose_txt_in_additional:
-                for line in txts:
-                    reply.add_ar(
-                        RR(
-                            rname=request.q.qname,
-                            rtype=QTYPE.TXT,
-                            rclass=1,
-                            ttl=txt_ttl,
-                            rdata=TXT([self._sanitize_txt_chunk(str(line))]),
-                        )
-                    )
-                try:
-                    if len(reply.pack()) > 512:
-                        reply.ar = []
-                        reply.header.tc = 1
-                except Exception:
-                    reply.ar = []
-                    reply.header.tc = 1
-            return PluginDecision(action="override", response=reply.pack())
-
-        if qtype == QTYPE.AAAA:
-            with self._lock:
-                addrs = list(self._forward_v6.get(name, []))
-                ttl = int(self._ttl_v6.get(name, self._ttl))
-                txts = list(self._aggregate_txt.get(name, []))
-                txt_ttl = int(self._ttl_txt.get(name, self._ttl))
-            if not addrs and not txts:
-                return None
-            try:
-                request = DNSRecord.parse(req)
-            except Exception as exc:
-                logger.warning("parse failure for AAAA %s: %s", qname, exc)
-                return None
-            reply = DNSRecord(
-                DNSHeader(id=request.header.id, qr=1, aa=1, ra=1), q=request.q
-            )
-            for ipaddr in addrs:
-                reply.add_answer(
-                    RR(
-                        rname=request.q.qname,
-                        rtype=QTYPE.AAAA,
-                        rclass=1,
-                        ttl=ttl,
-                        rdata=AAAA(ipaddr),
-                    )
-                )
-            if self._expose_txt_in_additional:
-                for line in txts:
-                    reply.add_ar(
-                        RR(
-                            rname=request.q.qname,
-                            rtype=QTYPE.TXT,
-                            rclass=1,
-                            ttl=txt_ttl,
-                            rdata=TXT([self._sanitize_txt_chunk(str(line))]),
-                        )
-                    )
-                try:
-                    if len(reply.pack()) > 512:
-                        reply.ar = []
-                        reply.header.tc = 1
-                except Exception:
-                    reply.ar = []
-                    reply.header.tc = 1
-            return PluginDecision(action="override", response=reply.pack())
-
-        if qtype == QTYPE.TXT:
-            with self._lock:
-                txts = list(self._aggregate_txt.get(name, []))
-                txt_ttl = int(self._ttl_txt.get(name, self._ttl))
-                a_candidates = list(self._forward_v4.get(name, []))
-                a_ttl = int(self._ttl_v4.get(name, self._ttl))
-                aaaa_candidates = list(self._forward_v6.get(name, []))
-                aaaa_ttl = int(self._ttl_v6.get(name, self._ttl))
-            if not txts and not a_candidates and not aaaa_candidates:
-                return None
-            try:
-                request = DNSRecord.parse(req)
-            except Exception as exc:
-                logger.warning("parse failure for TXT %s: %s", qname, exc)
-                return None
-            reply = DNSRecord(
-                DNSHeader(id=request.header.id, qr=1, aa=1, ra=1), q=request.q
-            )
-            for line in txts:
-                reply.add_answer(
-                    RR(
-                        rname=request.q.qname,
-                        rtype=QTYPE.TXT,
-                        rclass=1,
-                        ttl=txt_ttl,
-                        rdata=TXT([self._sanitize_txt_chunk(str(line))]),
-                    )
-                )
-            for ipaddr in a_candidates:
-                reply.add_answer(
-                    RR(
-                        rname=request.q.qname,
-                        rtype=QTYPE.A,
-                        rclass=1,
-                        ttl=a_ttl,
-                        rdata=A(ipaddr),
-                    )
-                )
-            for ipaddr in aaaa_candidates:
-                reply.add_answer(
-                    RR(
-                        rname=request.q.qname,
-                        rtype=QTYPE.AAAA,
-                        rclass=1,
-                        ttl=aaaa_ttl,
-                        rdata=AAAA(ipaddr),
-                    )
-                )
-            return PluginDecision(action="override", response=reply.pack())
-
-        if qtype == QTYPE.PTR:
-            with self._lock:
-                hostname = self._reverse.get(name)
-                ttl = int(self._ttl_ptr.get(name, self._ttl))
-            if not hostname:
-                return None
-            try:
-                request = DNSRecord.parse(req)
-            except Exception as exc:
-                logger.warning("parse failure for PTR %s: %s", qname, exc)
-                return None
-            reply = DNSRecord(
-                DNSHeader(id=request.header.id, qr=1, aa=1, ra=1), q=request.q
-            )
-            reply.add_answer(
-                RR(
-                    rname=request.q.qname,
-                    rtype=QTYPE.PTR,
-                    rclass=1,
-                    ttl=ttl,
-                    rdata=PTR(hostname),
-                )
-            )
-            return PluginDecision(action="override", response=reply.pack())
-
-        return None

@@ -9,6 +9,8 @@ Outputs:
 """
 
 import importlib
+
+from foghorn.plugins.resolve import hosts_common
 import ipaddress
 import types
 
@@ -676,7 +678,12 @@ def test_docker_hosts_iter_containers_state_change_logs_failures(monkeypatch, ca
 
     # First failure at t=100, quiet repeats, hourly re-warn at t=3700.
     timeline = iter([100.0, 101.0, 102.0, 3700.0, 3701.0])
-    monkeypatch.setattr(mod.time, "monotonic", lambda: next(timeline))
+    hc = importlib.import_module("foghorn.plugins.resolve.hosts_common")
+
+    def _mono() -> float:
+        return next(timeline)
+
+    monkeypatch.setattr(hc.time, "monotonic", _mono)
 
     caplog.set_level("DEBUG", logger=mod.__name__)
     endpoint = {"url": "unix:///var/run/docker.sock"}
@@ -1751,7 +1758,7 @@ def test_docker_hosts_admin_pages_and_ui_descriptor_shape():
 
 
 def test_docker_hosts_owner_helpers_normalize_suffixes():
-    """Brief: _aggregate_owner_for_suffix and _hosts_owner_for_suffix normalize suffixes.
+    """Brief: discovery_owner normalizes suffixes for inventory TXT owners.
 
     Inputs:
       - None.
@@ -1760,18 +1767,25 @@ def test_docker_hosts_owner_helpers_normalize_suffixes():
       - None; asserts various suffix forms map to expected owner names.
     """
 
-    mod = importlib.import_module("foghorn.plugins.resolve.docker_hosts")
+    assert hosts_common.discovery_owner("_containers", "") == "_containers"
+    assert (
+        hosts_common.discovery_owner("_containers", " docker.mycorp ")
+        == "_containers.docker.mycorp"
+    )
+    assert (
+        hosts_common.discovery_owner("_containers", ".docker..mycorp.")
+        == "_containers.docker.mycorp"
+    )
 
-    agg = mod.DockerHosts._aggregate_owner_for_suffix  # type: ignore[attr-defined]
-    hosts = mod.DockerHosts._hosts_owner_for_suffix  # type: ignore[attr-defined]
-
-    assert agg("") == "_containers"
-    assert agg(" docker.mycorp ") == "_containers.docker.mycorp"
-    assert agg(".docker..mycorp.") == "_containers.docker.mycorp"
-
-    assert hosts("") == "_hosts"
-    assert hosts(" docker.mycorp ") == "_hosts.docker.mycorp"
-    assert hosts(".docker..mycorp.") == "_hosts.docker.mycorp"
+    assert hosts_common.discovery_owner("_hosts", "") == "_hosts"
+    assert (
+        hosts_common.discovery_owner("_hosts", " docker.mycorp ")
+        == "_hosts.docker.mycorp"
+    )
+    assert (
+        hosts_common.discovery_owner("_hosts", ".docker..mycorp.")
+        == "_hosts.docker.mycorp"
+    )
 
 
 def test_docker_hosts_make_ip_response_success_a_and_aaaa(monkeypatch):
@@ -2094,7 +2108,7 @@ def test_docker_hosts_discovery_emits_hosts_txt_with_host_ips(monkeypatch):
     monkeypatch.setattr(plugin, "_iter_containers_for_endpoint", lambda _ep: containers)
     plugin.setup()
 
-    owner = plugin._hosts_owner_for_suffix("docker.mycorp")  # type: ignore[attr-defined]
+    owner = hosts_common.discovery_owner("_hosts", "docker.mycorp")
     lines = plugin._aggregate_txt.get(owner, [])  # type: ignore[attr-defined]
     assert lines
     joined = " ".join(lines)
@@ -2409,9 +2423,8 @@ def test_docker_hosts_sanitize_txt_chunk_removes_controls_and_clamps_bytes():
       - None; asserts no controls and byte length <= 253.
     """
 
-    mod = importlib.import_module("foghorn.plugins.resolve.docker_hosts")
     text = "bad\x00line\x1f\t" + ("é" * 200)
-    cleaned = mod.DockerHosts._sanitize_txt_chunk(text)  # type: ignore[attr-defined]
+    cleaned = hosts_common.sanitize_txt_chunk(text)
     assert "\x00" not in cleaned
     assert "\x1f" not in cleaned
     assert len(cleaned.encode("utf-8")) <= 253
@@ -2551,7 +2564,7 @@ def test_docker_hosts_tls_verify_with_ca_builds_config(tmp_path, monkeypatch):
 
     monkeypatch.setattr(mod, "docker", FakeDockerModule(), raising=True)
     monkeypatch.setattr(
-        DockerHosts, "_resolve_tls_path", staticmethod(lambda p: str(p)), raising=False
+        hosts_common, "resolve_plugin_tls_path", lambda p: str(p), raising=False
     )
 
     endpoint = {

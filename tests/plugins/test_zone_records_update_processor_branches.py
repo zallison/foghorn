@@ -391,7 +391,7 @@ def test_process_update_message_normalize_failures_and_no_tsig_paths(
     )
     plugin = SimpleNamespace(records={})
 
-    original_norm = up._normalize_dns_name
+    original_norm = up.dns_names.normalize_name
     key_norm_state = {"raised": False}
 
     def _flaky_norm(value: Any) -> str:
@@ -401,7 +401,7 @@ def test_process_update_message_normalize_failures_and_no_tsig_paths(
             raise ValueError("norm boom")
         return normalized
 
-    monkeypatch.setattr(up, "_normalize_dns_name", _flaky_norm)
+    monkeypatch.setattr(up.dns_names, "normalize_name", _flaky_norm)
     response_wire = up.process_update_message(
         wire,
         zone_apex="example.com",
@@ -802,8 +802,8 @@ def test_check_prerequisites_branch_matrix(monkeypatch: pytest.MonkeyPatch) -> N
             return "example.com."
 
     monkeypatch.setattr(
-        up,
-        "_normalize_dns_name",
+        up.dns_names,
+        "normalize_name",
         lambda *_a, **_kw: (_ for _ in ()).throw(ValueError("norm boom")),
     )
     rcode_bad_zone, _ = up.check_prerequisites([], records, _BadZone())  # type: ignore[arg-type]
@@ -1536,14 +1536,14 @@ def test_apply_update_operations_zone_apex_normalize_fallback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Brief: apply_update_operations falls back when zone_apex normalization fails."""
-    original_normalize_dns_name = up._normalize_dns_name
+    original_normalize_dns_name = up.dns_names.normalize_name
 
     def _normalize_with_zone_failure(value: str) -> str:
         if str(value) == "Example.COM.":
             raise ValueError("zone normalize boom")
         return original_normalize_dns_name(value)
 
-    monkeypatch.setattr(up, "_normalize_dns_name", _normalize_with_zone_failure)
+    monkeypatch.setattr(up.dns_names, "normalize_name", _normalize_with_zone_failure)
     plugin = SimpleNamespace(
         records={},
         _records_lock=threading.RLock(),

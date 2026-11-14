@@ -20,6 +20,23 @@ _ZONE_SUFFIX_TERMINAL = object()
 _WILDCARD_PATTERN_CACHE: dict[int, tuple[int, list[str]]] = {}
 
 
+def owner_in_zone(owner_norm: str, apex_norm: str) -> bool:
+    """Brief: Whether a normalized owner is inside a normalized zone apex.
+
+    Inputs:
+      - owner_norm: Owner name already lowercased without trailing dot.
+      - apex_norm: Zone apex already lowercased without trailing dot.
+
+    Outputs:
+      - True when apex is empty (unrestricted), owner equals apex, or owner is
+        a proper descendant of apex.
+    """
+
+    if not apex_norm:
+        return True
+    return owner_norm == apex_norm or owner_norm.endswith("." + apex_norm)
+
+
 def normalize_path_allowlist(raw: object) -> list[pathlib.Path]:
     """Brief: Normalize a path allowlist into resolved directory prefixes.
 

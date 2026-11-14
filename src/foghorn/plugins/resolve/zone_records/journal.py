@@ -30,6 +30,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
+from foghorn.plugins.resolve.zone_records.helpers import owner_in_zone
 from foghorn.utils import dns_names
 
 logger = logging.getLogger(__name__)
@@ -73,15 +74,18 @@ def _is_owner_in_zone(owner: str, zone_apex: str) -> bool:
     """Brief: Determine whether an owner belongs to a zone apex.
 
     Inputs:
-      - owner: Owner name to check.
-      - zone_apex: Zone apex.
+      - owner: Owner name to check (may be unnormalized).
+      - zone_apex: Zone apex (validated via _normalize_zone_apex).
 
     Outputs:
       - bool: True when owner is equal to apex or a descendant.
+
+    Notes:
+      - Raises ValueError when zone_apex is empty/unsafe (via _normalize_zone_apex).
     """
     owner_norm = dns_names.normalize_name(owner)
     zone_norm = _normalize_zone_apex(zone_apex)
-    return owner_norm == zone_norm or owner_norm.endswith(f".{zone_norm}")
+    return owner_in_zone(owner_norm, zone_norm)
 
 
 def filter_records_for_zone(

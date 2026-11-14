@@ -19,6 +19,7 @@ from dnslib import QTYPE
 
 from foghorn.plugins.resolve.zone_records import ZoneRecords
 from foghorn.plugins.resolve.zone_records import commit as zone_commit
+from foghorn.plugins.resolve.zone_records.helpers import owner_in_zone
 from foghorn.plugins.resolve.zone_records import update_processor as up
 
 
@@ -232,10 +233,10 @@ def test_resolve_zone_apex_for_owner_prefers_update_then_soa() -> None:
 
 def test_owner_in_zone_empty_apex_allows() -> None:
     """Brief: Empty apex disables zone boundary checks."""
-    assert zone_commit._owner_in_zone("anything", "") is True
-    assert zone_commit._owner_in_zone("example.com", "example.com") is True
-    assert zone_commit._owner_in_zone("a.example.com", "example.com") is True
-    assert zone_commit._owner_in_zone("evil.com", "example.com") is False
+    assert owner_in_zone("anything", "") is True
+    assert owner_in_zone("example.com", "example.com") is True
+    assert owner_in_zone("a.example.com", "example.com") is True
+    assert owner_in_zone("evil.com", "example.com") is False
 
 
 # ---------------------------------------------------------------------------
@@ -510,7 +511,7 @@ def test_commit_invalid_owner_raises_from_normalize(
 
         return dns_names.normalize_name(name)
 
-    monkeypatch.setattr(zone_commit, "_normalize_dns_name", _boom)
+    monkeypatch.setattr(zone_commit.dns_names, "normalize_name", _boom)
     result = zone_commit.commit_record_actions(
         plugin,
         "example.com",
