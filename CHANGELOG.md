@@ -10,12 +10,20 @@ All notable changes to this project will be documented in this file.
 - Admin snapshot routes for KubernetesHosts: `GET /api/v1/plugins/{plugin_name}/k8s_hosts` and `/kubernetes_hosts` (FastAPI and threaded), plus generic `/snapshot` via `get_http_snapshot()`.
 - Example config `example_configs/plugin_kubernetes_hosts.yaml` for in-cluster Service/Pod DNS publishing.
 
+### Fixed
+- DockerHosts setup continues when one endpoint client create fails: catch broad client-build errors per endpoint, connect remaining endpoints, log a connected/unavailable summary, and skip endpoints without a live client on the initial reload (retried on later cycles).
+
+### Changed
+- RateLimit periodic stats INFO log drops the redundant "RateLimit stats" prefix (logger name already identifies the source).
+
 ### Documentation
 - Added `docs/plugins/resolve/kubernetes_hosts.md` covering auth modes, TLS aliases, name publishing rules, config highlights, and admin snapshot URLs.
 - Documented KubernetesHosts snapshot endpoints in `docs/API.md`.
+- Documented DockerHosts multi-endpoint client-failure continue behavior in `docs/plugins/resolve/docker_hosts.md`.
 
 ### Tests
 - Added `tests/plugins/test_kubernetes_hosts.py` covering module import, Service/Pod map build and A/PTR answers, missing-auth error recording, kubeconfig token and client-cert parsing, and `tls_*` alias folding.
+- Added DockerHosts regression coverage that one failing endpoint does not prevent connecting a second endpoint.
 
 ## 0.7.2 — 2026-11-10
 
