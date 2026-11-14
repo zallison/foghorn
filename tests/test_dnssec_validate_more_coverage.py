@@ -372,6 +372,20 @@ def test_nsec_helpers_cover_edge_paths() -> None:
     qname2 = dns.name.from_text("aaaa.example.")
     assert dval._nsec_proves_nxdomain(qname2, [rr]) is True
 
+    # Structural subdomain of owner that sorts at/after next must NOT be
+    # treated as covered (owner < nxt alone is insufficient).
+    apex_owner = dns.name.from_text("example.")
+    early_next = dns.name.from_text("m.example.")
+    outside = dns.name.from_text("z.example.")
+    inside = dns.name.from_text("a.example.")
+    child_of_owner = dns.name.from_text("sub.m.example.")
+    apex_rr = _NsecRRset(apex_owner, [_WithNext(early_next)])
+    assert outside.is_subdomain(apex_owner)
+    assert dval._nsec_proves_nxdomain(outside, [apex_rr]) is False
+    assert dval._nsec_proves_nxdomain(inside, [apex_rr]) is True
+    # Names at/under next sort outside (apex, m.example) and must not match.
+    assert dval._nsec_proves_nxdomain(child_of_owner, [apex_rr]) is False
+
     # _nsec_proves_nodata skips non-matching rrsets.
     q = dns.name.from_text("name.example.")
     mismatch = _NsecRRset(dns.name.from_text("other.example."), [_WithNext(nxt)])

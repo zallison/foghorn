@@ -14,7 +14,10 @@ import dns.name
 import dns.rcode
 import dns.rdata
 import dns.rdataclass
+import dns.rdtypes.ANY.DNSKEY
+import dns.rdtypes.ANY.DS
 import dns.rdatatype
+import dns.rrset
 import pytest
 
 import foghorn.dnssec.dnssec_validate as dval
@@ -1224,59 +1227,298 @@ def test_configure_trust_anchors_updates_globals():
     assert dval._TRUST_ANCHOR_HOLD_REMOVE_DAYS == 9
 
 
-def test_dnskey_and_ds_caches_use_ttl_and_refresh(monkeypatch):
-    """Brief: _fetch_dnskey_cached/_fetch_ds_cached honour TTL and cache entries.
+def _make_dnskey_rrset(name: dns.name.Name, key_bytes: bytes = b"k") -> dns.rrset.RRset:
+    """Build a minimal DNSKEY RRset for chain-validation unit tests.
+
+    Inputs:
+      - name: Owner name for the RRset.
+      - key_bytes: Public key octets (only identity matters under mocks).
+
+    Outputs:
+      - dns.rrset.RRset containing one RSASHA256 DNSKEY.
+    """
+    dnskey = dns.rdtypes.ANY.DNSKEY.DNSKEY(
+        dns.rdataclass.IN,
+        dns.rdatatype.DNSKEY,
+        257,
+        3,
+        dns.dnssec.Algorithm.RSASHA256,
+        key_bytes,
+    )
+    rrset = dns.rrset.RRset(name, dns.rdataclass.IN, dns.rdatatype.DNSKEY)
+    rrset.add(dnskey)
+    return rrset
+
+
+def _make_ds_rrset(name: dns.name.Name, digest: bytes | None = None) -> dns.rrset.RRset:
+    """Build a minimal DS RRset for chain-validation unit tests.
+
+    Inputs:
+      - name: Owner name for the RRset.
+      - digest: Optional DS digest octets (defaults to 32 zero bytes for SHA-256).
+
+    Outputs:
+      - dns.rrset.RRset containing one DS record.
+    """
+    if digest is None:
+        digest = b"\x00" * 32
+    elif len(digest) < 32:
+        digest = digest.ljust(32, b"\x00")
+    ds = dns.rdtypes.ANY.DS.DS(
+        dns.rdataclass.IN,
+        dns.rdatatype.DS,
+        1,
+        8,
+        2,
+        digest,
+    )
+    rrset = dns.rrset.RRset(name, dns.rdataclass.IN, dns.rdatatype.DS)
+    rrset.add(ds)
+    return rrset
+
+
+def test_anchor_in_dnskey_rrset_matches_by_key_material():
+    """Brief: _anchor_in_dnskey_rrset requires matching algorithm/tag/key bytes.
+
+    Inputs:
+      - None
+
+    Outputs:
+      - None; asserts True on match and False when key material differs.
+    """
+    root = dns.name.root
+    anchors = _make_dnskey_rrset(root, b"anchor-key")
+    live_match = _make_dnskey_rrset(root, b"anchor-key")
+    live_miss = _make_dnskey_rrset(root, b"other-key")
+
+    assert dval._anchor_in_dnskey_rrset(anchors, live_match) is True
+    assert dval._anchor_in_dnskey_rrset(anchors, live_miss) is False
+
+
+def test_validate_chain_root_apex_success(monkeypatch):
+    """Brief: _validate_chain returns root DNSKEY when apex is root and valid.
 
     Inputs:
       - monkeypatch: pytest monkeypatch fixture.
 
     Outputs:
-      - None; asserts cached values are reused until expiry then refreshed.
+      - None; asserts validated root DNSKEY is returned.
     """
+    root = dns.name.root
+    anchors = _make_dnskey_rrset(root, b"anchor-key")
+    live = _make_dnskey_rrset(root, b"anchor-key")
+    sig = object()
 
-    # Clear caches for deterministic behavior.
-    dval._DNSKEY_CACHE.clear()
-    dval._DS_CACHE.clear()
+    monkeypatch.setattr(dval, "_root_dnskey_rrset", lambda: anchors)
+    monkeypatch.setattr(dval, "_fetch_dnskey_and_rrsig", lambda _r, _n: (live, sig))
+    monkeypatch.setattr(dns.dnssec, "validate", lambda *a, **k: None)
 
-    now_values = [1000.0, 1005.0, 1015.0, 1020.0, 1025.0, 1030.0]
+    out = dval._validate_chain(object(), root)
+    assert out is live
 
-    def fake_time() -> float:
-        """Return controlled timestamps for cache tests."""
 
-        return now_values.pop(0)
+def test_validate_chain_missing_root_keys(monkeypatch):
+    """Brief: _validate_chain fails closed when no trust anchor is available.
 
-    monkeypatch.setattr(dval.time, "time", fake_time)
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
 
-    class _Ans:
-        def __init__(self, ttl: int, tag: str) -> None:
-            self.rrset = type("_RR", (), {"ttl": ttl, "tag": tag})()
+    Outputs:
+      - None; asserts None when _root_dnskey_rrset returns None.
+    """
+    monkeypatch.setattr(dval, "_root_dnskey_rrset", lambda: None)
+    assert dval._validate_chain(object(), dns.name.root) is None
 
-    fetch_calls: list[tuple[str, str]] = []
 
-    def fake_fetch(resolver, name, rdtype):
-        """Return distinct rrsets so refresh behavior is visible."""
+def test_validate_chain_trust_anchor_not_in_live_root(monkeypatch):
+    """Brief: _validate_chain rejects live root DNSKEY missing the trust anchor.
 
-        fetch_calls.append((name.to_text(), rdtype))
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts None when anchor key material is absent.
+    """
+    root = dns.name.root
+    anchors = _make_dnskey_rrset(root, b"anchor-key")
+    live = _make_dnskey_rrset(root, b"attacker-key")
+
+    monkeypatch.setattr(dval, "_root_dnskey_rrset", lambda: anchors)
+    monkeypatch.setattr(
+        dval, "_fetch_dnskey_and_rrsig", lambda _r, _n: (live, object())
+    )
+
+    assert dval._validate_chain(object(), root) is None
+
+
+def test_validate_chain_missing_root_rrsig(monkeypatch):
+    """Brief: _validate_chain fails when root DNSKEY has no covering RRSIG.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts None when RRSIG(DNSKEY) is missing at root.
+    """
+    root = dns.name.root
+    anchors = _make_dnskey_rrset(root, b"anchor-key")
+    live = _make_dnskey_rrset(root, b"anchor-key")
+
+    monkeypatch.setattr(dval, "_root_dnskey_rrset", lambda: anchors)
+    monkeypatch.setattr(dval, "_fetch_dnskey_and_rrsig", lambda _r, _n: (live, None))
+
+    assert dval._validate_chain(object(), root) is None
+
+
+def test_validate_chain_root_self_sig_failure(monkeypatch):
+    """Brief: _validate_chain fails when root DNSKEY self-signature is invalid.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts None when dns.dnssec.validate raises for root.
+    """
+    root = dns.name.root
+    anchors = _make_dnskey_rrset(root, b"anchor-key")
+    live = _make_dnskey_rrset(root, b"anchor-key")
+
+    monkeypatch.setattr(dval, "_root_dnskey_rrset", lambda: anchors)
+    monkeypatch.setattr(
+        dval, "_fetch_dnskey_and_rrsig", lambda _r, _n: (live, object())
+    )
+
+    def boom(*_a, **_k):
+        raise dns.dnssec.ValidationFailure("bad root sig")
+
+    monkeypatch.setattr(dns.dnssec, "validate", boom)
+    assert dval._validate_chain(object(), root) is None
+
+
+def test_validate_chain_missing_ds_rrsig(monkeypatch):
+    """Brief: _validate_chain rejects DS without a covering RRSIG(DS).
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts None when DS is unsigned.
+    """
+    root = dns.name.root
+    child = dns.name.from_text("com.")
+    anchors = _make_dnskey_rrset(root, b"anchor-key")
+    root_dnskey = _make_dnskey_rrset(root, b"anchor-key")
+    ds = _make_ds_rrset(child)
+
+    monkeypatch.setattr(dval, "_root_dnskey_rrset", lambda: anchors)
+
+    def fake_dnskey_and_rrsig(_r, name):
+        assert name == root
+        return root_dnskey, object()
+
+    def fake_rrset_and_rrsig(_r, name, rdtype):
         if rdtype == "DNSKEY":
-            return _Ans(10, "dnskey")
-        return _Ans(10, "ds")
+            return fake_dnskey_and_rrsig(_r, name)
+        assert rdtype == "DS"
+        assert name == child
+        return ds, None
 
-    monkeypatch.setattr(dval, "_fetch", fake_fetch)
+    monkeypatch.setattr(dval, "_fetch_dnskey_and_rrsig", fake_dnskey_and_rrsig)
+    monkeypatch.setattr(dval, "_fetch_rrset_and_rrsig", fake_rrset_and_rrsig)
+    monkeypatch.setattr(dns.dnssec, "validate", lambda *a, **k: None)
 
-    name = dns.name.from_text("example.com.")
+    assert dval._validate_chain(object(), child) is None
 
-    rr1 = dval._fetch_dnskey_cached(object(), name)
-    rr2 = dval._fetch_dnskey_cached(object(), name)
-    # After TTL expiry, a new fetch should occur.
-    rr3 = dval._fetch_dnskey_cached(object(), name)
 
-    assert rr1 is rr2
-    assert rr3 is not rr1
+def test_validate_chain_ds_rrsig_failure(monkeypatch):
+    """Brief: _validate_chain fails when RRSIG(DS) does not verify.
 
-    # Similar behaviour for DS cache.
-    ds1 = dval._fetch_ds_cached(object(), name)
-    ds2 = dval._fetch_ds_cached(object(), name)
-    assert ds1 is ds2
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts None when parent cannot validate DS signature.
+    """
+    root = dns.name.root
+    child = dns.name.from_text("com.")
+    anchors = _make_dnskey_rrset(root, b"anchor-key")
+    root_dnskey = _make_dnskey_rrset(root, b"anchor-key")
+    ds = _make_ds_rrset(child)
+    ds_sig = object()
+
+    monkeypatch.setattr(dval, "_root_dnskey_rrset", lambda: anchors)
+
+    def fake_dnskey_and_rrsig(_r, name):
+        return root_dnskey, object()
+
+    def fake_rrset_and_rrsig(_r, name, rdtype):
+        if rdtype == "DNSKEY":
+            return fake_dnskey_and_rrsig(_r, name)
+        return ds, ds_sig
+
+    calls: list[str] = []
+
+    def fake_validate(rrset, sig, keys):
+        # First call is root DNSKEY self-sig; second is RRSIG(DS).
+        if rrset is ds:
+            calls.append("ds")
+            raise dns.dnssec.ValidationFailure("bad ds sig")
+        calls.append("root")
+
+    monkeypatch.setattr(dval, "_fetch_dnskey_and_rrsig", fake_dnskey_and_rrsig)
+    monkeypatch.setattr(dval, "_fetch_rrset_and_rrsig", fake_rrset_and_rrsig)
+    monkeypatch.setattr(dns.dnssec, "validate", fake_validate)
+
+    assert dval._validate_chain(object(), child) is None
+    assert calls == ["root", "ds"]
+
+
+def test_validate_chain_child_success(monkeypatch):
+    """Brief: _validate_chain walks root→child with DS + DNSKEY checks.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts child DNSKEY is returned on a full successful walk.
+    """
+    root = dns.name.root
+    child = dns.name.from_text("com.")
+    anchors = _make_dnskey_rrset(root, b"anchor-key")
+    root_dnskey = _make_dnskey_rrset(root, b"anchor-key")
+    child_dnskey = _make_dnskey_rrset(child, b"child-key")
+    ds = _make_ds_rrset(child, digest=b"match")
+    ds_sig = object()
+    child_sig = object()
+
+    monkeypatch.setattr(dval, "_root_dnskey_rrset", lambda: anchors)
+
+    def fake_dnskey_and_rrsig(_r, name):
+        if name == root:
+            return root_dnskey, object()
+        assert name == child
+        return child_dnskey, child_sig
+
+    def fake_rrset_and_rrsig(_r, name, rdtype):
+        if rdtype == "DNSKEY":
+            return fake_dnskey_and_rrsig(_r, name)
+        assert rdtype == "DS" and name == child
+        return ds, ds_sig
+
+    def fake_make_ds(owner, dnskey, algorithm):
+        return type(
+            "_DS",
+            (),
+            {"digest": b"match".ljust(32, b"\x00"), "key_tag": 1},
+        )()
+
+    monkeypatch.setattr(dval, "_fetch_dnskey_and_rrsig", fake_dnskey_and_rrsig)
+    monkeypatch.setattr(dval, "_fetch_rrset_and_rrsig", fake_rrset_and_rrsig)
+    monkeypatch.setattr(dns.dnssec, "validate", lambda *a, **k: None)
+    monkeypatch.setattr(dns.dnssec, "make_ds", fake_make_ds)
+
+    out = dval._validate_chain(object(), child)
+    assert out is child_dnskey
 
 
 def test_fetch_dnskey_and_rrsig_parsing_and_errors():
