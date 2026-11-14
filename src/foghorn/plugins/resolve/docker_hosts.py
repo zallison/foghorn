@@ -413,14 +413,19 @@ class DockerHosts(DynamicHostsPlugin):
         # Per-host exported ports (hostports) for admin UI display.
         self._hostports: dict[str, list[str]] = {}
 
-        # Docker clients per endpoint URL (when docker SDK is available)
+        # Docker clients per endpoint URL (when docker SDK is available).
+        # One unreachable endpoint must not block connecting to the others;
+        # failures are sticky-logged and retried on each reload cycle.
         self._clients: dict[str, object] = {}
+        connected = 0
+        failed = 0
         if docker is not None:
             for ep in self._endpoints:
                 url = str(ep["url"])
                 try:
                     client = self._build_docker_client(url=url, endpoint=ep)
-                except DockerException as exc:
+                except Exception as exc:
+                    failed += 1
                     self._note_condition_failure(
                         f"endpoint:{url}",
                         "failed to create client for %s: %s",
@@ -429,7 +434,15 @@ class DockerHosts(DynamicHostsPlugin):
                     )
                     continue
                 self._clients[url] = client
+                connected += 1
                 logger.info("connected to endpoint %s", url)
+            if self._endpoints:
+                logger.info(
+                    "docker endpoints: %d connected, %d unavailable "
+                    "(will retry on reload)",
+                    connected,
+                    failed,
+                )
         else:
             logger.warning(
                 "docker SDK is not installed; plugin will be inert until it is available"
@@ -441,7 +454,7 @@ class DockerHosts(DynamicHostsPlugin):
         ]
         self._reload_interval = min(positive_intervals) if positive_intervals else 0.0
 
-        # Initial population from Docker.
+        # Initial population from Docker (skips endpoints without a live client).
         self._reload_from_docker()
 
         # Optionally start a background refresher to keep mappings up to date

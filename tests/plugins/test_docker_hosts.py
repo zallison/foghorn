@@ -1003,6 +1003,57 @@ def test_docker_hosts_setup_handles_docker_client_creation_failure(monkeypatch, 
     assert any("failed to create client" in r.getMessage() for r in caplog.records)
 
 
+def test_docker_hosts_setup_continues_after_one_endpoint_fails(monkeypatch, caplog):
+    """Brief: setup connects remaining endpoints when one client create fails.
+
+    Inputs:
+      - monkeypatch/caplog: pytest fixtures.
+
+    Outputs:
+      - None; asserts failed endpoint is skipped and the next is connected.
+    """
+
+    mod = importlib.import_module("foghorn.plugins.resolve.docker_hosts")
+    DockerHosts = mod.DockerHosts
+
+    class DummyDockerExc(Exception):
+        pass
+
+    class OkClient:
+        pass
+
+    class FakeDockerModule:
+        def DockerClient(self, base_url: str, **kwargs):  # noqa: N802
+            _ = kwargs
+            if "bad" in base_url:
+                raise DummyDockerExc(f"cannot connect to {base_url}")
+            return OkClient()
+
+    monkeypatch.setattr(mod, "docker", FakeDockerModule(), raising=True)
+    monkeypatch.setattr(mod, "DockerException", DummyDockerExc, raising=True)
+
+    plugin = DockerHosts(
+        endpoints=[
+            {"url": "unix:///bad/docker.sock"},
+            {"url": "tcp://good.example:2376"},
+        ]
+    )  # type: ignore[arg-type]
+    monkeypatch.setattr(plugin, "_reload_from_docker", lambda: None)
+
+    caplog.set_level("INFO", logger=mod.__name__)
+    plugin.setup()
+
+    clients = getattr(plugin, "_clients", {})
+    assert "unix:///bad/docker.sock" not in clients
+    assert "tcp://good.example:2376" in clients
+    assert any("failed to create client" in r.getMessage() for r in caplog.records)
+    assert any(
+        "connected to endpoint tcp://good.example:2376" in r.getMessage()
+        for r in caplog.records
+    )
+    assert any("1 connected, 1 unavailable" in r.getMessage() for r in caplog.records)
+
+
 def test_docker_hosts_reload_loop_executes_reload_once(monkeypatch):
     """Brief: _reload_loop sleeps then calls _reload_from_docker in a loop.
 
