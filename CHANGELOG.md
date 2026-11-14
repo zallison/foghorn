@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- KubernetesHosts resolve plugin (`foghorn.plugins.resolve.kubernetes_hosts`): indexes Kubernetes Services and Pods via the API (in-cluster service account, kubeconfig, or explicit api_server + token and/or mTLS), builds forward/reverse maps, and answers matching A/AAAA/PTR/TXT queries in `pre_resolve`. Uses `requests` only (no official Kubernetes client). Supports multi-endpoint config, namespace/label selectors, optional DNS suffix, poll interval, and TXT metadata on answers.
+- Admin snapshot routes for KubernetesHosts: `GET /api/v1/plugins/{plugin_name}/k8s_hosts` and `/kubernetes_hosts` (FastAPI and threaded), plus generic `/snapshot` via `get_http_snapshot()`.
+- Example config `example_configs/plugin_kubernetes_hosts.yaml` for in-cluster Service/Pod DNS publishing.
+
+### Documentation
+- Added `docs/plugins/resolve/kubernetes_hosts.md` covering auth modes, TLS aliases, name publishing rules, config highlights, and admin snapshot URLs.
+- Documented KubernetesHosts snapshot endpoints in `docs/API.md`.
+
+### Tests
+- Added `tests/plugins/test_kubernetes_hosts.py` covering module import, Service/Pod map build and A/PTR answers, missing-auth error recording, kubeconfig token and client-cert parsing, and `tls_*` alias folding.
+
 ## 0.7.2 — 2026-11-10
 
 ### Added
