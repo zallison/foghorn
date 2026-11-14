@@ -2392,7 +2392,7 @@ class RateLimit(BasePlugin):
 
         plugin_name = str(getattr(self, "name", "rate_limit") or "rate_limit")
         logger.info(
-            "RateLimit stats name=%s avg_rps=%.2f max_rps=%.2f buckets=%d "
+            "name=%s avg_rps=%.2f max_rps=%.2f buckets=%d "
             + "max_bucket_avg_rps=%.2f stats_window_seconds=%d",
             plugin_name,
             avg_rps,
