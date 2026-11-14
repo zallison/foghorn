@@ -330,6 +330,12 @@ def auto_sign_zones(
             log=log,
         )
         validity_days = int(dnssec_cfg_raw.get("validity_days") or 30)
+        if validity_days < 1:
+            log.warning(
+                "DNSSEC validity_days=%s invalid; clamping to 1",
+                validity_days,
+            )
+            validity_days = 1
 
         try:
             dnskey_code_all = int(QTYPE.DNSKEY)
@@ -416,6 +422,15 @@ def auto_sign_zones(
                         and nsec3_cfg.get("iterations") is not None
                     ):
                         nsec3_iterations = int(nsec3_cfg.get("iterations"))
+                        # Cap iterations to bound SHA-1 work on sign/reload.
+                        if nsec3_iterations < 0:
+                            nsec3_iterations = 0
+                        if nsec3_iterations > 100:
+                            log.warning(
+                                "NSEC3 iterations=%s exceeds cap 100; clamping",
+                                nsec3_iterations,
+                            )
+                            nsec3_iterations = 100
             except Exception:  # pragma: no cover - defensive
                 nsec3_salt = "-"
                 nsec3_iterations = 10

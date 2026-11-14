@@ -493,10 +493,24 @@ class FoghornTTLCache:
             seconds_remaining = float(expiry - now)
             ttl = self._ttls.get(ns_key)
 
-            if seconds_remaining >= 0:
+            # Align with get(): remaining == 0 is expired (now >= expiry).
+            # Negative remaining is still returned so SWR callers can serve stale.
+            if seconds_remaining > 0:
                 self.cache_hits += 1
             else:
                 self.cache_misses += 1
+                if seconds_remaining == 0.0:
+                    # Exactly expired: drop like get() so meta path is not fresher.
+                    self._store.pop(ns_key, None)
+                    self._ttls.pop(ns_key, None)
+                    self._last_access.pop(ns_key, None)
+                    self._hit_counts.pop(ns_key, None)
+                    self._insert_index.pop(ns_key, None)
+                    return (
+                        None,
+                        seconds_remaining,
+                        int(ttl) if ttl is not None else None,
+                    )
 
             return (
                 data,

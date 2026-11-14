@@ -606,11 +606,13 @@ class RateLimit(BasePlugin):
         # without limit. Entries still expire after ~2 windows via TTL.
         cache_namespace = module_namespace(__file__)
         window_max = max(1, int(getattr(self, "active_window_max_keys", 2048) or 2048))
+        # Prefer LFU over LRU so an attacker spraying unique keys cannot evict
+        # hot victims and reset their per-window counters to 1 on reinsert.
         self._window_cache = TTLCacheAdapter(
             FoghornTTLCache(
                 namespace=cache_namespace,
                 maxsize=window_max,
-                eviction_policy="lru",
+                eviction_policy="lfu",
             )
         )
         self._window_locks = [threading.Lock() for _ in range(256)]

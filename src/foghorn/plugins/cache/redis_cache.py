@@ -257,6 +257,13 @@ class RedisCache(CachePlugin):
         try:
             ms = int(self._client.pttl(redis_key))
             # -2: key does not exist, -1: no expiry.
+            if ms == -1:
+                # Immortal entry (e.g. failed expire): treat as miss and delete.
+                try:
+                    self._client.delete(redis_key)
+                except Exception:
+                    pass
+                return None, None, None
             if ms >= 0:
                 seconds_remaining = float(ms) / 1000.0
         except Exception:
@@ -288,16 +295,26 @@ class RedisCache(CachePlugin):
         redis_key = self._redis_key(key)
         payload, is_pickle = _encode_value(value)
 
-        # Store value and metadata as a hash, and apply expiry to the hash key.
-        self._client.hset(
-            redis_key,
-            mapping={
-                "v": payload,
-                "p": int(is_pickle),
-                "ttl": int(ttl_int),
-            },
-        )
-        self._client.expire(redis_key, int(ttl_int))
+        # Store value+metadata and TTL atomically so a crash between hset and
+        # expire cannot leave a permanent no-TTL cache entry.
+        try:
+            pipe = self._client.pipeline(transaction=True)
+            pipe.hset(
+                redis_key,
+                mapping={
+                    "v": payload,
+                    "p": int(is_pickle),
+                    "ttl": int(ttl_int),
+                },
+            )
+            pipe.expire(redis_key, int(ttl_int))
+            pipe.execute()
+        except Exception:
+            try:
+                self._client.delete(redis_key)
+            except Exception:
+                pass
+            raise
 
     def purge(self) -> int:
         """Brief: Purge expired entries.

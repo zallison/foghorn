@@ -2447,7 +2447,12 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         except Exception as exc:
             try:
                 if os.path.exists(backup_path):
-                    shutil.copy(backup_path, cfg_path_abs)
+                    restore_tmp = cfg_path_abs + ".restore.tmp"
+                    with open(backup_path, "rb") as src, open(restore_tmp, "wb") as dst:
+                        dst.write(src.read())
+                        dst.flush()
+                        os.fsync(dst.fileno())
+                    os.replace(restore_tmp, cfg_path_abs)
                     restored = True
             except Exception:
                 restored = False

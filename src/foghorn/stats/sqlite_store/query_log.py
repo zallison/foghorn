@@ -13,6 +13,18 @@ from foghorn.utils import dns_names
 logger = logging.getLogger("foghorn.stats")
 
 
+def _like_escape(value: str) -> str:
+    """Brief: Escape LIKE metacharacters in an operator-supplied pattern fragment.
+
+    Inputs:
+      - value: Raw string fragment to embed in a SQL LIKE pattern.
+
+    Outputs:
+      - str: value with \\ , % , and _ escaped for use with ESCAPE '\\'.
+    """
+    return str(value).replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 class _QueryLogUtils:
     def select_query_log(
         self,
@@ -74,6 +86,9 @@ class _QueryLogUtils:
             page_size_i = 100
         if page_size_i < 1:
             page_size_i = 1
+        # Hard upper bound to avoid unbounded memory/latency from one request.
+        if page_size_i > 1000:
+            page_size_i = 1000
 
         client_ip_s = str(client_ip).strip() if client_ip is not None else None
         qtype_s = str(qtype).strip().upper() if qtype is not None else None
@@ -95,9 +110,9 @@ class _QueryLogUtils:
             where.append("qtype = ?")
             params.append(qtype_s)
         if qname_s:
-            where.append("(name = ? OR name LIKE ?)")
+            where.append("(name = ? OR name LIKE ? ESCAPE '\\')")
             params.append(qname_s)
-            params.append(f"%.{qname_s}")
+            params.append(f"%.{_like_escape(qname_s)}")
         if rcode_s:
             where.append("rcode = ?")
             params.append(rcode_s)
@@ -107,9 +122,12 @@ class _QueryLogUtils:
         if source_s:
             # result_json is stored as text; avoid JSON extension requirements by
             # matching compact and spaced key/value forms.
-            where.append("(LOWER(result_json) LIKE ? OR LOWER(result_json) LIKE ?)")
-            params.append(f'%"source":"{source_s}"%')
-            params.append(f'%"source": "{source_s}"%')
+            src_esc = _like_escape(source_s)
+            where.append(
+                "(LOWER(result_json) LIKE ? ESCAPE '\\' OR LOWER(result_json) LIKE ? ESCAPE '\\')"
+            )
+            params.append(f'%"source":"{src_esc}"%')
+            params.append(f'%"source": "{src_esc}"%')
         if ede_code_s:
             try:
                 ede_code_i = int(ede_code_s)

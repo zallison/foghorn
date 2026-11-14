@@ -18,6 +18,36 @@ from foghorn.plugins.cache import redis_cache as redis_cache_mod
 from foghorn.plugins.cache.registry import get_cache_plugin_class, load_cache_plugin
 
 
+class _FakePipeline:
+    """Brief: Minimal Redis pipeline stand-in for FakeRedisClient tests.
+
+    Inputs:
+      - client: Parent FakeRedisClient.
+
+    Outputs:
+      - Queues hset/expire and applies them on execute().
+    """
+
+    def __init__(self, client: "FakeRedisClient") -> None:
+        self._client = client
+        self._ops: List[tuple[str, tuple[Any, ...], dict[str, Any]]] = []
+
+    def hset(self, key: str, mapping: Dict[str, Any]) -> "_FakePipeline":
+        self._ops.append(("hset", (key,), {"mapping": mapping}))
+        return self
+
+    def expire(self, key: str, ttl: int) -> "_FakePipeline":
+        self._ops.append(("expire", (key, int(ttl)), {}))
+        return self
+
+    def execute(self) -> list[Any]:
+        out: list[Any] = []
+        for name, args, kwargs in self._ops:
+            out.append(getattr(self._client, name)(*args, **kwargs))
+        self._ops.clear()
+        return out
+
+
 class FakeRedisClient:
     """Brief: Minimal in-memory Redis client substitute for tests.
 
@@ -131,6 +161,19 @@ class FakeRedisClient:
 
         self.ttls[key] = int(ttl)
 
+    def pipeline(self, transaction: bool = True) -> "_FakePipeline":
+        """Brief: Return a minimal pipeline that applies hset+expire atomically.
+
+        Inputs:
+          - transaction: Ignored; kept for API compatibility.
+
+        Outputs:
+          - _FakePipeline bound to this client.
+        """
+
+        _ = transaction
+        return _FakePipeline(self)
+
     def pttl(self, key: str) -> int:
         """Brief: Return the remaining TTL in milliseconds.
 
@@ -141,9 +184,11 @@ class FakeRedisClient:
           - int: TTL in milliseconds or -2/-1 for missing/no TTL.
         """
 
+        if key not in self.store:
+            return -2
         ttl = self.ttls.get(key)
         if ttl is None:
-            return -2
+            return -1
         return int(ttl * 1000)
 
     def delete(self, key: str) -> None:

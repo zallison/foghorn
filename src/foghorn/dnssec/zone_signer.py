@@ -278,7 +278,17 @@ def load_key(key_dir: Path, zone_name: str, key_type: str) -> object | None:
     except (
         Exception
     ) as exc:  # pragma: nocover - [defensive: invalid or unsupported PEM key material]
-        logger.warning("Failed to load key from %s: %s", key_path, exc)
+        # Do not overwrite the path here; callers decide whether to generate a
+        # replacement. Quarantine corrupt material so generate_policy=maybe
+        # cannot silently mint a new KSK/ZSK over the same filename.
+        logger.error("Failed to load key from %s: %s", key_path, exc)
+        try:
+            corrupt_path = key_path.with_suffix(key_path.suffix + ".corrupt")
+            if not corrupt_path.exists():
+                key_path.replace(corrupt_path)
+                logger.error("Quarantined corrupt key file to %s", corrupt_path)
+        except Exception as move_exc:  # pragma: nocover - best-effort quarantine
+            logger.error("Failed to quarantine corrupt key %s: %s", key_path, move_exc)
         return None
 
 
@@ -383,12 +393,16 @@ def sign_zone(
             except (
                 Exception
             ) as exc:  # pragma: nocover - [defensive: dnspython signing can fail for malformed rdatasets]
-                logger.warning(
+                logger.error(
                     "Failed to sign %s %s: %s",
                     owner,
                     dns.rdatatype.to_text(rdataset.rdtype),
                     exc,
                 )
+                raise RuntimeError(
+                    f"DNSSEC signing failed for {owner} "
+                    f"{dns.rdatatype.to_text(rdataset.rdtype)}: {exc}"
+                ) from exc
 
 
 def generate_ds_records(
@@ -508,8 +522,11 @@ def sign_zone_object(
     """
 
     now = now or datetime.datetime.utcnow()
+    validity = int(validity_days)
+    if validity < 1:
+        raise ValueError(f"validity_days must be >= 1, got {validity_days!r}")
     inception = now - datetime.timedelta(hours=1)
-    expiration = now + datetime.timedelta(days=int(validity_days))
+    expiration = now + datetime.timedelta(days=validity)
 
     alg_enum = ALGORITHM_MAP[next(k for k, v in ALGORITHM_MAP.items() if v[0] == ksk_dnskey.algorithm)][0]  # type: ignore[attr-defined]
 
@@ -567,8 +584,11 @@ def sign_zone_file(
     )
 
     now = datetime.datetime.utcnow()
+    validity = int(validity_days)
+    if validity < 1:
+        raise ValueError(f"validity_days must be >= 1, got {validity_days!r}")
     inception = now - datetime.timedelta(hours=1)
-    expiration = now + datetime.timedelta(days=int(validity_days))
+    expiration = now + datetime.timedelta(days=validity)
     alg_enum = ALGORITHM_MAP[algorithm][0]
 
     sign_zone(

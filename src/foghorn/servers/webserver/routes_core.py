@@ -564,7 +564,7 @@ def _register_config_routes(
                 raw_yaml=raw_yaml,
                 backup_path=backup_path,
                 tmp_path=cfg_path_abs + ".new",
-                strategy="copy",
+                strategy="replace",
                 cleanup_tmp=False,
             )
         except Exception as exc:  # pragma: no cover - file system specific
@@ -583,7 +583,13 @@ def _register_config_routes(
         except Exception as exc:
             try:
                 if os.path.exists(backup_path):
-                    shutil.copy(backup_path, cfg_path_abs)
+                    # Atomic restore: same-dir replace avoids torn YAML on concurrent reload.
+                    restore_tmp = cfg_path_abs + ".restore.tmp"
+                    with open(backup_path, "rb") as src, open(restore_tmp, "wb") as dst:
+                        dst.write(src.read())
+                        dst.flush()
+                        os.fsync(dst.fileno())
+                    os.replace(restore_tmp, cfg_path_abs)
                     restored = True
             except Exception:
                 restored = False

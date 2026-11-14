@@ -72,7 +72,13 @@ def load_store(path: str) -> Store:
         if not isinstance(data, dict):
             return {}
         return data
-    except Exception:
+    except Exception as exc:
+        # Corrupt/unreadable store must not silently discard anchors without signal.
+        import logging
+
+        logging.getLogger("foghorn.dnssec").error(
+            "Failed to load trust-anchor store from %s: %s", path, exc, exc_info=True
+        )
         return {}
 
 

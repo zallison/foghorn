@@ -182,18 +182,24 @@ def _plugin_window_fallback(plugin: object | None) -> tuple[int, int, int]:
 
     try:
         window_seconds = max(1, int(getattr(plugin, "window_seconds", 60) or 60))
-    except Exception:  # pragma: nocover - defensive fallback for malformed plugin window settings
+    except (
+        Exception
+    ):  # pragma: nocover - defensive fallback for malformed plugin window settings
         window_seconds = 60
 
     # Prefer global_max_rps when explicitly configured; otherwise use a
     # conservative floor from min_enforce_rps.
     try:
         global_max_rps = float(getattr(plugin, "global_max_rps", 0.0) or 0.0)
-    except Exception:  # pragma: nocover - defensive fallback for malformed plugin limiter settings
+    except (
+        Exception
+    ):  # pragma: nocover - defensive fallback for malformed plugin limiter settings
         global_max_rps = 0.0
     try:
         min_enforce_rps = float(getattr(plugin, "min_enforce_rps", 50.0) or 50.0)
-    except Exception:  # pragma: nocover - defensive fallback for malformed plugin limiter settings
+    except (
+        Exception
+    ):  # pragma: nocover - defensive fallback for malformed plugin limiter settings
         min_enforce_rps = 50.0
     base_rps = float(global_max_rps if global_max_rps > 0.0 else min_enforce_rps)
     requests_per_window = max(1, int(math.ceil(base_rps * float(window_seconds))))
@@ -215,7 +221,9 @@ def _get_numeric_plugin_attr(plugin: object, attr_name: str, default: float) -> 
     try:
         value = getattr(plugin, attr_name, default)
         return float(value if value is not None else default)
-    except Exception:  # pragma: nocover - defensive fallback for malformed plugin numeric attrs
+    except (
+        Exception
+    ):  # pragma: nocover - defensive fallback for malformed plugin numeric attrs
         return float(default)
 
 
@@ -280,9 +288,14 @@ class PluginAdminRateLimitBackend:
             try:
                 if callable(getattr(plugin, "check_admin_rate_limit", None)):
                     return plugin
-                if named_candidate is None and str(type(plugin).__name__) == "RateLimit":
+                if (
+                    named_candidate is None
+                    and str(type(plugin).__name__) == "RateLimit"
+                ):
                     named_candidate = plugin
-            except Exception:  # pragma: nocover - defensive against malformed plugin objects
+            except (
+                Exception
+            ):  # pragma: nocover - defensive against malformed plugin objects
                 continue
         return named_candidate
 
@@ -302,7 +315,9 @@ class PluginAdminRateLimitBackend:
             try:
                 payload = hook(key=str(key), now_ts=float(now_ts))
                 return _decision_from_plugin_payload(payload)
-            except Exception:  # pragma: nocover - defensive: plugin hook failures must fail closed to fallback backend
+            except (
+                Exception
+            ):  # pragma: nocover - defensive: plugin hook failures must fail closed to fallback backend
                 logger.debug(
                     "admin rate-limit plugin hook failed; using fallback backend",
                     exc_info=True,
@@ -344,7 +359,9 @@ def _decision_from_plugin_payload(payload: object) -> AdminRateLimitDecision:
             retry_after_seconds=max(0, int(payload.get("retry_after_seconds", 0) or 0)),
             backend=str(payload.get("backend", "plugin") or "plugin"),
         )
-    raise ValueError(f"unsupported admin rate-limit payload type: {type(payload).__name__}")
+    raise ValueError(
+        f"unsupported admin rate-limit payload type: {type(payload).__name__}"
+    )
 
 
 @dataclass(frozen=True)
@@ -367,7 +384,9 @@ class AdminRateLimitSettings:
     excluded_actions: tuple[str, ...]
 
 
-def parse_admin_rate_limit_settings(config: Dict[str, Any] | None) -> AdminRateLimitSettings:
+def parse_admin_rate_limit_settings(
+    config: Dict[str, Any] | None,
+) -> AdminRateLimitSettings:
     """Brief: Parse `server.http.admin_rate_limit` settings with safe defaults.
 
     Inputs:
@@ -386,24 +405,34 @@ def parse_admin_rate_limit_settings(config: Dict[str, Any] | None) -> AdminRateL
         backend = "plugin"
     try:
         requests_per_window = max(1, int(admin_cfg.get("requests_per_window", 60)))
-    except Exception:  # pragma: nocover - defensive fallback for malformed config values
+    except (
+        Exception
+    ):  # pragma: nocover - defensive fallback for malformed config values
         requests_per_window = 60
     try:
         window_seconds = max(1, int(admin_cfg.get("window_seconds", 60)))
-    except Exception:  # pragma: nocover - defensive fallback for malformed config values
+    except (
+        Exception
+    ):  # pragma: nocover - defensive fallback for malformed config values
         window_seconds = 60
     try:
         burst = max(0, int(admin_cfg.get("burst", 0)))
-    except Exception:  # pragma: nocover - defensive fallback for malformed config values
+    except (
+        Exception
+    ):  # pragma: nocover - defensive fallback for malformed config values
         burst = 0
-    key_mode = str(admin_cfg.get("key_mode", "client_action") or "client_action").strip()
+    key_mode = str(
+        admin_cfg.get("key_mode", "client_action") or "client_action"
+    ).strip()
     key_mode = key_mode.lower()
     if key_mode not in {"client", "client_action"}:
         key_mode = "client_action"
     raw_excluded = admin_cfg.get("excluded_actions", [])
     excluded_actions: list[str] = []
     if isinstance(raw_excluded, list):
-        excluded_actions = [str(item).strip() for item in raw_excluded if str(item).strip()]
+        excluded_actions = [
+            str(item).strip() for item in raw_excluded if str(item).strip()
+        ]
     return AdminRateLimitSettings(
         enabled=bool(enabled),
         backend=str(backend),
@@ -514,9 +543,16 @@ class AdminRateLimitService:
                 backend="excluded",
             )
 
-        principal = _auth_identity_fragment(authorization_header, api_key_header)
-        if not principal:
-            principal = str(client_ip or "unknown")
+        # Pre-auth: always key by socket peer IP so rotating forged
+        # Authorization/X-API-Key values cannot mint fresh buckets.
+        # Token hash is only mixed in when a non-empty auth header is present
+        # *and* we still bind to client_ip (ip+token), never token-alone.
+        ip = str(client_ip or "unknown")
+        token_frag = _auth_identity_fragment(authorization_header, api_key_header)
+        if token_frag:
+            principal = f"{ip}|{token_frag}"
+        else:
+            principal = ip
         if self._settings.key_mode == "client":
             key = principal
         else:
@@ -570,7 +606,7 @@ def _service_signature(
     """
 
     plugin_fingerprint_items: list[tuple[Any, ...]] = []
-    for plugin in (plugins or []):
+    for plugin in plugins or []:
         plugin_name = str(getattr(plugin, "name", type(plugin).__name__))
         plugin_fingerprint_items.append(
             (

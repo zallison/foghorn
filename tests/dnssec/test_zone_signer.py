@@ -355,13 +355,14 @@ def test_sign_zone_derelativizes_non_absolute_origin(tmp_path: Path) -> None:
 
 
 def test_sign_zone_handles_signing_error(monkeypatch) -> None:
-    """Brief: sign_zone logs and continues when dnspython signing raises.
+    """Brief: sign_zone fails closed when dnspython signing raises.
 
     Inputs:
       - monkeypatch: pytest fixture to patch dns.dnssec.sign.
 
     Outputs:
-      - Asserts sign_zone does not raise when signing fails.
+      - Asserts sign_zone raises RuntimeError so callers cannot publish
+        an unsigned zone as if signing succeeded.
     """
 
     origin = dns.name.from_text("err.test.")
@@ -378,17 +379,18 @@ def test_sign_zone_handles_signing_error(monkeypatch) -> None:
     monkeypatch.setattr(zone_signer.dns.dnssec, "sign", _boom)
 
     now = datetime.datetime(2026, 1, 1, 0, 0, 0)
-    zone_signer.sign_zone(
-        zone,
-        origin,
-        ksk_private,
-        zsk_private,
-        ksk_dnskey,
-        zsk_dnskey,
-        alg,
-        now,
-        now + datetime.timedelta(days=1),
-    )
+    with pytest.raises(RuntimeError, match="DNSSEC signing failed"):
+        zone_signer.sign_zone(
+            zone,
+            origin,
+            ksk_private,
+            zsk_private,
+            ksk_dnskey,
+            zsk_dnskey,
+            alg,
+            now,
+            now + datetime.timedelta(days=1),
+        )
 
 
 def test_generate_ds_records_success_and_error(monkeypatch) -> None:

@@ -52,9 +52,14 @@ class _RebuildUtils:
             ):  # pragma: no cover - batching lock path exercised indirectly
                 self._flush_locked()
 
-        # Clear existing counts so we always rebuild from a clean slate.
+        # Snapshot existing counts so a mid-rebuild failure can restore them
+        # instead of leaving operators with an empty/partial counts table.
         try:
             with self._conn:  # type: ignore[attr-defined]
+                self._conn.execute("DROP TABLE IF EXISTS counts_backup")  # type: ignore[attr-defined]
+                self._conn.execute(
+                    "CREATE TABLE counts_backup AS SELECT * FROM counts"
+                )  # type: ignore[attr-defined]
                 self._conn.execute("DELETE FROM counts")  # type: ignore[attr-defined]
         except Exception as exc:  # pragma: no cover
             log.error(
@@ -62,6 +67,7 @@ class _RebuildUtils:
             )
             return
 
+        rebuild_ok = False
         try:
             cur = self._conn.cursor()  # type: ignore[attr-defined]
             cur.execute(
@@ -220,10 +226,37 @@ class _RebuildUtils:
                     self._lock
                 ):  # pragma: no cover - batching lock path exercised indirectly
                     self._flush_locked()
+            rebuild_ok = True
         except Exception as exc:  # pragma: no cover
             log.error(
                 "Error while rebuilding counts from query_log: %s", exc, exc_info=True
             )
+        finally:
+            if rebuild_ok:
+                try:
+                    with self._conn:  # type: ignore[attr-defined]
+                        self._conn.execute("DROP TABLE IF EXISTS counts_backup")  # type: ignore[attr-defined]
+                except Exception:  # pragma: no cover - cleanup best-effort
+                    pass
+            else:
+                # Restore pre-rebuild counts so a failed rebuild is not destructive.
+                try:
+                    with self._conn:  # type: ignore[attr-defined]
+                        self._conn.execute("DELETE FROM counts")  # type: ignore[attr-defined]
+                        self._conn.execute(
+                            "INSERT INTO counts (scope, key, value) "
+                            "SELECT scope, key, value FROM counts_backup"
+                        )  # type: ignore[attr-defined]
+                        self._conn.execute("DROP TABLE IF EXISTS counts_backup")  # type: ignore[attr-defined]
+                    log.error(
+                        "Restored previous counts after failed rebuild from query_log"
+                    )
+                except Exception as restore_exc:  # pragma: no cover
+                    log.error(
+                        "Failed to restore counts after rebuild error: %s",
+                        restore_exc,
+                        exc_info=True,
+                    )
 
     def rebuild_counts_if_needed(
         self, force_rebuild: bool = False, logger_obj: Optional[logging.Logger] = None
