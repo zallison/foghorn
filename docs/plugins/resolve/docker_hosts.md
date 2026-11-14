@@ -180,9 +180,12 @@ Top-level `config` keys (described by `DockerHostsConfig`):
 ### Behaviour
 
 - On setup, DockerHosts connects to each configured endpoint, inspects
-  containers and builds forward/reverse maps plus optional TXT summaries.
+  containers and builds forward/reverse maps plus optional TXT summaries. A
+  failed client create on one endpoint does not block the others; setup logs a
+  connected/unavailable summary and retries unavailable endpoints on later
+  reload cycles.
 - It periodically refreshes those maps at the minimum positive interval across
-  endpoints.
+  endpoints (endpoints without a live client are skipped until they connect).
 - Endpoint connectivity failures (client create / list containers) and empty
   mapping conditions use state-change logging: a WARNING on the first failure,
   silence while the condition persists (DEBUG notes suppressed repeats), an
