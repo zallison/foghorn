@@ -1370,6 +1370,21 @@ curl -sS \
   "$BASE_URL/api/v1/plugins/docker/docker_hosts"
 ```
 
+### GET `/api/v1/plugins/{plugin_name}/k8s_hosts` (Resolve plugin: KubernetesHosts)
+Auth: protected when `server.http.auth.mode: token`
+
+Brief: snapshot of Service/Pod host mappings discovered by KubernetesHosts.
+Aliases: `/api/v1/plugins/{plugin_name}/kubernetes_hosts` and generic `/snapshot`.
+
+Inputs:
+- path: `plugin_name` (string)
+
+Example:
+```bash
+curl -sS -H "Authorization: Bearer $TOKEN" \
+  "$BASE_URL/api/v1/plugins/k8s/k8s_hosts"
+```
+
 ### GET `/api/v1/plugins/{plugin_name}/etc_hosts` (Resolve plugin: EtcHosts)
 Auth: protected when `server.http.auth.mode: token`
 
@@ -2086,6 +2101,8 @@ Canonical method + path pairs registered by the FastAPI webserver (legacy aliase
 - `GET /api/v1/plugins/{plugin_name}/docker_hosts`
 - `GET /api/v1/plugins/{plugin_name}/docker_hosts/containers/{name}`
 - `POST /api/v1/plugins/{plugin_name}/docker_hosts/reload`
+- `GET /api/v1/plugins/{plugin_name}/k8s_hosts`
+- `GET /api/v1/plugins/{plugin_name}/kubernetes_hosts`
 - `GET /api/v1/plugins/{plugin_name}/etc_hosts`
 - `GET /api/v1/plugins/{plugin_name}/etc_hosts/lookup`
 - `POST /api/v1/plugins/{plugin_name}/etc_hosts/reload`
