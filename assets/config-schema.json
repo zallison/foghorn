@@ -1934,6 +1934,13 @@
         },
         "module": "foghorn.plugins.resolve.docker_hosts.DockerHosts"
       },
+      "dynamic_hosts": {
+        "aliases": [
+          "dynamic_hosts"
+        ],
+        "config_schema": null,
+        "module": "foghorn.plugins.resolve.hosts_common.DynamicHostsPlugin"
+      },
       "echo": {
         "aliases": [
           "echo"
@@ -2592,6 +2599,563 @@
           "type": "object"
         },
         "module": "foghorn.plugins.resolve.flaky_server.FlakyServer"
+      },
+      "kubernetes_hosts": {
+        "aliases": [
+          "k8s",
+          "k8s_hosts",
+          "kubernetes_hosts"
+        ],
+        "config_schema": {
+          "$defs": {
+            "KubernetesEndpointConfig": {
+              "additionalProperties": true,
+              "description": "Per-endpoint (or cluster) connection and scope settings.\n\nInputs (fields):\n  - api_server: Explicit API base URL (https://...).\n  - kubeconfig: Path to kubeconfig file.\n  - in_cluster: Use in-cluster service account files when True.\n  - token / token_file: Bearer token material.\n  - client_cert / client_key (aliases tls_cert / tls_key): mTLS client PEM paths.\n  - ca_cert (alias tls_ca) / tls_verify: TLS trust settings.\n  - tls_server_name (alias tls_name): SNI / expected certificate hostname.\n  - namespaces: Namespace allowlist (empty = all / cluster scope).\n  - label_selector / field_selector: List filter query params.\n  - include_services / include_pods: Resource kinds to index.\n  - suffix / use_ipv4 / use_ipv6 / ttl / reload_interval_seconds: DNS overrides.\n\nOutputs:\n  - Validated endpoint config (extra keys allowed).",
+              "properties": {
+                "api_server": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Types: string, null.",
+                  "title": "Api Server"
+                },
+                "ca_cert": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Types: string, null.",
+                  "title": "Ca Cert"
+                },
+                "client_cert": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Types: string, null.",
+                  "title": "Client Cert"
+                },
+                "client_key": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Types: string, null.",
+                  "title": "Client Key"
+                },
+                "field_selector": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Types: string, null.",
+                  "title": "Field Selector"
+                },
+                "in_cluster": {
+                  "default": false,
+                  "description": "Type: boolean. Default: false.",
+                  "title": "In Cluster",
+                  "type": "boolean"
+                },
+                "include_pods": {
+                  "anyOf": [
+                    {
+                      "description": "Type: boolean.",
+                      "type": "boolean"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Types: boolean, null.",
+                  "title": "Include Pods"
+                },
+                "include_services": {
+                  "anyOf": [
+                    {
+                      "description": "Type: boolean.",
+                      "type": "boolean"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Types: boolean, null.",
+                  "title": "Include Services"
+                },
+                "kubeconfig": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Types: string, null.",
+                  "title": "Kubeconfig"
+                },
+                "label_selector": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Types: string, null.",
+                  "title": "Label Selector"
+                },
+                "namespace": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Types: string, null.",
+                  "title": "Namespace"
+                },
+                "namespaces": {
+                  "description": "Type: array.",
+                  "items": {
+                    "description": "Type: string.",
+                    "type": "string"
+                  },
+                  "title": "Namespaces",
+                  "type": "array"
+                },
+                "reload_interval_seconds": {
+                  "anyOf": [
+                    {
+                      "description": "Type: number.",
+                      "minimum": 0,
+                      "type": "number"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Types: number, null.",
+                  "title": "Reload Interval Seconds"
+                },
+                "suffix": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Types: string, null.",
+                  "title": "Suffix"
+                },
+                "tls_server_name": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Types: string, null.",
+                  "title": "Tls Server Name"
+                },
+                "tls_verify": {
+                  "default": true,
+                  "description": "Type: boolean. Default: true.",
+                  "title": "Tls Verify",
+                  "type": "boolean"
+                },
+                "token": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Types: string, null.",
+                  "title": "Token"
+                },
+                "token_file": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Types: string, null.",
+                  "title": "Token File"
+                },
+                "ttl": {
+                  "anyOf": [
+                    {
+                      "description": "Type: integer.",
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Types: integer, null.",
+                  "title": "Ttl"
+                },
+                "use_ipv4": {
+                  "anyOf": [
+                    {
+                      "description": "Type: boolean.",
+                      "type": "boolean"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Types: boolean, null.",
+                  "title": "Use Ipv4"
+                },
+                "use_ipv6": {
+                  "anyOf": [
+                    {
+                      "description": "Type: boolean.",
+                      "type": "boolean"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Types: boolean, null.",
+                  "title": "Use Ipv6"
+                }
+              },
+              "title": "KubernetesEndpointConfig",
+              "type": "object"
+            }
+          },
+          "additionalProperties": true,
+          "description": "Plugin-level configuration for KubernetesHosts.\n\nInputs (fields):\n  - endpoints: Optional list of cluster endpoints; empty uses top-level\n    connection fields as a single implicit endpoint.\n  - ttl / suffix / use_ipv4 / use_ipv6: DNS defaults.\n  - include_services / include_pods / namespaces / label_selector: scope defaults.\n  - poll_interval_seconds: Background reload interval (0 disables).\n  - expose_txt_in_additional: Attach TXT metadata on A/AAAA answers.\n  - api_server / kubeconfig / in_cluster / token* / client_cert /\n    client_key / ca_cert / tls_verify / tls_server_name: Default connection\n    when endpoints is empty. Docker-style aliases tls_ca/tls_cert/tls_key/\n    tls_name are also accepted.\n\nOutputs:\n  - Validated plugin config (extra keys allowed).",
+          "properties": {
+            "api_server": {
+              "anyOf": [
+                {
+                  "description": "Type: string.",
+                  "type": "string"
+                },
+                {
+                  "description": "Type: null.",
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Types: string, null.",
+              "title": "Api Server"
+            },
+            "ca_cert": {
+              "anyOf": [
+                {
+                  "description": "Type: string.",
+                  "type": "string"
+                },
+                {
+                  "description": "Type: null.",
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Types: string, null.",
+              "title": "Ca Cert"
+            },
+            "client_cert": {
+              "anyOf": [
+                {
+                  "description": "Type: string.",
+                  "type": "string"
+                },
+                {
+                  "description": "Type: null.",
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Types: string, null.",
+              "title": "Client Cert"
+            },
+            "client_key": {
+              "anyOf": [
+                {
+                  "description": "Type: string.",
+                  "type": "string"
+                },
+                {
+                  "description": "Type: null.",
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Types: string, null.",
+              "title": "Client Key"
+            },
+            "endpoints": {
+              "description": "Type: array.",
+              "items": {
+                "$ref": "#/$defs/KubernetesEndpointConfig"
+              },
+              "title": "Endpoints",
+              "type": "array"
+            },
+            "expose_txt_in_additional": {
+              "default": false,
+              "description": "Type: boolean. Default: false.",
+              "title": "Expose Txt In Additional",
+              "type": "boolean"
+            },
+            "field_selector": {
+              "anyOf": [
+                {
+                  "description": "Type: string.",
+                  "type": "string"
+                },
+                {
+                  "description": "Type: null.",
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Types: string, null.",
+              "title": "Field Selector"
+            },
+            "in_cluster": {
+              "default": false,
+              "description": "Type: boolean. Default: false.",
+              "title": "In Cluster",
+              "type": "boolean"
+            },
+            "include_pods": {
+              "default": true,
+              "description": "Type: boolean. Default: true.",
+              "title": "Include Pods",
+              "type": "boolean"
+            },
+            "include_services": {
+              "default": true,
+              "description": "Type: boolean. Default: true.",
+              "title": "Include Services",
+              "type": "boolean"
+            },
+            "kubeconfig": {
+              "anyOf": [
+                {
+                  "description": "Type: string.",
+                  "type": "string"
+                },
+                {
+                  "description": "Type: null.",
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Types: string, null.",
+              "title": "Kubeconfig"
+            },
+            "label_selector": {
+              "anyOf": [
+                {
+                  "description": "Type: string.",
+                  "type": "string"
+                },
+                {
+                  "description": "Type: null.",
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Types: string, null.",
+              "title": "Label Selector"
+            },
+            "namespaces": {
+              "description": "Type: array.",
+              "items": {
+                "description": "Type: string.",
+                "type": "string"
+              },
+              "title": "Namespaces",
+              "type": "array"
+            },
+            "poll_interval_seconds": {
+              "default": 30.0,
+              "description": "Type: number. Default: 30.0.",
+              "minimum": 0,
+              "title": "Poll Interval Seconds",
+              "type": "number"
+            },
+            "suffix": {
+              "anyOf": [
+                {
+                  "description": "Type: string.",
+                  "type": "string"
+                },
+                {
+                  "description": "Type: null.",
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Types: string, null.",
+              "title": "Suffix"
+            },
+            "tls_server_name": {
+              "anyOf": [
+                {
+                  "description": "Type: string.",
+                  "type": "string"
+                },
+                {
+                  "description": "Type: null.",
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Types: string, null.",
+              "title": "Tls Server Name"
+            },
+            "tls_verify": {
+              "default": true,
+              "description": "Type: boolean. Default: true.",
+              "title": "Tls Verify",
+              "type": "boolean"
+            },
+            "token": {
+              "anyOf": [
+                {
+                  "description": "Type: string.",
+                  "type": "string"
+                },
+                {
+                  "description": "Type: null.",
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Types: string, null.",
+              "title": "Token"
+            },
+            "token_file": {
+              "anyOf": [
+                {
+                  "description": "Type: string.",
+                  "type": "string"
+                },
+                {
+                  "description": "Type: null.",
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Types: string, null.",
+              "title": "Token File"
+            },
+            "ttl": {
+              "default": 300,
+              "description": "Type: integer. Default: 300.",
+              "minimum": 0,
+              "title": "Ttl",
+              "type": "integer"
+            },
+            "use_ipv4": {
+              "default": true,
+              "description": "Type: boolean. Default: true.",
+              "title": "Use Ipv4",
+              "type": "boolean"
+            },
+            "use_ipv6": {
+              "default": true,
+              "description": "Type: boolean. Default: true.",
+              "title": "Use Ipv6",
+              "type": "boolean"
+            }
+          },
+          "title": "KubernetesHostsConfig",
+          "type": "object"
+        },
+        "module": "foghorn.plugins.resolve.kubernetes_hosts.KubernetesHosts"
       },
       "mdns_bridge": {
         "aliases": [
@@ -8341,6 +8905,13 @@
         },
         "module": "foghorn.plugins.resolve.docker_hosts.DockerHosts"
       },
+      "dynamic_hosts": {
+        "aliases": [
+          "dynamic_hosts"
+        ],
+        "config_schema": null,
+        "module": "foghorn.plugins.resolve.hosts_common.DynamicHostsPlugin"
+      },
       "echo": {
         "aliases": [
           "echo"
@@ -8999,6 +9570,563 @@
           "type": "object"
         },
         "module": "foghorn.plugins.resolve.flaky_server.FlakyServer"
+      },
+      "kubernetes_hosts": {
+        "aliases": [
+          "k8s",
+          "k8s_hosts",
+          "kubernetes_hosts"
+        ],
+        "config_schema": {
+          "$defs": {
+            "KubernetesEndpointConfig": {
+              "additionalProperties": true,
+              "description": "Per-endpoint (or cluster) connection and scope settings.\n\nInputs (fields):\n  - api_server: Explicit API base URL (https://...).\n  - kubeconfig: Path to kubeconfig file.\n  - in_cluster: Use in-cluster service account files when True.\n  - token / token_file: Bearer token material.\n  - client_cert / client_key (aliases tls_cert / tls_key): mTLS client PEM paths.\n  - ca_cert (alias tls_ca) / tls_verify: TLS trust settings.\n  - tls_server_name (alias tls_name): SNI / expected certificate hostname.\n  - namespaces: Namespace allowlist (empty = all / cluster scope).\n  - label_selector / field_selector: List filter query params.\n  - include_services / include_pods: Resource kinds to index.\n  - suffix / use_ipv4 / use_ipv6 / ttl / reload_interval_seconds: DNS overrides.\n\nOutputs:\n  - Validated endpoint config (extra keys allowed).",
+              "properties": {
+                "api_server": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Types: string, null.",
+                  "title": "Api Server"
+                },
+                "ca_cert": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Types: string, null.",
+                  "title": "Ca Cert"
+                },
+                "client_cert": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Types: string, null.",
+                  "title": "Client Cert"
+                },
+                "client_key": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Types: string, null.",
+                  "title": "Client Key"
+                },
+                "field_selector": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Types: string, null.",
+                  "title": "Field Selector"
+                },
+                "in_cluster": {
+                  "default": false,
+                  "description": "Type: boolean. Default: false.",
+                  "title": "In Cluster",
+                  "type": "boolean"
+                },
+                "include_pods": {
+                  "anyOf": [
+                    {
+                      "description": "Type: boolean.",
+                      "type": "boolean"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Types: boolean, null.",
+                  "title": "Include Pods"
+                },
+                "include_services": {
+                  "anyOf": [
+                    {
+                      "description": "Type: boolean.",
+                      "type": "boolean"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Types: boolean, null.",
+                  "title": "Include Services"
+                },
+                "kubeconfig": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Types: string, null.",
+                  "title": "Kubeconfig"
+                },
+                "label_selector": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Types: string, null.",
+                  "title": "Label Selector"
+                },
+                "namespace": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Types: string, null.",
+                  "title": "Namespace"
+                },
+                "namespaces": {
+                  "description": "Type: array.",
+                  "items": {
+                    "description": "Type: string.",
+                    "type": "string"
+                  },
+                  "title": "Namespaces",
+                  "type": "array"
+                },
+                "reload_interval_seconds": {
+                  "anyOf": [
+                    {
+                      "description": "Type: number.",
+                      "minimum": 0,
+                      "type": "number"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Types: number, null.",
+                  "title": "Reload Interval Seconds"
+                },
+                "suffix": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Types: string, null.",
+                  "title": "Suffix"
+                },
+                "tls_server_name": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Types: string, null.",
+                  "title": "Tls Server Name"
+                },
+                "tls_verify": {
+                  "default": true,
+                  "description": "Type: boolean. Default: true.",
+                  "title": "Tls Verify",
+                  "type": "boolean"
+                },
+                "token": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Types: string, null.",
+                  "title": "Token"
+                },
+                "token_file": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Types: string, null.",
+                  "title": "Token File"
+                },
+                "ttl": {
+                  "anyOf": [
+                    {
+                      "description": "Type: integer.",
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Types: integer, null.",
+                  "title": "Ttl"
+                },
+                "use_ipv4": {
+                  "anyOf": [
+                    {
+                      "description": "Type: boolean.",
+                      "type": "boolean"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Types: boolean, null.",
+                  "title": "Use Ipv4"
+                },
+                "use_ipv6": {
+                  "anyOf": [
+                    {
+                      "description": "Type: boolean.",
+                      "type": "boolean"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Types: boolean, null.",
+                  "title": "Use Ipv6"
+                }
+              },
+              "title": "KubernetesEndpointConfig",
+              "type": "object"
+            }
+          },
+          "additionalProperties": true,
+          "description": "Plugin-level configuration for KubernetesHosts.\n\nInputs (fields):\n  - endpoints: Optional list of cluster endpoints; empty uses top-level\n    connection fields as a single implicit endpoint.\n  - ttl / suffix / use_ipv4 / use_ipv6: DNS defaults.\n  - include_services / include_pods / namespaces / label_selector: scope defaults.\n  - poll_interval_seconds: Background reload interval (0 disables).\n  - expose_txt_in_additional: Attach TXT metadata on A/AAAA answers.\n  - api_server / kubeconfig / in_cluster / token* / client_cert /\n    client_key / ca_cert / tls_verify / tls_server_name: Default connection\n    when endpoints is empty. Docker-style aliases tls_ca/tls_cert/tls_key/\n    tls_name are also accepted.\n\nOutputs:\n  - Validated plugin config (extra keys allowed).",
+          "properties": {
+            "api_server": {
+              "anyOf": [
+                {
+                  "description": "Type: string.",
+                  "type": "string"
+                },
+                {
+                  "description": "Type: null.",
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Types: string, null.",
+              "title": "Api Server"
+            },
+            "ca_cert": {
+              "anyOf": [
+                {
+                  "description": "Type: string.",
+                  "type": "string"
+                },
+                {
+                  "description": "Type: null.",
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Types: string, null.",
+              "title": "Ca Cert"
+            },
+            "client_cert": {
+              "anyOf": [
+                {
+                  "description": "Type: string.",
+                  "type": "string"
+                },
+                {
+                  "description": "Type: null.",
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Types: string, null.",
+              "title": "Client Cert"
+            },
+            "client_key": {
+              "anyOf": [
+                {
+                  "description": "Type: string.",
+                  "type": "string"
+                },
+                {
+                  "description": "Type: null.",
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Types: string, null.",
+              "title": "Client Key"
+            },
+            "endpoints": {
+              "description": "Type: array.",
+              "items": {
+                "$ref": "#/$defs/KubernetesEndpointConfig"
+              },
+              "title": "Endpoints",
+              "type": "array"
+            },
+            "expose_txt_in_additional": {
+              "default": false,
+              "description": "Type: boolean. Default: false.",
+              "title": "Expose Txt In Additional",
+              "type": "boolean"
+            },
+            "field_selector": {
+              "anyOf": [
+                {
+                  "description": "Type: string.",
+                  "type": "string"
+                },
+                {
+                  "description": "Type: null.",
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Types: string, null.",
+              "title": "Field Selector"
+            },
+            "in_cluster": {
+              "default": false,
+              "description": "Type: boolean. Default: false.",
+              "title": "In Cluster",
+              "type": "boolean"
+            },
+            "include_pods": {
+              "default": true,
+              "description": "Type: boolean. Default: true.",
+              "title": "Include Pods",
+              "type": "boolean"
+            },
+            "include_services": {
+              "default": true,
+              "description": "Type: boolean. Default: true.",
+              "title": "Include Services",
+              "type": "boolean"
+            },
+            "kubeconfig": {
+              "anyOf": [
+                {
+                  "description": "Type: string.",
+                  "type": "string"
+                },
+                {
+                  "description": "Type: null.",
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Types: string, null.",
+              "title": "Kubeconfig"
+            },
+            "label_selector": {
+              "anyOf": [
+                {
+                  "description": "Type: string.",
+                  "type": "string"
+                },
+                {
+                  "description": "Type: null.",
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Types: string, null.",
+              "title": "Label Selector"
+            },
+            "namespaces": {
+              "description": "Type: array.",
+              "items": {
+                "description": "Type: string.",
+                "type": "string"
+              },
+              "title": "Namespaces",
+              "type": "array"
+            },
+            "poll_interval_seconds": {
+              "default": 30.0,
+              "description": "Type: number. Default: 30.0.",
+              "minimum": 0,
+              "title": "Poll Interval Seconds",
+              "type": "number"
+            },
+            "suffix": {
+              "anyOf": [
+                {
+                  "description": "Type: string.",
+                  "type": "string"
+                },
+                {
+                  "description": "Type: null.",
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Types: string, null.",
+              "title": "Suffix"
+            },
+            "tls_server_name": {
+              "anyOf": [
+                {
+                  "description": "Type: string.",
+                  "type": "string"
+                },
+                {
+                  "description": "Type: null.",
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Types: string, null.",
+              "title": "Tls Server Name"
+            },
+            "tls_verify": {
+              "default": true,
+              "description": "Type: boolean. Default: true.",
+              "title": "Tls Verify",
+              "type": "boolean"
+            },
+            "token": {
+              "anyOf": [
+                {
+                  "description": "Type: string.",
+                  "type": "string"
+                },
+                {
+                  "description": "Type: null.",
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Types: string, null.",
+              "title": "Token"
+            },
+            "token_file": {
+              "anyOf": [
+                {
+                  "description": "Type: string.",
+                  "type": "string"
+                },
+                {
+                  "description": "Type: null.",
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Types: string, null.",
+              "title": "Token File"
+            },
+            "ttl": {
+              "default": 300,
+              "description": "Type: integer. Default: 300.",
+              "minimum": 0,
+              "title": "Ttl",
+              "type": "integer"
+            },
+            "use_ipv4": {
+              "default": true,
+              "description": "Type: boolean. Default: true.",
+              "title": "Use Ipv4",
+              "type": "boolean"
+            },
+            "use_ipv6": {
+              "default": true,
+              "description": "Type: boolean. Default: true.",
+              "title": "Use Ipv6",
+              "type": "boolean"
+            }
+          },
+          "title": "KubernetesHostsConfig",
+          "type": "object"
+        },
+        "module": "foghorn.plugins.resolve.kubernetes_hosts.KubernetesHosts"
       },
       "mdns_bridge": {
         "aliases": [
