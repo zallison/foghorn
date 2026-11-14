@@ -3702,6 +3702,8 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             "access_control",
             "rate_limit",
             "docker_hosts",
+            "k8s_hosts",
+            "kubernetes_hosts",
             "etc_hosts",
             "mdns",
             "zone_records",
@@ -4167,6 +4169,8 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         # plugin named snapshots and plugin-specific suffix-based routes
         for suffix, label in [
             ("/docker_hosts", "DockerHosts"),
+            ("/k8s_hosts", "KubernetesHosts"),
+            ("/kubernetes_hosts", "KubernetesHosts"),
             ("/mdns", "MdnsBridge"),
             ("/etc_hosts", "EtcHosts"),
             ("/access_control", "AccessControl"),
