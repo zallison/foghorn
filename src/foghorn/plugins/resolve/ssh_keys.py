@@ -66,6 +66,10 @@ class SshKeysConfig(BaseModel):
       - max_rows: Maximum number of rows to retain in the DB (oldest evicted).
       - prune_interval_seconds: Minimum time between DB prune passes.
       - db_path_allowlist: Allowed base directories for db_path.
+      - initial_scan_background: When true, run the startup scan in a daemon
+        thread so DNS service startup is not blocked.
+      - initial_scan_deadline_seconds: Wall-clock budget for the initial scan
+        (0 disables the deadline).
 
     Outputs:
       - SshKeysConfig instance with normalized field types.
@@ -94,6 +98,8 @@ class SshKeysConfig(BaseModel):
     db_path_allowlist: List[str] = Field(
         default_factory=lambda: ["./config/var", "./var", "./data", "."]
     )
+    initial_scan_background: bool = Field(default=True)
+    initial_scan_deadline_seconds: float = Field(default=120.0, ge=0.0)
 
     model_config = ConfigDict(extra="allow")
 
@@ -174,6 +180,10 @@ class SshKeys(BasePlugin):
         self._max_rows: int = int(cfg.max_rows)
         self._prune_interval_seconds: float = float(cfg.prune_interval_seconds)
         self._db_path_allowlist: List[str] = list(cfg.db_path_allowlist or [])
+        self._initial_scan_background: bool = bool(cfg.initial_scan_background)
+        self._initial_scan_deadline_seconds: float = float(
+            cfg.initial_scan_deadline_seconds
+        )
         self._cidr_networks = self._parse_cidr_targets(self._targets)
         self._last_prune: float = 0.0
 
@@ -181,6 +191,7 @@ class SshKeys(BasePlugin):
         self._conn: Optional[sqlite3.Connection] = None
         self._lazy_scan_lock: threading.Lock = threading.Lock()
         self._lazy_scans: set[str] = set()
+        self._initial_scan_thread: Optional[threading.Thread] = None
 
     # ---------------------- setup and database helpers ----------------------
 
@@ -192,14 +203,36 @@ class SshKeys(BasePlugin):
 
         Outputs:
           - None; creates the sqlite database on disk when needed, ensures the
-            schema exists, and performs a best-effort scan of configured
-            targets using up to ``scan_threads`` worker threads.
+            schema exists, and starts a best-effort scan of configured targets
+            (background by default so setup() does not block DNS startup).
         """
 
         self._init_db()
 
         # Empty target list is allowed and results in a no-op scan.
         if not self._targets:
+            return
+
+        if self._initial_scan_background:
+
+            def _bg() -> None:
+                try:
+                    self._run_initial_scan(self._targets)
+                    self._maybe_prune_db(force=True)
+                except Exception as exc:  # pragma: no cover - defensive
+                    logger.warning(
+                        "SshKeys: background initial scan failed: %s",
+                        exc,
+                        exc_info=True,
+                    )
+
+            self._initial_scan_thread = threading.Thread(
+                target=_bg,
+                name="SshKeysInitialScan",
+                daemon=True,
+            )
+            self._initial_scan_thread.start()
+            logger.info("SshKeys: initial scan started in background")
             return
 
         self._run_initial_scan(self._targets)
@@ -281,23 +314,25 @@ class SshKeys(BasePlugin):
             except Exception:
                 continue
 
-        fallback_root = allowed_dirs[0]
         safe_name = os.path.basename(resolved) or "ssh_keys.db"
-        fallback = os.path.join(fallback_root, safe_name)
-        fallback_dir = os.path.dirname(fallback) or "."
-        if not os.access(fallback_dir, os.W_OK | os.X_OK):
-            logger.warning(
-                "SshKeys: fallback db_path %s is not writable; using %s",
-                fallback,
-                resolved,
-            )
-            return resolved
-        logger.warning(
-            "SshKeys: db_path %s is outside allowlist; using %s instead",
-            resolved,
-            fallback,
+        for fallback_root in allowed_dirs:
+            fallback = os.path.join(fallback_root, safe_name)
+            fallback_dir = os.path.dirname(fallback) or "."
+            try:
+                os.makedirs(fallback_dir, exist_ok=True)
+            except Exception:
+                pass
+            if os.access(fallback_dir, os.W_OK | os.X_OK):
+                logger.warning(
+                    "SshKeys: db_path %s is outside allowlist; using %s instead",
+                    resolved,
+                    fallback,
+                )
+                return fallback
+        raise RuntimeError(
+            f"SshKeys: db_path {resolved} is outside allowlist and no writable "
+            f"allowlisted directory is available: {allowed_dirs}"
         )
-        return fallback
 
     def _init_db(self) -> None:
         """Brief: Create sqlite connection and ensure ssh_keys table exists.
@@ -551,21 +586,60 @@ class SshKeys(BasePlugin):
             return
 
         max_workers = max(1, int(self._scan_threads))
+        deadline = float(self._initial_scan_deadline_seconds or 0.0)
         logger.info(
-            "SshKeys: starting initial scan of %d targets with %d threads",
+            "SshKeys: starting initial scan of %d targets with %d threads" "%s",
             len(pending),
             max_workers,
+            f" (deadline={deadline:.1f}s)" if deadline > 0 else "",
         )
 
+        started = time.monotonic()
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
             futures = [
                 pool.submit(self._scan_single, kind, value) for kind, value in pending
             ]
-            for fut in futures:
-                try:
-                    fut.result()
-                except Exception as exc:  # pragma: no cover - defensive logging only
-                    logger.warning("SshKeys: scan worker error: %s", exc, exc_info=True)
+            remaining = list(futures)
+            while remaining:
+                timeout: float | None = None
+                if deadline > 0:
+                    left = deadline - (time.monotonic() - started)
+                    if left <= 0:
+                        logger.warning(
+                            "SshKeys: initial scan deadline (%.1fs) reached; "
+                            "cancelling %d outstanding probes",
+                            deadline,
+                            len(remaining),
+                        )
+                        for fut in remaining:
+                            fut.cancel()
+                        break
+                    timeout = left
+                done, remaining = concurrent.futures.wait(
+                    remaining,
+                    timeout=timeout,
+                    return_when=concurrent.futures.FIRST_COMPLETED,
+                )
+                if not done and deadline > 0:
+                    # wait timed out with nothing completed
+                    logger.warning(
+                        "SshKeys: initial scan deadline (%.1fs) reached; "
+                        "cancelling %d outstanding probes",
+                        deadline,
+                        len(remaining),
+                    )
+                    for fut in remaining:
+                        fut.cancel()
+                    break
+                for fut in done:
+                    try:
+                        fut.result()
+                    except (
+                        Exception
+                    ) as exc:  # pragma: no cover - defensive logging only
+                        logger.warning(
+                            "SshKeys: scan worker error: %s", exc, exc_info=True
+                        )
 
     def _iter_scan_items(self, entries: Iterable[str]) -> Iterable[Tuple[str, str]]:
         """Brief: Expand raw config entries into concrete scan tasks.

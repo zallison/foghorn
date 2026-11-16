@@ -34,6 +34,26 @@ def db_path(tmp_path) -> str:
     return str(tmp_path / "ssh_keys.db")
 
 
+def _ssh_keys(db_path: str, **kwargs):
+    """Brief: Construct SshKeys with tmp db path allowlisted.
+
+    Inputs:
+      - db_path: Absolute temp sqlite path.
+      - **kwargs: Extra SshKeys config.
+
+    Outputs:
+      - SshKeys instance.
+    """
+
+    import os
+
+    allow = kwargs.pop("db_path_allowlist", None)
+    if allow is None:
+        allow = [os.path.dirname(db_path) or "."]
+    kwargs.setdefault("initial_scan_background", False)
+    return SshKeys(db_path=db_path, db_path_allowlist=allow, **kwargs)
+
+
 def _make_sshfp_query(name: str) -> bytes:
     """Brief: Build a wire-format SSHFP DNS query for name.
 
@@ -58,7 +78,7 @@ def test_ssh_keys_setup_creates_db_and_skips_empty_targets(db_path: str) -> None
       - Asserts that setup() succeeds and a sqlite connection is available.
     """
 
-    plugin = SshKeys(db_path=db_path, targets=[])
+    plugin = _ssh_keys(db_path, targets=[])
     plugin.setup()
     assert plugin._conn is not None
 
@@ -73,7 +93,7 @@ def test_ssh_keys_db_helpers_round_trip(db_path: str) -> None:
       - Asserts that subjects are persisted and retrievable via helpers.
     """
 
-    plugin = SshKeys(db_path=db_path, targets=[])
+    plugin = _ssh_keys(db_path, targets=[])
     plugin.setup()
 
     plugin._db_upsert_pair("host.example", "192.0.2.10", "ssh-ed25519", "ab" * 16)
@@ -151,7 +171,7 @@ def test_ssh_keys_run_initial_scan_filters_existing_and_calls_scan(
       - Asserts that _scan_single is called only for unseen subjects.
     """
 
-    plugin = SshKeys(db_path=db_path, targets=[])
+    plugin = _ssh_keys(db_path, targets=[])
     plugin.setup()
 
     # Pretend that _iter_scan_items found two entries.
@@ -195,7 +215,7 @@ def test_ssh_keys_run_initial_scan_worker_error_is_logged(
       - Asserts that a worker exception results in a warning log entry.
     """
 
-    plugin = SshKeys(db_path=db_path, targets=[])
+    plugin = _ssh_keys(db_path, targets=[])
     plugin.setup()
 
     monkeypatch.setattr(
@@ -252,7 +272,7 @@ def test_ssh_keys_pre_resolve_respects_targets(db_path: str, monkeypatch) -> Non
       - Asserts that a non-target client yields no decision.
     """
 
-    plugin = SshKeys(db_path=db_path, targets=["10.0.0.0/8"])
+    plugin = _ssh_keys(db_path, targets=["10.0.0.0/8"])
 
     # Avoid expanding and probing the entire 10.0.0.0/8 range during tests;
     # _run_initial_scan behaviour is covered separately.
@@ -279,7 +299,7 @@ def test_ssh_keys_pre_resolve_non_sshfp_qtype_ignored(
       - Asserts that no DB lookups occur for non-SSHFP qtypes.
     """
 
-    plugin = SshKeys(db_path=db_path, targets=[])
+    plugin = _ssh_keys(db_path, targets=[])
     plugin.setup()
 
     called = {"db": False}
@@ -311,7 +331,7 @@ def test_ssh_keys_pre_resolve_no_row_returns_none(db_path: str) -> None:
       - Asserts that an SSHFP query for an unknown subject returns None.
     """
 
-    plugin = SshKeys(db_path=db_path, targets=[])
+    plugin = _ssh_keys(db_path, targets=[])
     plugin.setup()
 
     wire = _make_sshfp_query("unknown.example")
@@ -331,7 +351,7 @@ def test_ssh_keys_pre_resolve_unsupported_key_type(db_path: str, monkeypatch) ->
       - Asserts that an unknown key_type does not produce an answer.
     """
 
-    plugin = SshKeys(db_path=db_path, targets=[])
+    plugin = _ssh_keys(db_path, targets=[])
     plugin.setup()
 
     monkeypatch.setattr(plugin, "_db_get_row", lambda subject: ("ssh-unknown", "00"))
@@ -353,7 +373,7 @@ def test_ssh_keys_pre_resolve_invalid_hex(db_path: str, monkeypatch) -> None:
       - Asserts that a ValueError in bytes.fromhex leads to no decision.
     """
 
-    plugin = SshKeys(db_path=db_path, targets=[])
+    plugin = _ssh_keys(db_path, targets=[])
     plugin.setup()
 
     monkeypatch.setattr(
@@ -380,7 +400,7 @@ def test_ssh_keys_pre_resolve_parse_error_is_handled(
       - Asserts that a parse error logs a warning and returns None.
     """
 
-    plugin = SshKeys(db_path=db_path, targets=[])
+    plugin = _ssh_keys(db_path, targets=[])
     plugin.setup()
 
     monkeypatch.setattr(
@@ -419,7 +439,7 @@ def test_ssh_keys_pre_resolve_success_builds_sshfp_response(
         expected algorithm and fingerprint lengths.
     """
 
-    plugin = SshKeys(db_path=db_path, targets=[])
+    plugin = _ssh_keys(db_path, targets=[])
     plugin.setup()
 
     # Use a deterministic key_hex so we can verify both digests.
@@ -514,7 +534,8 @@ def test_ssh_keys_resolve_db_path_allowlist_and_fallback_branches(
     assert fallback.endswith("outside.sqlite")
 
     monkeypatch.setattr(os, "access", lambda _p, _m: False)
-    assert plugin._resolve_db_path("/tmp/outside.sqlite") == resolved_input
+    with pytest.raises(RuntimeError, match="no writable allowlisted directory"):
+        plugin._resolve_db_path("/tmp/outside.sqlite")
 
 
 def test_ssh_keys_maybe_prune_db_interval_and_force_paths(
@@ -531,7 +552,7 @@ def test_ssh_keys_maybe_prune_db_interval_and_force_paths(
       - Asserts skip and forced prune behavior.
     """
 
-    plugin = SshKeys(db_path=db_path, targets=[])
+    plugin = _ssh_keys(db_path, targets=[])
     plugin.setup()
 
     called: list[float] = []
@@ -563,7 +584,7 @@ def test_ssh_keys_prune_db_deletes_stale_and_excess_rows(db_path: str) -> None:
       - Asserts stale rows are removed and total rows are capped.
     """
 
-    plugin = SshKeys(db_path=db_path, targets=[])
+    plugin = _ssh_keys(db_path, targets=[])
     plugin.setup()
     plugin._retention_seconds = 5.0
     plugin._max_rows = 1
@@ -633,7 +654,7 @@ def test_ssh_keys_scan_single_ip_path_branches(
       - Asserts branch behavior via captured upsert calls.
     """
 
-    plugin = SshKeys(db_path=db_path, targets=[])
+    plugin = _ssh_keys(db_path, targets=[])
     plugin.setup()
 
     upserts: list[tuple[str | None, str | None, str, str]] = []
@@ -686,7 +707,7 @@ def test_ssh_keys_scan_single_hostname_path_branches(
       - Asserts branch behavior via captured upsert calls.
     """
 
-    plugin = SshKeys(db_path=db_path, targets=[])
+    plugin = _ssh_keys(db_path, targets=[])
     plugin.setup()
 
     upserts: list[tuple[str | None, str | None, str, str]] = []
@@ -782,7 +803,7 @@ def test_ssh_keys_enqueue_lazy_scan_dedupe_and_limit(
       - Asserts only one lazy scan launches and subject cleanup occurs.
     """
 
-    plugin = SshKeys(db_path=db_path, targets=[], max_lazy_scans=1)
+    plugin = _ssh_keys(db_path, targets=[], max_lazy_scans=1)
     plugin.setup()
 
     calls: list[tuple[str, str]] = []
@@ -834,7 +855,7 @@ def test_ssh_keys_pre_resolve_lazy_scan_and_sha256_only(
       - Asserts lazy enqueue on CIDR miss and one SSHFP RR with include_sha1=False.
     """
 
-    plugin = SshKeys(db_path=db_path, targets=["192.0.2.0/24"], include_sha1=False)
+    plugin = _ssh_keys(db_path, targets=["192.0.2.0/24"], include_sha1=False)
     monkeypatch.setattr(plugin, "_run_initial_scan", lambda entries: None)
     plugin.setup()
     monkeypatch.setattr(plugin, "targets", lambda _ctx: True)
@@ -884,7 +905,7 @@ def test_ssh_keys_pre_resolve_handles_qtype_coercion_error(
       - Asserts graceful None return.
     """
 
-    plugin = SshKeys(db_path=db_path, targets=[])
+    plugin = _ssh_keys(db_path, targets=[])
     plugin.setup()
     monkeypatch.setattr(plugin, "targets", lambda _ctx: True)
     monkeypatch.setattr(plugin, "_is_response_allowed", lambda _ctx: True)
@@ -952,7 +973,7 @@ def test_ssh_keys_db_helpers_handle_none_connection_and_empty_subjects(
       - Asserts early-return branches execute without side effects.
     """
 
-    plugin = SshKeys(db_path=db_path, targets=[])
+    plugin = _ssh_keys(db_path, targets=[])
     plugin._db_upsert_pair("host.example", "192.0.2.10", "ssh-ed25519", "aa")
     plugin._prune_db(now=0.0)
 
@@ -977,7 +998,7 @@ def test_ssh_keys_run_initial_scan_cap_and_skip_branches(
       - Asserts skip-only scan and cap warning behavior.
     """
 
-    plugin = SshKeys(db_path=db_path, targets=[])
+    plugin = _ssh_keys(db_path, targets=[])
     plugin.setup()
 
     scanned: list[tuple[str, str]] = []
@@ -1037,7 +1058,7 @@ def test_ssh_keys_scan_single_ip_prefers_reverse_hostname(
       - Asserts normalized reverse hostname is persisted.
     """
 
-    plugin = SshKeys(db_path=db_path, targets=[])
+    plugin = _ssh_keys(db_path, targets=[])
     plugin.setup()
 
     upserts: list[tuple[str | None, str | None, str, str]] = []
@@ -1074,8 +1095,8 @@ def test_ssh_keys_public_policy_and_empty_lazy_subject_paths(
       - Asserts allow_public branches and no thread launch for empty lazy subject.
     """
 
-    plugin = SshKeys(
-        db_path=db_path,
+    plugin = _ssh_keys(
+        db_path,
         targets=[],
         allow_public_scan=True,
         allow_public_responses=True,
@@ -1105,7 +1126,7 @@ def test_ssh_keys_pre_resolve_subject_empty_lazy_disabled_and_no_rr(
       - Asserts None decisions for these defensive branches.
     """
 
-    plugin = SshKeys(db_path=db_path, targets=["192.0.2.0/24"])
+    plugin = _ssh_keys(db_path, targets=["192.0.2.0/24"])
     monkeypatch.setattr(plugin, "_run_initial_scan", lambda entries: None)
     plugin.setup()
     monkeypatch.setattr(plugin, "targets", lambda _ctx: True)
@@ -1170,7 +1191,7 @@ def test_ssh_keys_prune_db_noop_and_under_limit_branches_additional(
       - Asserts row remains when prune conditions are not met.
     """
 
-    plugin = SshKeys(db_path=db_path, targets=[])
+    plugin = _ssh_keys(db_path, targets=[])
     plugin.setup()
     assert plugin._conn is not None
     with plugin._conn:
@@ -1215,7 +1236,7 @@ def test_ssh_keys_scan_single_hostname_without_supported_family_additional(
       - Asserts no upsert occurs when resolution yields only unsupported families.
     """
 
-    plugin = SshKeys(db_path=db_path, targets=[])
+    plugin = _ssh_keys(db_path, targets=[])
     plugin.setup()
     upserts: list[tuple[str | None, str | None, str, str]] = []
     monkeypatch.setattr(
@@ -1262,7 +1283,7 @@ def test_ssh_keys_pre_resolve_response_denied_and_lazy_miss_outside_cidr_additio
       - Asserts deny path and no lazy enqueue for out-of-CIDR misses.
     """
 
-    plugin = SshKeys(db_path=db_path, targets=["192.0.2.0/24"])
+    plugin = _ssh_keys(db_path, targets=["192.0.2.0/24"])
     monkeypatch.setattr(plugin, "_run_initial_scan", lambda entries: None)
     plugin.setup()
     monkeypatch.setattr(plugin, "targets", lambda _ctx: True)
