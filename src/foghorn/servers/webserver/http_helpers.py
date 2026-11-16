@@ -206,7 +206,9 @@ def _decode_basic_credentials(
     if not token:
         return None
     try:
-        decoded = base64.b64decode(token, validate=True).decode("utf-8")
+        decoded = base64.b64decode(
+            token.replace("-", "+").replace("_", "/"), validate=True
+        ).decode("utf-8")
     except (binascii.Error, ValueError, UnicodeDecodeError):
         return None
     username, sep, password = decoded.partition(":")

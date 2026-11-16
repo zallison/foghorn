@@ -122,23 +122,26 @@ def write_raw_yaml_via_copy(
     raw_yaml: str,
     tmp_path: str,
 ) -> None:
-    """Brief: Write raw YAML using a tmp file and then copy over dst_path.
+    """Brief: Write raw YAML via tmp then atomic replace (copy strategy name kept).
 
     Inputs:
       - dst_path: Destination YAML file path.
       - raw_yaml: YAML document text.
-      - tmp_path: Temporary file path to write before copying.
+      - tmp_path: Temporary file path to write before replace.
 
     Outputs:
       - None.
 
     Notes:
-      - This mirrors the FastAPI implementation's historic behaviour.
-      - This helper does not remove tmp_path; caller-managed cleanup is expected.
+      - Historically used shutil.copy (non-atomic). Now uses os.replace so a
+        concurrent reader never observes a torn destination file. The
+        strategy name remains 'copy' for API compatibility.
+      - This helper does not remove tmp_path when replace consumes it;
+        caller-managed cleanup is expected if replace fails mid-flight.
     """
 
     write_text_file(tmp_path, raw_yaml)
-    shutil.copy(tmp_path, dst_path)
+    os.replace(tmp_path, dst_path)
 
 
 def write_raw_yaml_via_replace(

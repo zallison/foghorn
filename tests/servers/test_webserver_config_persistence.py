@@ -187,13 +187,13 @@ def test_prune_timestamped_backups_sorts_by_mtime_and_ignores_delete_errors(
 def test_write_raw_yaml_via_copy_updates_destination_and_keeps_tmp(
     tmp_path: Path,
 ) -> None:
-    """Brief: write_raw_yaml_via_copy should write tmp and copy it into destination.
+    """Brief: write_raw_yaml_via_copy atomically replaces destination from temp.
 
     Inputs:
       - tmp_path fixture with destination and temp paths.
 
     Outputs:
-      - Destination and temp files both contain the written YAML text.
+      - Destination contains new YAML; temp path is consumed by os.replace.
     """
 
     dst = tmp_path / "config.yaml"
@@ -206,7 +206,7 @@ def test_write_raw_yaml_via_copy_updates_destination_and_keeps_tmp(
         tmp_path=str(tmp),
     )
     assert dst.read_text(encoding="utf-8") == "new: true\n"
-    assert tmp.read_text(encoding="utf-8") == "new: true\n"
+    assert not tmp.exists()
 
 
 def test_write_raw_yaml_via_replace_updates_destination_and_removes_tmp(
@@ -403,19 +403,20 @@ def test_safe_write_raw_yaml_ignores_prune_and_cleanup_failures(
     )
 
     assert dst.read_text(encoding="utf-8") == "new: true\n"
-    assert tmp.exists()
+    # Atomic replace consumes tmp_path; cleanup_tmp has nothing left to remove.
+    assert not tmp.exists()
 
 
 def test_safe_write_raw_yaml_cleanup_tmp_false_preserves_tmp_file(
     tmp_path: Path,
 ) -> None:
-    """Brief: safe_write_raw_yaml should leave temp file when cleanup_tmp is False.
+    """Brief: copy strategy now uses os.replace so tmp is consumed even without cleanup.
 
     Inputs:
       - copy strategy with cleanup_tmp=False.
 
     Outputs:
-      - Destination updated and tmp file remains on disk.
+      - Destination updated; tmp path is gone because replace moved it.
     """
 
     dst = tmp_path / "config.yaml"
@@ -432,4 +433,4 @@ def test_safe_write_raw_yaml_cleanup_tmp_false_preserves_tmp_file(
     )
 
     assert dst.read_text(encoding="utf-8") == "new: true\n"
-    assert tmp.exists()
+    assert not tmp.exists()
