@@ -149,11 +149,13 @@ def clamp_positive_int(value: object, *, default: int, minimum: int = 1) -> int:
     Notes:
       - If *default* or *minimum* are not int-castable, conversion exceptions
         propagate to the caller.
+      - Only TypeError/ValueError from int(value) fall back to default so
+        unexpected failures are not silently swallowed.
     """
 
     try:
         out = int(value)  # type: ignore[arg-type]
-    except Exception:
+    except (TypeError, ValueError):
         out = int(default)
     if out < int(minimum):
         return int(minimum)
