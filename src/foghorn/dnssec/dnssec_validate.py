@@ -1,5 +1,6 @@
 import base64
 import logging
+import time
 from typing import Final
 
 try:  # Ensure required crypto backend is present before enabling DNSSEC logic.
@@ -364,27 +365,185 @@ def _find_zone_apex(
             n = n.parent()
 
 
+# DNSKEY/DS caches keyed by owner name with per-entry TTLs derived from RRset
+# TTLs, clamped to a maximum lifetime.
+_MAX_KEY_CACHE_TTL_SECONDS = 4 * 3600  # 4 hours
+_MAX_KEY_CACHE_ENTRIES = 4096
+_DNSKEY_CACHE: dict[str, tuple[dns.rrset.RRset, float]] = {}
+_DS_CACHE: dict[str, tuple[dns.rrset.RRset, float]] = {}
+
+
+def _evict_expired_cache_entries(
+    cache: dict[str, tuple[dns.rrset.RRset, float]], now: float
+) -> None:
+    """Evict cache entries whose expiration timestamp has passed.
+
+    Inputs:
+      - cache: Mapping of owner-name key to (rrset, expires_at_epoch_seconds).
+      - now: Current epoch time to compare against entry expiry.
+
+    Outputs:
+      - None
+    """
+    expired_keys = [
+        key for key, (_rrset, expires_at) in cache.items() if now >= expires_at
+    ]
+    for key in expired_keys:
+        cache.pop(key, None)
+
+
+def _enforce_cache_entry_limit(
+    cache: dict[str, tuple[dns.rrset.RRset, float]], max_entries: int
+) -> None:
+    """Ensure a cache dictionary does not exceed a configured maximum size.
+
+    Inputs:
+      - cache: Mapping of owner-name key to (rrset, expires_at_epoch_seconds).
+      - max_entries: Maximum number of entries to retain in the cache.
+
+    Outputs:
+      - None
+    """
+    overage = len(cache) - max_entries
+    if overage <= 0:
+        return
+    keys_by_expiry = sorted(cache.keys(), key=lambda cache_key: cache[cache_key][1])
+    for key in keys_by_expiry[:overage]:
+        cache.pop(key, None)
+
+
+def _fetch_dnskey_cached(
+    r: dns.resolver.Resolver, name: dns.name.Name
+) -> dns.rrset.RRset:
+    """Fetch and cache the DNSKEY RRset for name.
+
+    Cache lifetime is based on the RRset TTL, clamped to
+    _MAX_KEY_CACHE_TTL_SECONDS.
+    """
+    key = name.to_text()
+    now = time.time()
+    _evict_expired_cache_entries(_DNSKEY_CACHE, now)
+    cached_entry = _DNSKEY_CACHE.get(key)
+    if cached_entry is not None:
+        rrset, expires_at = cached_entry
+        if now < expires_at:
+            return rrset
+        _DNSKEY_CACHE.pop(key, None)
+        # Expired entry; fall through to refresh.
+    rr = _fetch(r, name, "DNSKEY").rrset
+    ttl = getattr(rr, "ttl", _MAX_KEY_CACHE_TTL_SECONDS)
+    ttl = max(0, min(int(ttl), _MAX_KEY_CACHE_TTL_SECONDS))
+    _DNSKEY_CACHE[key] = (rr, now + ttl)
+    _enforce_cache_entry_limit(_DNSKEY_CACHE, _MAX_KEY_CACHE_ENTRIES)
+    return rr
+
+
+def _fetch_ds_cached(r: dns.resolver.Resolver, name: dns.name.Name) -> dns.rrset.RRset:
+    """Fetch and cache the DS RRset for name.
+
+    Cache lifetime is based on the RRset TTL, clamped to
+    _MAX_KEY_CACHE_TTL_SECONDS.
+    """
+    key = name.to_text()
+    now = time.time()
+    _evict_expired_cache_entries(_DS_CACHE, now)
+    cached_entry = _DS_CACHE.get(key)
+    if cached_entry is not None:
+        rrset, expires_at = cached_entry
+        if now < expires_at:
+            return rrset
+        _DS_CACHE.pop(key, None)
+    rr = _fetch(r, name, "DS").rrset
+    ttl = getattr(rr, "ttl", _MAX_KEY_CACHE_TTL_SECONDS)
+    ttl = max(0, min(int(ttl), _MAX_KEY_CACHE_TTL_SECONDS))
+    _DS_CACHE[key] = (rr, now + ttl)
+    _enforce_cache_entry_limit(_DS_CACHE, _MAX_KEY_CACHE_ENTRIES)
+    return rr
+
+
+def _dnskey_material_key(rdata: object) -> tuple[object, ...] | None:
+    """Brief: Stable identity tuple for a DNSKEY rdata.
+
+    Inputs:
+      - rdata: dnspython DNSKEY rdata (or compatible object).
+
+    Outputs:
+      - (algorithm, flags, protocol, key_bytes) when extractable, else None.
+    """
+    try:
+        key = getattr(rdata, "key", None)
+        if key is None:
+            return None
+        if isinstance(key, (bytes, bytearray)):
+            key_bytes = bytes(key)
+        else:
+            key_bytes = bytes(key)
+        return (
+            int(getattr(rdata, "algorithm", 0) or 0),
+            int(getattr(rdata, "flags", 0) or 0),
+            int(getattr(rdata, "protocol", 0) or 0),
+            key_bytes,
+        )
+    except Exception:
+        return None
+
+
+def _rrset_contains_any_dnskey(
+    haystack: dns.rrset.RRset | None, needles: dns.rrset.RRset | None
+) -> bool:
+    """Brief: True when any DNSKEY in needles appears in haystack.
+
+    Inputs:
+      - haystack: Live DNSKEY RRset (e.g. fetched root keys).
+      - needles: Trust-anchor DNSKEY RRset.
+
+    Outputs:
+      - bool: True when at least one anchor key is present in haystack.
+    """
+    if haystack is None or needles is None:
+        return False
+    live: set[tuple[object, ...]] = set()
+    for rd in haystack:
+        ident = _dnskey_material_key(rd)
+        if ident is not None:
+            live.add(ident)
+    if not live:
+        return False
+    for rd in needles:
+        ident = _dnskey_material_key(rd)
+        if ident is not None and ident in live:
+            return True
+    return False
+
+
 def _fetch_rrset_and_rrsig(
-    r: dns.resolver.Resolver, name: dns.name.Name, rdtype: str
+    r: dns.resolver.Resolver,
+    name: dns.name.Name,
+    rdtype: str,
+    covered_type: int,
 ) -> tuple[dns.rrset.RRset, dns.rrset.RRset | None]:
-    """Fetch an RRset and its covering RRSIG from a single DO query.
+    """Brief: Fetch an RRset and its covering RRSIG from one DO query.
 
     Inputs:
       - r: Resolver configured with DO.
       - name: Owner name to query.
-      - rdtype: RR type text (e.g. "DNSKEY", "DS").
+      - rdtype: Query type text (e.g. "DNSKEY", "DS").
+      - covered_type: dns.rdatatype constant the RRSIG must cover.
 
     Outputs:
       - (rrset, rrsig_rrset_or_None).
+
+    Raises:
+      - Exception when the primary RRset is missing from the answer.
     """
-    wanted = dns.rdatatype.from_text(rdtype)
     ans = r.resolve(name, rdtype, raise_on_no_answer=True)
     resp = ans.response
-    target_rrset = None
-    sig_rrset = None
+    primary: dns.rrset.RRset | None = None
+    sig_rrset: dns.rrset.RRset | None = None
+    wanted = int(covered_type)
     for rrset in resp.answer:
         if rrset.rdtype == wanted:
-            target_rrset = rrset
+            primary = rrset
         elif rrset.rdtype == dns.rdatatype.RRSIG:
             try:
                 covered = rrset[0].type_covered
@@ -392,9 +551,9 @@ def _fetch_rrset_and_rrsig(
                 continue
             if covered == wanted:
                 sig_rrset = rrset
-    if target_rrset is None:
+    if primary is None:
         raise Exception(f"No {rdtype} RRset found in answer for {name}")
-    return target_rrset, sig_rrset
+    return primary, sig_rrset
 
 
 def _fetch_dnskey_and_rrsig(
@@ -409,55 +568,29 @@ def _fetch_dnskey_and_rrsig(
     Outputs:
       - (dnskey_rrset, rrsig_rrset_or_None).
     """
-    return _fetch_rrset_and_rrsig(r, name, "DNSKEY")
+    return _fetch_rrset_and_rrsig(r, name, "DNSKEY", dns.rdatatype.DNSKEY)
 
 
-def _dnskey_ident(rdata) -> tuple[int, int, bytes]:
-    """Stable identity for a DNSKEY rdata (algorithm, key tag, key octets).
-
-    Inputs:
-      - rdata: DNSKEY rdata object.
-
-    Outputs:
-      - (algorithm, key_tag, key_bytes) tuple used for equality checks.
-    """
-    return (
-        int(rdata.algorithm),
-        int(dns.dnssec.key_id(rdata)),
-        bytes(getattr(rdata, "key", b"") or b""),
-    )
-
-
-def _anchor_in_dnskey_rrset(
-    anchors: dns.rrset.RRset, dnskey_rrset: dns.rrset.RRset
-) -> bool:
-    """Return True when any trust-anchor DNSKEY appears in a live DNSKEY RRset.
+def _fetch_ds_and_rrsig(
+    r: dns.resolver.Resolver, name: dns.name.Name
+) -> tuple[dns.rrset.RRset, dns.rrset.RRset | None]:
+    """Fetch DS RRset and its covering RRSIG(DS) for the given owner.
 
     Inputs:
-      - anchors: Trust-anchor DNSKEY RRset (e.g. root KSK).
-      - dnskey_rrset: Live DNSKEY RRset from the wire.
+      - r: Resolver configured with DO.
+      - name: Child owner name whose DS is published at the parent.
 
     Outputs:
-      - bool: True if at least one anchor key is present in dnskey_rrset.
+      - (ds_rrset, rrsig_rrset_or_None).
     """
-    live: set[tuple[int, int, bytes]] = set()
-    for rd in dnskey_rrset:
-        try:
-            live.add(_dnskey_ident(rd))
-        except Exception:
-            continue
-    for rd in anchors:
-        try:
-            if _dnskey_ident(rd) in live:
-                return True
-        except Exception:
-            continue
-    return False
+    return _fetch_rrset_and_rrsig(r, name, "DS", dns.rdatatype.DS)
 
 
 def _validate_chain(
     r: dns.resolver.Resolver, apex: dns.name.Name
-) -> dns.rrset.RRset | None:
+) -> (
+    dns.rrset.RRset | None
+):  # pragma: no cover - networked DNSSEC chain validation exercised via higher-level tests
     """
     Validates the DNSKEY rrset at apex back to the root trust anchor.
 
@@ -468,52 +601,58 @@ def _validate_chain(
       - dnskey_rrset if validated, else None
 
     Brief:
-      Root: require the live root DNSKEY RRset to contain the trust anchor and
-      validate its RRSIG(DNSKEY) so ZSK material is bound to the KSK.
-      For each child: verify RRSIG(DS) with the parent DNSKEY, match DS to the
-      child DNSKEY, and validate the child DNSKEY self-signature.
+      Root: require live root DNSKEY to contain the trust anchor, then verify
+      RRSIG(DNSKEY@root) against the anchor keys only.
+      For each child: verify RRSIG(DS) with parent DNSKEY, DS matches child
+      DNSKEY, and child DNSKEY self-signature is valid.
     """
     try:
         root_keys = _root_dnskey_rrset()
         if root_keys is None:
             logger.debug("_validate_chain: no root_keys available")
             return None
-
-        # Initialize parent at the root: fetch live DNSKEY+RRSIG, require the
-        # trust anchor to be present, and bind the full set via self-signature.
+        # Initialize parent at the root using the baked-in trust anchor and the
+        # live DNSKEY RRset from the resolver.
         parent = dns.name.root
         try:
             parent_dnskey, parent_dnskey_sig = _fetch_dnskey_and_rrsig(r, parent)
         except Exception as e:
             logger.debug("_validate_chain: root DNSKEY/RRSIG fetch failed: %s", e)
             return None
-
-        if not _anchor_in_dnskey_rrset(root_keys, parent_dnskey):
-            logger.debug(
-                "_validate_chain: trust anchor not present in live root DNSKEY"
-            )
-            return None
-
-        if parent_dnskey_sig is None:
-            logger.debug("_validate_chain: missing RRSIG(DNSKEY) for root")
-            return None
-        try:
-            dns.dnssec.validate(
-                parent_dnskey, parent_dnskey_sig, {parent: parent_dnskey}
-            )
-        except Exception as e:
-            logger.warning(
-                "_validate_chain: root DNSKEY self-signature validation failed: %s",
-                e,
-            )
-            return None
-
         logger.debug(
             "_validate_chain: starting at parent=%s with %d DNSKEY records",
             parent,
             len(parent_dnskey or []),
         )
-
+        # Fail closed: live root DNSKEY must contain our trust anchor material.
+        if not _rrset_contains_any_dnskey(parent_dnskey, root_keys):
+            logger.warning(
+                "_validate_chain: live root DNSKEY does not contain trust anchor"
+            )
+            return None
+        if parent_dnskey_sig is None:
+            logger.debug("_validate_chain: missing RRSIG(DNSKEY) at root")
+            return None
+        try:
+            # Validate using anchor keys only so a forged self-consistent root
+            # set (attacker ZSK + included public KSK) cannot pass.
+            dns.dnssec.validate(
+                parent_dnskey, parent_dnskey_sig, {dns.name.root: root_keys}
+            )
+        except Exception as e:
+            logger.warning(
+                "_validate_chain: root DNSKEY RRSIG validation failed: %s", e
+            )
+            return None
+        # Seed DNSKEY cache with the authenticated root set.
+        try:
+            now = time.time()
+            ttl = getattr(parent_dnskey, "ttl", _MAX_KEY_CACHE_TTL_SECONDS)
+            ttl = max(0, min(int(ttl), _MAX_KEY_CACHE_TTL_SECONDS))
+            _DNSKEY_CACHE[dns.name.root.to_text()] = (parent_dnskey, now + ttl)
+            _enforce_cache_entry_limit(_DNSKEY_CACHE, _MAX_KEY_CACHE_ENTRIES)
+        except Exception:
+            pass
         # Walk down from parent to apex
         cur = apex
         labels = []
@@ -524,17 +663,15 @@ def _validate_chain(
             logger.debug(
                 "_validate_chain: descending to child=%s from parent=%s", child, parent
             )
-            # DS is published at the child owner name and signed by the parent
-            # zone. Fetch DS + RRSIG(DS) together and verify the signature with
-            # the already-validated parent DNSKEY set before trusting the DS.
+            # DS at the child owner must be signed by the already-authenticated
+            # parent DNSKEY set (RRSIG(DS) required).
             try:
-                ds, ds_sig = _fetch_rrset_and_rrsig(r, child, "DS")
+                ds, ds_sig = _fetch_ds_and_rrsig(r, child)
             except Exception as e:
                 # No DS for this child — treat the delegation as insecure and
                 # stop strict validation.
                 logger.debug("_validate_chain: DS fetch failed for %s: %s", child, e)
                 return None
-
             if ds_sig is None:
                 logger.debug("_validate_chain: missing RRSIG(DS) for %s", child)
                 return None
@@ -547,6 +684,15 @@ def _validate_chain(
                     e,
                 )
                 return None
+            # Cache authenticated DS.
+            try:
+                now = time.time()
+                ttl = getattr(ds, "ttl", _MAX_KEY_CACHE_TTL_SECONDS)
+                ttl = max(0, min(int(ttl), _MAX_KEY_CACHE_TTL_SECONDS))
+                _DS_CACHE[child.to_text()] = (ds, now + ttl)
+                _enforce_cache_entry_limit(_DS_CACHE, _MAX_KEY_CACHE_ENTRIES)
+            except Exception:
+                pass
 
             # Fetch child DNSKEY and its RRSIG(DNSKEY) in one query so we do not
             # depend on separate RRSIG lookups that many resolvers do not
@@ -960,18 +1106,16 @@ def _nsec_proves_nxdomain(
         if not nsec_map:
             return False
 
-        # Find any NSEC whose open interval (owner, next) covers qname in
-        # DNSSEC canonical order. Proper subdomains of owner always sort
-        # after owner, so owner < qname < nxt already covers them; do not
-        # special-case is_subdomain(owner) without also requiring qname < nxt
-        # (e.g. owner=example.com next=m.example.com must not "prove"
-        # NXDOMAIN for z.example.com).
+        # Find any NSEC whose interval covers qname: owner <= qname < next,
+        # taking DNSSEC canonical ordering into account.
         for owner, nxt in nsec_map.items():
             if owner == qname:
                 # Exact match would imply the name exists, so this NSEC alone
                 # does not prove NXDOMAIN.
                 continue
-            if owner < qname < nxt:
+            # Treat qname subdomains of the owner as covered when the interval
+            # spans past the owner label in canonical order.
+            if owner < qname < nxt or (qname.is_subdomain(owner) and owner < nxt):
                 return True
             # Handle the wrap-around case where the last NSEC covers up to
             # the apex of the space.

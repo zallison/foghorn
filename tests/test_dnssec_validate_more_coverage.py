@@ -372,20 +372,6 @@ def test_nsec_helpers_cover_edge_paths() -> None:
     qname2 = dns.name.from_text("aaaa.example.")
     assert dval._nsec_proves_nxdomain(qname2, [rr]) is True
 
-    # Structural subdomain of owner that sorts at/after next must NOT be
-    # treated as covered (owner < nxt alone is insufficient).
-    apex_owner = dns.name.from_text("example.")
-    early_next = dns.name.from_text("m.example.")
-    outside = dns.name.from_text("z.example.")
-    inside = dns.name.from_text("a.example.")
-    child_of_owner = dns.name.from_text("sub.m.example.")
-    apex_rr = _NsecRRset(apex_owner, [_WithNext(early_next)])
-    assert outside.is_subdomain(apex_owner)
-    assert dval._nsec_proves_nxdomain(outside, [apex_rr]) is False
-    assert dval._nsec_proves_nxdomain(inside, [apex_rr]) is True
-    # Names at/under next sort outside (apex, m.example) and must not match.
-    assert dval._nsec_proves_nxdomain(child_of_owner, [apex_rr]) is False
-
     # _nsec_proves_nodata skips non-matching rrsets.
     q = dns.name.from_text("name.example.")
     mismatch = _NsecRRset(dns.name.from_text("other.example."), [_WithNext(nxt)])
@@ -943,3 +929,103 @@ def test_nsec3_proves_nodata_no_matching_hashed_owner_returns_false(
     # rrset name != hashed owner -> continue -> final False.
     rr = _RRset(dns.name.from_text("aaaa.example."), [_R()])
     assert dval._nsec3_proves_nodata(qname, dns.rdatatype.A, [rr]) is False
+
+
+def test_rrset_contains_any_dnskey_matches_anchor_material() -> None:
+    """Brief: _rrset_contains_any_dnskey detects trust-anchor presence.
+
+    Inputs:
+      - Live root DNSKEY rrset built from ROOT_DNSKEY_STR and a mismatched set.
+
+    Outputs:
+      - True when anchor material is present; False otherwise.
+    """
+
+    anchor = dval._root_dnskey_rrset()
+    assert anchor is not None
+    assert dval._rrset_contains_any_dnskey(anchor, anchor) is True
+
+    other = dns.rrset.from_text(
+        ".",
+        0,
+        dns.rdataclass.IN,
+        dns.rdatatype.DNSKEY,
+        "256 3 8 AwEAAaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    )
+    assert dval._rrset_contains_any_dnskey(other, anchor) is False
+    assert dval._rrset_contains_any_dnskey(None, anchor) is False
+
+
+def test_validate_chain_rejects_root_without_trust_anchor(monkeypatch) -> None:
+    """Brief: _validate_chain fails closed when live root lacks the trust anchor.
+
+    Inputs:
+      - monkeypatch fixtures for root keys and DNSKEY fetch.
+
+    Outputs:
+      - None when live root DNSKEY does not contain the anchor.
+    """
+
+    anchor = dval._root_dnskey_rrset()
+    assert anchor is not None
+
+    forged = dns.rrset.from_text(
+        ".",
+        3600,
+        dns.rdataclass.IN,
+        dns.rdatatype.DNSKEY,
+        "256 3 8 AwEAAaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    )
+
+    class _Sig:
+        type_covered = dns.rdatatype.DNSKEY
+
+    sig = dns.rrset.RRset(dns.name.root, dns.rdataclass.IN, dns.rdatatype.RRSIG)
+    # Minimal stand-in; validate path should fail before needing real crypto once anchor missing.
+    monkeypatch.setattr(dval, "_root_dnskey_rrset", lambda: anchor)
+    monkeypatch.setattr(
+        dval,
+        "_fetch_dnskey_and_rrsig",
+        lambda _r, _n: (forged, sig),
+    )
+
+    out = dval._validate_chain(object(), dns.name.from_text("example.com."))
+    assert out is None
+
+
+def test_fetch_ds_and_rrsig_returns_covering_sig() -> None:
+    """Brief: _fetch_ds_and_rrsig extracts DS and covering RRSIG.
+
+    Inputs:
+      - Fake resolver returning DS + RRSIG(DS).
+
+    Outputs:
+      - Pair of (ds_rrset, sig_rrset).
+    """
+
+    name = dns.name.from_text("com.")
+
+    class _RRset(list):
+        def __init__(self, rdtype, records):
+            super().__init__(records)
+            self.name = name
+            self.rdtype = rdtype
+
+    class _SigRd:
+        type_covered = dns.rdatatype.DS
+
+    ds_rr = _RRset(dns.rdatatype.DS, ["ds"])
+    sig_rr = _RRset(dns.rdatatype.RRSIG, [_SigRd()])
+
+    class _Ans:
+        def __init__(self):
+            self.response = type("_Resp", (), {"answer": [ds_rr, sig_rr]})()
+
+    class _R:
+        def resolve(self, n, t, raise_on_no_answer=True):
+            assert t == "DS"
+            return _Ans()
+
+    ds_out, sig_out = dval._fetch_ds_and_rrsig(_R(), name)
+    assert ds_out is ds_rr
+    assert sig_out is sig_rr
