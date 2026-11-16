@@ -8,9 +8,9 @@ Outputs:
 """
 
 from __future__ import annotations
-import ssl
 
-from typing import Any, Dict, List
+import ssl
+from typing import Any
 
 import pytest
 
@@ -46,7 +46,7 @@ def test_parse_config_variables_non_mapping_raises() -> None:
       - None; asserts ValueError when cfg['variables'] is not a dict.
     """
 
-    cfg: Dict[str, Any] = {"variables": [1, 2, 3]}
+    cfg: dict[str, Any] = {"variables": [1, 2, 3]}
     with pytest.raises(ValueError, match="config.variables must be a mapping"):
         cp.parse_config_variables(cfg)
 
@@ -61,7 +61,7 @@ def test_parse_config_variables_env_and_cli_validation() -> None:
       - None; asserts env keys are parsed and CLI validation errors on bad keys.
     """
 
-    cfg: Dict[str, Any] = {"variables": {"EXISTING": 1}}
+    cfg: dict[str, Any] = {"variables": {"EXISTING": 1}}
     env = {"lower": "1", "UPPER": "2"}
     merged = cp.parse_config_variables(cfg, environ=env, cli_vars=["NEW=3"])
     # lowercase, uppercase, and CLI keys are merged as YAML scalars.
@@ -96,7 +96,7 @@ def test_parse_config_file_non_mapping_root_raises(tmp_path, monkeypatch) -> Non
 
     real_safe_load = _yaml.safe_load
 
-    def fake_safe_load(text: str) -> Any:  # noqa: D401
+    def fake_safe_load(text: str) -> Any:
         """Return a list to trigger non-mapping error for this test file."""
 
         data = real_safe_load(text)
@@ -108,6 +108,36 @@ def test_parse_config_file_non_mapping_root_raises(tmp_path, monkeypatch) -> Non
 
     with pytest.raises(ValueError, match="Configuration root must be a mapping"):
         cp.parse_config_file(str(p))
+
+
+def test_parse_config_file_undefined_alias_message(tmp_path) -> None:
+    """Brief: parse_config_file reports undefined YAML aliases clearly.
+
+    Inputs:
+      - tmp_path: pytest temporary directory fixture.
+
+    Outputs:
+      - None; asserts ValueError names the missing alias and file location.
+    """
+
+    cfg_path = tmp_path / "cfg.yaml"
+    cfg_path.write_text(
+        "\n".join(
+            [
+                "server:",
+                "  listen:",
+                "    udp: *missing_listener",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match=r"undefined alias \*missing_listener") as ei:
+        cp.parse_config_file(str(cfg_path), skip_schema_validation=True)
+    msg = str(ei.value)
+    assert "Define it with &missing_listener" in msg
+    assert str(cfg_path) in msg
 
 
 def test_parse_config_file_rejects_invalid_plugin_hooks_key(tmp_path) -> None:
@@ -387,7 +417,7 @@ def test_normalize_upstream_config_invalid_layout_and_timeout_fallback() -> None
 
     # Invalid timeout_ms that cannot be converted to int falls back to default.
     class Bad:
-        def __int__(self) -> int:  # noqa: D401
+        def __int__(self) -> int:
             """Raise TypeError when converted to int."""
 
             raise TypeError("no int")
@@ -517,7 +547,7 @@ class DummyPlugin(BasePlugin):
       - DummyPlugin instance; records last init kwargs for assertions.
     """
 
-    last_init: Dict[str, Any] | None = None
+    last_init: dict[str, Any] | None = None
 
     def __init__(self, name: str, **config: Any) -> None:  # type: ignore[override]
         super().__init__(name=name, **config)
@@ -580,13 +610,13 @@ def test_derive_plugin_instance_name_explicit_and_duplicates() -> None:
 
 class AliasPlugin(BasePlugin):
     @staticmethod
-    def get_aliases() -> List[str]:  # type: ignore[override]
+    def get_aliases() -> list[str]:  # type: ignore[override]
         return ["docker-hosts", "docker"]
 
 
 class BrokenAliasPlugin(BasePlugin):
     @staticmethod
-    def get_aliases() -> List[str]:  # type: ignore[override]
+    def get_aliases() -> list[str]:  # type: ignore[override]
         raise RuntimeError("boom")
 
 
@@ -650,11 +680,11 @@ def test_load_plugins_rejects_uppercase_comment_keys(monkeypatch) -> None:
     """
 
     # Monkeypatch discover_plugins/get_plugin_class to avoid importing real plugins.
-    monkeypatch.setattr(cp, "discover_plugins", lambda: {})
+    monkeypatch.setattr(cp, "discover_plugins", dict)
     monkeypatch.setattr(cp, "get_plugin_class", lambda ident, reg=None: DummyPlugin)
 
     # Spec-level "Comment".
-    with pytest.raises(ValueError, match="use 'comment' \(lowercase\)"):
+    with pytest.raises(ValueError, match=r"use 'comment' \(lowercase\)"):
         cp.load_plugins(
             [
                 {"type": "dummy", "Comment": "oops"},
@@ -662,7 +692,7 @@ def test_load_plugins_rejects_uppercase_comment_keys(monkeypatch) -> None:
         )
 
     # Config-level "Comment".
-    with pytest.raises(ValueError, match="plugins\[\]\.config: use 'comment'"):
+    with pytest.raises(ValueError, match=r"plugins\[\]\.config: use 'comment'"):
         cp.load_plugins(
             [
                 {"type": "dummy", "config": {"Comment": "oops"}},
@@ -683,11 +713,11 @@ def test_load_plugins_enabled_and_priority_propagation_and_cache_error(
         cache config errors wrapped in ValueError.
     """
 
-    monkeypatch.setattr(cp, "discover_plugins", lambda: {})
+    monkeypatch.setattr(cp, "discover_plugins", dict)
     monkeypatch.setattr(cp, "get_plugin_class", lambda ident, reg=None: DummyPlugin)
 
     # Monkeypatch load_cache_plugin to raise so we hit the error path.
-    def boom_cache(cfg: Any) -> Any:  # noqa: D401, ARG001
+    def boom_cache(cfg: Any) -> Any:
         """Always raise to simulate bad cache configuration."""
 
         raise RuntimeError("bad cache")
@@ -714,7 +744,7 @@ def test_load_plugins_enabled_and_priority_propagation_and_cache_error(
         cp.load_plugins([disabled_spec, bad_cache_spec])
 
     # Now test successful priority propagation without cache errors.
-    def ok_cache(cfg: Any) -> Any:  # noqa: D401, ARG001
+    def ok_cache(cfg: Any) -> Any:
         """Return a sentinel cache object for plugin config injection."""
 
         return {"cache": "ok"}
@@ -742,6 +772,7 @@ def test_load_plugins_enabled_and_priority_propagation_and_cache_error(
     # Cache instance should be injected into plugin config.
     assert "cache" in init_cfg
 
+
 def test_load_plugins_disable_api_is_passed_to_plugin(
     monkeypatch,
 ) -> None:
@@ -754,7 +785,7 @@ def test_load_plugins_disable_api_is_passed_to_plugin(
       - None; asserts disable_api is available to plugin constructors.
     """
 
-    monkeypatch.setattr(cp, "discover_plugins", lambda: {})
+    monkeypatch.setattr(cp, "discover_plugins", dict)
     monkeypatch.setattr(cp, "get_plugin_class", lambda ident, reg=None: DummyPlugin)
 
     DummyPlugin.last_init = None
@@ -788,7 +819,7 @@ def test_load_plugins_hooks_priority_shorthands_and_precedence(monkeypatch) -> N
         *_priority/priority fields are rejected.
     """
 
-    monkeypatch.setattr(cp, "discover_plugins", lambda: {})
+    monkeypatch.setattr(cp, "discover_plugins", dict)
     monkeypatch.setattr(cp, "get_plugin_class", lambda ident, reg=None: DummyPlugin)
 
     # hooks.pre_resolve as int; hooks.post_resolve as {priority: ...}

@@ -59,10 +59,10 @@ from .main_lifecycle_helpers import (
 )
 from .plugins.querylog import BaseStatsStore, load_stats_store_backend
 from .plugins.resolve.base import BasePlugin
-from .plugins.setup import run_shutdown_plugins  # re-exported for tests/callers
 from .plugins.setup import (
     _SetupDNSResolverContext,
     run_setup_plugins,
+    run_shutdown_plugins,  # re-exported for tests/callers
 )
 from .runtime_config import (
     RuntimeSnapshot,
@@ -117,7 +117,8 @@ def main(argv: list[str] | None = None) -> int:
             skip_schema_validation=bool(getattr(args, "skip_schema_validation", False)),
         )
     except ValueError as exc:
-        print(str(exc))
+        # parse_config_file wraps YAML/OS errors as ValueError with a concise message.
+        print(f"Foghorn config error: {exc}", file=sys.stderr)
         return 1
 
     # Initialize logging before any other operations.

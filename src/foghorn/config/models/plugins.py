@@ -16,20 +16,34 @@ from pydantic import Field
 from foghorn.config.models.common import OpenModel, StrictModel
 
 
+class PluginHookNode(OpenModel):
+    """Brief: Mapping form of a single plugin hook priority.
+
+    Inputs:
+      - priority: Optional integer priority for this hook.
+
+    Outputs:
+      - Object accepted as hooks.pre_resolve / post_resolve / setup.
+    """
+
+    priority: int | None = None
+
+
 class PluginHooksConfig(OpenModel):
     """Brief: Per-hook enablement and priorities for a plugin instance.
 
     Inputs:
-      - priority / pre_resolve / post_resolve / setup and related knobs.
+      - priority: Shorthand integer applied to setup/pre_resolve/post_resolve.
+      - setup / pre_resolve / post_resolve: Integer priority or {priority: int}.
 
     Outputs:
-      - Permissive hooks object (strict key checks remain in config_schema.py).
+      - Hooks object (strict key checks remain in config_schema.py).
     """
 
     priority: int | None = None
-    pre_resolve: Any | None = None
-    post_resolve: Any | None = None
-    setup: Any | None = None
+    pre_resolve: int | PluginHookNode | None = None
+    post_resolve: int | PluginHookNode | None = None
+    setup: int | PluginHookNode | None = None
 
 
 class PluginSetupConfig(OpenModel):

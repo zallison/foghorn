@@ -22,7 +22,7 @@ from __future__ import annotations
 import logging
 import os
 import ssl
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any
 from urllib.parse import urlparse
 
 import yaml
@@ -30,8 +30,8 @@ import yaml
 from ..plugins.cache.registry import load_cache_plugin
 from ..plugins.resolve.base import BasePlugin
 from ..plugins.resolve.registry import discover_plugins, get_plugin_class
-from .plugin_profiles import resolve_plugin_profile
 from .config_schema import validate_config
+from .plugin_profiles import resolve_plugin_profile
 
 _UPSTREAM_URL_SCHEME_TO_TRANSPORT = {
     "udp": "udp",
@@ -92,11 +92,11 @@ def _parse_yaml_value(text: str) -> Any:
 
 
 def parse_config_variables(
-    cfg: Dict[str, Any],
+    cfg: dict[str, Any],
     *,
-    cli_vars: Optional[List[str]] = None,
-    environ: Optional[Dict[str, str]] = None,
-) -> Dict[str, Any]:
+    cli_vars: list[str] | None = None,
+    environ: dict[str, str] | None = None,
+) -> dict[str, Any]:
     """Brief: Merge config/environment/CLI variables into cfg['variables'].
 
     Inputs:
@@ -208,7 +208,7 @@ def _coerce_bool_flag(value: object, *, default: bool) -> bool:
     return bool(default)
 
 
-def _resolve_abort_on_fail_flag(container: Dict[str, Any], *, default: bool) -> bool:
+def _resolve_abort_on_fail_flag(container: dict[str, Any], *, default: bool) -> bool:
     """Brief: Resolve abort behavior from a config mapping.
 
     Inputs:
@@ -231,8 +231,8 @@ def _resolve_abort_on_fail_flag(container: Dict[str, Any], *, default: bool) -> 
 
 
 def _iter_tls_ca_file_checks(
-    cfg: Dict[str, Any],
-) -> List[Tuple[str, str, bool]]:
+    cfg: dict[str, Any],
+) -> list[tuple[str, str, bool]]:
     """Brief: Collect TLS ca_file validation checks from upstream config.
 
     Inputs:
@@ -244,7 +244,7 @@ def _iter_tls_ca_file_checks(
         - human-readable config location
         - effective abort_on_fail behavior
     """
-    checks: List[Tuple[str, str, bool]] = []
+    checks: list[tuple[str, str, bool]] = []
     upstream_cfg = cfg.get("upstreams")
     if not isinstance(upstream_cfg, dict):
         return checks
@@ -324,7 +324,7 @@ def _validate_tls_ca_file(ca_file: str, *, location: str) -> None:
         ) from exc
 
 
-def _validate_tls_ca_files(cfg: Dict[str, Any]) -> None:
+def _validate_tls_ca_files(cfg: dict[str, Any]) -> None:
     """Brief: Validate all configured TLS CA bundle paths.
 
     Inputs:
@@ -352,13 +352,61 @@ def _validate_tls_ca_files(cfg: Dict[str, Any]) -> None:
             )
 
 
+def _format_yaml_load_error(config_path: str, exc: yaml.YAMLError) -> str:
+    """Brief: Build a concise operator-facing message for YAML load failures.
+
+    Inputs:
+      - config_path: Path to the config file being parsed.
+      - exc: PyYAML error raised by safe_load.
+
+    Outputs:
+      - str: Short error suitable for CLI print.
+
+    Notes:
+      - Emphasizes undefined anchors/aliases and source marks when available.
+    """
+
+    mark = getattr(exc, "problem_mark", None) or getattr(exc, "context_mark", None)
+    location = config_path
+    if mark is not None:
+        try:
+            line = int(getattr(mark, "line", 0)) + 1
+            col = int(getattr(mark, "column", 0)) + 1
+            location = f"{config_path}:{line}:{col}"
+        except Exception:
+            location = config_path
+
+    problem = str(getattr(exc, "problem", "") or "").strip()
+    context = str(getattr(exc, "context", "") or "").strip()
+    detail = problem or str(exc).strip() or exc.__class__.__name__
+
+    if "undefined alias" in detail.lower():
+        alias = detail
+        if "'" in detail:
+            try:
+                alias = detail.split("'", 2)[1]
+            except Exception:
+                alias = detail
+        msg = (
+            f"YAML error in {location}: undefined alias *{alias}. "
+            f"Define it with &{alias} in this file (anchors do not span files)."
+        )
+        if context:
+            msg = f"{msg} ({context})"
+        return msg
+
+    if context and context not in detail:
+        return f"YAML error in {location}: {detail} ({context})"
+    return f"YAML error in {location}: {detail}"
+
+
 def parse_config_file(
     config_path: str,
     *,
-    cli_vars: Optional[List[str]] = None,
+    cli_vars: list[str] | None = None,
     unknown_keys: str = "error",
     skip_schema_validation: bool = False,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Brief: Read, variable-merge, and schema-validate a v2 YAML config file.
 
     Inputs:
@@ -373,7 +421,9 @@ def parse_config_file(
       - dict: Parsed configuration mapping (mutated by validate_config).
 
     Raises:
-      - ValueError: When schema validation fails or variables are invalid.
+      - ValueError: When the file cannot be read, YAML is invalid (including
+        undefined anchors/aliases), schema validation fails, or variables are
+        invalid.
 
     Notes:
       - validate_config() performs normalization steps, including variable
@@ -383,8 +433,17 @@ def parse_config_file(
         not part of the accepted schema anymore.
     """
 
-    with open(config_path, "r") as f:
-        cfg: Dict[str, Any] = yaml.safe_load(f) or {}
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            cfg: dict[str, Any] = yaml.safe_load(f) or {}
+    except FileNotFoundError as exc:
+        raise ValueError(f"Configuration file not found: {config_path}") from exc
+    except OSError as exc:
+        raise ValueError(
+            f"Cannot read configuration file {config_path}: {exc}"
+        ) from exc
+    except yaml.YAMLError as exc:
+        raise ValueError(_format_yaml_load_error(config_path, exc)) from exc
 
     if not isinstance(cfg, dict):
         raise ValueError("Configuration root must be a mapping")
@@ -403,8 +462,8 @@ def parse_config_file(
 
 
 def _normalize_url_form_upstream_entry(
-    endpoint: Dict[str, Any],
-) -> Optional[Dict[str, Union[str, int, dict]]]:
+    endpoint: dict[str, Any],
+) -> dict[str, str | int | dict] | None:
     """Brief: Normalize one URL-form upstream entry into runtime endpoint shape.
 
     Inputs:
@@ -457,7 +516,7 @@ def _normalize_url_form_upstream_entry(
                 raise ValueError(
                     f"url-form DoH upstream must not set {disallowed_key!r}"
                 )
-        rec: Dict[str, Union[str, int, dict]] = {
+        rec: dict[str, str | int | dict] = {
             "transport": "doh",
             "url": canonical_url,
         }
@@ -490,7 +549,7 @@ def _normalize_url_form_upstream_entry(
     if parsed_port < 1 or parsed_port > 65535:
         raise ValueError("upstream url port must be within 1..65535")
 
-    rec2: Dict[str, Union[str, int, dict]] = {
+    rec2: dict[str, str | int | dict] = {
         "host": str(parsed.hostname).strip(),
         "port": int(parsed_port),
         "transport": expected_transport,
@@ -505,8 +564,8 @@ def _normalize_url_form_upstream_entry(
 
 
 def _normalize_upstream_endpoints_list(
-    upstream_raw: List[Any],
-) -> List[Dict[str, Union[str, int, dict]]]:
+    upstream_raw: list[Any],
+) -> list[dict[str, str | int | dict]]:
     """Brief: Normalize a raw upstream endpoints list.
 
     Inputs:
@@ -525,7 +584,7 @@ def _normalize_upstream_endpoints_list(
         'upstreams.backup.endpoints' blocks share identical parsing rules.
     """
 
-    upstreams: List[Dict[str, Union[str, int, dict]]] = []
+    upstreams: list[dict[str, str | int | dict]] = []
     for u in upstream_raw:
         if not isinstance(u, dict):
             raise ValueError("each upstream entry must be a mapping")
@@ -537,7 +596,7 @@ def _normalize_upstream_endpoints_list(
         transport = str(u.get("transport", "udp")).strip().lower()
 
         if transport == "doh":
-            rec: Dict[str, Union[str, int, dict]] = {
+            rec: dict[str, str | int | dict] = {
                 "transport": "doh",
                 "url": str(u["url"]),
             }
@@ -559,7 +618,7 @@ def _normalize_upstream_endpoints_list(
         raw_port = u.get("port")
         if raw_port is None or (isinstance(raw_port, str) and not raw_port.strip()):
             raw_port = default_port
-        rec2: Dict[str, Union[str, int, dict]] = {
+        rec2: dict[str, str | int | dict] = {
             "host": str(u["host"]),
             "port": int(raw_port),
         }
@@ -577,8 +636,8 @@ def _normalize_upstream_endpoints_list(
 
 
 def normalize_upstream_config(
-    cfg: Dict[str, Any],
-) -> Tuple[List[Dict[str, Union[str, int, dict]]], int]:
+    cfg: dict[str, Any],
+) -> tuple[list[dict[str, str | int | dict]], int]:
     """Brief: Normalize upstream configuration to endpoints + timeout.
 
     Inputs:
@@ -629,7 +688,7 @@ def normalize_upstream_config(
     return upstreams, timeout_ms
 
 
-def normalize_upstream_backup_config(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
+def normalize_upstream_backup_config(cfg: dict[str, Any]) -> list[dict[str, Any]]:
     """Brief: Normalize upstreams.backup.endpoints to a list of upstream dicts.
 
     Inputs:
@@ -798,7 +857,7 @@ def _derive_plugin_instance_name(
     # then the plugin class name. This keeps defaults stable even if call
     # ordering changes.
     try:
-        raw_aliases = list(getattr(plugin_cls, "get_aliases", lambda: [])())
+        raw_aliases = list(getattr(plugin_cls, "get_aliases", list)())
     except Exception:
         raw_aliases = []
 
@@ -839,7 +898,7 @@ def _derive_plugin_instance_name(
         idx += 1
 
 
-def load_plugins(plugin_specs: List[dict]) -> List[BasePlugin]:
+def load_plugins(plugin_specs: list[dict]) -> list[BasePlugin]:
     """Brief: Load and initialize plugins from config plugin specifications.
 
     Inputs:
@@ -867,13 +926,13 @@ def load_plugins(plugin_specs: List[dict]) -> List[BasePlugin]:
     """
 
     alias_registry = discover_plugins()
-    plugins: List[BasePlugin] = []
+    plugins: list[BasePlugin] = []
     seen_names: set[str] = set()
 
     for spec in plugin_specs or []:
-        module_path: Optional[str]
-        plugin_name: Optional[object]
-        raw_config: Dict[str, Any]
+        module_path: str | None
+        plugin_name: object | None
+        raw_config: dict[str, Any]
 
         spec_enabled: object | None = None
 
@@ -1030,7 +1089,7 @@ def load_plugins(plugin_specs: List[dict]) -> List[BasePlugin]:
         profile_name = str(plugin_specific_config.get("profile", "") or "").strip()
         if profile_name:
             try:
-                plugin_aliases = list(getattr(plugin_cls, "get_aliases", lambda: [])())
+                plugin_aliases = list(getattr(plugin_cls, "get_aliases", list)())
             except Exception:
                 plugin_aliases = []
             profile_plugin_type = ""
