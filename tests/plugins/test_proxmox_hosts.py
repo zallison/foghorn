@@ -706,3 +706,48 @@ def test_default_reload_interval_is_300():
     mod = importlib.import_module("foghorn.plugins.resolve.proxmox_hosts")
     cfg = mod.ProxmoxHostsConfig()
     assert cfg.reload_interval_second == 300.0
+
+
+def test_reload_maps_hook_calls_reload_from_proxmox(monkeypatch):
+    """Brief: DynamicHostsPlugin poller hook must call _reload_from_proxmox.
+
+    Inputs:
+      - monkeypatch: pytest fixture.
+
+    Outputs:
+      - None.
+
+    Notes:
+      - Regression: missing _reload_maps raised bare NotImplementedError on each
+        poll (empty str(exc) -> "keeping previous mappings:" with no detail).
+    """
+
+    mod = importlib.import_module("foghorn.plugins.resolve.proxmox_hosts")
+    ProxmoxHosts = mod.ProxmoxHosts
+    fake = _FakeClient({"cluster/resources?type=vm": []})
+    plugin = ProxmoxHosts(
+        endpoints=[
+            {
+                "url": "https://pve.example:8006",
+                "token_id": "foghorn@pve!dns",
+                "token_secret": "secret",
+                "verify_tls": False,
+            }
+        ],
+        reload_interval_second=0,
+    )
+    monkeypatch.setattr(plugin, "_get_client", lambda endpoint: fake)
+    monkeypatch.setattr(mod, "_PveClient", lambda **kwargs: fake)
+    plugin.setup()
+
+    calls = {"n": 0}
+    real = plugin._reload_from_proxmox
+
+    def wrapped():
+        calls["n"] += 1
+        return real()
+
+    monkeypatch.setattr(plugin, "_reload_from_proxmox", wrapped)
+    plugin._reload_maps()
+    assert calls["n"] == 1
+    plugin.shutdown()

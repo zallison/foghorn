@@ -316,6 +316,24 @@ class ProxmoxHosts(DynamicHostsPlugin):
 
         return ProxmoxHostsConfig
 
+    def _reload_maps(self) -> None:
+        """Brief: Reload maps from Proxmox (DynamicHostsPlugin poller hook).
+
+        Inputs:
+          - None.
+
+        Outputs:
+          - None.
+
+        Notes:
+          - Background `_reload_loop` calls this method; without the hook the
+            base class raises bare ``NotImplementedError`` (empty ``str(exc)``),
+            which produced "keeping previous mappings:" with no detail and never
+            refreshed inventory after setup.
+        """
+
+        self._reload_from_proxmox()
+
     def _accept_ip(self, ip_text: str) -> bool:
         """Brief: Apply usable-IP + include/exclude CIDR filters.
 
