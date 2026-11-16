@@ -9,12 +9,29 @@ All notable changes to this project will be documented in this file.
 - KubernetesHosts resolve plugin (`foghorn.plugins.resolve.kubernetes_hosts`): indexes Kubernetes Services and Pods via the API (in-cluster service account, kubeconfig, or explicit api_server + token and/or mTLS), builds forward/reverse maps, and answers matching A/AAAA/PTR/TXT queries in `pre_resolve`. Uses `requests` only (no official Kubernetes client). Supports multi-endpoint config, namespace/label selectors, optional DNS suffix, poll interval, and TXT metadata on answers.
 - Admin snapshot routes for KubernetesHosts: `GET /api/v1/plugins/{plugin_name}/k8s_hosts` and `/kubernetes_hosts` (FastAPI and threaded), plus generic `/snapshot` via `get_http_snapshot()`.
 - Example config `example_configs/plugin_kubernetes_hosts.yaml` for in-cluster Service/Pod DNS publishing.
+- KubernetesHosts inventory caps `max_list_pages` (default 50) and `max_list_items` (default 20000); oversized list reloads abort and keep the previous host maps.
+- SSHKeys `initial_scan_background` (default true) and `initial_scan_deadline_seconds` (default 120) for non-blocking startup scans with a bounded wait.
+- Shared hosts DNS helpers in `hosts_common` (A/AAAA/PTR/TXT builders, reverse-name utilities) used by etc_hosts and mdns.
+- DNSSEC validator TTL-bounded DNSKEY/DS caches (entry and size caps), DNSKEY material matching, and DS/RRSIG fetch helpers for root trust-anchor checks.
+- Config parser wraps file/YAML failures in actionable `ValueError` messages (undefined aliases include name, path, and anchor hints).
+- Plugin hook priorities accept bare `int` or `{priority: int}` mapping nodes.
 
 ### Fixed
 - DockerHosts setup continues when one endpoint client create fails: catch broad client-build errors per endpoint, connect remaining endpoints, log a connected/unavailable summary, and skip endpoints without a live client on the initial reload (retried on later cycles).
+- ProxmoxHosts `_reload_maps()` now calls `_reload_from_proxmox()` so scheduled/forced reloads refresh inventory.
+- SSHKeys prefers a writable allowlisted `db_path` directory and raises `RuntimeError` when none is available instead of silently failing path setup.
+- ZoneRecords commit rejects multi-value CNAME RRsets and CNAME coexisting with other non-DNSSEC types.
+- Admin pre-auth rate limiting keys buckets by client IP (and optional action), not credential material, so rotating API keys cannot bypass limits.
+- YAML config persistence "copy" strategy uses `os.replace` so the temp file is consumed atomically.
+- Basic auth credential decoding accepts URL-safe Base64 characters.
+- `security_limits` limit coercion catches only `TypeError`/`ValueError`.
+- Startup prints `Foghorn config error:` lines to stderr on configuration failure.
+- etc_hosts reverse maps include IPv6 as well as IPv4 via shared hosts helpers.
 
 ### Changed
 - RateLimit periodic stats INFO log drops the redundant "RateLimit stats" prefix (logger name already identifies the source).
+- etc_hosts and mdns resolve plugins call shared `hosts_common` DNS response builders instead of local duplicates.
+- DNSSEC validation tests reshaped around cached DNSKEY/DS and trust-anchor matching paths.
 
 ### Documentation
 - Added `docs/plugins/resolve/kubernetes_hosts.md` covering auth modes, TLS aliases, name publishing rules, config highlights, and admin snapshot URLs.
@@ -24,6 +41,9 @@ All notable changes to this project will be documented in this file.
 ### Tests
 - Added `tests/plugins/test_kubernetes_hosts.py` covering module import, Service/Pod map build and A/PTR answers, missing-auth error recording, kubeconfig token and client-cert parsing, and `tls_*` alias folding.
 - Added DockerHosts regression coverage that one failing endpoint does not prevent connecting a second endpoint.
+- Added `tests/plugins/test_hosts_common_dns_helpers.py` for shared A/AAAA/PTR/TXT and reverse-name helpers.
+- KubernetesHosts page-cap coverage; ProxmoxHosts `_reload_maps` regression; SSHKeys allowlisted DB path and fallback failure; ZoneRecords invalid CNAME commit rejection.
+- Config parser undefined-alias message coverage; admin pre-auth IP rate-limit shared-bucket coverage; YAML copy `os.replace` persistence coverage; DNSSEC trust-anchor/cache path updates.
 
 ## 0.7.2 — 2026-11-10
 
