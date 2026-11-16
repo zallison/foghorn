@@ -8,7 +8,7 @@ import threading
 import time
 from typing import Dict, Iterable, List, Optional
 
-from dnslib import AAAA, PTR, QTYPE, RR, A, DNSHeader, DNSRecord
+from dnslib import QTYPE
 from pydantic import BaseModel, Field, ConfigDict
 
 try:  # watchdog is used for cross-platform file watching
@@ -24,6 +24,12 @@ from foghorn.plugins.resolve.base import (
     PluginContext,
     PluginDecision,
     plugin_aliases,
+)
+from foghorn.plugins.resolve.hosts_common import (
+    ip_matches_qtype,
+    is_reverse_ptr_name,
+    make_a_aaaa_response,
+    make_ptr_response,
 )
 from foghorn.plugins.resolve.zone_records import update_helpers
 from foghorn.utils import dns_names
@@ -271,12 +277,9 @@ class EtcHosts(BasePlugin):
                         )
                         continue
 
-                    # When adding an IPv4 address, also create the corresponding
-                    # in-addr.arpa reverse mapping so reverse lookups can be
-                    # resolved from the same hosts data.
-                    reverse_name: Optional[str] = None
-                    if addr.version == 4:
-                        reverse_name = addr.reverse_pointer
+                    # Seed reverse mappings (in-addr.arpa / ip6.arpa) so PTR lookups for
+                    # these addresses can be answered from the same hosts data.
+                    reverse_name = str(addr.reverse_pointer).lower()
 
                     for domain in parts[1:]:
                         domain_norm = dns_names.normalize_name(domain)
@@ -329,13 +332,12 @@ class EtcHosts(BasePlugin):
         # (PTR-style) names are pushed to the bottom of the admin view.
         def _sort_key(item: tuple[str, str]) -> tuple[int, str]:
             n, _v = item
-            is_ptr = n.endswith(".in-addr.arpa") or n.endswith(".ip6.arpa")
-            return (1 if is_ptr else 0, n)
+            return (1 if is_reverse_ptr_name(n) else 0, n)
 
         for name, value in sorted(mapping.items(), key=_sort_key):
             ip = str(value)
             source_path = src_map.get(name)
-            is_ptr = name.endswith(".in-addr.arpa") or name.endswith(".ip6.arpa")
+            is_ptr = is_reverse_ptr_name(name)
             is_v6 = ":" in ip
             is_v4 = "." in ip and not is_v6
             if is_ptr:
@@ -746,9 +748,7 @@ class EtcHosts(BasePlugin):
         """
 
         qname = dns_names.normalize_name(qname)
-        is_reverse_ptr_name = qname.endswith(".in-addr.arpa") or qname.endswith(
-            ".ip6.arpa"
-        )
+        reverse_qname = is_reverse_ptr_name(qname)
 
         # Safe concurrent read from the hosts mapping when a watcher may be
         # reloading it in the background.
@@ -764,35 +764,25 @@ class EtcHosts(BasePlugin):
         if not self.targets(ctx):
             if not (
                 qtype == QTYPE.PTR
-                and is_reverse_ptr_name
+                and reverse_qname
                 and self._targets_ptr_hostname(ctx, str(value))
             ):
                 return None
 
-        # Handle reverse lookups using the precomputed in-addr.arpa entries.
+        # Handle reverse lookups using the precomputed reverse entries.
         if qtype == QTYPE.PTR:
-            if not is_reverse_ptr_name:
+            if not reverse_qname:
                 return None
-            hostname = str(value).rstrip(".") + "."
-            try:
-                request = DNSRecord.parse(req)
-            except Exception as exc:
-                logger.warning("EtcHosts: parse failure for PTR %s: %s", qname, exc)
+            wire = make_ptr_response(
+                req,
+                str(value),
+                int(self._ttl),
+                qname=qname,
+                log=logger,
+            )
+            if wire is None:
                 return None
-
-            reply = DNSRecord(
-                DNSHeader(id=request.header.id, qr=1, aa=1, ra=1), q=request.q
-            )
-            reply.add_answer(
-                RR(
-                    rname=request.q.qname,
-                    rtype=QTYPE.PTR,
-                    rclass=1,
-                    ttl=self._ttl,
-                    rdata=PTR(hostname),
-                )
-            )
-            return PluginDecision(action="override", response=reply.pack())
+            return PluginDecision(action="override", response=wire)
 
         # Only A/AAAA lookups use the stored IP value.
         if qtype not in (QTYPE.A, QTYPE.AAAA):
@@ -802,63 +792,20 @@ class EtcHosts(BasePlugin):
 
         # If the requested type doesn't match the IP version we have, let normal
         # resolution continue (avoid constructing invalid AAAA from IPv4, etc.).
-        is_v6 = ":" in ip
-        is_v4 = "." in ip
-        if qtype == QTYPE.AAAA and is_v4 and not is_v6:
-            return None
-        if qtype == QTYPE.A and is_v6 and not is_v4:
+        if not ip_matches_qtype(str(ip), qtype):
             return None
 
-        # Build a proper DNS response with the same TXID
-        wire = self._make_a_response(qname, qtype, req, ctx, ip)
+        wire = make_a_aaaa_response(
+            req,
+            qtype,
+            [str(ip)],
+            int(self._ttl),
+            qname=qname,
+            log=logger,
+        )
         if not wire:
             return None
         return PluginDecision(action="override", response=wire)
-
-    def _make_a_response(
-        self,
-        qname: str,
-        query_type: int,
-        raw_req: bytes,
-        ctx: PluginContext,
-        ipaddr: str,
-    ) -> Optional[bytes]:
-        try:
-            request = DNSRecord.parse(raw_req)
-        except Exception as e:
-            logger.warning("parse failure: %s", e)
-            return None
-
-        # Normalize domain
-        # qname = str(request.q.qname).rstrip(".")
-
-        ip = ipaddr
-        reply = DNSRecord(
-            DNSHeader(id=request.header.id, qr=1, aa=1, ra=1), q=request.q
-        )
-
-        if query_type == QTYPE.A:
-            reply.add_answer(
-                RR(
-                    rname=request.q.qname,
-                    rtype=QTYPE.A,
-                    rclass=1,
-                    ttl=self._ttl,
-                    rdata=A(ip),
-                )
-            )
-        elif query_type == QTYPE.AAAA:
-            reply.add_answer(
-                RR(
-                    rname=request.q.qname,
-                    rtype=QTYPE.AAAA,
-                    rclass=1,
-                    ttl=self._ttl,
-                    rdata=AAAA(ip),
-                )
-            )
-
-        return reply.pack()
 
     class _WatchdogHandler(FileSystemEventHandler):
         """Brief: Internal watchdog handler that reloads hosts on file changes.

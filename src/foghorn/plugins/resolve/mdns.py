@@ -12,17 +12,7 @@ from typing import Dict, List, Optional, Set, Tuple, Final
 from pydantic import BaseModel, Field, validator, ConfigDict
 from foghorn.utils.register_caches import registered_lru_cache
 
-from dnslib import (
-    AAAA,
-    PTR,
-    QTYPE,
-    RR,
-    SRV,
-    TXT,
-    A,
-    DNSHeader,
-    DNSRecord,
-)
+from dnslib import QTYPE, RR, SRV
 
 
 from foghorn.plugins.resolve.base import (
@@ -31,6 +21,15 @@ from foghorn.plugins.resolve.base import (
     PluginContext,
     PluginDecision,
     plugin_aliases,
+)
+from foghorn.plugins.resolve.hosts_common import (
+    authoritative_reply,
+    limit_txt_values,
+    parse_dns_request,
+    rr_a,
+    rr_aaaa,
+    rr_ptr,
+    rr_txt,
 )
 
 from foghorn.utils import dns_names
@@ -1621,15 +1620,12 @@ class MdnsBridge(BasePlugin):
         if not any(name_norm.endswith(suf) for suf in allowed_suffixes):
             return None
 
-        try:
-            request = DNSRecord.parse(req)
-        except Exception:
+        request = parse_dns_request(req)
+        if request is None:
             return None
 
         qtype_int = int(qtype)
-        reply = DNSRecord(
-            DNSHeader(id=request.header.id, qr=1, aa=1, ra=1), q=request.q
-        )
+        reply = authoritative_reply(request)
         owner_wire = request.q.qname
 
         def _added_any() -> bool:
@@ -1662,15 +1658,7 @@ class MdnsBridge(BasePlugin):
                     for ip in ips:
                         if not _can_add_rr():
                             break
-                        reply.add_ar(
-                            RR(
-                                rname=host_name + ".",
-                                rtype=QTYPE.A,
-                                rclass=1,
-                                ttl=self._ttl,
-                                rdata=A(ip),
-                            ),
-                        )
+                        reply.add_ar(rr_a(host_name + ".", ip, self._ttl))
 
             if self._include_ipv6:
                 ips6 = self._aaaa.get(host_name)
@@ -1681,15 +1669,7 @@ class MdnsBridge(BasePlugin):
                     for ip in ips:
                         if not _can_add_rr():
                             break
-                        reply.add_ar(
-                            RR(
-                                rname=host_name + ".",
-                                rtype=QTYPE.AAAA,
-                                rclass=1,
-                                ttl=self._ttl,
-                                rdata=AAAA(ip),
-                            ),
-                        )
+                        reply.add_ar(rr_aaaa(host_name + ".", ip, self._ttl))
 
         def _limit_txt_values(values: List[str]) -> List[str]:
             """Brief: Limit TXT strings and bytes for response emission.
@@ -1701,24 +1681,12 @@ class MdnsBridge(BasePlugin):
               - list[str]: Limited TXT values respecting configured caps.
             """
 
-            if not values:
-                return []
-            out: List[str] = []
-            max_strings = self._response_max_txt_strings
-            max_bytes = self._response_max_txt_bytes
-            total_bytes = 0
-            for item in values:
-                if max_strings > 0 and len(out) >= max_strings:
-                    break
-                try:
-                    b = item.encode("utf-8", errors="replace")
-                except Exception:
-                    b = repr(item).encode("utf-8", errors="replace")
-                if max_bytes > 0 and total_bytes + len(b) > max_bytes:
-                    break
-                out.append(item)
-                total_bytes += len(b)
-            return out
+            return limit_txt_values(
+                values,
+                max_strings=self._response_max_txt_strings,
+                max_bytes=self._response_max_txt_bytes,
+                sanitize=True,
+            )
 
         def _can_add_rr() -> bool:
             """Brief: Check response size cap before adding a record.
@@ -1824,15 +1792,7 @@ class MdnsBridge(BasePlugin):
                     for t in sorted(ptr_targets):
                         if not _can_add_rr():
                             break
-                        reply.add_answer(
-                            RR(
-                                rname=owner_wire,
-                                rtype=QTYPE.PTR,
-                                rclass=1,
-                                ttl=self._ttl,
-                                rdata=PTR(t + "."),
-                            ),
-                        )
+                        reply.add_answer(rr_ptr(owner_wire, t, self._ttl))
                 # Fallback: when no explicit `_services._dns-sd._udp` PTRs are
                 # available for this suffix, synthesize service-type owners from
                 # the SRV cache so that `_dns_sd._tcp.<suffix>` and
@@ -1850,15 +1810,7 @@ class MdnsBridge(BasePlugin):
                         for t in sorted(ptr_targets):
                             if not _can_add_rr():
                                 break
-                            reply.add_answer(
-                                RR(
-                                    rname=owner_wire,
-                                    rtype=QTYPE.PTR,
-                                    rclass=1,
-                                    ttl=self._ttl,
-                                    rdata=PTR(t + "."),
-                                ),
-                            )
+                            reply.add_answer(rr_ptr(owner_wire, t, self._ttl))
 
                 # RFC 6763 style browsing: `_tcp.<suffix>` or `_udp.<suffix>` PTR
                 # queries enumerate service types for that protocol.
@@ -1879,15 +1831,7 @@ class MdnsBridge(BasePlugin):
                             for t in sorted(ptr_targets):
                                 if not _can_add_rr():
                                     break
-                                reply.add_answer(
-                                    RR(
-                                        rname=owner_wire,
-                                        rtype=QTYPE.PTR,
-                                        rclass=1,
-                                        ttl=self._ttl,
-                                        rdata=PTR(t + "."),
-                                    ),
-                                )
+                                reply.add_answer(rr_ptr(owner_wire, t, self._ttl))
 
                 # Rule #2: when there are relatively few PTR targets, attempt to
                 # infer the corresponding host(s) and include their A/AAAA as
@@ -1910,13 +1854,12 @@ class MdnsBridge(BasePlugin):
                             if not _can_add_rr():
                                 break
                             reply.add_ar(
-                                RR(
-                                    rname=target + ".",
-                                    rtype=QTYPE.TXT,
-                                    rclass=1,
-                                    ttl=self._ttl,
-                                    rdata=TXT(limited_txts),
-                                ),
+                                rr_txt(
+                                    target + ".",
+                                    limited_txts,
+                                    self._ttl,
+                                    sanitize=False,
+                                )
                             )
 
                         # Patterns we understand for mapping PTR target ->
@@ -1972,13 +1915,7 @@ class MdnsBridge(BasePlugin):
                     limited_txts = _limit_txt_values(list(txts))
                     if limited_txts and _can_add_rr():
                         reply.add_answer(
-                            RR(
-                                rname=owner_wire,
-                                rtype=QTYPE.TXT,
-                                rclass=1,
-                                ttl=self._ttl,
-                                rdata=TXT(limited_txts),
-                            ),
+                            rr_txt(owner_wire, limited_txts, self._ttl, sanitize=False)
                         )
 
                     # Rule #1: TXT on a service-node like
@@ -1999,15 +1936,7 @@ class MdnsBridge(BasePlugin):
                     for ip in ips:
                         if not _can_add_rr():
                             break
-                        reply.add_answer(
-                            RR(
-                                rname=owner_wire,
-                                rtype=QTYPE.A,
-                                rclass=1,
-                                ttl=self._ttl,
-                                rdata=A(ip),
-                            )
-                        )
+                        reply.add_answer(rr_a(owner_wire, ip, self._ttl))
                 elif qtype_int == int(QTYPE.A):
                     # Allow service-type and DNS-SD browse-name A queries (for
                     # example, `_http._tcp.example`, `_dns_sd._tcp.example`,
@@ -2054,15 +1983,7 @@ class MdnsBridge(BasePlugin):
                             for t in sorted(ptr_targets):
                                 if not _can_add_rr():
                                     break
-                                reply.add_answer(
-                                    RR(
-                                        rname=owner_wire,
-                                        rtype=QTYPE.PTR,
-                                        rclass=1,
-                                        ttl=self._ttl,
-                                        rdata=PTR(t + "."),
-                                    ),
-                                )
+                                reply.add_answer(rr_ptr(owner_wire, t, self._ttl))
 
                 if qtype_int == int(QTYPE.A) and service_node_host:
                     # When querying A for a service-node name, also return TXT
@@ -2074,13 +1995,9 @@ class MdnsBridge(BasePlugin):
                         limited_txts = _limit_txt_values(list(txts_for_service))
                         if limited_txts and _can_add_rr():
                             reply.add_ar(
-                                RR(
-                                    rname=owner_wire,
-                                    rtype=QTYPE.TXT,
-                                    rclass=1,
-                                    ttl=self._ttl,
-                                    rdata=TXT(limited_txts),
-                                ),
+                                rr_txt(
+                                    owner_wire, limited_txts, self._ttl, sanitize=False
+                                )
                             )
                     if self._enable_additional_glue:
                         _append_host_additionals(service_node_host)
@@ -2094,15 +2011,7 @@ class MdnsBridge(BasePlugin):
                     for ip in ips:
                         if not _can_add_rr():
                             break
-                        reply.add_answer(
-                            RR(
-                                rname=owner_wire,
-                                rtype=QTYPE.AAAA,
-                                rclass=1,
-                                ttl=self._ttl,
-                                rdata=AAAA(ip),
-                            )
-                        )
+                        reply.add_answer(rr_aaaa(owner_wire, ip, self._ttl))
                 elif qtype_int == int(QTYPE.AAAA):
                     # Same behavior for AAAA queries to service-type and
                     # DNS-SD browse names as for A queries above.
@@ -2139,15 +2048,7 @@ class MdnsBridge(BasePlugin):
                             for t in sorted(ptr_targets):
                                 if not _can_add_rr():
                                     break
-                                reply.add_answer(
-                                    RR(
-                                        rname=owner_wire,
-                                        rtype=QTYPE.PTR,
-                                        rclass=1,
-                                        ttl=self._ttl,
-                                        rdata=PTR(t + "."),
-                                    ),
-                                )
+                                reply.add_answer(rr_ptr(owner_wire, t, self._ttl))
 
         if not _added_any():
             return None

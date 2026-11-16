@@ -1,7 +1,9 @@
-"""Shared helpers for dynamic inventory hosts plugins (Docker/Proxmox/K8s).
+"""Shared helpers for hosts-like resolve plugins.
 
 Brief:
-  - Pure helpers for TXT sanitize, TLS path resolve, DNS labels, map merge.
+  - Pure helpers for TXT sanitize, TLS path resolve, DNS labels, map merge,
+    and authoritative A/AAAA/PTR reply packing (used by Docker/Proxmox/K8s,
+    EtcHosts, and MdnsBridge).
   - DynamicHostsPlugin base: sticky condition logs, host maps, reload loop,
     shutdown, and shared A/AAAA/PTR/TXT pre_resolve answering.
 """
@@ -182,6 +184,306 @@ def ptr_owner(hostname: str) -> str:
     if not host:
         return "."
     return host if host.endswith(".") else host + "."
+
+
+def format_exception_brief(exc: BaseException) -> str:
+    """Brief: Human-readable exception text that stays useful when str(exc) is empty.
+
+    Inputs:
+      - exc: Caught exception instance.
+
+    Outputs:
+      - "Type: message" when message is non-empty; otherwise just the type name.
+
+    Example:
+      format_exception_brief(NotImplementedError()) -> "NotImplementedError"
+      format_exception_brief(RuntimeError("boom")) -> "RuntimeError: boom"
+    """
+
+    name = type(exc).__name__
+    msg = str(exc).strip()
+    if not msg:
+        return name
+    return f"{name}: {msg}"
+
+
+def is_reverse_ptr_name(name: str) -> bool:
+    """Brief: True when name is an in-addr.arpa or ip6.arpa reverse owner.
+
+    Inputs:
+      - name: Normalized DNS owner (no trailing dot expected).
+
+    Outputs:
+      - bool.
+    """
+
+    text = str(name or "").lower().rstrip(".")
+    return text.endswith(".in-addr.arpa") or text.endswith(".ip6.arpa")
+
+
+def ip_matches_qtype(ip_text: str, qtype: int) -> bool:
+    """Brief: True when an address string is compatible with A or AAAA qtype.
+
+    Inputs:
+      - ip_text: Address text (may be unparsed; uses ':' / '.' heuristics).
+      - qtype: Numeric QTYPE (A or AAAA).
+
+    Outputs:
+      - False when the family clearly mismatches the query type.
+    """
+
+    ip = str(ip_text or "")
+    is_v6 = ":" in ip
+    is_v4 = "." in ip
+    if qtype == QTYPE.AAAA and is_v4 and not is_v6:
+        return False
+    if qtype == QTYPE.A and is_v6 and not is_v4:
+        return False
+    return True
+
+
+def parse_dns_request(
+    req: bytes,
+    *,
+    log: logging.Logger | None = None,
+    log_message: str | None = None,
+    log_args: tuple[object, ...] = (),
+) -> DNSRecord | None:
+    """Brief: Parse wire DNS request bytes into a DNSRecord.
+
+    Inputs:
+      - req: Raw DNS query bytes.
+      - log: Optional logger for parse failures.
+      - log_message: Optional warning template when parse fails.
+      - log_args: %-format args for log_message.
+
+    Outputs:
+      - DNSRecord, or None on parse failure.
+    """
+
+    try:
+        return DNSRecord.parse(req)
+    except Exception as exc:
+        if log is not None and log_message:
+            log.warning(log_message, *log_args, exc)
+        elif log is not None:
+            log.warning("DNS request parse failure: %s", exc)
+        return None
+
+
+def authoritative_reply(request: DNSRecord) -> DNSRecord:
+    """Brief: Build an empty AA+RA response shell matching the request question.
+
+    Inputs:
+      - request: Parsed DNS query.
+
+    Outputs:
+      - DNSRecord reply with qr/aa/ra set and the same question.
+    """
+
+    return DNSRecord(DNSHeader(id=request.header.id, qr=1, aa=1, ra=1), q=request.q)
+
+
+def rr_a(rname: object, ip: str, ttl: int) -> RR:
+    """Brief: Build an A RR.
+
+    Inputs:
+      - rname: Owner name (dnslib name or str).
+      - ip: IPv4 text.
+      - ttl: TTL seconds.
+
+    Outputs:
+      - RR instance.
+    """
+
+    return RR(rname=rname, rtype=QTYPE.A, rclass=1, ttl=int(ttl), rdata=A(ip))
+
+
+def rr_aaaa(rname: object, ip: str, ttl: int) -> RR:
+    """Brief: Build an AAAA RR.
+
+    Inputs:
+      - rname: Owner name (dnslib name or str).
+      - ip: IPv6 text.
+      - ttl: TTL seconds.
+
+    Outputs:
+      - RR instance.
+    """
+
+    return RR(rname=rname, rtype=QTYPE.AAAA, rclass=1, ttl=int(ttl), rdata=AAAA(ip))
+
+
+def rr_ptr(rname: object, hostname: str, ttl: int) -> RR:
+    """Brief: Build a PTR RR (hostname normalized with trailing dot).
+
+    Inputs:
+      - rname: Owner name (dnslib name or str).
+      - hostname: PTR target hostname.
+      - ttl: TTL seconds.
+
+    Outputs:
+      - RR instance.
+    """
+
+    return RR(
+        rname=rname,
+        rtype=QTYPE.PTR,
+        rclass=1,
+        ttl=int(ttl),
+        rdata=PTR(ptr_owner(hostname)),
+    )
+
+
+def rr_txt(
+    rname: object, values: Iterable[str], ttl: int, *, sanitize: bool = True
+) -> RR:
+    """Brief: Build a TXT RR from string chunks.
+
+    Inputs:
+      - rname: Owner name (dnslib name or str).
+      - values: TXT character-strings.
+      - ttl: TTL seconds.
+      - sanitize: When True, run each chunk through sanitize_txt_chunk.
+
+    Outputs:
+      - RR instance.
+    """
+
+    chunks = [
+        sanitize_txt_chunk(str(v)) if sanitize else str(v) for v in values if str(v)
+    ]
+    return RR(
+        rname=rname,
+        rtype=QTYPE.TXT,
+        rclass=1,
+        ttl=int(ttl),
+        rdata=TXT(chunks),
+    )
+
+
+def limit_txt_values(
+    values: Iterable[str],
+    *,
+    max_strings: int = 0,
+    max_bytes: int = 0,
+    sanitize: bool = False,
+) -> list[str]:
+    """Brief: Cap TXT strings by count and total UTF-8 bytes.
+
+    Inputs:
+      - values: Candidate TXT strings.
+      - max_strings: Max strings (0 = unlimited).
+      - max_bytes: Max total UTF-8 bytes across emitted strings (0 = unlimited).
+      - sanitize: When True, sanitize each kept chunk.
+
+    Outputs:
+      - Possibly truncated list of strings (order preserved).
+    """
+
+    out: list[str] = []
+    total_bytes = 0
+    for item in values:
+        text = sanitize_txt_chunk(str(item)) if sanitize else str(item)
+        if not text and not str(item):
+            continue
+        if max_strings > 0 and len(out) >= max_strings:
+            break
+        try:
+            encoded = text.encode("utf-8", errors="replace")
+        except Exception:
+            encoded = repr(text).encode("utf-8", errors="replace")
+        if max_bytes > 0 and total_bytes + len(encoded) > max_bytes:
+            break
+        out.append(text)
+        total_bytes += len(encoded)
+    return out
+
+
+def make_a_aaaa_response(
+    req: bytes,
+    qtype: int,
+    addrs: Iterable[str],
+    ttl: int,
+    *,
+    qname: str | None = None,
+    log: logging.Logger | None = None,
+) -> bytes | None:
+    """Brief: Pack an authoritative A/AAAA answer for one question.
+
+    Inputs:
+      - req: Raw DNS request bytes.
+      - qtype: QTYPE.A or QTYPE.AAAA (other values treated as A).
+      - addrs: Address strings to include (may be empty -> NOERROR empty answer).
+      - ttl: Answer TTL seconds.
+      - qname: Optional name for parse-failure logs.
+      - log: Optional logger.
+
+    Outputs:
+      - Packed response bytes, or None when req cannot be parsed.
+
+    Example:
+      wire = make_a_aaaa_response(req, QTYPE.A, ["10.0.0.1"], 300)
+    """
+
+    name = qname or "?"
+    request = parse_dns_request(
+        req,
+        log=log,
+        log_message="parse failure building response for %s %s: %s",
+        log_args=(name, QTYPE.get(qtype, str(qtype))),
+    )
+    if request is None:
+        return None
+
+    reply = authoritative_reply(request)
+    addrs_list = [str(a) for a in addrs]
+    if not addrs_list:
+        return reply.pack()
+
+    use_aaaa = qtype == QTYPE.AAAA
+    for ipaddr in addrs_list:
+        if use_aaaa:
+            reply.add_answer(rr_aaaa(request.q.qname, ipaddr, ttl))
+        else:
+            reply.add_answer(rr_a(request.q.qname, ipaddr, ttl))
+    return reply.pack()
+
+
+def make_ptr_response(
+    req: bytes,
+    hostname: str,
+    ttl: int,
+    *,
+    qname: str | None = None,
+    log: logging.Logger | None = None,
+) -> bytes | None:
+    """Brief: Pack an authoritative PTR answer for one question.
+
+    Inputs:
+      - req: Raw DNS request bytes.
+      - hostname: PTR target hostname (trailing dot optional).
+      - ttl: Answer TTL seconds.
+      - qname: Optional reverse name for parse-failure logs.
+      - log: Optional logger.
+
+    Outputs:
+      - Packed response bytes, or None when req cannot be parsed.
+    """
+
+    name = qname or "?"
+    request = parse_dns_request(
+        req,
+        log=log,
+        log_message="parse failure for PTR %s: %s",
+        log_args=(name,),
+    )
+    if request is None:
+        return None
+
+    reply = authoritative_reply(request)
+    reply.add_answer(rr_ptr(request.q.qname, hostname, ttl))
+    return reply.pack()
 
 
 def empty_host_maps() -> dict[str, Any]:
@@ -681,7 +983,7 @@ class DynamicHostsPlugin(BasePlugin):
                 self._note_condition_failure(
                     "periodic-reload-error",
                     "error during periodic reload; keeping previous mappings: %s",
-                    exc,
+                    format_exception_brief(exc),
                 )
 
     def _shutdown_resources(self) -> None:
@@ -738,41 +1040,14 @@ class DynamicHostsPlugin(BasePlugin):
           - Packed DNS response bytes, or None when req cannot be parsed.
         """
 
-        try:
-            request = DNSRecord.parse(req)
-        except Exception as exc:
-            log = getattr(self, "logger", logger)
-            log.warning(
-                "parse failure building response for %s %s: %s",
-                qname,
-                QTYPE.get(qtype, str(qtype)),
-                exc,
-            )
-            return None
-
-        reply = DNSRecord(
-            DNSHeader(id=request.header.id, qr=1, aa=1, ra=1), q=request.q
+        return make_a_aaaa_response(
+            req,
+            qtype,
+            addrs,
+            ttl,
+            qname=qname,
+            log=getattr(self, "logger", logger),
         )
-        if not addrs:
-            return reply.pack()
-
-        for ipaddr in addrs:
-            if qtype == QTYPE.AAAA:
-                rdata = AAAA(ipaddr)
-                rtype = QTYPE.AAAA
-            else:
-                rdata = A(ipaddr)
-                rtype = QTYPE.A
-            reply.add_answer(
-                RR(
-                    rname=request.q.qname,
-                    rtype=rtype,
-                    rclass=1,
-                    ttl=int(ttl),
-                    rdata=rdata,
-                )
-            )
-        return reply.pack()
 
     def _build_address_reply(
         self,
@@ -795,39 +1070,24 @@ class DynamicHostsPlugin(BasePlugin):
           - PluginDecision or None on parse failure.
         """
 
-        try:
-            request = DNSRecord.parse(req)
-        except Exception as exc:
-            logger.warning(
-                "parse failure for %s %s: %s",
-                QTYPE.get(rtype, str(rtype)),
-                qname,
-                exc,
-            )
-            return None
-        reply = DNSRecord(
-            DNSHeader(id=request.header.id, qr=1, aa=1, ra=1), q=request.q
+        request = parse_dns_request(
+            req,
+            log=logger,
+            log_message="parse failure for %s %s: %s",
+            log_args=(QTYPE.get(rtype, str(rtype)), qname),
         )
+        if request is None:
+            return None
+        reply = authoritative_reply(request)
         for ipaddr in addrs:
-            reply.add_answer(
-                RR(
-                    rname=request.q.qname,
-                    rtype=rtype,
-                    rclass=1,
-                    ttl=int(ttl),
-                    rdata=rdata_cls(ipaddr),
-                )
-            )
+            if rdata_cls is AAAA or rtype == QTYPE.AAAA:
+                reply.add_answer(rr_aaaa(request.q.qname, ipaddr, ttl))
+            else:
+                reply.add_answer(rr_a(request.q.qname, ipaddr, ttl))
         if getattr(self, "_expose_txt_in_additional", False):
             for line in txts:
                 reply.add_ar(
-                    RR(
-                        rname=request.q.qname,
-                        rtype=QTYPE.TXT,
-                        rclass=1,
-                        ttl=int(txt_ttl),
-                        rdata=TXT([sanitize_txt_chunk(str(line))]),
-                    )
+                    rr_txt(request.q.qname, [str(line)], txt_ttl, sanitize=True)
                 )
             try:
                 if len(reply.pack()) > 512:
@@ -893,44 +1153,23 @@ class DynamicHostsPlugin(BasePlugin):
                 aaaa_ttl = int(self._ttl_v6.get(name, default_ttl))
             if not txts and not a_addrs and not aaaa_addrs:
                 return None
-            try:
-                request = DNSRecord.parse(req)
-            except Exception as exc:
-                logger.warning("parse failure for TXT %s: %s", qname, exc)
-                return None
-            reply = DNSRecord(
-                DNSHeader(id=request.header.id, qr=1, aa=1, ra=1), q=request.q
+            request = parse_dns_request(
+                req,
+                log=logger,
+                log_message="parse failure for TXT %s: %s",
+                log_args=(qname,),
             )
+            if request is None:
+                return None
+            reply = authoritative_reply(request)
             for line in txts:
                 reply.add_answer(
-                    RR(
-                        rname=request.q.qname,
-                        rtype=QTYPE.TXT,
-                        rclass=1,
-                        ttl=txt_ttl,
-                        rdata=TXT([sanitize_txt_chunk(str(line))]),
-                    )
+                    rr_txt(request.q.qname, [str(line)], txt_ttl, sanitize=True)
                 )
             for ipaddr in a_addrs:
-                reply.add_answer(
-                    RR(
-                        rname=request.q.qname,
-                        rtype=QTYPE.A,
-                        rclass=1,
-                        ttl=a_ttl,
-                        rdata=A(ipaddr),
-                    )
-                )
+                reply.add_answer(rr_a(request.q.qname, ipaddr, a_ttl))
             for ipaddr in aaaa_addrs:
-                reply.add_answer(
-                    RR(
-                        rname=request.q.qname,
-                        rtype=QTYPE.AAAA,
-                        rclass=1,
-                        ttl=aaaa_ttl,
-                        rdata=AAAA(ipaddr),
-                    )
-                )
+                reply.add_answer(rr_aaaa(request.q.qname, ipaddr, aaaa_ttl))
             return PluginDecision(action="override", response=reply.pack())
 
         if qtype == QTYPE.PTR:
@@ -939,24 +1178,10 @@ class DynamicHostsPlugin(BasePlugin):
                 ttl = int(self._ttl_ptr.get(name, default_ttl))
             if not hostname:
                 return None
-            try:
-                request = DNSRecord.parse(req)
-            except Exception as exc:
-                logger.warning("parse failure for PTR %s: %s", qname, exc)
+            wire = make_ptr_response(req, str(hostname), ttl, qname=qname, log=logger)
+            if wire is None:
                 return None
-            reply = DNSRecord(
-                DNSHeader(id=request.header.id, qr=1, aa=1, ra=1), q=request.q
-            )
-            reply.add_answer(
-                RR(
-                    rname=request.q.qname,
-                    rtype=QTYPE.PTR,
-                    rclass=1,
-                    ttl=ttl,
-                    rdata=PTR(ptr_owner(str(hostname))),
-                )
-            )
-            return PluginDecision(action="override", response=reply.pack())
+            return PluginDecision(action="override", response=wire)
 
         return None
 
