@@ -20,11 +20,11 @@ import logging
 import math
 import threading
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, Protocol
+from typing import Any, Dict, Protocol
 
 from .config_helpers import _get_web_cfg
-
 
 logger = logging.getLogger("foghorn.webserver")
 
@@ -50,7 +50,7 @@ class AdminRateLimitDecision:
     retry_after_seconds: int
     backend: str
 
-    def to_headers(self) -> Dict[str, str]:
+    def to_headers(self) -> dict[str, str]:
         """Brief: Render standard response headers for rate-limit visibility.
 
         Inputs:
@@ -114,7 +114,7 @@ class InMemoryAdminRateLimitBackend:
         self._burst = max(0, int(burst))
         self._name = str(backend_name or "memory")
         self._lock = threading.Lock()
-        self._state: Dict[str, tuple[int, int]] = {}
+        self._state: dict[str, tuple[int, int]] = {}
 
     @property
     def name(self) -> str:
@@ -385,7 +385,7 @@ class AdminRateLimitSettings:
 
 
 def parse_admin_rate_limit_settings(
-    config: Dict[str, Any] | None,
+    config: dict[str, Any] | None,
 ) -> AdminRateLimitSettings:
     """Brief: Parse `server.http.admin_rate_limit` settings with safe defaults.
 
@@ -543,16 +543,14 @@ class AdminRateLimitService:
                 backend="excluded",
             )
 
-        # Pre-auth: always key by socket peer IP so rotating forged
-        # Authorization/X-API-Key values cannot mint fresh buckets.
-        # Token hash is only mixed in when a non-empty auth header is present
-        # *and* we still bind to client_ip (ip+token), never token-alone.
+        # Pre-auth: bucket solely by socket peer IP (+ optional action).
+        # Never mix Authorization/X-API-Key material into the key — rotating
+        # forged tokens would otherwise mint a fresh bucket per guess and
+        # defeat the pre-auth rate limit. Auth headers are accepted for API
+        # compatibility but ignored for principal selection here.
+        _ = authorization_header, api_key_header
         ip = str(client_ip or "unknown")
-        token_frag = _auth_identity_fragment(authorization_header, api_key_header)
-        if token_frag:
-            principal = f"{ip}|{token_frag}"
-        else:
-            principal = ip
+        principal = ip
         if self._settings.key_mode == "client":
             key = principal
         else:
@@ -639,7 +637,7 @@ def _service_signature(
 def get_admin_rate_limit_service(
     *,
     state_obj: object,
-    config: Dict[str, Any] | None,
+    config: dict[str, Any] | None,
     plugins: Iterable[object] | None,
 ) -> AdminRateLimitService:
     """Brief: Return cached admin rate-limit service for runtime state object.
@@ -664,6 +662,6 @@ def get_admin_rate_limit_service(
         settings=settings,
         backend=_build_backend(settings=settings, plugins=plugins),
     )
-    setattr(state_obj, "_admin_rate_limit_service", service)
-    setattr(state_obj, "_admin_rate_limit_service_signature", signature)
+    state_obj._admin_rate_limit_service = service
+    state_obj._admin_rate_limit_service_signature = signature
     return service

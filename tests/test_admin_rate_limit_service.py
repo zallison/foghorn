@@ -140,7 +140,7 @@ def test_plugin_backend_malformed_payload_uses_fallback_backend() -> None:
     """
 
     class RateLimit:
-        name = 'rl'
+        name = "rl"
 
         def check_admin_rate_limit(self, *, key: str, now_ts: float) -> object:
             _ = key, now_ts
@@ -149,17 +149,17 @@ def test_plugin_backend_malformed_payload_uses_fallback_backend() -> None:
     fallback = rl.InMemoryAdminRateLimitBackend(
         requests_per_window=1,
         window_seconds=60,
-        backend_name='fallback-memory',
+        backend_name="fallback-memory",
     )
     backend = rl.PluginAdminRateLimitBackend(
         plugins=[RateLimit()],
         fallback_backend=fallback,
     )
-    first = backend.evaluate(key='client-a', now_ts=100.0)
-    second = backend.evaluate(key='client-a', now_ts=101.0)
+    first = backend.evaluate(key="client-a", now_ts=100.0)
+    second = backend.evaluate(key="client-a", now_ts=101.0)
     assert first.allowed is True
     assert second.allowed is False
-    assert second.backend == 'fallback-memory'
+    assert second.backend == "fallback-memory"
 
 
 def test_plugin_backend_prefers_hook_capability_not_class_name() -> None:
@@ -173,23 +173,68 @@ def test_plugin_backend_prefers_hook_capability_not_class_name() -> None:
     """
 
     class CustomLimiter:
-        name = 'custom'
+        name = "custom"
 
-        def check_admin_rate_limit(self, *, key: str, now_ts: float) -> dict[str, object]:
+        def check_admin_rate_limit(
+            self, *, key: str, now_ts: float
+        ) -> dict[str, object]:
             _ = key, now_ts
             return {
-                'allowed': False,
-                'limit': 7,
-                'remaining': 0,
-                'retry_after_seconds': 3,
-                'backend': 'custom-hook',
+                "allowed": False,
+                "limit": 7,
+                "remaining": 0,
+                "retry_after_seconds": 3,
+                "backend": "custom-hook",
             }
 
     backend = rl.PluginAdminRateLimitBackend(plugins=[CustomLimiter()])
-    decision = backend.evaluate(key='client-a', now_ts=10.0)
+    decision = backend.evaluate(key="client-a", now_ts=10.0)
     assert decision.allowed is False
-    assert decision.backend == 'custom-hook'
+    assert decision.backend == "custom-hook"
     assert decision.retry_after_seconds == 3
+
+
+def test_admin_rate_limit_ignores_rotating_api_keys() -> None:
+    """Brief: Pre-auth principal is IP-only so rotating X-API-Key cannot mint buckets.
+
+    Inputs:
+      - Memory backend with requests_per_window=1.
+      - Two evaluate calls from same IP with different X-API-Key values.
+
+    Outputs:
+      - Second request is blocked (same principal bucket).
+    """
+
+    settings = rl.AdminRateLimitSettings(
+        enabled=True,
+        backend="memory",
+        requests_per_window=1,
+        window_seconds=60,
+        burst=0,
+        key_mode="client_action",
+        excluded_actions=(),
+    )
+    backend = rl.InMemoryAdminRateLimitBackend(
+        requests_per_window=1,
+        window_seconds=60,
+    )
+    service = rl.AdminRateLimitService(settings=settings, backend=backend)
+    first = service.evaluate(
+        action="admin.read",
+        client_ip="10.0.0.1",
+        authorization_header=None,
+        api_key_header="guess-1",
+        now_ts=1.0,
+    )
+    second = service.evaluate(
+        action="admin.read",
+        client_ip="10.0.0.1",
+        authorization_header=None,
+        api_key_header="guess-2",
+        now_ts=2.0,
+    )
+    assert first.allowed is True
+    assert second.allowed is False
 
 
 def test_get_admin_rate_limit_service_rebuilds_when_plugin_attrs_change() -> None:
@@ -206,7 +251,7 @@ def test_get_admin_rate_limit_service_rebuilds_when_plugin_attrs_change() -> Non
         pass
 
     class RateLimit:
-        name = 'rl'
+        name = "rl"
 
         def __init__(self) -> None:
             self.window_seconds = 60
@@ -216,11 +261,11 @@ def test_get_admin_rate_limit_service_rebuilds_when_plugin_attrs_change() -> Non
     state = _State()
     plugin = RateLimit()
     config = {
-        'server': {
-            'http': {
-                'admin_rate_limit': {
-                    'enabled': True,
-                    'backend': 'plugin',
+        "server": {
+            "http": {
+                "admin_rate_limit": {
+                    "enabled": True,
+                    "backend": "plugin",
                 }
             }
         }
