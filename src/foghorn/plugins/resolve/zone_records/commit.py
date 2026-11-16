@@ -95,6 +95,64 @@ def _clone_record_entry(entry: RecordEntry) -> RecordEntry:
     return (int(ttl), list(values or []), list(sources or []))
 
 
+def _cname_qtype() -> int:
+    """Brief: Numeric QTYPE for CNAME (5 if dnslib lacks the attribute).
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - int QTYPE code.
+    """
+
+    try:
+        return int(QTYPE.CNAME)
+    except Exception:
+        return 5
+
+
+def _dnssec_side_qtypes() -> frozenset[int]:
+    """Brief: RRtypes allowed alongside CNAME (DNSSEC companion records).
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - frozenset of qtype integers.
+    """
+
+    names = ("RRSIG", "NSEC", "NSEC3", "NSEC3PARAM", "DNSKEY")
+    fallback = {
+        "RRSIG": 46,
+        "NSEC": 47,
+        "NSEC3": 50,
+        "NSEC3PARAM": 51,
+        "DNSKEY": 48,
+    }
+    out: set[int] = set()
+    for name in names:
+        try:
+            out.add(int(getattr(QTYPE, name)))
+        except Exception:
+            out.add(int(fallback[name]))
+    return frozenset(out)
+
+
+def _cname_multi_rdata_error(values: List[str]) -> Optional[str]:
+    """Brief: Error text when a CNAME RRset would contain multiple rdata.
+
+    Inputs:
+      - values: Candidate rdata strings for a CNAME RRset.
+
+    Outputs:
+      - Error string when len(values) > 1; otherwise None.
+    """
+
+    if len(list(values or [])) > 1:
+        return "CNAME RRset must contain exactly one rdata value"
+    return None
+
+
 def _owner_rrsets_from_view(
     owner_norm: str,
     records_map: Dict[RecordKey, RecordEntry],
@@ -409,6 +467,54 @@ def commit_record_actions(
             return None
         return _clone_record_entry(base_entry)
 
+    cname_code = _cname_qtype()
+    dnssec_side = _dnssec_side_qtypes()
+
+    def _owner_present_qtypes(owner_norm: str) -> set[int]:
+        """Brief: Qtypes present at owner in the transactional view.
+
+        Inputs:
+          - owner_norm: Normalized owner.
+
+        Outputs:
+          - set of qtype ints with a non-deleted RRset.
+        """
+        present: set[int] = set()
+        if owner_norm not in pending_name_delete_all:
+            for (own, qt), _entry in snapshot_records.items():
+                if str(own) != owner_norm:
+                    continue
+                key = (owner_norm, int(qt))
+                if key in pending_rrset_updates and pending_rrset_updates[key] is None:
+                    continue
+                present.add(int(qt))
+        for (own, qt), entry in pending_rrset_updates.items():
+            if str(own) != owner_norm:
+                continue
+            if entry is None:
+                present.discard(int(qt))
+            else:
+                present.add(int(qt))
+        return present
+
+    def _cname_owner_conflict(owner_norm: str, *, adding_qtype: int) -> Optional[str]:
+        """Brief: Reject CNAME coexisting with non-DNSSEC data at an owner.
+
+        Inputs:
+          - owner_norm: Owner being mutated.
+          - adding_qtype: Qtype of the RRset being added/replaced.
+
+        Outputs:
+          - Error string when the resulting owner state would be illegal.
+        """
+        present = _owner_present_qtypes(owner_norm)
+        # After this action the adding_qtype will exist (caller handles values).
+        present.add(int(adding_qtype))
+        non_side = {qt for qt in present if qt not in dnssec_side}
+        if cname_code in non_side and len(non_side) > 1:
+            return f"CNAME at {owner_norm} cannot coexist with other non-DNSSEC RRsets"
+        return None
+
     for raw_action in action_list:
         action_type = str(raw_action.get("type", "") or "")
         try:
@@ -475,6 +581,31 @@ def commit_record_actions(
                 )
             record_key = (owner_norm, qtype_int)
             current_entry = _effective_rrset_entry(owner_norm, qtype_int)
+            if current_entry is None:
+                candidate_values = [rdata_str]
+            else:
+                _existing_ttl, existing_values, sources = current_entry
+                if rdata_str in existing_values:
+                    candidate_values = list(existing_values)
+                else:
+                    candidate_values = list(existing_values) + [rdata_str]
+            if int(qtype_int) == int(cname_code):
+                multi_err = _cname_multi_rdata_error(candidate_values)
+                if multi_err:
+                    return CommitResult(
+                        ok=False,
+                        rcode=1,
+                        error=multi_err,
+                        zone_apex=apex_norm,
+                    )
+            coexist_err = _cname_owner_conflict(owner_norm, adding_qtype=qtype_int)
+            if coexist_err:
+                return CommitResult(
+                    ok=False,
+                    rcode=1,
+                    error=coexist_err,
+                    zone_apex=apex_norm,
+                )
             if current_entry is None:
                 pending_rrset_updates[record_key] = (ttl, [rdata_str], [action_source])
             else:
@@ -611,12 +742,32 @@ def commit_record_actions(
                     error="Missing values in rr_replace",
                     zone_apex=apex_norm,
                 )
+            if int(qtype_int) == int(cname_code):
+                multi_err = _cname_multi_rdata_error(values_list)
+                if multi_err:
+                    return CommitResult(
+                        ok=False,
+                        rcode=1,
+                        error=multi_err,
+                        zone_apex=apex_norm,
+                    )
+            # Stage replace into pending so coexistence sees the post-replace view.
             record_key = (owner_norm, qtype_int)
             pending_rrset_updates[record_key] = (
                 ttl,
                 list(values_list),
                 [action_source],
             )
+            coexist_err = _cname_owner_conflict(owner_norm, adding_qtype=qtype_int)
+            if coexist_err:
+                # Roll back this staged replace on conflict.
+                del pending_rrset_updates[record_key]
+                return CommitResult(
+                    ok=False,
+                    rcode=1,
+                    error=coexist_err,
+                    zone_apex=apex_norm,
+                )
             normalized_actions.append(
                 {
                     "type": "rr_replace",

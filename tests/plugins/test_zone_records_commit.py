@@ -1342,3 +1342,93 @@ def test_commit_max_journal_entries_compaction(
         writer.close()
     assert result.ok is True
     assert calls["n"] >= 1
+
+
+def test_commit_rejects_multi_cname_and_cname_with_other_types() -> None:
+    """Brief: CNAME must be single-rdata and exclusive of other non-DNSSEC types.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts FORMERR-style rcode=1 for illegal CNAME commits.
+    """
+
+    plugin = _plugin()
+    multi = zone_commit.commit_record_actions(
+        plugin,
+        "example.com",
+        [
+            {
+                "type": "rr_replace",
+                "owner": "alias.example.com",
+                "qtype": int(QTYPE.CNAME),
+                "ttl": 60,
+                "values": ["a.example.com.", "b.example.com."],
+            }
+        ],
+        send_notify=False,
+    )
+    assert multi.ok is False
+    assert multi.rcode == 1
+    assert "exactly one rdata" in str(multi.error or "")
+
+    plugin2 = _plugin(
+        records={
+            ("host.example.com", int(QTYPE.A)): (300, ["***********"], ["src"]),
+        }
+    )
+    with_a = zone_commit.commit_record_actions(
+        plugin2,
+        "example.com",
+        [
+            {
+                "type": "rr_add",
+                "owner": "host.example.com",
+                "qtype": int(QTYPE.CNAME),
+                "ttl": 60,
+                "value": "target.example.com.",
+            }
+        ],
+        send_notify=False,
+    )
+    assert with_a.ok is False
+    assert with_a.rcode == 1
+    assert "cannot coexist" in str(with_a.error or "")
+
+    plugin3 = _plugin()
+    ok_cname = zone_commit.commit_record_actions(
+        plugin3,
+        "example.com",
+        [
+            {
+                "type": "rr_replace",
+                "owner": "only.example.com",
+                "qtype": int(QTYPE.CNAME),
+                "ttl": 60,
+                "value": "target.example.com.",
+            }
+        ],
+        send_notify=False,
+    )
+    assert ok_cname.ok is True
+    assert plugin3.records[("only.example.com", int(QTYPE.CNAME))][1] == [
+        "target.example.com."
+    ]
+
+    second = zone_commit.commit_record_actions(
+        plugin3,
+        "example.com",
+        [
+            {
+                "type": "rr_add",
+                "owner": "only.example.com",
+                "qtype": int(QTYPE.CNAME),
+                "ttl": 60,
+                "value": "other.example.com.",
+            }
+        ],
+        send_notify=False,
+    )
+    assert second.ok is False
+    assert "exactly one rdata" in str(second.error or "")
