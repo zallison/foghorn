@@ -337,3 +337,52 @@ users:
     # cleanup temps
     for pth in hints.get("_temp_files") or []:
         Path(pth).unlink(missing_ok=True)
+
+
+def test_list_namespaced_enforces_page_and_item_caps(monkeypatch):
+    """Brief: _list_namespaced raises when page/item caps are exceeded.
+
+    Inputs:
+      - Fake _k8s_get that always returns a continue token and one item.
+
+    Outputs:
+      - RuntimeError mentioning max_list_pages.
+    """
+
+    import importlib
+
+    mod = importlib.import_module("foghorn.plugins.resolve.kubernetes_hosts")
+    KubernetesHosts = mod.KubernetesHosts
+
+    plugin = KubernetesHosts(
+        name="k8s",
+        api_server="https://k8s.example",
+        token="t",
+        tls_verify=False,
+        poll_interval_seconds=0,
+        max_list_pages=2,
+        max_list_items=100,
+    )
+    plugin._typed = plugin._coerce_config()
+
+    calls = {"n": 0}
+
+    def fake_get(conn, path, *, params=None, timeout=15.0):
+        calls["n"] += 1
+        return {
+            "items": [{"metadata": {"name": f"item-{calls['n']}"}}],
+            "metadata": {"continue": f"tok-{calls['n']}"},
+        }
+
+    monkeypatch.setattr(plugin, "_k8s_get", fake_get)
+    try:
+        plugin._list_namespaced(
+            {"api_server": "https://x"},
+            "services",
+            "default",
+            label_selector=None,
+            field_selector=None,
+        )
+        assert False, "expected RuntimeError"
+    except RuntimeError as exc:
+        assert "max_list_pages" in str(exc)

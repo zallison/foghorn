@@ -175,6 +175,9 @@ class KubernetesHostsConfig(BaseModel):
     label_selector: str | None = None
     field_selector: str | None = None
     poll_interval_seconds: float = Field(default=30.0, ge=0)
+    # Hard caps on API list amplification (0 disables a given cap).
+    max_list_pages: int = Field(default=50, ge=0)
+    max_list_items: int = Field(default=20000, ge=0)
     expose_txt_in_additional: bool = False
     api_server: str | None = None
     kubeconfig: str | None = None
@@ -690,7 +693,23 @@ class KubernetesHosts(DynamicHostsPlugin):
 
         items: list[dict[str, Any]] = []
         cont: str | None = None
+        pages = 0
+        typed = getattr(self, "_typed", None)
+        try:
+            max_pages = int(getattr(typed, "max_list_pages", 50) or 0)
+        except Exception:
+            max_pages = 50
+        try:
+            max_items = int(getattr(typed, "max_list_items", 20000) or 0)
+        except Exception:
+            max_items = 20000
         while True:
+            pages += 1
+            if max_pages > 0 and pages > max_pages:
+                raise RuntimeError(
+                    f"k8s list pagination exceeded max_list_pages={max_pages} "
+                    f"for {resource} ns={namespace or '*'}"
+                )
             page_params = dict(params)
             if cont:
                 page_params["continue"] = cont
@@ -698,6 +717,11 @@ class KubernetesHosts(DynamicHostsPlugin):
             for it in data.get("items") or []:
                 if isinstance(it, dict):
                     items.append(it)
+                    if max_items > 0 and len(items) > max_items:
+                        raise RuntimeError(
+                            f"k8s list exceeded max_list_items={max_items} "
+                            f"for {resource} ns={namespace or '*'}"
+                        )
             meta = (
                 data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
             )
@@ -843,6 +867,9 @@ class KubernetesHosts(DynamicHostsPlugin):
                         field_selector=field_selector,
                     )
                 except Exception as exc:
+                    msg = str(exc)
+                    if "max_list_pages" in msg or "max_list_items" in msg:
+                        raise
                     logger.warning(
                         "[%s]: list services failed (ns=%s): %s",
                         self.name,
@@ -911,6 +938,9 @@ class KubernetesHosts(DynamicHostsPlugin):
                         field_selector=field_selector,
                     )
                 except Exception as exc:
+                    msg = str(exc)
+                    if "max_list_pages" in msg or "max_list_items" in msg:
+                        raise
                     logger.warning(
                         "[%s]: list pods failed (ns=%s): %s",
                         self.name,
@@ -1007,6 +1037,7 @@ class KubernetesHosts(DynamicHostsPlugin):
         entry_sources: dict[str, str] = {}
         errors: list[str] = []
 
+        cap_exceeded = False
         for endpoint in self._effective_endpoints():
             try:
                 (
@@ -1023,6 +1054,8 @@ class KubernetesHosts(DynamicHostsPlugin):
             except Exception as exc:
                 msg = str(exc)
                 errors.append(msg)
+                if "max_list_pages" in msg or "max_list_items" in msg:
+                    cap_exceeded = True
                 self._note_condition_failure(
                     f"endpoint-collect:{getattr(endpoint, 'api_server', None) or id(endpoint)}",
                     "[%s]: endpoint collect failed: %s",
@@ -1040,6 +1073,20 @@ class KubernetesHosts(DynamicHostsPlugin):
             merge_list_map(aggregate_txt, e_txt)
             ttl_txt.update(e_ttl_txt)
             entry_sources.update(e_src)
+
+        # Cap hit: keep previous maps so a hostile/buggy API cannot wipe or
+        # OOM-amplify state via unbounded continue tokens.
+        if cap_exceeded:
+            with self._lock:
+                self._last_reload_ts = time.time()
+                self._last_error = "; ".join(errors) if errors else "list cap exceeded"
+            self._note_condition_failure(
+                "cluster-reload",
+                "[%s]: reload aborted (list cap exceeded); keeping previous maps: %s",
+                self.name,
+                self._last_error,
+            )
+            return
 
         with self._lock:
             self._forward_v4 = forward_v4
