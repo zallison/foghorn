@@ -1890,13 +1890,19 @@
             }
           },
           "additionalProperties": true,
-          "description": "Brief: Typed configuration model for DockerHosts plugin.\n\nInputs:\n  - endpoints: List of endpoint dictionaries.\n    Each entry must contain:\n      - url: Docker endpoint URL (e.g. \"unix:///var/run/docker.sock\",\n        \"tcp://127.0.0.1:2375\").\n    and may contain:\n      - reload_interval_second: float seconds between refreshes for that\n        endpoint.\n      - use_ipv4: Optional IPv4 address to use instead of per-container\n        IPv4 addresses for containers discovered via that endpoint.\n      - use_ipv6: Optional IPv6 address to use instead of per-container\n        IPv6 addresses for containers discovered via that endpoint.\n      - ttl: Optional TTL override (seconds) for answers derived from that\n        endpoint.\n  - ttl: Plugin-level DNS answer TTL in seconds used when an endpoint does\n    not specify its own ttl.\n  - health: List of acceptable container health/status values. Supported:\n    \"starting\", \"healthy\", \"running\", \"unhealthy\". Default:\n    [\"healthy\", \"running\"].\n  - discovery: When true, publish a TXT record at\n    \"_containers.<suffix>\" (or \"_containers\" when no suffix is configured)\n    containing container summary lines, plus a host-level summary under\n    \"_hosts.<suffix>\" (or \"_hosts\").\n  - expose_txt_in_additional: When true, include per-host TXT summaries in\n    A/AAAA ADDITIONAL sections.\n\nOutputs:\n  - DockerHostsConfig instance with normalized field types.",
+          "description": "Brief: Typed configuration model for DockerHosts plugin.\n\nInputs:\n  - endpoints: List of endpoint dictionaries.\n    Each entry must contain:\n      - url: Docker endpoint URL (e.g. \"unix:///var/run/docker.sock\",\n        \"tcp://127.0.0.1:2375\").\n    and may contain:\n      - reload_interval_second: float seconds between refreshes for that\n        endpoint.\n      - use_ipv4: Optional IPv4 address to use instead of per-container\n        IPv4 addresses for containers discovered via that endpoint.\n      - use_ipv6: Optional IPv6 address to use instead of per-container\n        IPv6 addresses for containers discovered via that endpoint.\n      - ttl: Optional TTL override (seconds) for answers derived from that\n        endpoint.\n  - ttl: Plugin-level DNS answer TTL in seconds used when an endpoint does\n    not specify its own ttl.\n  - health: List of acceptable container health/status values. Supported:\n    \"starting\", \"healthy\", \"running\", \"unhealthy\". Default:\n    [\"healthy\", \"running\"].\n  - discovery: When true, publish a TXT record at\n    \"_containers.<suffix>\" (or \"_containers\" when no suffix is configured)\n    containing container summary lines, plus a host-level summary under\n    \"_hosts.<suffix>\" (or \"_hosts\").\n  - expose_txt_in_additional: When true, include per-host TXT summaries in\n    A/AAAA ADDITIONAL sections.\n  - dns_name_label: Container label key used as an explicit DNS name override\n    (default \"dns_name\"). Values may be comma/whitespace-separated aliases.\n\nOutputs:\n  - DockerHostsConfig instance with normalized field types.",
           "properties": {
             "discovery": {
               "default": false,
               "description": "Type: boolean. Default: false.",
               "title": "Discovery",
               "type": "boolean"
+            },
+            "dns_name_label": {
+              "default": "dns_name",
+              "description": "Type: string. Default: \"dns_name\".",
+              "title": "Dns Name Label",
+              "type": "string"
             },
             "endpoints": {
               "description": "Type: array.",
@@ -2973,6 +2979,12 @@
               "description": "Types: string, null.",
               "title": "Client Key"
             },
+            "dns_name_label": {
+              "default": "dns_name",
+              "description": "Type: string. Default: \"dns_name\".",
+              "title": "Dns Name Label",
+              "type": "string"
+            },
             "endpoints": {
               "description": "Type: array.",
               "items": {
@@ -3049,6 +3061,20 @@
               "default": null,
               "description": "Types: string, null.",
               "title": "Label Selector"
+            },
+            "max_list_items": {
+              "default": 20000,
+              "description": "Type: integer. Default: 20000.",
+              "minimum": 0,
+              "title": "Max List Items",
+              "type": "integer"
+            },
+            "max_list_pages": {
+              "default": 50,
+              "description": "Type: integer. Default: 50.",
+              "minimum": 0,
+              "title": "Max List Pages",
+              "type": "integer"
             },
             "namespaces": {
               "description": "Type: array.",
@@ -3319,7 +3345,7 @@
         "config_schema": {
           "$defs": {
             "ProxmoxEndpointConfig": {
-              "description": "Brief: Per-endpoint Proxmox API connection settings.\n\nInputs:\n  - url: Base URL, e.g. https://pve1.lan:8006\n  - token_id: Full token id USER@REALM!TOKENID (or token name only with user)\n  - token_secret: Token secret UUID\n  - user / password: Optional ticket-auth fallback when token is absent\n  - verify_tls: Verify HTTPS certificates (default True)\n  - tls_ca: Optional CA bundle path\n  - use_ipv4 / use_ipv6: Optional host IP overrides for all guests\n  - ttl: Optional TTL override for this endpoint\n  - suffix: Optional DNS suffix override\n  - reload_interval_second: Optional per-endpoint poll override (None = inherit plugin)\n\nOutputs:\n  - ProxmoxEndpointConfig instance.",
+              "description": "Brief: Per-endpoint Proxmox API connection settings.\n\nInputs:\n  - url: Base URL, e.g. https://pve1.lan:8006\n  - token_id: Full token id USER@REALM!TOKENID (or token name only with user)\n  - token_secret: Token secret UUID\n  - user / password: Optional ticket-auth fallback when token is absent\n  - verify_tls: Verify HTTPS certificates (default True)\n  - tls_ca: Optional CA bundle path\n  - tls_server_name: SNI / expected cert hostname (aliases: tls_name, server_name)\n  - use_ipv4 / use_ipv6: Optional host IP overrides for all guests\n  - ttl: Optional TTL override for this endpoint\n  - suffix: Optional DNS suffix override\n  - reload_interval_second: Optional per-endpoint poll override (None = inherit plugin)\n\nOutputs:\n  - ProxmoxEndpointConfig instance.",
               "properties": {
                 "password": {
                   "anyOf": [
@@ -3381,6 +3407,21 @@
                   "default": null,
                   "description": "Types: string, null.",
                   "title": "Tls Ca"
+                },
+                "tls_server_name": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Types: string, null.",
+                  "title": "Tls Server Name"
                 },
                 "token_id": {
                   "anyOf": [
@@ -3933,7 +3974,7 @@
         ],
         "config_schema": {
           "additionalProperties": true,
-          "description": "Brief: Typed configuration model for SshKeys.\n\nInputs:\n  - targets: List of IPs, CIDR ranges, and/or hostnames to scan.\n  - scan_threads: Maximum number of concurrent SSH probes.\n  - ttl: DNS TTL to apply to synthesized SSHFP answers.\n  - db_path: Filesystem path to the sqlite database storing SSH keys.\n  - port: SSH TCP port used when probing hosts.\n  - timeout_seconds: Socket/handshake timeout when fetching keys.\n  - scan_allowlist: Optional list of CIDR/IP strings allowed for scanning.\n  - scan_blocklist: Optional list of CIDR/IP strings excluded from scanning.\n  - allow_public_scan: When false, skip targets resolving to public IPs unless\n    they are explicitly allowed.\n  - max_targets: Maximum number of scan targets processed per startup scan.\n  - max_cidr_hosts: Maximum number of hosts to expand per CIDR target.\n  - lazy_scan: When true, allow on-demand single-host scans for CIDR targets.\n  - max_lazy_scans: Maximum number of concurrent lazy scans.\n  - response_allowlist: Optional list of client CIDR/IPs allowed to receive\n    SSHFP responses.\n  - response_blocklist: Optional list of client CIDR/IPs excluded from SSHFP\n    responses.\n  - allow_public_responses: When false, only respond to non-public clients\n    unless explicitly allowlisted.\n  - include_sha1: When true, include SHA-1 SSHFP records (fp_type=1).\n  - retention_seconds: Age threshold for pruning stale DB rows.\n  - max_rows: Maximum number of rows to retain in the DB (oldest evicted).\n  - prune_interval_seconds: Minimum time between DB prune passes.\n  - db_path_allowlist: Allowed base directories for db_path.\n\nOutputs:\n  - SshKeysConfig instance with normalized field types.",
+          "description": "Brief: Typed configuration model for SshKeys.\n\nInputs:\n  - targets: List of IPs, CIDR ranges, and/or hostnames to scan.\n  - scan_threads: Maximum number of concurrent SSH probes.\n  - ttl: DNS TTL to apply to synthesized SSHFP answers.\n  - db_path: Filesystem path to the sqlite database storing SSH keys.\n  - port: SSH TCP port used when probing hosts.\n  - timeout_seconds: Socket/handshake timeout when fetching keys.\n  - scan_allowlist: Optional list of CIDR/IP strings allowed for scanning.\n  - scan_blocklist: Optional list of CIDR/IP strings excluded from scanning.\n  - allow_public_scan: When false, skip targets resolving to public IPs unless\n    they are explicitly allowed.\n  - max_targets: Maximum number of scan targets processed per startup scan.\n  - max_cidr_hosts: Maximum number of hosts to expand per CIDR target.\n  - lazy_scan: When true, allow on-demand single-host scans for CIDR targets.\n  - max_lazy_scans: Maximum number of concurrent lazy scans.\n  - response_allowlist: Optional list of client CIDR/IPs allowed to receive\n    SSHFP responses.\n  - response_blocklist: Optional list of client CIDR/IPs excluded from SSHFP\n    responses.\n  - allow_public_responses: When false, only respond to non-public clients\n    unless explicitly allowlisted.\n  - include_sha1: When true, include SHA-1 SSHFP records (fp_type=1).\n  - retention_seconds: Age threshold for pruning stale DB rows.\n  - max_rows: Maximum number of rows to retain in the DB (oldest evicted).\n  - prune_interval_seconds: Minimum time between DB prune passes.\n  - db_path_allowlist: Allowed base directories for db_path.\n  - initial_scan_background: When true, run the startup scan in a daemon\n    thread so DNS service startup is not blocked.\n  - initial_scan_deadline_seconds: Wall-clock budget for the initial scan\n    (0 disables the deadline).\n\nOutputs:\n  - SshKeysConfig instance with normalized field types.",
           "properties": {
             "allow_public_responses": {
               "default": false,
@@ -3967,6 +4008,19 @@
               "description": "Type: boolean. Default: true.",
               "title": "Include Sha1",
               "type": "boolean"
+            },
+            "initial_scan_background": {
+              "default": true,
+              "description": "Type: boolean. Default: true.",
+              "title": "Initial Scan Background",
+              "type": "boolean"
+            },
+            "initial_scan_deadline_seconds": {
+              "default": 120.0,
+              "description": "Type: number. Default: 120.0.",
+              "minimum": 0.0,
+              "title": "Initial Scan Deadline Seconds",
+              "type": "number"
             },
             "lazy_scan": {
               "default": true,
@@ -5514,9 +5568,64 @@
         "module": "foghorn.plugins.resolve.zone_records.ZoneRecords"
       }
     },
+    "PluginHookNode": {
+      "additionalProperties": true,
+      "description": "Brief: Mapping form of a single plugin hook priority.\n\nInputs:\n  - priority: Optional integer priority for this hook.\n\nOutputs:\n  - Object accepted as hooks.pre_resolve / post_resolve / setup.",
+      "properties": {
+        "comment": {
+          "anyOf": [
+            {
+              "description": "Type: string.",
+              "maxLength": 254,
+              "type": "string"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional human metadata string (max 254 characters).",
+          "title": "Comment"
+        },
+        "id": {
+          "anyOf": [
+            {
+              "description": "Type: string.",
+              "maxLength": 254,
+              "type": "string"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional human metadata string (max 254 characters).",
+          "title": "Id"
+        },
+        "priority": {
+          "anyOf": [
+            {
+              "description": "Type: integer.",
+              "type": "integer"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Types: integer, null.",
+          "title": "Priority"
+        }
+      },
+      "title": "PluginHookNode",
+      "type": "object"
+    },
     "PluginHooksConfig": {
       "additionalProperties": true,
-      "description": "Brief: Per-hook enablement and priorities for a plugin instance.\n\nInputs:\n  - priority / pre_resolve / post_resolve / setup and related knobs.\n\nOutputs:\n  - Permissive hooks object (strict key checks remain in config_schema.py).",
+      "description": "Brief: Per-hook enablement and priorities for a plugin instance.\n\nInputs:\n  - priority: Shorthand integer applied to setup/pre_resolve/post_resolve.\n  - setup / pre_resolve / post_resolve: Integer priority or {priority: int}.\n\nOutputs:\n  - Hooks object (strict key checks remain in config_schema.py).",
       "properties": {
         "comment": {
           "anyOf": [
@@ -5552,26 +5661,38 @@
         },
         "post_resolve": {
           "anyOf": [
-            {},
+            {
+              "description": "Type: integer.",
+              "type": "integer"
+            },
+            {
+              "$ref": "#/$defs/PluginHookNode"
+            },
             {
               "description": "Type: null.",
               "type": "null"
             }
           ],
           "default": null,
-          "description": "Type: null.",
+          "description": "Types: integer, null.",
           "title": "Post Resolve"
         },
         "pre_resolve": {
           "anyOf": [
-            {},
+            {
+              "description": "Type: integer.",
+              "type": "integer"
+            },
+            {
+              "$ref": "#/$defs/PluginHookNode"
+            },
             {
               "description": "Type: null.",
               "type": "null"
             }
           ],
           "default": null,
-          "description": "Type: null.",
+          "description": "Types: integer, null.",
           "title": "Pre Resolve"
         },
         "priority": {
@@ -5591,14 +5712,20 @@
         },
         "setup": {
           "anyOf": [
-            {},
+            {
+              "description": "Type: integer.",
+              "type": "integer"
+            },
+            {
+              "$ref": "#/$defs/PluginHookNode"
+            },
             {
               "description": "Type: null.",
               "type": "null"
             }
           ],
           "default": null,
-          "description": "Type: null.",
+          "description": "Types: integer, null.",
           "title": "Setup"
         }
       },
@@ -8861,13 +8988,19 @@
             }
           },
           "additionalProperties": true,
-          "description": "Brief: Typed configuration model for DockerHosts plugin.\n\nInputs:\n  - endpoints: List of endpoint dictionaries.\n    Each entry must contain:\n      - url: Docker endpoint URL (e.g. \"unix:///var/run/docker.sock\",\n        \"tcp://127.0.0.1:2375\").\n    and may contain:\n      - reload_interval_second: float seconds between refreshes for that\n        endpoint.\n      - use_ipv4: Optional IPv4 address to use instead of per-container\n        IPv4 addresses for containers discovered via that endpoint.\n      - use_ipv6: Optional IPv6 address to use instead of per-container\n        IPv6 addresses for containers discovered via that endpoint.\n      - ttl: Optional TTL override (seconds) for answers derived from that\n        endpoint.\n  - ttl: Plugin-level DNS answer TTL in seconds used when an endpoint does\n    not specify its own ttl.\n  - health: List of acceptable container health/status values. Supported:\n    \"starting\", \"healthy\", \"running\", \"unhealthy\". Default:\n    [\"healthy\", \"running\"].\n  - discovery: When true, publish a TXT record at\n    \"_containers.<suffix>\" (or \"_containers\" when no suffix is configured)\n    containing container summary lines, plus a host-level summary under\n    \"_hosts.<suffix>\" (or \"_hosts\").\n  - expose_txt_in_additional: When true, include per-host TXT summaries in\n    A/AAAA ADDITIONAL sections.\n\nOutputs:\n  - DockerHostsConfig instance with normalized field types.",
+          "description": "Brief: Typed configuration model for DockerHosts plugin.\n\nInputs:\n  - endpoints: List of endpoint dictionaries.\n    Each entry must contain:\n      - url: Docker endpoint URL (e.g. \"unix:///var/run/docker.sock\",\n        \"tcp://127.0.0.1:2375\").\n    and may contain:\n      - reload_interval_second: float seconds between refreshes for that\n        endpoint.\n      - use_ipv4: Optional IPv4 address to use instead of per-container\n        IPv4 addresses for containers discovered via that endpoint.\n      - use_ipv6: Optional IPv6 address to use instead of per-container\n        IPv6 addresses for containers discovered via that endpoint.\n      - ttl: Optional TTL override (seconds) for answers derived from that\n        endpoint.\n  - ttl: Plugin-level DNS answer TTL in seconds used when an endpoint does\n    not specify its own ttl.\n  - health: List of acceptable container health/status values. Supported:\n    \"starting\", \"healthy\", \"running\", \"unhealthy\". Default:\n    [\"healthy\", \"running\"].\n  - discovery: When true, publish a TXT record at\n    \"_containers.<suffix>\" (or \"_containers\" when no suffix is configured)\n    containing container summary lines, plus a host-level summary under\n    \"_hosts.<suffix>\" (or \"_hosts\").\n  - expose_txt_in_additional: When true, include per-host TXT summaries in\n    A/AAAA ADDITIONAL sections.\n  - dns_name_label: Container label key used as an explicit DNS name override\n    (default \"dns_name\"). Values may be comma/whitespace-separated aliases.\n\nOutputs:\n  - DockerHostsConfig instance with normalized field types.",
           "properties": {
             "discovery": {
               "default": false,
               "description": "Type: boolean. Default: false.",
               "title": "Discovery",
               "type": "boolean"
+            },
+            "dns_name_label": {
+              "default": "dns_name",
+              "description": "Type: string. Default: \"dns_name\".",
+              "title": "Dns Name Label",
+              "type": "string"
             },
             "endpoints": {
               "description": "Type: array.",
@@ -9944,6 +10077,12 @@
               "description": "Types: string, null.",
               "title": "Client Key"
             },
+            "dns_name_label": {
+              "default": "dns_name",
+              "description": "Type: string. Default: \"dns_name\".",
+              "title": "Dns Name Label",
+              "type": "string"
+            },
             "endpoints": {
               "description": "Type: array.",
               "items": {
@@ -10020,6 +10159,20 @@
               "default": null,
               "description": "Types: string, null.",
               "title": "Label Selector"
+            },
+            "max_list_items": {
+              "default": 20000,
+              "description": "Type: integer. Default: 20000.",
+              "minimum": 0,
+              "title": "Max List Items",
+              "type": "integer"
+            },
+            "max_list_pages": {
+              "default": 50,
+              "description": "Type: integer. Default: 50.",
+              "minimum": 0,
+              "title": "Max List Pages",
+              "type": "integer"
             },
             "namespaces": {
               "description": "Type: array.",
@@ -10290,7 +10443,7 @@
         "config_schema": {
           "$defs": {
             "ProxmoxEndpointConfig": {
-              "description": "Brief: Per-endpoint Proxmox API connection settings.\n\nInputs:\n  - url: Base URL, e.g. https://pve1.lan:8006\n  - token_id: Full token id USER@REALM!TOKENID (or token name only with user)\n  - token_secret: Token secret UUID\n  - user / password: Optional ticket-auth fallback when token is absent\n  - verify_tls: Verify HTTPS certificates (default True)\n  - tls_ca: Optional CA bundle path\n  - use_ipv4 / use_ipv6: Optional host IP overrides for all guests\n  - ttl: Optional TTL override for this endpoint\n  - suffix: Optional DNS suffix override\n  - reload_interval_second: Optional per-endpoint poll override (None = inherit plugin)\n\nOutputs:\n  - ProxmoxEndpointConfig instance.",
+              "description": "Brief: Per-endpoint Proxmox API connection settings.\n\nInputs:\n  - url: Base URL, e.g. https://pve1.lan:8006\n  - token_id: Full token id USER@REALM!TOKENID (or token name only with user)\n  - token_secret: Token secret UUID\n  - user / password: Optional ticket-auth fallback when token is absent\n  - verify_tls: Verify HTTPS certificates (default True)\n  - tls_ca: Optional CA bundle path\n  - tls_server_name: SNI / expected cert hostname (aliases: tls_name, server_name)\n  - use_ipv4 / use_ipv6: Optional host IP overrides for all guests\n  - ttl: Optional TTL override for this endpoint\n  - suffix: Optional DNS suffix override\n  - reload_interval_second: Optional per-endpoint poll override (None = inherit plugin)\n\nOutputs:\n  - ProxmoxEndpointConfig instance.",
               "properties": {
                 "password": {
                   "anyOf": [
@@ -10352,6 +10505,21 @@
                   "default": null,
                   "description": "Types: string, null.",
                   "title": "Tls Ca"
+                },
+                "tls_server_name": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Types: string, null.",
+                  "title": "Tls Server Name"
                 },
                 "token_id": {
                   "anyOf": [
@@ -10904,7 +11072,7 @@
         ],
         "config_schema": {
           "additionalProperties": true,
-          "description": "Brief: Typed configuration model for SshKeys.\n\nInputs:\n  - targets: List of IPs, CIDR ranges, and/or hostnames to scan.\n  - scan_threads: Maximum number of concurrent SSH probes.\n  - ttl: DNS TTL to apply to synthesized SSHFP answers.\n  - db_path: Filesystem path to the sqlite database storing SSH keys.\n  - port: SSH TCP port used when probing hosts.\n  - timeout_seconds: Socket/handshake timeout when fetching keys.\n  - scan_allowlist: Optional list of CIDR/IP strings allowed for scanning.\n  - scan_blocklist: Optional list of CIDR/IP strings excluded from scanning.\n  - allow_public_scan: When false, skip targets resolving to public IPs unless\n    they are explicitly allowed.\n  - max_targets: Maximum number of scan targets processed per startup scan.\n  - max_cidr_hosts: Maximum number of hosts to expand per CIDR target.\n  - lazy_scan: When true, allow on-demand single-host scans for CIDR targets.\n  - max_lazy_scans: Maximum number of concurrent lazy scans.\n  - response_allowlist: Optional list of client CIDR/IPs allowed to receive\n    SSHFP responses.\n  - response_blocklist: Optional list of client CIDR/IPs excluded from SSHFP\n    responses.\n  - allow_public_responses: When false, only respond to non-public clients\n    unless explicitly allowlisted.\n  - include_sha1: When true, include SHA-1 SSHFP records (fp_type=1).\n  - retention_seconds: Age threshold for pruning stale DB rows.\n  - max_rows: Maximum number of rows to retain in the DB (oldest evicted).\n  - prune_interval_seconds: Minimum time between DB prune passes.\n  - db_path_allowlist: Allowed base directories for db_path.\n\nOutputs:\n  - SshKeysConfig instance with normalized field types.",
+          "description": "Brief: Typed configuration model for SshKeys.\n\nInputs:\n  - targets: List of IPs, CIDR ranges, and/or hostnames to scan.\n  - scan_threads: Maximum number of concurrent SSH probes.\n  - ttl: DNS TTL to apply to synthesized SSHFP answers.\n  - db_path: Filesystem path to the sqlite database storing SSH keys.\n  - port: SSH TCP port used when probing hosts.\n  - timeout_seconds: Socket/handshake timeout when fetching keys.\n  - scan_allowlist: Optional list of CIDR/IP strings allowed for scanning.\n  - scan_blocklist: Optional list of CIDR/IP strings excluded from scanning.\n  - allow_public_scan: When false, skip targets resolving to public IPs unless\n    they are explicitly allowed.\n  - max_targets: Maximum number of scan targets processed per startup scan.\n  - max_cidr_hosts: Maximum number of hosts to expand per CIDR target.\n  - lazy_scan: When true, allow on-demand single-host scans for CIDR targets.\n  - max_lazy_scans: Maximum number of concurrent lazy scans.\n  - response_allowlist: Optional list of client CIDR/IPs allowed to receive\n    SSHFP responses.\n  - response_blocklist: Optional list of client CIDR/IPs excluded from SSHFP\n    responses.\n  - allow_public_responses: When false, only respond to non-public clients\n    unless explicitly allowlisted.\n  - include_sha1: When true, include SHA-1 SSHFP records (fp_type=1).\n  - retention_seconds: Age threshold for pruning stale DB rows.\n  - max_rows: Maximum number of rows to retain in the DB (oldest evicted).\n  - prune_interval_seconds: Minimum time between DB prune passes.\n  - db_path_allowlist: Allowed base directories for db_path.\n  - initial_scan_background: When true, run the startup scan in a daemon\n    thread so DNS service startup is not blocked.\n  - initial_scan_deadline_seconds: Wall-clock budget for the initial scan\n    (0 disables the deadline).\n\nOutputs:\n  - SshKeysConfig instance with normalized field types.",
           "properties": {
             "allow_public_responses": {
               "default": false,
@@ -10938,6 +11106,19 @@
               "description": "Type: boolean. Default: true.",
               "title": "Include Sha1",
               "type": "boolean"
+            },
+            "initial_scan_background": {
+              "default": true,
+              "description": "Type: boolean. Default: true.",
+              "title": "Initial Scan Background",
+              "type": "boolean"
+            },
+            "initial_scan_deadline_seconds": {
+              "default": 120.0,
+              "description": "Type: number. Default: 120.0.",
+              "minimum": 0.0,
+              "title": "Initial Scan Deadline Seconds",
+              "type": "number"
             },
             "lazy_scan": {
               "default": true,
@@ -13751,26 +13932,142 @@
                   },
                   "post_resolve": {
                     "anyOf": [
-                      {},
+                      {
+                        "description": "Type: integer.",
+                        "type": "integer"
+                      },
+                      {
+                        "additionalProperties": true,
+                        "description": "Brief: Mapping form of a single plugin hook priority.\n\nInputs:\n  - priority: Optional integer priority for this hook.\n\nOutputs:\n  - Object accepted as hooks.pre_resolve / post_resolve / setup.",
+                        "properties": {
+                          "comment": {
+                            "anyOf": [
+                              {
+                                "description": "Type: string.",
+                                "maxLength": 254,
+                                "type": "string"
+                              },
+                              {
+                                "description": "Type: null.",
+                                "type": "null"
+                              }
+                            ],
+                            "default": null,
+                            "description": "Optional human metadata string (max 254 characters).",
+                            "title": "Comment"
+                          },
+                          "id": {
+                            "anyOf": [
+                              {
+                                "description": "Type: string.",
+                                "maxLength": 254,
+                                "type": "string"
+                              },
+                              {
+                                "description": "Type: null.",
+                                "type": "null"
+                              }
+                            ],
+                            "default": null,
+                            "description": "Optional human metadata string (max 254 characters).",
+                            "title": "Id"
+                          },
+                          "priority": {
+                            "anyOf": [
+                              {
+                                "description": "Type: integer.",
+                                "type": "integer"
+                              },
+                              {
+                                "description": "Type: null.",
+                                "type": "null"
+                              }
+                            ],
+                            "default": null,
+                            "description": "Types: integer, null.",
+                            "title": "Priority"
+                          }
+                        },
+                        "title": "PluginHookNode",
+                        "type": "object"
+                      },
                       {
                         "description": "Type: null.",
                         "type": "null"
                       }
                     ],
                     "default": null,
-                    "description": "Type: null.",
+                    "description": "Types: integer, object, null.",
                     "title": "Post Resolve"
                   },
                   "pre_resolve": {
                     "anyOf": [
-                      {},
+                      {
+                        "description": "Type: integer.",
+                        "type": "integer"
+                      },
+                      {
+                        "additionalProperties": true,
+                        "description": "Brief: Mapping form of a single plugin hook priority.\n\nInputs:\n  - priority: Optional integer priority for this hook.\n\nOutputs:\n  - Object accepted as hooks.pre_resolve / post_resolve / setup.",
+                        "properties": {
+                          "comment": {
+                            "anyOf": [
+                              {
+                                "description": "Type: string.",
+                                "maxLength": 254,
+                                "type": "string"
+                              },
+                              {
+                                "description": "Type: null.",
+                                "type": "null"
+                              }
+                            ],
+                            "default": null,
+                            "description": "Optional human metadata string (max 254 characters).",
+                            "title": "Comment"
+                          },
+                          "id": {
+                            "anyOf": [
+                              {
+                                "description": "Type: string.",
+                                "maxLength": 254,
+                                "type": "string"
+                              },
+                              {
+                                "description": "Type: null.",
+                                "type": "null"
+                              }
+                            ],
+                            "default": null,
+                            "description": "Optional human metadata string (max 254 characters).",
+                            "title": "Id"
+                          },
+                          "priority": {
+                            "anyOf": [
+                              {
+                                "description": "Type: integer.",
+                                "type": "integer"
+                              },
+                              {
+                                "description": "Type: null.",
+                                "type": "null"
+                              }
+                            ],
+                            "default": null,
+                            "description": "Types: integer, null.",
+                            "title": "Priority"
+                          }
+                        },
+                        "title": "PluginHookNode",
+                        "type": "object"
+                      },
                       {
                         "description": "Type: null.",
                         "type": "null"
                       }
                     ],
                     "default": null,
-                    "description": "Type: null.",
+                    "description": "Types: integer, object, null.",
                     "title": "Pre Resolve"
                   },
                   "priority": {
@@ -13790,14 +14087,72 @@
                   },
                   "setup": {
                     "anyOf": [
-                      {},
+                      {
+                        "description": "Type: integer.",
+                        "type": "integer"
+                      },
+                      {
+                        "additionalProperties": true,
+                        "description": "Brief: Mapping form of a single plugin hook priority.\n\nInputs:\n  - priority: Optional integer priority for this hook.\n\nOutputs:\n  - Object accepted as hooks.pre_resolve / post_resolve / setup.",
+                        "properties": {
+                          "comment": {
+                            "anyOf": [
+                              {
+                                "description": "Type: string.",
+                                "maxLength": 254,
+                                "type": "string"
+                              },
+                              {
+                                "description": "Type: null.",
+                                "type": "null"
+                              }
+                            ],
+                            "default": null,
+                            "description": "Optional human metadata string (max 254 characters).",
+                            "title": "Comment"
+                          },
+                          "id": {
+                            "anyOf": [
+                              {
+                                "description": "Type: string.",
+                                "maxLength": 254,
+                                "type": "string"
+                              },
+                              {
+                                "description": "Type: null.",
+                                "type": "null"
+                              }
+                            ],
+                            "default": null,
+                            "description": "Optional human metadata string (max 254 characters).",
+                            "title": "Id"
+                          },
+                          "priority": {
+                            "anyOf": [
+                              {
+                                "description": "Type: integer.",
+                                "type": "integer"
+                              },
+                              {
+                                "description": "Type: null.",
+                                "type": "null"
+                              }
+                            ],
+                            "default": null,
+                            "description": "Types: integer, null.",
+                            "title": "Priority"
+                          }
+                        },
+                        "title": "PluginHookNode",
+                        "type": "object"
+                      },
                       {
                         "description": "Type: null.",
                         "type": "null"
                       }
                     ],
                     "default": null,
-                    "description": "Type: null.",
+                    "description": "Types: integer, object, null.",
                     "title": "Setup"
                   }
                 },
@@ -14010,26 +14365,142 @@
               },
               "post_resolve": {
                 "anyOf": [
-                  {},
+                  {
+                    "description": "Type: integer.",
+                    "type": "integer"
+                  },
+                  {
+                    "additionalProperties": true,
+                    "description": "Brief: Mapping form of a single plugin hook priority.\n\nInputs:\n  - priority: Optional integer priority for this hook.\n\nOutputs:\n  - Object accepted as hooks.pre_resolve / post_resolve / setup.",
+                    "properties": {
+                      "comment": {
+                        "anyOf": [
+                          {
+                            "description": "Type: string.",
+                            "maxLength": 254,
+                            "type": "string"
+                          },
+                          {
+                            "description": "Type: null.",
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "Optional human metadata string (max 254 characters).",
+                        "title": "Comment"
+                      },
+                      "id": {
+                        "anyOf": [
+                          {
+                            "description": "Type: string.",
+                            "maxLength": 254,
+                            "type": "string"
+                          },
+                          {
+                            "description": "Type: null.",
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "Optional human metadata string (max 254 characters).",
+                        "title": "Id"
+                      },
+                      "priority": {
+                        "anyOf": [
+                          {
+                            "description": "Type: integer.",
+                            "type": "integer"
+                          },
+                          {
+                            "description": "Type: null.",
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "Types: integer, null.",
+                        "title": "Priority"
+                      }
+                    },
+                    "title": "PluginHookNode",
+                    "type": "object"
+                  },
                   {
                     "description": "Type: null.",
                     "type": "null"
                   }
                 ],
                 "default": null,
-                "description": "Type: null.",
+                "description": "Types: integer, object, null.",
                 "title": "Post Resolve"
               },
               "pre_resolve": {
                 "anyOf": [
-                  {},
+                  {
+                    "description": "Type: integer.",
+                    "type": "integer"
+                  },
+                  {
+                    "additionalProperties": true,
+                    "description": "Brief: Mapping form of a single plugin hook priority.\n\nInputs:\n  - priority: Optional integer priority for this hook.\n\nOutputs:\n  - Object accepted as hooks.pre_resolve / post_resolve / setup.",
+                    "properties": {
+                      "comment": {
+                        "anyOf": [
+                          {
+                            "description": "Type: string.",
+                            "maxLength": 254,
+                            "type": "string"
+                          },
+                          {
+                            "description": "Type: null.",
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "Optional human metadata string (max 254 characters).",
+                        "title": "Comment"
+                      },
+                      "id": {
+                        "anyOf": [
+                          {
+                            "description": "Type: string.",
+                            "maxLength": 254,
+                            "type": "string"
+                          },
+                          {
+                            "description": "Type: null.",
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "Optional human metadata string (max 254 characters).",
+                        "title": "Id"
+                      },
+                      "priority": {
+                        "anyOf": [
+                          {
+                            "description": "Type: integer.",
+                            "type": "integer"
+                          },
+                          {
+                            "description": "Type: null.",
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "Types: integer, null.",
+                        "title": "Priority"
+                      }
+                    },
+                    "title": "PluginHookNode",
+                    "type": "object"
+                  },
                   {
                     "description": "Type: null.",
                     "type": "null"
                   }
                 ],
                 "default": null,
-                "description": "Type: null.",
+                "description": "Types: integer, object, null.",
                 "title": "Pre Resolve"
               },
               "priority": {
@@ -14049,14 +14520,72 @@
               },
               "setup": {
                 "anyOf": [
-                  {},
+                  {
+                    "description": "Type: integer.",
+                    "type": "integer"
+                  },
+                  {
+                    "additionalProperties": true,
+                    "description": "Brief: Mapping form of a single plugin hook priority.\n\nInputs:\n  - priority: Optional integer priority for this hook.\n\nOutputs:\n  - Object accepted as hooks.pre_resolve / post_resolve / setup.",
+                    "properties": {
+                      "comment": {
+                        "anyOf": [
+                          {
+                            "description": "Type: string.",
+                            "maxLength": 254,
+                            "type": "string"
+                          },
+                          {
+                            "description": "Type: null.",
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "Optional human metadata string (max 254 characters).",
+                        "title": "Comment"
+                      },
+                      "id": {
+                        "anyOf": [
+                          {
+                            "description": "Type: string.",
+                            "maxLength": 254,
+                            "type": "string"
+                          },
+                          {
+                            "description": "Type: null.",
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "Optional human metadata string (max 254 characters).",
+                        "title": "Id"
+                      },
+                      "priority": {
+                        "anyOf": [
+                          {
+                            "description": "Type: integer.",
+                            "type": "integer"
+                          },
+                          {
+                            "description": "Type: null.",
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "Types: integer, null.",
+                        "title": "Priority"
+                      }
+                    },
+                    "title": "PluginHookNode",
+                    "type": "object"
+                  },
                   {
                     "description": "Type: null.",
                     "type": "null"
                   }
                 ],
                 "default": null,
-                "description": "Type: null.",
+                "description": "Types: integer, object, null.",
                 "title": "Setup"
               }
             },
