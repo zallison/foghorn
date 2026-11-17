@@ -503,7 +503,8 @@ def test_save_config_sets_restored_false_when_backup_copy_fails(
 
     Inputs:
       - Fake persistence writer creating a backup file.
-      - runtime_config.load_config_from_disk and shutil.copy patched to raise.
+      - runtime_config.load_config_from_disk patched to raise.
+      - os.replace patched to fail during atomic restore.
 
     Outputs:
       - HTTP 400 with restored_backup=False in error details.
@@ -528,10 +529,11 @@ def test_save_config_sets_restored_false_when_backup_copy_fails(
         "load_config_from_disk",
         lambda **_kw: (_ for _ in ()).throw(ValueError("bad-config")),
     )
+    # Restore now uses open + os.replace (not shutil.copy).
     monkeypatch.setattr(
-        routes_core_mod.shutil,
-        "copy",
-        lambda *_a, **_kw: (_ for _ in ()).throw(OSError("copy-failed")),
+        routes_core_mod.os,
+        "replace",
+        lambda *_a, **_kw: (_ for _ in ()).throw(OSError("replace-failed")),
     )
 
     app = _create_test_app(config_path=str(cfg_path))

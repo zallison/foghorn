@@ -3177,6 +3177,7 @@ def test_save_config_400_when_body_not_object(tmp_path) -> None:
     """
 
     import asyncio
+    from types import SimpleNamespace
 
     from fastapi import HTTPException
 
@@ -3194,9 +3195,15 @@ def test_save_config_400_when_body_not_object(tmp_path) -> None:
         r for r in app.router.routes if getattr(r, "path", None) == "/config/save"
     )
 
+    # Endpoint is (request, body=...); body validation lives in _save_config_to_disk.
+    fake_request = SimpleNamespace(
+        client=SimpleNamespace(host="testclient"),
+        headers={},
+    )
+
     async def run() -> None:
         try:
-            await route.endpoint(["not", "object"])  # type: ignore[arg-type]
+            await route.endpoint(fake_request, ["not", "object"])  # type: ignore[arg-type]
         except HTTPException as exc:
             assert exc.status_code == 400
             assert exc.detail == "request body must be a JSON object"
