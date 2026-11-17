@@ -23,6 +23,8 @@ from foghorn.plugins.resolve.base import (
 from foghorn.plugins.resolve.hosts_common import (
     DynamicHostsPlugin,
     discovery_owner,
+    dns_names_from_labels,
+    is_valid_dns_hostname,
     is_valid_dns_label,
     normalize_suffix,
     resolve_plugin_tls_path,
@@ -116,6 +118,8 @@ class DockerHostsConfig(BaseModel):
         "_hosts.<suffix>" (or "_hosts").
       - expose_txt_in_additional: When true, include per-host TXT summaries in
         A/AAAA ADDITIONAL sections.
+      - dns_name_label: Container label key used as an explicit DNS name override
+        (default "dns_name"). Values may be comma/whitespace-separated aliases.
 
     Outputs:
       - DockerHostsConfig instance with normalized field types.
@@ -126,6 +130,7 @@ class DockerHostsConfig(BaseModel):
     health: list[str] = Field(default_factory=lambda: ["healthy", "running"])
     discovery: bool = Field(default=False)
     expose_txt_in_additional: bool = Field(default=False)
+    dns_name_label: str = Field(default="dns_name")
 
     model_config = ConfigDict(extra="allow")
 
@@ -235,6 +240,11 @@ class DockerHosts(DynamicHostsPlugin):
         # per-endpoint suffix is provided, e.g. "docker.mycorp" so that a
         # container named "web" is published as "web.docker.mycorp".
         self._suffix = normalize_suffix(self.config.get("suffix"))
+
+        # Label key for explicit DNS names (provider-neutral default: dns_name).
+        raw_label_key = self.config.get("dns_name_label", "dns_name")
+        label_key = str(raw_label_key or "").strip() or "dns_name"
+        self._dns_name_label = label_key
 
         # Optional per-container TXT customisation driven by docker inspect
         # JSONPath-like expressions. When txt_fields is provided, each entry
@@ -356,7 +366,7 @@ class DockerHosts(DynamicHostsPlugin):
                     logger.warning(
                         "invalid ttl %r for endpoint %s; ignoring override",
                         ttl_raw,
-                        url,
+                        item.get("id") or url,
                     )
                     ttl_override = None
             tls_verify = bool(item.get("tls_verify", False))
@@ -368,15 +378,17 @@ class DockerHosts(DynamicHostsPlugin):
             ):
                 logger.warning(
                     "missing TLS: plaintext endpoint %s",
-                    url,
+                    item.get("id") or url,
                 )
 
             # Optional per-endpoint suffix; when absent, we fall back to the
             # plugin-level suffix stored in self._suffix.
             ep_suffix = normalize_suffix(item.get("suffix"))
 
+            ep_id = str(item.get("id") or "").strip() or None
             endpoints_cfg.append(
                 {
+                    "id": ep_id,
                     "url": url,
                     "interval": interval,
                     "host_ipv4": host_ipv4,
@@ -429,13 +441,13 @@ class DockerHosts(DynamicHostsPlugin):
                     self._note_condition_failure(
                         f"endpoint:{url}",
                         "failed to create client for %s: %s",
-                        url,
+                        ep.get("id") or url,
                         exc,
                     )
                     continue
                 self._clients[url] = client
                 connected += 1
-                logger.info("connected to endpoint %s", url)
+                logger.info("connected to endpoint %s", ep.get("id") or url)
             if self._endpoints:
                 logger.info(
                     "docker endpoints: %d connected, %d unavailable "
@@ -492,13 +504,13 @@ class DockerHosts(DynamicHostsPlugin):
                 self._note_condition_failure(
                     endpoint_key,
                     "failed to create client for %s during reload: %s",
-                    url,
+                    endpoint.get("id") or url,
                     exc,
                 )
                 return []
             else:
                 self._clients[url] = client
-                logger.info("connected to endpoint %s", url)
+                logger.info("connected to endpoint %s", endpoint.get("id") or url)
         elif client is None:
             # docker SDK is unavailable; nothing to do for this endpoint.
             return []
@@ -516,7 +528,7 @@ class DockerHosts(DynamicHostsPlugin):
             self._note_condition_failure(
                 endpoint_key,
                 "failed to list containers for %s: %s",
-                url,
+                endpoint.get("id") or url,
                 exc,
             )
             return []
@@ -524,7 +536,7 @@ class DockerHosts(DynamicHostsPlugin):
         self._note_condition_ok(
             endpoint_key,
             "endpoint %s is reachable again",
-            url,
+            endpoint.get("id") or url,
         )
         return result
 
@@ -701,6 +713,11 @@ class DockerHosts(DynamicHostsPlugin):
                             pass
                 else:
                     # Explicit insecure mode only when tls_verify is false.
+                    from foghorn.plugins.resolve.hosts_common import (
+                        note_insecure_tls,
+                    )
+
+                    note_insecure_tls("docker-tls", log=logger)
                     ctx.check_hostname = False
                     ctx.verify_mode = ssl.CERT_NONE
                 if client_cert is not None:
@@ -830,18 +847,10 @@ class DockerHosts(DynamicHostsPlugin):
                 host_ipv4 = endpoint.get("host_ipv4") or ""
                 host_ipv6 = endpoint.get("host_ipv6") or ""
                 parts: list[str] = []
-                url = str(endpoint.get("url"))
-                if url:
-                    # For display, shorten tcp://host:port endpoints to just
-                    # the host name so TXT/Info stays compact. Other schemes
-                    # (e.g. unix://) are left as-is.
-                    if url.startswith("tcp://"):
-                        disp = url[len("tcp://") :]
-                        # Strip :port when present.
-                        host_only = disp.split(":", 1)[0]
-                        parts.append(f"endpoint={host_only}")
-                    else:
-                        parts.append(f"endpoint={url}")
+                # Prefer configured endpoint id over URL/host for compact TXT.
+                ep_label = self._endpoint_display_label(endpoint)
+                if ep_label:
+                    parts.append(f"endpoint={ep_label}")
                 if host_ipv4:
                     parts.append(f"ans4={host_ipv4}")
                 if host_ipv6:
@@ -888,29 +897,11 @@ class DockerHosts(DynamicHostsPlugin):
                 if host_ipv6 is not None:
                     v6_list = [str(host_ipv6)]
 
-                # Preserve legacy behaviour: warn and skip when no hostname is
-                # available at all, even if IPs exist. This matches the
-                # original "warning if there's no hostname or ip found" user
-                # requirement and existing tests.
-                if not hostname:
-                    cid = container.get("Id", "<unknown>")
-                    logger.warning("container %s has no hostname; skipping", cid)
-                    continue
-
-                if not v4_list and not v6_list:
-                    cid = container.get("Id", "<unknown>")
-                    logger.warning(
-                        "container %s (%s) has no IPv4/IPv6; skipping",
-                        cid,
-                        hostname,
-                    )
-                    continue
-
                 # Determine all hostnames we should map for this container:
+                # - Optional dns_name label (preferred explicit override)
                 # - Docker Name (without leading '/')
                 # - Config.Hostname (from _extract)
                 # - Container ID as a last-resort alias
-                # - Optional project name label (when distinct from name/image)
                 raw_name = str(container.get("Name") or "").strip()
                 raw_name = raw_name.removeprefix("/")
                 container_id = str(container.get("Id") or "").strip()
@@ -919,6 +910,31 @@ class DockerHosts(DynamicHostsPlugin):
                 labels = cfg.get("Labels") if isinstance(cfg, dict) else None
                 if not isinstance(labels, dict):
                     labels = {}
+
+                label_key = getattr(self, "_dns_name_label", "dns_name")
+                label_dns_names = dns_names_from_labels(labels, label_key)
+
+                # Preserve legacy behaviour: warn and skip when no hostname and
+                # no dns_name label are available, even if IPs exist.
+                if not hostname and not label_dns_names and not raw_name:
+                    cid = container.get("Id", "<unknown>")
+                    logger.warning("container %s has no hostname; skipping", cid)
+                    continue
+
+                if not v4_list and not v6_list:
+                    cid = container.get("Id", "<unknown>")
+                    display = (
+                        (label_dns_names[0] if label_dns_names else None)
+                        or hostname
+                        or raw_name
+                        or cid
+                    )
+                    logger.warning(
+                        "container %s (%s) has no IPv4/IPv6; skipping",
+                        cid,
+                        display,
+                    )
+                    continue
 
                 project_name_raw = labels.get(
                     "com.docker.compose.project"
@@ -954,23 +970,26 @@ class DockerHosts(DynamicHostsPlugin):
                 raw_name = _strip_env_domain(raw_name)
                 hostname = _strip_env_domain(hostname) if hostname else hostname
 
-                candidate_names: list[tuple[str, bool]] = []
+                # Candidates: (name, is_container_id_alias, allow_multi_label)
+                candidate_names: list[tuple[str, bool, bool]] = []
+                for dn in label_dns_names:
+                    candidate_names.append((dn, False, True))
                 if raw_name:
-                    candidate_names.append((raw_name, False))
+                    candidate_names.append((raw_name, False, False))
                 if hostname and hostname != raw_name:
-                    candidate_names.append((hostname, False))
+                    candidate_names.append((hostname, False, False))
                 # Note: project-name is no longer used as a DNS label source; it is
                 # retained only for metadata in TXT/Info summaries.
                 if container_id:
                     # Include both short and full IDs so lookups by abbreviated
                     # container ID work when rendered into hosts-style records
                     # or when querying via PTR names generated from these labels.
-                    candidate_names.append((container_id[:12], True))
-                    candidate_names.append((container_id, True))
+                    candidate_names.append((container_id[:12], True, False))
+                    candidate_names.append((container_id, True, False))
 
-                normalized_candidates: list[tuple[str, bool]] = []
+                normalized_candidates: list[tuple[str, bool, bool]] = []
                 seen: set[str] = set()
-                for n, is_container_id_alias in candidate_names:
+                for n, is_container_id_alias, allow_multi in candidate_names:
                     # Ensure normalized names do not retain any leading or
                     # trailing dots so we never publish names that begin with
                     # ".". Docker/container names can include underscores;
@@ -980,9 +999,14 @@ class DockerHosts(DynamicHostsPlugin):
                     if not key or key in seen:
                         continue
                     seen.add(key)
-                    normalized_candidates.append((key, is_container_id_alias))
+                    normalized_candidates.append(
+                        (key, is_container_id_alias, allow_multi)
+                    )
                 valid_names: list[str] = []
-                for key, is_container_id_alias in normalized_candidates:
+                for key, is_container_id_alias, allow_multi in normalized_candidates:
+                    if allow_multi and is_valid_dns_hostname(key):
+                        valid_names.append(key)
+                        continue
                     if is_valid_dns_label(key):
                         valid_names.append(key)
                         continue
@@ -1031,19 +1055,20 @@ class DockerHosts(DynamicHostsPlugin):
                     # No suffix configured: publish raw normalized names.
                     names_for_mapping = list(normalized_names)
 
-                # Choose the canonical name for reverse PTRs: prefer the Docker
-                # Name, then the extracted hostname, then the container ID, and
-                # apply the same suffix (if any).
-                if raw_name:
+                # Choose the canonical name for reverse PTRs: prefer dns_name
+                # label, then Docker Name, then Config.Hostname, then ID.
+                if label_dns_names:
+                    base_canonical = label_dns_names[0]
+                elif raw_name:
                     base_canonical = raw_name
                 elif hostname:
                     base_canonical = str(hostname)
-                else:  # pragma: nocover defensive: unreachable because containers without hostname are skipped earlier in _reload_from_docker
+                else:
                     base_canonical = container_id or normalized_names[0]
                 base_canonical = (
                     str(base_canonical).strip(".").lower().replace("_", "-")
                 )
-                if not is_valid_dns_label(base_canonical):
+                if not is_valid_dns_hostname(base_canonical):
                     base_canonical = normalized_names[0]
 
                 if ep_suffix:
@@ -1107,7 +1132,8 @@ class DockerHosts(DynamicHostsPlugin):
                     container=container,
                     canonical=ptr_canonical,
                     aliases=sorted(canonical_aliases.get(ptr_canonical, set())),
-                    endpoint_url=str(endpoint.get("url")),
+                    endpoint_url=str(endpoint.get("url") or ""),
+                    endpoint_id=endpoint.get("id"),
                     effective_health=effective_health,
                     project_name=project_name,
                     internal_v4=internal_v4,
@@ -1263,6 +1289,7 @@ class DockerHosts(DynamicHostsPlugin):
                     "type": "table",
                     "path": "summary.endpoints",
                     "columns": [
+                        {"key": "id", "label": "ID"},
                         {"key": "url", "label": "URL"},
                         {"key": "interval", "label": "Interval (s)"},
                         {"key": "host_ipv4", "label": "Host IPv4"},
@@ -1404,8 +1431,10 @@ class DockerHosts(DynamicHostsPlugin):
             for ep in getattr(self, "_endpoints", []):
                 if not isinstance(ep, dict):
                     continue
+                ep_id = str(ep.get("id") or "").strip() or None
                 endpoints_view.append(
                     {
+                        "id": ep_id,
                         "url": str(ep.get("url", "")),
                         "interval": float(ep.get("interval", 0.0) or 0.0),
                         "host_ipv4": ep.get("host_ipv4"),
@@ -1485,6 +1514,45 @@ class DockerHosts(DynamicHostsPlugin):
         return "running"
 
     @staticmethod
+    def _endpoint_display_label(
+        endpoint: dict[str, object] | None = None,
+        *,
+        endpoint_id: object | None = None,
+        url: str | None = None,
+    ) -> str:
+        """Brief: Choose a compact label for an endpoint (prefer configured id).
+
+        Inputs:
+          - endpoint: Optional normalized endpoint mapping with id/url.
+          - endpoint_id: Optional explicit id override.
+          - url: Optional explicit URL override.
+
+        Outputs:
+          - Display label: endpoint id when set, else shortened tcp host, else URL.
+
+        Example:
+          - id "web" + url "tcp://web.lan:2376" -> "web"
+          - url "tcp://web.lan:2376" alone -> "web.lan"
+        """
+
+        ep = endpoint if isinstance(endpoint, dict) else {}
+        eid = endpoint_id if endpoint_id is not None else ep.get("id")
+        label = str(eid or "").strip()
+        if label:
+            return label
+
+        raw_url = url if url is not None else ep.get("url")
+        text = str(raw_url or "").strip()
+        if not text:
+            return ""
+        # For display, shorten tcp://host:port endpoints to just the host
+        # name so TXT/Info stays compact. Other schemes (e.g. unix://) stay as-is.
+        if text.startswith("tcp://"):
+            disp = text[len("tcp://") :]
+            return disp.split(":", 1)[0]
+        return text
+
+    @staticmethod
     def _format_aggregate_line(
         *,
         container: dict,
@@ -1497,6 +1565,7 @@ class DockerHosts(DynamicHostsPlugin):
         internal_v6: list[str],
         answer_v4: list[str],
         answer_v6: list[str],
+        endpoint_id: object | None = None,
         extra_txt_fields: list[tuple[str, str]] | None = None,
         replace_default_txt: bool = False,
         txt_fields_keep: list[str] | None = None,
@@ -1509,6 +1578,7 @@ class DockerHosts(DynamicHostsPlugin):
           - canonical: Canonical published name for PTRs.
           - aliases: All published aliases for the container.
           - endpoint_url: Docker endpoint URL for this container.
+          - endpoint_id: Optional configured endpoint id (preferred in endpoint=).
           - effective_health: Effective health/status string.
           - project_name: Project/stack name (best-effort label-derived string).
           - internal_v4/internal_v6: Container IPs discovered from inspect.
@@ -1788,13 +1858,11 @@ class DockerHosts(DynamicHostsPlugin):
             base_pieces.append(f"int6={_join(internal_v6)}")
         if net_parts:
             base_pieces.append(f"nets={_join(net_parts, limit=3)}")
-        if endpoint_url:
-            # For display, shorten tcp://host:port endpoints to just the host
-            # name so TXT/Info stays compact.
-            disp_endpoint = endpoint_url
-            if endpoint_url.startswith("tcp://"):
-                disp = endpoint_url[len("tcp://") :]
-                disp_endpoint = disp.split(":", 1)[0]
+        disp_endpoint = DockerHosts._endpoint_display_label(
+            endpoint_id=endpoint_id,
+            url=endpoint_url,
+        )
+        if disp_endpoint:
             base_pieces.append(f"endpoint={disp_endpoint}")
 
         # Helper to clamp an individual "key=value" segment to a maximum

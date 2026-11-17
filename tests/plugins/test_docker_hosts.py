@@ -2148,9 +2148,9 @@ def test_docker_hosts_discovery_emits_hosts_txt_with_host_ips(monkeypatch):
         discovery=True,
         endpoints=[
             {
-                "url": "tcp://127.0.0.1:2375",
-                "use_ipv4": "192.0.2.10",
-                "use_ipv6": "2001:db8::10",
+                "url": "tcp://*********:2375",
+                "use_ipv4": "**********",
+                "use_ipv6": "************",
             }
         ],
     )
@@ -2164,9 +2164,90 @@ def test_docker_hosts_discovery_emits_hosts_txt_with_host_ips(monkeypatch):
     assert lines
     joined = " ".join(lines)
     # Endpoint should be shortened to host-only, without the tcp:// scheme or port.
-    assert "endpoint=127.0.0.1" in joined
-    assert "ans4=192.0.2.10" in joined
-    assert "ans6=2001:db8::10" in joined
+    assert "endpoint=*********" in joined
+    assert "ans4=**********" in joined
+    assert "ans6=************" in joined
+
+
+def test_docker_hosts_endpoint_id_preferred_in_txt_and_snapshot(monkeypatch):
+    """Brief: configured endpoint id is preferred over URL in TXT and admin snapshot.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts endpoint= uses id when set, else falls back to shortened URL.
+    """
+
+    mod = importlib.import_module("foghorn.plugins.resolve.docker_hosts")
+    DockerHosts = mod.DockerHosts
+
+    class DummyClient:
+        def __init__(self, base_url: str) -> None:  # noqa: D401
+            """Store base_url and expose an empty containers list."""
+
+            self.base_url = base_url
+            self.containers = types.SimpleNamespace(list=lambda: [])
+
+    class DummyDockerModule:
+        def DockerClient(self, base_url: str, **_kwargs):  # noqa: D401, N802
+            """Return a dummy client for the requested base_url."""
+
+            return DummyClient(base_url)
+
+    monkeypatch.setattr(mod, "docker", DummyDockerModule(), raising=True)
+
+    plugin = DockerHosts(  # type: ignore[arg-type]
+        suffix="docker.mycorp",
+        discovery=True,
+        endpoints=[
+            {
+                "id": "nextcloud",
+                "url": "tcp://nextcloud.zaa:2376",
+                "use_ipv4": "10.0.0.10",
+            }
+        ],
+    )
+
+    containers = [
+        {
+            "Id": "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899",
+            "Name": "/app",
+            "Config": {"Hostname": "app", "Labels": {}},
+            "State": {"Status": "running"},
+            "NetworkSettings": {
+                "Networks": {"bridge": {"IPAddress": "172.17.0.2"}},
+            },
+        }
+    ]
+    monkeypatch.setattr(plugin, "_iter_containers_for_endpoint", lambda _ep: containers)
+    plugin.setup()
+
+    hosts_owner = hosts_common.discovery_owner("_hosts", "docker.mycorp")
+    hosts_lines = plugin._aggregate_txt.get(hosts_owner, [])  # type: ignore[attr-defined]
+    assert any("endpoint=nextcloud" in str(line) for line in hosts_lines)
+    assert not any("endpoint=nextcloud.zaa" in str(line) for line in hosts_lines)
+
+    containers_owner = hosts_common.discovery_owner("_containers", "docker.mycorp")
+    container_lines = plugin._aggregate_txt.get(containers_owner, [])  # type: ignore[attr-defined]
+    joined = " ".join(str(x) for x in container_lines)
+    assert "endpoint=nextcloud" in joined
+    assert "endpoint=nextcloud.zaa" not in joined
+
+    snap = plugin.get_http_snapshot()
+    eps = snap["summary"]["endpoints"]  # type: ignore[index]
+    assert isinstance(eps, list) and eps
+    assert eps[0].get("id") == "nextcloud"
+    assert eps[0].get("url") == "tcp://nextcloud.zaa:2376"
+
+    # Without id, tcp URL still shortens to host-only.
+    assert DockerHosts._endpoint_display_label(url="tcp://web.lan:2376") == "web.lan"
+    assert (
+        DockerHosts._endpoint_display_label(
+            endpoint_id="pve1", url="tcp://lemur.zaa:2376"
+        )
+        == "pve1"
+    )
 
 
 def test_docker_hosts_strip_env_domain_placeholders_from_names(monkeypatch):
@@ -2724,3 +2805,57 @@ def test_docker_hosts_mount_tls_adapter_verify_uses_cert_required(
     assert ctx.verify_mode == ssl.CERT_REQUIRED
     assert ctx.check_hostname is True
     assert captured.get("cafile") == str(ca_path)
+
+
+def test_docker_hosts_dns_name_label_override(monkeypatch):
+    """Brief: dns_name label publishes stable names for random container names.
+
+    Inputs:
+      - monkeypatch: pytest fixture.
+
+    Outputs:
+      - None; asserts label name is mapped and preferred for PTR.
+    """
+
+    mod = importlib.import_module("foghorn.plugins.resolve.docker_hosts")
+    DockerHosts = mod.DockerHosts
+
+    # Build address without a literal that tooling may redact.
+    v4 = ".".join(str(p) for p in (10, 0, 0, 50))
+
+    plugin = DockerHosts(  # type: ignore[arg-type]
+        suffix="docker.example",
+        endpoints=[{"url": "unix:///var/run/docker.sock"}],
+    )
+
+    containers = [
+        {
+            "Id": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+            "Name": "/naughty_euler",
+            "Config": {
+                "Hostname": "abcdef012345",
+                "Labels": {"dns_name": "api"},
+            },
+            "NetworkSettings": {
+                "Networks": {
+                    "bridge": {
+                        "IPAddress": v4,
+                        "GlobalIPv6Address": "",
+                    }
+                }
+            },
+        }
+    ]
+
+    def fake_iter(endpoint):  # noqa: ARG001
+        return containers
+
+    monkeypatch.setattr(plugin, "_iter_containers_for_endpoint", fake_iter)
+    plugin.setup()
+
+    assert "api.docker.example" in plugin._forward_v4  # type: ignore[attr-defined]
+    assert plugin._forward_v4["api.docker.example"] == [v4]  # type: ignore[index]
+    # Random docker name still published as alias.
+    assert "naughty-euler.docker.example" in plugin._forward_v4  # type: ignore[attr-defined]
+    ptr = ipaddress.ip_address(v4).reverse_pointer
+    assert plugin._reverse[ptr] == "api.docker.example"  # type: ignore[attr-defined,index]

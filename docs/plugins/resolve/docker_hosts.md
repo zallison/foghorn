@@ -164,6 +164,13 @@ Top-level `config` keys (described by `DockerHostsConfig`):
 - `suffix: str | null`
   - Default DNS suffix to append to container names, e.g. `docker.zaa`.
   - Container name `web` becomes `web.docker.zaa`.
+- `dns_name_label: str`
+  - Container label key used as an explicit DNS name (default `dns_name`).
+  - When set on a container (e.g. `labels: {dns_name: api}`), that value is
+    published (with `suffix`) even if the Docker name is random. Comma- or
+    whitespace-separated multi-values become multiple aliases. PTR canonical
+    prefers the first `dns_name` value. Native Name/Hostname/ID aliases are
+    still published.
 - `txt_fields: list[{name, path}]`
   - Optional list of JSONPath-like expressions used to construct custom TXT
 	fields from docker inspect data. Each entry:
