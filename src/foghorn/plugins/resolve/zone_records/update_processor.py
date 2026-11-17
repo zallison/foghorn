@@ -18,7 +18,6 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
-import time
 from typing import Any
 
 import dns.exception
@@ -35,7 +34,7 @@ from dnslib import QTYPE, RR, DNSRecord
 
 from foghorn.plugins.resolve.zone_records.helpers import owner_in_zone
 from foghorn.servers.tsig_utils import normalize_tsig_algorithm
-from foghorn.utils import dns_names
+from foghorn.utils import dns_names, rate_limit
 
 
 logger = logging.getLogger(__name__)
@@ -203,38 +202,6 @@ def _clone_records_for_update_processing(
 
         cloned[(str(owner), qtype_int)] = (ttl_int, values_list, sources_list)
     return cloned
-
-
-def _prune_dns_update_rate_buckets(
-    buckets: dict[str, dict[str, float | int]],
-    now: float,
-    *,
-    window_seconds: float = 60.0,
-) -> None:
-    """Brief: Remove stale DNS UPDATE rate-limit token buckets.
-
-    Inputs:
-      - buckets: Mutable bucket map keyed by client/key identifier.
-      - now: Current epoch seconds.
-      - window_seconds: Active token-window duration.
-
-    Outputs:
-      - None. Mutates ``buckets`` in place by deleting stale entries.
-    """
-    stale_keys: list[str] = []
-    for bucket_key, bucket_value in buckets.items():
-        if not isinstance(bucket_value, dict):
-            stale_keys.append(bucket_key)
-            continue
-        try:
-            start = float(bucket_value.get("start", now))
-        except (TypeError, ValueError):
-            stale_keys.append(bucket_key)
-            continue
-        if now - start >= window_seconds:
-            stale_keys.append(bucket_key)
-    for stale_key in stale_keys:
-        buckets.pop(stale_key, None)
 
 
 def process_update_message(
@@ -717,40 +684,16 @@ def process_update_message(
                         resp.set_rcode(dns.rcode.REFUSED)
                         return resp.to_wire()
 
-        # Token bucket style (minute window) per-client and per-key.
-        now = float(time.time())
-        buckets = getattr(plugin, "_dns_update_rate_buckets", None)
-        if not isinstance(buckets, dict):
-            buckets = {}
-            plugin._dns_update_rate_buckets = buckets
-        last_prune = getattr(plugin, "_dns_update_rate_buckets_last_prune", 0.0)
-        try:
-            last_prune_ts = float(last_prune)
-        except (TypeError, ValueError):
-            last_prune_ts = 0.0
-        if now - last_prune_ts >= 60.0:
-            _prune_dns_update_rate_buckets(buckets, now, window_seconds=60.0)
-            plugin._dns_update_rate_buckets_last_prune = now
-
+        # Rate limiting per-client and per-key using shared state.
         limit_client = int(security_cfg.get("rate_limit_per_client", 0) or 0)
         if limit_client > 0:
             key = f"client:{ctx.client_ip}"
-            ts_count = buckets.get(key, {"start": now, "count": 0})
-            start = float(ts_count.get("start", now))
-            count = int(ts_count.get("count", 0))
-            if now - start >= 60.0:
-                start = now
-                count = 0
-            count += 1
-            buckets[key] = {"start": start, "count": count}
-            if count > limit_client:
+            if rate_limit.check_window_counter(key, limit_client):
                 try:
                     plugin._dns_update_rate_limit_hits = int(
                         getattr(plugin, "_dns_update_rate_limit_hits", 0) + 1
                     )
-                except (
-                    Exception
-                ):  # pragma: no cover - nocover: defensive metrics increment path
+                except Exception:
                     pass
                 resp = dns.message.make_response(request_msg)
                 resp.set_rcode(dns.rcode.REFUSED)
@@ -761,22 +704,12 @@ def process_update_message(
             key_name = str(ctx.tsig_key_config.get("name", ""))
             if key_name:
                 key = f"tsig:{key_name}"
-                ts_count = buckets.get(key, {"start": now, "count": 0})
-                start = float(ts_count.get("start", now))
-                count = int(ts_count.get("count", 0))
-                if now - start >= 60.0:
-                    start = now
-                    count = 0  # pragma: no cover - nocover: requires controlled multi-minute per-key rate window
-                count += 1
-                buckets[key] = {"start": start, "count": count}
-                if count > limit_key:
+                if rate_limit.check_window_counter(key, limit_key):
                     try:
                         plugin._dns_update_rate_limit_hits = int(
                             getattr(plugin, "_dns_update_rate_limit_hits", 0) + 1
                         )
-                    except (
-                        Exception
-                    ):  # pragma: no cover - nocover: defensive metrics increment path
+                    except Exception:
                         pass
                     resp = dns.message.make_response(request_msg)
                     resp.set_rcode(dns.rcode.REFUSED)

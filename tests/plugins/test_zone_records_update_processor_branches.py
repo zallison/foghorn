@@ -16,6 +16,7 @@ import pytest
 from dnslib import QTYPE
 
 from foghorn.plugins.resolve.zone_records import update_processor as up
+from foghorn.utils import rate_limit
 
 
 def _zone_cfg(
@@ -566,11 +567,20 @@ def test_process_update_message_rate_limits_prereq_scope_and_update_error_paths(
     """Brief: Rate limit, prerequisite rejection, scope, and update error branches."""
     wire, keyring = _signed_update_wire()
     req = dns.message.from_wire(wire, keyring=keyring)
+    client_ip = "192.0.2.1"
+    client_key = f"client:{client_ip}"
+    tsig_key = "tsig:key.example.com."
+
+    # Shared fixed-window limiter: pre-seed counters at limit so next check refuses.
+    rate_limit.clear()
+    limiter = rate_limit._GLOBAL_LIMITER
+    now = float(__import__("time").monotonic())
+    with limiter._lock:
+        limiter._window_counters[client_key] = {"start": now, "count": 1}
 
     plugin_client_limit = SimpleNamespace(
         records={},
         _dns_update_config={"security": {"rate_limit_per_client": 1}},
-        _dns_update_rate_buckets={"client:192.0.2.1": {"start": 1.0e15, "count": 1}},
         _dns_update_rate_limit_hits="bad",
     )
     resp_client = up.process_update_message(
@@ -581,19 +591,21 @@ def test_process_update_message_rate_limits_prereq_scope_and_update_error_paths(
             secret_b64="dGVzdHNlY3JldA==",
         ),
         plugin=plugin_client_limit,
-        client_ip="192.0.2.1",
+        client_ip=client_ip,
     )
     parsed_client = dns.message.from_wire(
         resp_client, keyring=keyring, request_mac=req.mac
     )
     assert parsed_client.rcode() == dns.rcode.REFUSED
+    assert plugin_client_limit._dns_update_rate_limit_hits == "bad"
+
+    rate_limit.clear()
+    with limiter._lock:
+        limiter._window_counters[tsig_key] = {"start": now, "count": 1}
 
     plugin_key_limit = SimpleNamespace(
         records={},
         _dns_update_config={"security": {"rate_limit_per_key": 1}},
-        _dns_update_rate_buckets={
-            "tsig:key.example.com.": {"start": 1.0e15, "count": 1}
-        },
         _dns_update_rate_limit_hits="bad",
     )
     resp_key = up.process_update_message(
@@ -604,15 +616,19 @@ def test_process_update_message_rate_limits_prereq_scope_and_update_error_paths(
             secret_b64="dGVzdHNlY3JldA==",
         ),
         plugin=plugin_key_limit,
-        client_ip="192.0.2.1",
+        client_ip=client_ip,
     )
     parsed_key = dns.message.from_wire(resp_key, keyring=keyring, request_mac=req.mac)
     assert parsed_key.rcode() == dns.rcode.REFUSED
+    assert plugin_key_limit._dns_update_rate_limit_hits == "bad"
 
+    # Expired window (start far in the past) resets count and allows the request.
+    rate_limit.clear()
+    with limiter._lock:
+        limiter._window_counters[client_key] = {"start": 0.0, "count": 9}
     plugin_reset = SimpleNamespace(
         records={},
         _dns_update_config={"security": {"rate_limit_per_client": 5}},
-        _dns_update_rate_buckets={"client:192.0.2.1": {"start": 0.0, "count": 9}},
     )
     monkeypatch.setattr(up, "apply_update_operations", lambda *_a, **_kw: (0, None))
     resp_reset = up.process_update_message(
@@ -623,13 +639,14 @@ def test_process_update_message_rate_limits_prereq_scope_and_update_error_paths(
             secret_b64="dGVzdHNlY3JldA==",
         ),
         plugin=plugin_reset,
-        client_ip="192.0.2.1",
+        client_ip=client_ip,
     )
     parsed_reset = dns.message.from_wire(
         resp_reset, keyring=keyring, request_mac=req.mac
     )
     assert parsed_reset.rcode() == dns.rcode.NOERROR
-    assert plugin_reset._dns_update_rate_buckets["client:192.0.2.1"]["count"] == 1
+    with limiter._lock:
+        assert limiter._window_counters[client_key]["count"] == 1
 
     original_from_wire = dns.message.from_wire
     msg_with_prereq = original_from_wire(wire, keyring=keyring)
@@ -1456,15 +1473,20 @@ def test_process_update_message_runtime_state_dir_fallback(
 def test_process_update_message_per_key_rate_window_reset(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Brief: Per-key rate bucket resets after one-minute window elapses."""
+    """Brief: Per-key fixed window resets after the 1s window elapses."""
     wire, keyring = _signed_update_wire()
     request_msg = dns.message.from_wire(wire, keyring=keyring)
+    tsig_key = "tsig:key.example.com."
+    rate_limit.clear()
+    limiter = rate_limit._GLOBAL_LIMITER
+    with limiter._lock:
+        # Expired window start forces reset on next check.
+        limiter._window_counters[tsig_key] = {"start": 0.0, "count": 4}
+
     plugin = SimpleNamespace(
         records={},
         _dns_update_config={"security": {"rate_limit_per_key": 5}},
-        _dns_update_rate_buckets={"tsig:key.example.com.": {"start": 0.0, "count": 4}},
     )
-
     monkeypatch.setattr(up, "apply_update_operations", lambda *_a, **_kw: (0, None))
 
     response_wire = up.process_update_message(
@@ -1481,16 +1503,26 @@ def test_process_update_message_per_key_rate_window_reset(
         response_wire, keyring=keyring, request_mac=request_msg.mac
     )
     assert parsed.rcode() == dns.rcode.NOERROR
-    assert plugin._dns_update_rate_buckets["tsig:key.example.com."]["count"] == 1
+    with limiter._lock:
+        assert limiter._window_counters[tsig_key]["count"] == 1
 
 
-def test_process_update_message_prunes_stale_rate_buckets(
+def test_process_update_message_shared_rate_limit_keys(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Brief: Stale DNS UPDATE rate buckets are pruned to bound memory use."""
+    """Brief: DNS UPDATE rate limits use the shared window-counter keys.
+
+    Notes:
+      - Per-plugin bucket maps were replaced by foghorn.utils.rate_limit.
+      - This covers client and TSIG key counters after a successful update.
+    """
     wire, keyring = _signed_update_wire()
     request_msg = dns.message.from_wire(wire, keyring=keyring)
-    now = float(up.time.time())
+    client_ip = "192.0.2.1"
+    client_key = f"client:{client_ip}"
+    tsig_key = "tsig:key.example.com."
+    rate_limit.clear()
+
     plugin = SimpleNamespace(
         records={},
         _dns_update_config={
@@ -1499,13 +1531,6 @@ def test_process_update_message_prunes_stale_rate_buckets(
                 "rate_limit_per_key": 10,
             }
         },
-        _dns_update_rate_buckets={
-            "client:stale-a": {"start": now - 120.0, "count": 1},
-            "tsig:stale-b": {"start": now - 80.0, "count": 2},
-            "client:fresh": {"start": now - 5.0, "count": 3},
-            "client:bad-entry": "bad",
-        },
-        _dns_update_rate_buckets_last_prune=0.0,
     )
     monkeypatch.setattr(up, "apply_update_operations", lambda *_a, **_kw: (0, None))
 
@@ -1517,19 +1542,19 @@ def test_process_update_message_prunes_stale_rate_buckets(
             secret_b64="dGVzdHNlY3JldA==",
         ),
         plugin=plugin,
-        client_ip="192.0.2.1",
+        client_ip=client_ip,
     )
     parsed = dns.message.from_wire(
         response_wire, keyring=keyring, request_mac=request_msg.mac
     )
     assert parsed.rcode() == dns.rcode.NOERROR
-    assert "client:stale-a" not in plugin._dns_update_rate_buckets
-    assert "tsig:stale-b" not in plugin._dns_update_rate_buckets
-    assert "client:bad-entry" not in plugin._dns_update_rate_buckets
-    assert plugin._dns_update_rate_buckets["client:fresh"]["count"] == 3
-    assert plugin._dns_update_rate_buckets["client:192.0.2.1"]["count"] == 1
-    assert plugin._dns_update_rate_buckets["tsig:key.example.com."]["count"] == 1
-    assert float(plugin._dns_update_rate_buckets_last_prune) >= now
+    limiter = rate_limit._GLOBAL_LIMITER
+    with limiter._lock:
+        assert limiter._window_counters[client_key]["count"] == 1
+        assert limiter._window_counters[tsig_key]["count"] == 1
+    rate_limit.clear()
+    with limiter._lock:
+        assert limiter._window_counters == {}
 
 
 def test_apply_update_operations_zone_apex_normalize_fallback(

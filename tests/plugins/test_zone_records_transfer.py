@@ -19,6 +19,7 @@ from dnslib import DNSRecord, QTYPE, RCODE, RR
 
 from foghorn.plugins.resolve.zone_records import transfer
 from foghorn.servers.tsig_utils import normalize_tsig_algorithm
+from foghorn.utils import rate_limit
 
 
 class _PluginNoLock:
@@ -578,8 +579,7 @@ def test_axfr_rate_limit_and_slot_counters(monkeypatch: pytest.MonkeyPatch) -> N
       - Asserts token transitions and max-slot gate behavior.
     """
 
-    transfer._AXFR_CLIENT_RATE_STATE.clear()
-    transfer._AXFR_ACTIVE_TRANSFERS = 0
+    rate_limit.clear()
 
     assert (
         transfer._axfr_rate_limited(
@@ -608,7 +608,7 @@ def test_axfr_rate_limit_and_slot_counters(monkeypatch: pytest.MonkeyPatch) -> N
     assert transfer._axfr_try_acquire_slot({"max_concurrent_transfers": 1}) is False
     transfer._axfr_release_slot()
     transfer._axfr_release_slot()
-    assert transfer._AXFR_ACTIVE_TRANSFERS == 0
+    assert rate_limit.get_concurrent_transfers_count() == 0
 
 
 def test_axfr_rate_limit_state_prunes_idle_clients(
@@ -623,8 +623,7 @@ def test_axfr_rate_limit_state_prunes_idle_clients(
       - Asserts stale client keys are evicted during a later sweep.
     """
 
-    transfer._AXFR_CLIENT_RATE_STATE.clear()
-    transfer._AXFR_RATE_STATE_LAST_SWEEP = 0.0
+    rate_limit.clear()
 
     now = [100.0]
     monkeypatch.setattr(transfer.time, "monotonic", lambda: now[0])
@@ -632,12 +631,12 @@ def test_axfr_rate_limit_state_prunes_idle_clients(
 
     for index in range(256):
         assert transfer._axfr_rate_limited(f"client-{index}", policy) is False
-    assert len(transfer._AXFR_CLIENT_RATE_STATE) == 256
+    assert rate_limit.get_token_buckets_count() == 256
 
     now[0] = 170.0
     assert transfer._axfr_rate_limited("client-fresh", policy) is False
-    assert "client-0" not in transfer._AXFR_CLIENT_RATE_STATE
-    assert len(transfer._AXFR_CLIENT_RATE_STATE) == 1
+    assert "client-0" not in rate_limit.get_token_buckets_keys()
+    assert rate_limit.get_token_buckets_count() == 1
 
 
 def test_iter_axfr_messages_refused_for_tsig_rate_limit_and_slot(
