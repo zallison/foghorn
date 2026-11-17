@@ -485,11 +485,13 @@ class FileDownloader(BasePlugin):
             planned.append((url, fpath, fname))
 
         if planned:
-            logger.info("Checking for updates to (%i) upstream files", len(planned))
+            logger.info("checking for updates to (%i) upstream files", len(planned))
         for url, fpath, fname in planned:
             # Try HEAD for last-modified; fall back to GET
             if self._needs_update(url, fpath):
-                logger.info("Downloading list %s to %s", url, fpath)
+                logger.info(
+                    "Downloading list %s to %s", self._get_url_display_name(url), fpath
+                )
                 temp_path = self._fetch(url, fpath)
                 try:
                     if not self._validate_domain_list(temp_path):
@@ -573,7 +575,9 @@ class FileDownloader(BasePlugin):
 
         res: requests.Response | None = None
         try:
-            logger.info("checking upstream (HEAD) for %s", url)
+            logger.info(
+                "checking upstream (HEAD) for %s", self._get_url_display_name(url)
+            )
             res = self._request_with_safe_redirects(
                 method="HEAD",
                 url=url,
@@ -658,6 +662,7 @@ class FileDownloader(BasePlugin):
                 url = self._validate_and_normalize_url(entry, source="urls")
                 use_hashed = self._default_hash_filenames
                 add_comment = self._default_add_comment
+                url_id = None
             elif isinstance(entry, dict):
                 url = str(entry.get("url", ""))
                 if not url:
@@ -675,6 +680,7 @@ class FileDownloader(BasePlugin):
                     add_comment = entry.get("add_comment")
                 else:
                     add_comment = self._default_add_comment
+                url_id = entry.get("id")
             else:
                 logger.warning(
                     "FileDownloader skipping unsupported urls entry %r (expected str or mapping)",
@@ -688,11 +694,16 @@ class FileDownloader(BasePlugin):
             self._url_options[url] = {
                 "hash_filenames": use_hashed,
                 "add_comment": add_comment,
+                "id": url_id,
             }
 
         # Keep urls list stable and sorted for callers/tests that inspect it.
         if self.urls:
             self.urls = sorted({u: None for u in self.urls}.keys())
+
+    def _get_url_display_name(self, url: str) -> str:
+        """Brief: Return the id of a URL if available, otherwise the URL."""
+        return self._url_options.get(url, {}).get("id") or url
 
     def _get_effective_url_options(self, url: str) -> tuple[bool, Optional[bool]]:
         """Brief: Resolve per-URL options for hash_filenames and add_comment.
@@ -971,7 +982,7 @@ class FileDownloader(BasePlugin):
             if content_length > MAX_DOWNLOAD_RESPONSE_BYTES:
                 raise ValueError(
                     "Upstream list exceeds max allowed size "
-                    f"({content_length} > {MAX_DOWNLOAD_RESPONSE_BYTES} bytes): {url}"
+                    f"({content_length} > {MAX_DOWNLOAD_RESPONSE_BYTES} bytes): {self._get_url_display_name(url)}"
                 )
 
             _, add_comment = self._get_effective_url_options(url)
