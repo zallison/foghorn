@@ -12,11 +12,20 @@ All notable changes to this project will be documented in this file.
 - KubernetesHosts inventory caps `max_list_pages` (default 50) and `max_list_items` (default 20000); oversized list reloads abort and keep the previous host maps.
 - SSHKeys `initial_scan_background` (default true) and `initial_scan_deadline_seconds` (default 120) for non-blocking startup scans with a bounded wait.
 - Shared hosts DNS helpers in `hosts_common` (A/AAAA/PTR/TXT builders, reverse-name utilities) used by etc_hosts and mdns.
+- DockerHosts and KubernetesHosts honor a provider-neutral `dns_name` label (configurable via `dns_name_label`) so stable DNS names work even when container/pod names are random.
+- DockerHosts optional endpoint `id` for logs, snapshots, and TXT output.
+- ProxmoxHosts endpoint `tls_server_name` (aliases `tls_name`, `server_name`) for SNI / expected certificate hostname via the shared HTTPS session helper.
+- Shared `hosts_common` helpers for DNS hostname validation, multi-value label extraction, SNI-aware `requests` sessions, and one-shot insecure-TLS notices.
+- Shared `foghorn.utils.rate_limit` helpers (token bucket, fixed 1s window counter, concurrent slots) used by ZoneRecords AXFR and DNS UPDATE.
+- FileDownloader per-URL `id` / `url_id` so operator logs and errors can identify sources without raw URLs.
+- CLI actions beyond serve: `init`, `status`, `config`, `service`, and `reload` in `foghorn.cli_actions`, with PID file helpers for serve/status/reload.
+- Admin snapshot routes for ProxmoxHosts: `GET /api/v1/plugins/{plugin_name}/proxmox_hosts` (FastAPI and threaded).
 - DNSSEC validator TTL-bounded DNSKEY/DS caches (entry and size caps), DNSKEY material matching, and DS/RRSIG fetch helpers for root trust-anchor checks.
 - Config parser wraps file/YAML failures in actionable `ValueError` messages (undefined aliases include name, path, and anchor hints).
 - Plugin hook priorities accept bare `int` or `{priority: int}` mapping nodes.
 
 ### Fixed
+- ZoneRecords loader messages distinguish missing records files (`FileNotFoundError`) from other read/OS errors.
 - DockerHosts setup continues when one endpoint client create fails: catch broad client-build errors per endpoint, connect remaining endpoints, log a connected/unavailable summary, and skip endpoints without a live client on the initial reload (retried on later cycles).
 - ProxmoxHosts `_reload_maps()` now calls `_reload_from_proxmox()` so scheduled/forced reloads refresh inventory.
 - SSHKeys prefers a writable allowlisted `db_path` directory and raises `RuntimeError` when none is available instead of silently failing path setup.
@@ -29,16 +38,23 @@ All notable changes to this project will be documented in this file.
 - etc_hosts reverse maps include IPv6 as well as IPv4 via shared hosts helpers.
 
 ### Changed
+- SIGUSR1 reloads configuration from disk (refreshing live config/plugin refs when the snapshot advances) before stats reset and plugin notifications; failures and restart-required reasons are logged.
+- Empty/default config webserver port is `5380` (was `8053`).
+- ZoneRecords AXFR token-bucket/concurrency and DNS UPDATE window counters delegate to `foghorn.utils.rate_limit` instead of plugin-local limiter state.
+- Legacy `foghorn --config …` invocation still works; preferred form is `foghorn serve [config]`.
 - RateLimit periodic stats INFO log drops the redundant "RateLimit stats" prefix (logger name already identifies the source).
 - etc_hosts and mdns resolve plugins call shared `hosts_common` DNS response builders instead of local duplicates.
 - DNSSEC validation tests reshaped around cached DNSKEY/DS and trust-anchor matching paths.
 
 ### Documentation
+- Documented DockerHosts/KubernetesHosts `dns_name_label` behavior and ProxmoxHosts `tls_server_name` in resolve plugin docs and the Proxmox example config.
 - Added `docs/plugins/resolve/kubernetes_hosts.md` covering auth modes, TLS aliases, name publishing rules, config highlights, and admin snapshot URLs.
 - Documented KubernetesHosts snapshot endpoints in `docs/API.md`.
 - Documented DockerHosts multi-endpoint client-failure continue behavior in `docs/plugins/resolve/docker_hosts.md`.
 
 ### Tests
+- Added `tests/test_cli_actions.py` for init/status/config/service/reload and PID helpers; updated main/config-parser coverage for action CLI and SIGUSR1 reload stubs.
+- Expanded hosts plugin tests for dns_name labels, endpoint ids, Proxmox SNI, shared hosts_common helpers, zone loader errors, and shared rate-limit wiring.
 - Added `tests/plugins/test_kubernetes_hosts.py` covering module import, Service/Pod map build and A/PTR answers, missing-auth error recording, kubeconfig token and client-cert parsing, and `tls_*` alias folding.
 - Added DockerHosts regression coverage that one failing endpoint does not prevent connecting a second endpoint.
 - Added `tests/plugins/test_hosts_common_dns_helpers.py` for shared A/AAAA/PTR/TXT and reverse-name helpers.
