@@ -41,7 +41,7 @@ def test_empty_config_structure() -> None:
     web_cfg = cfg["webserver"]
     assert web_cfg["enabled"] is True
     assert web_cfg["host"] == "127.0.0.1"
-    assert web_cfg["port"] == 8053
+    assert web_cfg["port"] == 5380
     assert web_cfg["index"] is True
 
 
