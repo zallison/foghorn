@@ -89,17 +89,17 @@ def test_validate_input_path_covers_allowlist_and_warning_branches(tmp_path, cap
 
 
 def test_enforce_file_size_limit_covers_stat_failure_and_oversize(tmp_path):
-    """Brief: File-size enforcement rejects stat failures and oversized files.
+    """Brief: File-size enforcement rejects missing/unreadable and oversized files.
 
     Inputs:
       - tmp_path: pytest temporary path.
 
     Outputs:
-      - None: asserts ValueError on stat failure and on exceeded size budget.
+      - None: asserts ValueError on missing file and on exceeded size budget.
     """
 
     missing = tmp_path / "missing.txt"
-    with pytest.raises(ValueError, match="Failed to stat configured records file"):
+    with pytest.raises(ValueError, match="Records file not found"):
         loader._enforce_file_size_limit(path=missing, max_file_size_bytes=1)
 
     big = tmp_path / "big.txt"
@@ -638,7 +638,7 @@ def test_load_records_invalid_bind_entry_and_missing_bind_file(tmp_path, caplog)
         bind_paths=[str(missing_zone)],
         load_mode="first",
     )
-    with pytest.raises(ValueError, match="Failed to stat configured records file"):
+    with pytest.raises(ValueError, match="Records file not found"):
         plugin_missing.setup()
 
 

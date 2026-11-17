@@ -105,14 +105,17 @@ def _enforce_file_size_limit(
       - max_file_size_bytes: Configured max allowed file size in bytes.
 
     Outputs:
-      - None, raises ValueError when the size exceeds the configured maximum.
+      - None, raises ValueError when the file is missing or exceeds the
+        configured maximum size.
     """
     if max_file_size_bytes <= 0:
         return
     try:
         size_bytes = int(path.stat().st_size)
-    except Exception as exc:
-        raise ValueError(f"Failed to stat configured records file {path.name}") from exc
+    except FileNotFoundError as exc:
+        raise ValueError(f"Records file not found: {path}") from exc
+    except OSError as exc:
+        raise ValueError(f"Cannot access records file {path}: {exc.strerror}") from exc
     if size_bytes > max_file_size_bytes:
         raise ValueError(
             f"Configured records file {path.name} exceeds max_file_size_bytes "
