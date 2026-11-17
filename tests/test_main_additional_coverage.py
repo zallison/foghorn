@@ -2136,7 +2136,7 @@ def test_main_returns_one_on_config_validation_error(monkeypatch, capsys):
       - monkeypatch/capsys fixtures; parse_config_file patched to raise ValueError.
 
     Outputs:
-      - None: asserts exit code 1 and that the error message is printed to stdout.
+      - None: asserts exit code 1 and that the error message is printed to stderr.
     """
 
     yaml_data = (
@@ -2144,7 +2144,7 @@ def test_main_returns_one_on_config_validation_error(monkeypatch, capsys):
         "  listen:\n"
         "    udp:\n"
         "      enabled: true\n"
-        "      host: 127.0.0.1\n"
+        "      host: *********\n"
         "      port: 5354\n"
         "  resolver:\n"
         "    mode: forward\n"
@@ -2153,7 +2153,7 @@ def test_main_returns_one_on_config_validation_error(monkeypatch, capsys):
         "  strategy: failover\n"
         "  max_concurrent: 1\n"
         "  endpoints:\n"
-        "    - host: 1.1.1.1\n"
+        "    - host: *******\n"
         "      port: 53\n"
     )
 
@@ -2165,11 +2165,12 @@ def test_main_returns_one_on_config_validation_error(monkeypatch, capsys):
     monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
 
     with patch("builtins.open", mock_open(read_data=yaml_data)):
-        rc = main_mod.main(["--config", "invalid.yaml"])
+        rc = main_mod.main(["serve", "invalid.yaml"])
 
     assert rc == 1
-    out = capsys.readouterr().out
-    assert "bad config value" in out
+    err = capsys.readouterr().err
+    assert "bad config value" in err
+    assert "Foghorn config error" in err
 
 
 def test_main_sigusr_dispatch_uses_unified_hook(monkeypatch, caplog):

@@ -41,19 +41,101 @@ class BackendUnavailableError(RuntimeError):
         super().__init__(message)
 
 
+def _add_config_path_arguments(
+    action_parser: argparse.ArgumentParser,
+    *,
+    positional: bool = True,
+) -> None:
+    """Brief: Attach `-c/--config` and optional positional config path args.
+
+    Inputs:
+      - action_parser: Per-action (or nested subcommand) argparse parser.
+      - positional: When True, also accept a bare config path argument.
+
+    Outputs:
+      - None. Mutates action_parser in place.
+
+    Notes:
+      - Positional lands on `config_positional`; flag on `config_opt`.
+      - Defaults use SUPPRESS so nested parent/leaf parsers do not wipe values
+        set on the other level.
+      - Call resolve_cli_config_path() after parse_args() to set `args.config`.
+      - Explicit `--config` avoids argparse abbreviating it to `--config-extras`.
+    """
+
+    action_parser.add_argument(
+        "-c",
+        "--config",
+        dest="config_opt",
+        default=argparse.SUPPRESS,
+        metavar="PATH",
+        help="Path to YAML config (default: config.yaml)",
+    )
+    if positional:
+        action_parser.add_argument(
+            "config_positional",
+            nargs="?",
+            default=argparse.SUPPRESS,
+            metavar="config",
+            help="Path to YAML config (default: config.yaml)",
+        )
+
+
+def resolve_cli_config_path(args: argparse.Namespace) -> str:
+    """Brief: Resolve effective config path from flag and/or positional.
+
+    Inputs:
+      - args: Parsed argparse namespace (may have config_opt / config_positional).
+
+    Outputs:
+      - str: Effective config path. Also sets args.config for callers.
+
+    Precedence:
+      1. positional config path (e.g. `foghorn status foo.yaml`)
+      2. `-c/--config PATH`
+      3. default `config.yaml`
+    """
+
+    positional = getattr(args, "config_positional", None)
+    optional = getattr(args, "config_opt", None)
+    existing = getattr(args, "config", None)
+
+    def _clean(value: object | None) -> str | None:
+        if value is None:
+            return None
+        text = str(value).strip()
+        return text or None
+
+    path = _clean(positional) or _clean(optional) or _clean(existing) or "config.yaml"
+    args.config = path
+    return path
+
+
 def _build_main_arg_parser() -> argparse.ArgumentParser:
-    """Brief: Build the CLI parser used by main().
+    """Brief: Build the command-based CLI parser used by main().
 
     Inputs:
       - None.
 
     Outputs:
-      - argparse.ArgumentParser: Parser configured with all supported flags.
+      - argparse.ArgumentParser: Parser for
+        `foghorn <action> [config] [subcommand]` with shared flags
+        (-v/--var, --rebuild, --config-extras, --skip-schema-validation)
+        and per-action `-c/--config` or positional config path.
+
+    Actions:
+      - serve, init, status, config (validate|show), service (install|uninstall),
+        reload.
+
+    Config path forms (all equivalent):
+      - foghorn status foo.yaml
+      - foghorn status --config foo.yaml
+      - foghorn config validate foo.yaml
+      - foghorn config validate --config foo.yaml
     """
 
-    parser = argparse.ArgumentParser(description="Caching DNS server with plugins")
-    parser.add_argument("--config", default="config.yaml", help="Path to YAML config")
-    parser.add_argument(
+    parent_parser = argparse.ArgumentParser(add_help=False)
+    parent_parser.add_argument(
         "-v",
         "--var",
         action="append",
@@ -63,7 +145,7 @@ def _build_main_arg_parser() -> argparse.ArgumentParser:
             "CLI overrides environment overrides config file variables."
         ),
     )
-    parser.add_argument(
+    parent_parser.add_argument(
         "--rebuild",
         action="store_true",
         help=(
@@ -71,7 +153,7 @@ def _build_main_arg_parser() -> argparse.ArgumentParser:
             "(overrides existing counts when present)."
         ),
     )
-    parser.add_argument(
+    parent_parser.add_argument(
         "--config-extras",
         dest="config_extras",
         choices=["ignore", "warn", "error"],
@@ -81,7 +163,7 @@ def _build_main_arg_parser() -> argparse.ArgumentParser:
             "ignore, warn, or error (default)."
         ),
     )
-    parser.add_argument(
+    parent_parser.add_argument(
         "--skip-schema-validation",
         dest="skip_schema_validation",
         action="store_true",
@@ -91,6 +173,83 @@ def _build_main_arg_parser() -> argparse.ArgumentParser:
             "file cannot be shipped."
         ),
     )
+
+    parser = argparse.ArgumentParser(
+        description=(
+            "Foghorn DNS server CLI. Usage: foghorn <action> [options] [config]"
+        ),
+        # Avoid `--config` being treated as an abbreviation of `--config-extras`
+        # on parsers that do not define an explicit --config flag.
+        allow_abbrev=False,
+    )
+    subparsers = parser.add_subparsers(
+        dest="action", help="Action to perform", required=True
+    )
+
+    # serve / init / status / reload: shared flags + config path forms
+    serve_parser = subparsers.add_parser(
+        "serve", parents=[parent_parser], help="Start the DNS server"
+    )
+    _add_config_path_arguments(serve_parser)
+
+    init_parser = subparsers.add_parser(
+        "init",
+        parents=[parent_parser],
+        help="Initialize Foghorn directory structure",
+    )
+    _add_config_path_arguments(init_parser)
+
+    status_parser = subparsers.add_parser(
+        "status", parents=[parent_parser], help="Check Foghorn health status"
+    )
+    _add_config_path_arguments(status_parser)
+
+    reload_parser = subparsers.add_parser(
+        "reload", parents=[parent_parser], help="Reload configuration via signal"
+    )
+    _add_config_path_arguments(reload_parser)
+
+    # config validate|show:
+    # - `-c/--config` on parent and leaf (SUPPRESS defaults so values stick)
+    # - positional only on leaf so `config validate foo.yaml` works.
+    #   Optional positional before nested subcommands steals the subcommand
+    #   token in argparse, so it is intentionally omitted on the parent.
+    config_parser = subparsers.add_parser(
+        "config", parents=[parent_parser], help="Manage Foghorn configuration"
+    )
+    _add_config_path_arguments(config_parser, positional=False)
+    config_subparsers = config_parser.add_subparsers(
+        dest="subcommand", help="Config subcommand"
+    )
+    for name, help_text in (
+        ("validate", "Validate config schema"),
+        ("show", "Show interpolated config"),
+    ):
+        leaf = config_subparsers.add_parser(
+            name, parents=[parent_parser], help=help_text
+        )
+        _add_config_path_arguments(leaf, positional=True)
+
+    # service install|uninstall (same nesting pattern as config)
+    service_parser = subparsers.add_parser(
+        "service", parents=[parent_parser], help="Manage Foghorn systemd service"
+    )
+    _add_config_path_arguments(service_parser, positional=False)
+    service_subparsers = service_parser.add_subparsers(
+        dest="subcommand", help="Service subcommand"
+    )
+    for name, help_text in (
+        ("install", "Install Foghorn as a systemd service"),
+        (
+            "uninstall",
+            "Remove the systemd unit file and stop the service",
+        ),
+    ):
+        leaf = service_subparsers.add_parser(
+            name, parents=[parent_parser], help=help_text
+        )
+        _add_config_path_arguments(leaf, positional=True)
+
     return parser
 
 
@@ -236,8 +395,8 @@ def _build_listener_configs(
     if not isinstance(dns_cfg, dict):
         dns_cfg = {}
 
-    # Listener defaults are sourced from listen.dns when present; otherwise
-    # they fall back to hard-coded defaults.
+    # Listener defaults are sourced from listen.dns when present; otherwise they fall
+    # back to hard-coded defaults.
     raw_host = dns_cfg.get("host", "127.0.0.1")
     raw_port = dns_cfg.get("port", 5335)
 
@@ -360,7 +519,7 @@ def _seed_listener_runtime_state(
     dot_cfg: dict,
     doh_cfg: dict,
 ) -> None:
-    """Brief: Seed runtime readiness state for DNS listeners.
+    """Brief: Seed readiness state for DNS listeners.
 
     Inputs:
       - runtime_state: Shared runtime readiness state.
@@ -402,10 +561,6 @@ def _parse_resolver_cfg(
 
     Outputs:
       - tuple: (resolver_cfg, resolver_mode, recursive_max_depth, recursive_timeout_ms, recursive_per_try_timeout_ms).
-
-    Notes:
-      - resolver.mode: "none" is treated as the legacy alias for "master" and will log a warning.
-      - resolver.max_depth is capped to a safe maximum.
     """
 
     # Resolver configuration (forward vs recursive) with conservative defaults.
@@ -661,103 +816,6 @@ def _parse_upstream_selection_cfg(
     return upstream_cfg, upstream_strategy, upstream_health, upstream_max_concurrent
 
 
-def _configure_bg_executor_from_limits(
-    *,
-    limits_cfg: dict,
-    logger: logging.Logger,
-) -> None:
-    """Brief: Configure bounded background executor from server.limits.
-
-    Inputs:
-      - limits_cfg: server.limits mapping.
-      - logger: Logger for best-effort failure diagnostics.
-
-    Outputs:
-      - None.
-    """
-
-    try:
-        from .servers.bg_executor import configure_bg_executor
-
-        raw_workers = limits_cfg.get("bg_executor_workers")
-        raw_pending = limits_cfg.get("bg_executor_max_pending")
-        try:
-            bg_workers = int(raw_workers) if raw_workers is not None else None
-        except Exception:
-            bg_workers = None
-        try:
-            bg_pending = int(raw_pending) if raw_pending is not None else None
-        except Exception:
-            bg_pending = None
-        configure_bg_executor(max_workers=bg_workers, max_pending=bg_pending)
-    except Exception:
-        logger.warning("Failed to configure background executor", exc_info=True)
-
-
-def _parse_dnssec_settings(
-    *,
-    server_cfg: dict,
-) -> tuple[str, int, str]:
-    """Brief: Parse DNSSEC mode/payload/validation settings.
-
-    Inputs:
-      - server_cfg: Parsed server config mapping.
-
-    Outputs:
-      - tuple[str, int, str]: (dnssec_mode, edns_payload, dnssec_validation).
-    """
-
-    dnssec_cfg = server_cfg.get("dnssec") or {}
-    if not isinstance(dnssec_cfg, dict):
-        dnssec_cfg = {}
-    dnssec_mode = str(dnssec_cfg.get("mode", "ignore")).lower()
-    edns_payload = int(dnssec_cfg.get("udp_payload_size", 1232))
-    dnssec_validation = str(dnssec_cfg.get("validation", "upstream_ad")).lower()
-    return dnssec_mode, edns_payload, dnssec_validation
-
-
-def _parse_search_domain_settings(
-    *,
-    resolver_cfg: dict,
-) -> tuple[str, bool, object, str]:
-    """Brief: Parse resolver search-domain qualification settings.
-
-    Inputs:
-      - resolver_cfg: Parsed resolver config mapping.
-
-    Outputs:
-      - tuple[str, bool, object, str]:
-        (search_domain, qualify_single_label, qualify_non_proper_tld,
-         non_proper_tld_mode).
-    """
-
-    search_cfg = resolver_cfg.get("search") or {}
-    if not isinstance(search_cfg, dict):
-        search_cfg = {}
-    search_domain = str(search_cfg.get("domain", "") or "").strip().rstrip(".")
-    qualify_single_label = bool(search_cfg.get("qualify_single_label", True))
-    raw_npt = search_cfg.get("qualify_non_proper_tld", False)
-    if isinstance(raw_npt, list):
-        qualify_non_proper_tld: object = [
-            str(e).strip().rstrip(".") for e in raw_npt if str(e).strip()
-        ]
-    elif isinstance(raw_npt, str):
-        s = raw_npt.strip().lower()
-        qualify_non_proper_tld = True if s in ("true", "yes", "1") else False
-    else:
-        qualify_non_proper_tld = bool(raw_npt)
-    raw_tld_mode = search_cfg.get("non_proper_tld_mode", "suffix")
-    non_proper_tld_mode = str(raw_tld_mode or "suffix").strip().lower()
-    if non_proper_tld_mode not in {"suffix", "exact"}:
-        non_proper_tld_mode = "suffix"
-    return (
-        search_domain,
-        qualify_single_label,
-        qualify_non_proper_tld,
-        non_proper_tld_mode,
-    )
-
-
 def _parse_axfr_settings(
     *,
     server_cfg: dict,
@@ -863,6 +921,103 @@ def _parse_axfr_settings(
         axfr_message_max_bytes,
         axfr_require_tsig,
         axfr_tsig_keys,
+    )
+
+
+def _configure_bg_executor_from_limits(
+    *,
+    limits_cfg: dict,
+    logger: logging.Logger,
+) -> None:
+    """Brief: Configure bounded background executor from server.limits.
+
+    Inputs:
+      - limits_cfg: server.limits mapping.
+      - logger: Logger for best-effort failure diagnostics.
+
+    Outputs:
+      - None.
+    """
+
+    try:
+        from .servers.bg_executor import configure_bg_executor
+
+        raw_workers = limits_cfg.get("bg_executor_workers")
+        raw_pending = limits_cfg.get("bg_executor_max_pending")
+        try:
+            bg_workers = int(raw_workers) if raw_workers is not None else None
+        except Exception:
+            bg_workers = None
+        try:
+            bg_pending = int(raw_pending) if raw_pending is not None else None
+        except Exception:
+            bg_pending = None
+        configure_bg_executor(max_workers=bg_workers, max_pending=bg_pending)
+    except Exception:
+        logger.warning("Failed to configure background executor", exc_info=True)
+
+
+def _parse_dnssec_settings(
+    *,
+    server_cfg: dict,
+) -> tuple[str, int, str]:
+    """Brief: Parse DNSSEC mode/payload/validation settings.
+
+    Inputs:
+      - server_cfg: Parsed server config mapping.
+
+    Outputs:
+      - tuple[str, int, str]: (dnssec_mode, edns_payload, dnssec_validation).
+    """
+
+    dnssec_cfg = server_cfg.get("dnssec") or {}
+    if not isinstance(dnssec_cfg, dict):
+        dnssec_cfg = {}
+    dnssec_mode = str(dnssec_cfg.get("mode", "ignore")).lower()
+    edns_payload = int(dnssec_cfg.get("udp_payload_size", 1232))
+    dnssec_validation = str(dnssec_cfg.get("validation", "upstream_ad")).lower()
+    return dnssec_mode, edns_payload, dnssec_validation
+
+
+def _parse_search_domain_settings(
+    *,
+    resolver_cfg: dict,
+) -> tuple[str, bool, object, str]:
+    """Brief: Parse resolver search-domain qualification settings.
+
+    Inputs:
+      - resolver_cfg: Parsed resolver config mapping.
+
+    Outputs:
+      - tuple[str, bool, object, str]:
+        (search_domain, qualify_single_label, qualify_non_proper_tld,
+         non_proper_tld_mode).
+    """
+
+    search_cfg = resolver_cfg.get("search") or {}
+    if not isinstance(search_cfg, dict):
+        search_cfg = {}
+    search_domain = str(search_cfg.get("domain", "") or "").strip().rstrip(".")
+    qualify_single_label = bool(search_cfg.get("qualify_single_label", True))
+    raw_npt = search_cfg.get("qualify_non_proper_tld", False)
+    if isinstance(raw_npt, list):
+        qualify_non_proper_tld: object = [
+            str(e).strip().rstrip(".") for e in raw_npt if str(e).strip()
+        ]
+    elif isinstance(raw_npt, str):
+        s = raw_npt.strip().lower()
+        qualify_non_proper_tld = True if s in ("true", "yes", "1") else False
+    else:
+        qualify_non_proper_tld = bool(raw_npt)
+    raw_tld_mode = search_cfg.get("non_proper_tld_mode", "suffix")
+    non_proper_tld_mode = str(raw_tld_mode or "suffix").strip().lower()
+    if non_proper_tld_mode not in {"suffix", "exact"}:
+        non_proper_tld_mode = "suffix"
+    return (
+        search_domain,
+        qualify_single_label,
+        qualify_non_proper_tld,
+        non_proper_tld_mode,
     )
 
 

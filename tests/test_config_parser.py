@@ -262,11 +262,19 @@ def test_main_arg_parser_defaults_config_extras_to_error() -> None:
 
     Outputs:
       - None; asserts parsed default config_extras is 'error'.
+
+    Notes:
+      - Action is required (`serve`/`init`/…); shared flags live on each action.
     """
 
+    from foghorn.main_config_helpers import resolve_cli_config_path
+
     parser = _build_main_arg_parser()
-    args = parser.parse_args([])
+    args = parser.parse_args(["serve"])
+    resolve_cli_config_path(args)
+    assert args.action == "serve"
     assert args.config_extras == "error"
+    assert args.config == "config.yaml"
 
 
 def test_parse_config_file_tls_ca_missing_is_fatal(tmp_path) -> None:

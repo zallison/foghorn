@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import atexit
 import ipaddress
 import logging
 import os
@@ -23,6 +24,12 @@ except Exception:  # pragma: no cover - defensive
 
 from foghorn.stats.meta import FOGHORN_VERSION
 
+from .cli_actions import (
+    dispatch_non_serve_action,
+    remove_pid_file,
+    resolve_pid_file_path,
+    write_pid_file,
+)
 from .config.config_parser import (
     load_plugins,
     parse_config_file,
@@ -47,6 +54,7 @@ from .main_config_helpers import (
     _parse_upstream_selection_cfg,
     _resolve_web_config,
     _seed_listener_runtime_state,
+    resolve_cli_config_path,
 )
 from .main_lifecycle_helpers import (
     _resolve_doh,
@@ -75,7 +83,7 @@ from .stats import StatsCollector, StatsReporter
 
 def main(argv: list[str] | None = None) -> int:
     """
-    Parses arguments, loads configuration, initializes plugins, and starts the server.
+    Parses arguments, dispatches CLI actions, and starts the server for `serve`.
 
     Args:
         argv: Command-line arguments.
@@ -85,7 +93,7 @@ def main(argv: list[str] | None = None) -> int:
 
     Example use:
         CLI:
-            PYTHONPATH=src python -m foghorn.main --config config.yaml
+            PYTHONPATH=src python -m foghorn.main serve config.yaml
 
         Programmatic (for testing):
         (This is a simplified example; real usage involves creating a config file)
@@ -93,22 +101,31 @@ def main(argv: list[str] | None = None) -> int:
         >>> import time
         >>> with patch('builtins.open', mock_open(read_data='''
         ... listen:
-        ...   host: 127.0.0.1
+        ...   host: *********
         ...   port: 5354
         ... upstreams:
-        ...   - host: 1.1.1.1
+        ...   - host: *******
         ...     port: 53
         ... foghorn:
         ...   timeout_ms: 2000
         ... ''')):
-        ...     server_thread = threading.Thread(target=main, args=(["--config", "config.yaml"],), daemon=True)
+        ...     server_thread = threading.Thread(target=main, args=(["serve", "config.yaml"],), daemon=True)
         ...     server_thread.start()
         ...     time.sleep(0.1) # Give server time to start
     """
     parser = _build_main_arg_parser()
-    args = parser.parse_args(argv)
+    normalized_argv = _normalize_legacy_cli_argv(argv)
+    args = parser.parse_args(normalized_argv)
+    # Normalize -c/--config and positional config path onto args.config.
+    resolve_cli_config_path(args)
 
-    # Load and validate configuration.
+    # Route non-serve actions (init/status/config/service/reload) before loading
+    # the full server runtime.
+    non_serve_rc = dispatch_non_serve_action(args)
+    if non_serve_rc is not None:
+        return int(non_serve_rc)
+
+    # Load and validate configuration for serve.
     try:
         cfg = parse_config_file(
             args.config,
@@ -140,6 +157,22 @@ def main(argv: list[str] | None = None) -> int:
     # _apply_runtime_config) so they can adjust behaviour without restarting
     # the main process or DNS listeners.
     cfg_path: str = args.config
+    pid_file_path = resolve_pid_file_path(cfg_path)
+    try:
+        write_pid_file(pid_file_path)
+        logger.info("PID file: %s", pid_file_path)
+
+        def _cleanup_pid_file() -> None:
+            """Brief: Best-effort PID file removal for any serve exit path."""
+
+            try:
+                remove_pid_file(pid_file_path)
+            except Exception:
+                pass
+
+        atexit.register(_cleanup_pid_file)
+    except OSError as exc:
+        logger.warning("Could not write PID file %s: %s", pid_file_path, exc)
     # Record config path early so plugins can resolve relative TLS/file paths
     # during setup() before initialize_runtime() runs.
     try:
@@ -539,7 +572,10 @@ def main(argv: list[str] | None = None) -> int:
         sig=signal.SIGUSR1,
         handler=_sigusr1_handler,
         logger=logger,
-        success_log="Installed SIGUSR1 handler to notify plugins and optionally reset statistics",
+        success_log=(
+            "Installed SIGUSR1 handler to reload config, notify plugins, "
+            "and optionally reset statistics"
+        ),
         failure_log="Could not install SIGUSR1 handler on this platform",
     )
     _install_signal_handler(
@@ -1177,6 +1213,10 @@ def main(argv: list[str] | None = None) -> int:
             loop_threads=loop_threads,
         )
     finally:
+        try:
+            remove_pid_file(pid_file_path)
+        except Exception:
+            logger.debug("Failed to remove PID file %s", pid_file_path, exc_info=True)
         _teardown_main_process(
             logger=logger,
             udp_handle=udp_handle,
@@ -2389,6 +2429,60 @@ def _configure_dnssec_validation_resolver(
             pass
 
     return True
+
+
+def _normalize_legacy_cli_argv(argv: list[str] | None) -> list[str] | None:
+    """Brief: Map legacy `--config PATH` invocations to `serve PATH`.
+
+    Inputs:
+      - argv: Raw argv list (excluding program name), or None for sys.argv.
+
+    Outputs:
+      - list[str] | None: Normalized argv, or None when argv was None so
+        argparse reads sys.argv (also normalized via a rewritten copy when
+        legacy flags are present on sys.argv).
+
+    Notes:
+      - Legacy form: foghorn --config config.yaml [...flags]
+      - New form:    foghorn serve config.yaml [...flags]
+      - When an explicit action is already present, argv is returned unchanged.
+    """
+
+    actions = {"serve", "init", "status", "config", "service", "reload"}
+
+    def _rewrite(values: list[str]) -> list[str]:
+        if any(v in actions for v in values if not str(v).startswith("-")):
+            return values
+        out: list[str] = []
+        i = 0
+        config_path: str | None = None
+        while i < len(values):
+            tok = values[i]
+            if tok in {"--config", "-c"} and i + 1 < len(values):
+                config_path = values[i + 1]
+                i += 2
+                continue
+            if tok.startswith("--config="):
+                config_path = tok.split("=", 1)[1]
+                i += 1
+                continue
+            out.append(tok)
+            i += 1
+        if config_path is None:
+            # No legacy --config and no action: leave as-is so argparse errors.
+            return values
+        return ["serve", str(config_path), *out]
+
+    if argv is None:
+        # Rewrite sys.argv in place for `python -m foghorn.main --config ...`.
+        try:
+            rewritten = _rewrite(list(sys.argv[1:]))
+            if rewritten != list(sys.argv[1:]):
+                sys.argv = [sys.argv[0], *rewritten]
+        except Exception:
+            pass
+        return None
+    return _rewrite(list(argv))
 
 
 def _install_signal_handler(
