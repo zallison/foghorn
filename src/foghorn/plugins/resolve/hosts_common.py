@@ -15,8 +15,12 @@ import os
 import re
 import threading
 import time
+import warnings
 from collections.abc import Iterable
 from typing import Any, ClassVar
+
+import requests
+from requests.adapters import HTTPAdapter
 
 from dnslib import AAAA, PTR, QTYPE, RR, TXT, A, DNSHeader, DNSRecord
 
@@ -28,6 +32,13 @@ logger = logging.getLogger(__name__)
 
 _DNS_LABEL_RE = re.compile(r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$")
 _CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f]")
+
+# verify=False triggers urllib3 InsecureRequestWarning on every request (and
+# logging.captureWarnings routes those into py.warnings). Suppress once and
+# emit a single compact operator notice per target URL/host instead.
+_INSECURE_TLS_NOTICES: set[str] = set()
+_INSECURE_TLS_LOCK = threading.Lock()
+_INSECURE_WARNING_FILTER_INSTALLED = False
 
 
 def sanitize_txt_chunk(text: str, max_bytes: int = 253) -> str:
@@ -95,6 +106,76 @@ def is_valid_dns_label(name: str) -> bool:
     if not label or "." in label or len(label) > 63:
         return False
     return bool(_DNS_LABEL_RE.match(label))
+
+
+def is_valid_dns_hostname(name: str) -> bool:
+    """Brief: Validate a single- or multi-label hostname (LDH labels).
+
+    Inputs:
+      - name: Candidate hostname; may contain dots (no trailing dot).
+
+    Outputs:
+      - True when every label is publishable under LDH rules.
+
+    Example:
+      is_valid_dns_hostname("api") -> True
+      is_valid_dns_hostname("api.internal") -> True
+      is_valid_dns_hostname("_bad") -> False
+    """
+
+    host = normalize_host_label(name)
+    if not host or len(host) > 253:
+        return False
+    return all(is_valid_dns_label(part) for part in host.split(".") if part)
+
+
+def dns_names_from_labels(
+    labels: dict | None,
+    label_key: str = "dns_name",
+) -> list[str]:
+    """Brief: Extract publishable DNS names from a labels/tags mapping.
+
+    Inputs:
+      - labels: Mapping of label key -> value (Docker Labels / K8s metadata.labels).
+      - label_key: Label name to read (default "dns_name").
+
+    Outputs:
+      - Deduped list of normalized hostnames. Values may be comma- or
+        whitespace-separated multi-names. Invalid tokens are dropped.
+
+    Example:
+      dns_names_from_labels({"dns_name": "api, web"}) -> ["api", "web"]
+    """
+
+    key = str(label_key or "").strip() or "dns_name"
+    if not isinstance(labels, dict) or not key:
+        return []
+    raw = labels.get(key)
+    if raw is None:
+        # Case-insensitive key match for operator convenience.
+        key_l = key.lower()
+        for k, v in labels.items():
+            if str(k).lower() == key_l:
+                raw = v
+                break
+        else:
+            return []
+    text = str(raw).strip()
+    if not text:
+        return []
+    # Split on commas and/or whitespace so "api,web" and "api web" both work.
+    tokens = [t for t in re.split(r"[\s,]+", text) if t]
+    out: list[str] = []
+    seen: set[str] = set()
+    for tok in tokens:
+        host = normalize_host_label(tok)
+        if not host or host in seen:
+            continue
+        if not is_valid_dns_hostname(host):
+            continue
+        seen.add(host)
+        out.append(host)
+    return out
 
 
 def normalize_suffix(raw: object) -> str:
@@ -1274,3 +1355,120 @@ def add_forward_records(
             continue
         reverse.setdefault(rev, ptr_target)
         ttl_ptr[rev] = int(ttl)
+
+
+class _SNIAdapter(HTTPAdapter):
+    """HTTPAdapter that forces a TLS server_hostname (SNI / cert name)."""
+
+    def __init__(self, server_hostname: str | None = None, **kwargs: Any) -> None:
+        """Brief: Create adapter with optional SNI override.
+
+        Inputs:
+          - server_hostname: Hostname sent in SNI and used for cert matching.
+          - kwargs: Passed to HTTPAdapter.
+
+        Outputs:
+          - None.
+        """
+
+        self._server_hostname = (
+            str(server_hostname).strip() if server_hostname else None
+        )
+        super().__init__(**kwargs)
+
+    def init_poolmanager(
+        self, connections: int, maxsize: int, block: bool = False, **pool_kwargs: Any
+    ) -> None:
+        """Brief: Initialize urllib3 pool with server_hostname when set.
+
+        Inputs:
+          - connections / maxsize / block: Pool sizing flags.
+          - pool_kwargs: Extra urllib3 pool kwargs.
+
+        Outputs:
+          - None.
+        """
+
+        if self._server_hostname:
+            pool_kwargs["server_hostname"] = self._server_hostname
+        super().init_poolmanager(connections, maxsize, block, **pool_kwargs)
+
+
+def suppress_insecure_request_warnings() -> None:
+    """Brief: Globally silence urllib3 InsecureRequestWarning (idempotent).
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None.
+
+    Notes:
+      - Uses both urllib3.disable_warnings and warnings filters so the noise is
+        suppressed even when logging.captureWarnings(True) is enabled.
+    """
+
+    global _INSECURE_WARNING_FILTER_INSTALLED
+    with _INSECURE_TLS_LOCK:
+        if _INSECURE_WARNING_FILTER_INSTALLED:
+            return
+        try:
+            import urllib3
+            from urllib3.exceptions import InsecureRequestWarning
+
+            urllib3.disable_warnings(InsecureRequestWarning)
+            warnings.filterwarnings("ignore", category=InsecureRequestWarning)
+            warnings.filterwarnings(
+                "ignore",
+                message=r"Unverified HTTPS request is being made.*",
+            )
+        except Exception:
+            # urllib3 may be absent in minimal installs; nothing to suppress.
+            pass
+        _INSECURE_WARNING_FILTER_INSTALLED = True
+
+
+def note_insecure_tls(
+    target: str,
+    *,
+    log: logging.Logger | None = None,
+) -> None:
+    """Brief: Suppress InsecureRequestWarning flood; log one notice per target.
+
+    Inputs:
+      - target: Host/URL label for the one-shot warning message.
+      - log: Optional logger (defaults to hosts_common logger).
+
+    Outputs:
+      - None.
+
+    Example:
+      note_insecure_tls("https://pve.lan:8006", log=logger)
+    """
+
+    suppress_insecure_request_warnings()
+    host = str(target or "").strip().rstrip("/") or "unknown"
+    with _INSECURE_TLS_LOCK:
+        already = host in _INSECURE_TLS_NOTICES
+        if not already:
+            _INSECURE_TLS_NOTICES.add(host)
+    if already:
+        return
+    (log or logger).warning("TLS verify disabled for %s", host)
+
+
+def get_sni_session(server_hostname: str | None) -> requests.Session:
+    """Brief: Create a requests.Session with SNI support if requested.
+
+    Inputs:
+      - server_hostname: Hostname sent in SNI and used for cert matching.
+
+    Outputs:
+      - requests.Session with optional SNI adapter.
+    """
+
+    session = requests.Session()
+    if server_hostname:
+        adapter = _SNIAdapter(server_hostname=str(server_hostname))
+        session.mount("https://", adapter)
+    return session

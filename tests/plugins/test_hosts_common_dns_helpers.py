@@ -116,3 +116,26 @@ def test_format_exception_brief_handles_empty_message() -> None:
         hosts_common.format_exception_brief(RuntimeError("boom"))
         == "RuntimeError: boom"
     )
+
+
+def test_dns_names_from_labels_parses_and_validates() -> None:
+    """Brief: dns_names_from_labels splits, normalizes, and drops invalid tokens.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts parsing, multi-label keep, invalid drop.
+    """
+
+    assert hosts_common.dns_names_from_labels({"dns_name": "api, web"}) == [
+        "api",
+        "web",
+    ]
+    assert hosts_common.dns_names_from_labels(
+        {"DNS_NAME": "Api.Internal"}, "dns_name"
+    ) == ["api.internal"]
+    assert hosts_common.dns_names_from_labels({"dns_name": "_bad,ok"}) == ["ok"]
+    assert hosts_common.dns_names_from_labels({}, "dns_name") == []
+    assert hosts_common.is_valid_dns_hostname("api.internal") is True
+    assert hosts_common.is_valid_dns_hostname("_x") is False
