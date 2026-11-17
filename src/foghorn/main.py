@@ -394,8 +394,8 @@ def main(argv: list[str] | None = None) -> int:
     _sigusr2_pending = threading.Event()
 
     def _process_usr_signal(sig_label: str) -> None:
-        """Brief: Handle SIGUSR1/SIGUSR2 by optionally resetting statistics and
-        notifying plugins.
+        """Brief: Handle SIGUSR1/SIGUSR2 by reloading config (USR1), optionally
+        resetting statistics, and notifying plugins.
 
         Inputs:
           - sig_label: Human-readable signal label used in log messages (e.g.,
@@ -405,12 +405,57 @@ def main(argv: list[str] | None = None) -> int:
           - None
 
         Notes:
+          - SIGUSR1 triggers runtime_config.reload_from_disk() before stats/plugins.
           - SIGUSR1 and SIGUSR2 each honor their own reset flag:
             sigusr1_resets_stats for SIGUSR1, sigusr2_resets_stats for SIGUSR2.
         """
 
-        nonlocal cfg, stats_collector
+        nonlocal cfg, stats_collector, plugins
         log = logging.getLogger("foghorn.main")
+
+        # SIGUSR1: re-read and apply configuration without restarting listeners.
+        if sig_label == "SIGUSR1":
+            try:
+                from foghorn import runtime_config as _runtime_config
+
+                reload_res = _runtime_config.reload_from_disk(
+                    config_path=cfg_path,
+                    mode="reload_only",
+                )
+                if reload_res.ok:
+                    try:
+                        snap = _runtime_config.get_runtime_snapshot()
+                        if isinstance(getattr(snap, "cfg", None), dict):
+                            cfg = snap.cfg
+                        # Refresh the local plugin list from the active snapshot when
+                        # runtime has been initialized. Skip default empty snapshots
+                        # (generation 0) so early/test signals do not wipe plugins.
+                        snap_gen = int(getattr(snap, "generation", 0) or 0)
+                        if snap_gen > 0 and getattr(snap, "plugins", None) is not None:
+                            plugins = list(snap.plugins or [])
+                    except Exception:
+                        log.debug(
+                            "SIGUSR1: failed to refresh local cfg/plugins refs",
+                            exc_info=True,
+                        )
+                    if reload_res.restart_required:
+                        log.warning(
+                            "SIGUSR1: config reloaded with restart-required changes "
+                            "preserved (reasons=%s); full restart needed for listeners/TLS",
+                            list(reload_res.restart_reasons or []),
+                        )
+                    else:
+                        log.info(
+                            "SIGUSR1: configuration reloaded (generation=%s)",
+                            reload_res.generation,
+                        )
+                else:
+                    log.error(
+                        "SIGUSR1: configuration reload failed: %s",
+                        reload_res.error or "unknown error",
+                    )
+            except Exception as exc:
+                log.error("SIGUSR1: unexpected error during config reload: %s", exc)
 
         # Conditionally reset statistics based on config; failures here must
         # never prevent plugin notifications from running.

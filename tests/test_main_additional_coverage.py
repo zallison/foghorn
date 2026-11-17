@@ -2266,6 +2266,24 @@ def test_main_sigusr_dispatch_uses_unified_hook(monkeypatch, caplog):
         lambda *a, **k: None,
     )
 
+    # SIGUSR1 now reloads config from disk. Keep the injected plugin instance
+    # across that path; the fixture YAML has plugins: [] so a real reload would
+    # replace main's plugin list before handle_sigusr runs.
+    import foghorn.runtime_config as runtime_config_mod
+    from foghorn.runtime_config import ReloadResult
+
+    monkeypatch.setattr(
+        runtime_config_mod,
+        "reload_from_disk",
+        lambda **_kw: ReloadResult(
+            ok=True,
+            generation=1,
+            restart_required=False,
+            restart_reasons=[],
+            error=None,
+        ),
+    )
+
     with patch("builtins.open", mock_open(read_data=yaml_data)):
         with caplog.at_level(logging.INFO, logger="foghorn.main"):
             rc = main_mod.main(["--config", "cfg.yaml"])

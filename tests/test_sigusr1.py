@@ -121,6 +121,24 @@ def test_sigusr1_resets_stats_and_notifies_plugins(monkeypatch, caplog):
     monkeypatch.setattr(main_mod.signal, "signal", fake_signal)
     monkeypatch.setattr(time, "sleep", _sleep_once)
 
+    # Keep the test's DummyPlugin instances across SIGUSR1 config reload.
+    # Production reloads rebuild plugins from YAML; this unit test injects plugins
+    # via load_plugins and has no plugin specs in the fixture YAML.
+    import foghorn.runtime_config as runtime_config_mod
+    from foghorn.runtime_config import ReloadResult
+
+    monkeypatch.setattr(
+        runtime_config_mod,
+        "reload_from_disk",
+        lambda **_kw: ReloadResult(
+            ok=True,
+            generation=1,
+            restart_required=False,
+            restart_reasons=[],
+            error=None,
+        ),
+    )
+
     with patch("builtins.open", mock_open(read_data=yaml_data)):
         caplog.set_level(logging.INFO)
         rc = main_mod.main(["--config", "cfg.yaml"])
