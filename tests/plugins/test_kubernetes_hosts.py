@@ -386,3 +386,72 @@ def test_list_namespaced_enforces_page_and_item_caps(monkeypatch):
         assert False, "expected RuntimeError"
     except RuntimeError as exc:
         assert "max_list_pages" in str(exc)
+
+
+def test_kubernetes_hosts_dns_name_label(monkeypatch):
+    """Brief: dns_name label publishes stable names for random pod names.
+
+    Inputs:
+      - monkeypatch: pytest fixture.
+
+    Outputs:
+      - None; asserts label-based and resource-name hostnames both map.
+    """
+
+    mod = importlib.import_module("foghorn.plugins.resolve.kubernetes_hosts")
+    KubernetesHosts = mod.KubernetesHosts
+
+    pod_ip = _ip(10, 244, 1, 7)
+    plugin = KubernetesHosts(
+        name="k8s",
+        api_server="https://k8s.example",
+        token="test-token",
+        tls_verify=False,
+        namespaces=["default"],
+        suffix="cluster.local",
+        poll_interval_seconds=0,
+        include_services=False,
+        include_pods=True,
+    )
+
+    pods = [
+        {
+            "metadata": {
+                "name": "web-7d9f8c-xk2m",
+                "namespace": "default",
+                "labels": {"dns_name": "api"},
+            },
+            "status": {
+                "phase": "Running",
+                "podIP": pod_ip,
+                "podIPs": [{"ip": pod_ip}],
+            },
+        }
+    ]
+
+    def fake_list(conn, resource, namespace, *, label_selector, field_selector):
+        _ = (conn, label_selector, field_selector, namespace)
+        if resource == "pods":
+            return pods
+        return []
+
+    monkeypatch.setattr(plugin, "_list_namespaced", fake_list)
+    monkeypatch.setattr(
+        plugin,
+        "_resolve_connection",
+        lambda endpoint: {
+            "api_server": "https://k8s.example",
+            "token": "x",
+            "verify": False,
+            "headers": {},
+        },
+    )
+
+    plugin.setup()
+    with plugin._lock:
+        names = set(plugin._forward_v4) | set(plugin._forward_v6)
+    assert "api.default.cluster.local" in names
+    assert "api.cluster.local" in names or "api.default.pod.cluster.local" in names
+    assert any(n.startswith("web-7d9f8c-xk2m.default") for n in names)
+    assert plugin._forward_v4["api.default.cluster.local"] == [pod_ip]
+    plugin.shutdown()

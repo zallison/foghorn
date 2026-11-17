@@ -16,10 +16,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin
 
-import requests
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
-from requests.adapters import HTTPAdapter
 
 from foghorn.plugins.resolve.base import (
     AdminPageSpec,
@@ -28,52 +26,17 @@ from foghorn.plugins.resolve.base import (
 from foghorn.plugins.resolve.hosts_common import (
     DynamicHostsPlugin,
     add_forward_records,
+    dns_names_from_labels,
     fold_tls_aliases,
     join_host_suffix,
     merge_list_map,
     normalize_host_label,
     normalize_suffix,
     resolve_plugin_tls_path,
+    get_sni_session,
 )
 
 logger = logging.getLogger(__name__)
-
-
-class _SNIAdapter(HTTPAdapter):
-    """HTTPAdapter that forces a TLS server_hostname (SNI / cert name)."""
-
-    def __init__(self, server_hostname: str | None = None, **kwargs: Any) -> None:
-        """Brief: Create adapter with optional SNI override.
-
-        Inputs:
-          - server_hostname: Hostname sent in SNI and used for cert matching.
-          - kwargs: Passed to HTTPAdapter.
-
-        Outputs:
-          - None.
-        """
-
-        self._server_hostname = (
-            str(server_hostname).strip() if server_hostname else None
-        )
-        super().__init__(**kwargs)
-
-    def init_poolmanager(
-        self, connections: int, maxsize: int, block: bool = False, **pool_kwargs: Any
-    ) -> None:
-        """Brief: Initialize urllib3 pool with server_hostname when set.
-
-        Inputs:
-          - connections / maxsize / block: Pool sizing flags.
-          - pool_kwargs: Extra urllib3 pool kwargs.
-
-        Outputs:
-          - None.
-        """
-
-        if self._server_hostname:
-            pool_kwargs["server_hostname"] = self._server_hostname
-        super().init_poolmanager(connections, maxsize, block, **pool_kwargs)
 
 
 _IN_CLUSTER_TOKEN = "/var/run/secrets/kubernetes.io/serviceaccount/token"
@@ -179,6 +142,8 @@ class KubernetesHostsConfig(BaseModel):
     max_list_pages: int = Field(default=50, ge=0)
     max_list_items: int = Field(default=20000, ge=0)
     expose_txt_in_additional: bool = False
+    # Label key for explicit DNS names (provider-neutral default: dns_name).
+    dns_name_label: str = Field(default="dns_name")
     api_server: str | None = None
     kubeconfig: str | None = None
     in_cluster: bool = False
@@ -555,6 +520,12 @@ class KubernetesHosts(DynamicHostsPlugin):
         # TLS trust: explicit false wins; otherwise ca_cert path becomes verify=.
         if endpoint.tls_verify is False:
             verify = False
+            from foghorn.plugins.resolve.hosts_common import note_insecure_tls
+
+            note_insecure_tls(
+                str(api_server or endpoint.api_server or "kubernetes"),
+                log=logger,
+            )
         elif ca_cert:
             ca_path = str(ca_cert)
             if (
@@ -642,17 +613,11 @@ class KubernetesHosts(DynamicHostsPlugin):
         if cert is not None:
             req_kwargs["cert"] = cert
 
-        sni = conn.get("tls_server_name")
-        if sni:
-            session = requests.Session()
-            try:
-                adapter = _SNIAdapter(server_hostname=str(sni))
-                session.mount("https://", adapter)
-                resp = session.get(url, **req_kwargs)
-            finally:
-                session.close()
-        else:
-            resp = requests.get(url, **req_kwargs)
+        session = get_sni_session(conn.get("tls_server_name"))
+        try:
+            resp = session.get(url, **req_kwargs)
+        finally:
+            session.close()
         resp.raise_for_status()
         data = resp.json()
         if not isinstance(data, dict):
@@ -795,6 +760,64 @@ class KubernetesHosts(DynamicHostsPlugin):
                 out.append(full)
         return out
 
+    def _publish_names_for_resource(
+        self,
+        *,
+        resource_name: str,
+        namespace: str,
+        kind: str,
+        suffix: str | None,
+        single_ns: bool,
+        labels: object,
+    ) -> list[str]:
+        """Brief: Build publish names, preferring dns_name label when set.
+
+        Inputs:
+          - resource_name / namespace / kind: K8s object identity.
+          - suffix / single_ns: Same as _names_for_resource.
+          - labels: metadata.labels mapping (may be empty).
+
+        Outputs:
+          - Unique hostnames. When dns_name label values are present they are
+            used as primary bases (still with ns/kind variants); the original
+            resource name is also published as an alias base.
+
+        Example:
+          labels={"dns_name": "api"}, resource_name="web-abc123" publishes both
+          api.<ns>… and web-abc123.<ns>… forms.
+        """
+
+        label_key = (
+            str(
+                getattr(getattr(self, "_typed", None), "dns_name_label", None)
+                or "dns_name"
+            ).strip()
+            or "dns_name"
+        )
+        label_names = dns_names_from_labels(labels, label_key)
+        bases: list[str] = []
+        seen_bases: set[str] = set()
+        for n in label_names + [resource_name]:
+            key = normalize_host_label(n)
+            if not key or key in seen_bases:
+                continue
+            seen_bases.add(key)
+            bases.append(key)
+        out: list[str] = []
+        seen: set[str] = set()
+        for base in bases:
+            for full in self._names_for_resource(
+                name=base,
+                namespace=namespace,
+                kind=kind,
+                suffix=suffix,
+                single_ns=single_ns,
+            ):
+                if full and full not in seen:
+                    seen.add(full)
+                    out.append(full)
+        return out
+
     def _collect_endpoint(self, endpoint: KubernetesEndpointConfig) -> tuple[
         dict[str, list[str]],
         dict[str, list[str]],
@@ -896,12 +919,18 @@ class KubernetesHosts(DynamicHostsPlugin):
                     for ext in spec.get("externalIPs") or []:
                         if ext:
                             ips.append(str(ext))
-                    names = self._names_for_resource(
-                        name=sname,
+                    labels = (
+                        meta.get("labels")
+                        if isinstance(meta.get("labels"), dict)
+                        else {}
+                    )
+                    names = self._publish_names_for_resource(
+                        resource_name=sname,
                         namespace=sns,
                         kind="service",
                         suffix=suffix,
                         single_ns=single_ns,
+                        labels=labels,
                     )
                     txt = [
                         "k8s=service",
@@ -909,6 +938,11 @@ class KubernetesHosts(DynamicHostsPlugin):
                         f"name={sname}",
                         f"type={spec.get('type') or ''}",
                     ]
+                    label_names = dns_names_from_labels(
+                        labels, getattr(self._typed, "dns_name_label", "dns_name")
+                    )
+                    if label_names:
+                        txt.append(f"dns_name={','.join(label_names)}")
                     add_forward_records(
                         names=names,
                         ips=ips,
@@ -977,14 +1011,25 @@ class KubernetesHosts(DynamicHostsPlugin):
                                 ips.append(ip_s)
                     if not ips:
                         continue
-                    names = self._names_for_resource(
-                        name=pname,
+                    labels = (
+                        meta.get("labels")
+                        if isinstance(meta.get("labels"), dict)
+                        else {}
+                    )
+                    names = self._publish_names_for_resource(
+                        resource_name=pname,
                         namespace=pns,
                         kind="pod",
                         suffix=suffix,
                         single_ns=single_ns,
+                        labels=labels,
                     )
                     txt = ["k8s=pod", f"ns={pns}", f"name={pname}", f"phase={phase}"]
+                    label_names = dns_names_from_labels(
+                        labels, getattr(self._typed, "dns_name_label", "dns_name")
+                    )
+                    if label_names:
+                        txt.append(f"dns_name={','.join(label_names)}")
                     add_forward_records(
                         names=names,
                         ips=ips,

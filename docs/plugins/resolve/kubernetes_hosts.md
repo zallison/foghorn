@@ -52,6 +52,11 @@ For each Service/Pod `name` in `namespace`, Foghorn publishes:
 - `{name}` when exactly one namespace is configured
 - optional `suffix` appended (e.g. `cluster.local`)
 
+When metadata label `dns_name` is set (configurable via `dns_name_label`), that
+value is also used as a name base with the same variants. Example:
+`labels: {dns_name: api}` on pod `web-7d9f8c-xk2m` publishes `api.default…`
+in addition to the pod name forms. Values may be comma/whitespace-separated.
+
 Headless Services (`clusterIP: None`) are skipped. Non-Running pods are skipped.
 
 ## Config highlights
@@ -62,6 +67,7 @@ Headless Services (`clusterIP: None`) are skipped. Non-Running pods are skipped.
 | `namespaces` | Limit scope; empty lists all namespaces the token can see |
 | `include_services` / `include_pods` | Resource kinds |
 | `label_selector` / `field_selector` | K8s list filters |
+| `dns_name_label` | Label key for explicit DNS names (default `dns_name`) |
 | `poll_interval_seconds` | Reload interval; `0` disables background poll |
 | `suffix` | DNS suffix |
 | `ttl` | Answer TTL |
