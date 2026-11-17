@@ -14,8 +14,8 @@ import ipaddress
 
 from dnslib import QTYPE, DNSRecord
 
-from foghorn.plugins.resolve.base import PluginContext
 from foghorn.plugins.resolve import hosts_common
+from foghorn.plugins.resolve.base import PluginContext
 
 # RFC 5737 / 3849 documentation addresses (safe in tests).
 WEB_V4 = "192.0.2.10"
@@ -502,6 +502,113 @@ def test_proxmox_hosts_address_filters_end_to_end(monkeypatch):
     plugin.shutdown()
 
 
+def test_endpoint_tls_server_name_aliases(monkeypatch):
+    """Brief: tls_name/server_name fold onto tls_server_name and reach _PveClient.
+
+    Inputs:
+      - monkeypatch: pytest fixture.
+    Outputs:
+      - None.
+    """
+
+    mod = importlib.import_module("foghorn.plugins.resolve.proxmox_hosts")
+    ProxmoxHosts = mod.ProxmoxHosts
+
+    # Canonical field via pydantic endpoint model.
+    ep = mod.ProxmoxEndpointConfig.model_validate(
+        {
+            "url": "https://pve.example:8006",
+            "token_id": "foghorn@pve!dns",
+            "token_secret": "secret",
+            "tls_name": "proxmox.example.com",
+        }
+    )
+    assert ep.tls_server_name == "proxmox.example.com"
+
+    ep2 = mod.ProxmoxEndpointConfig.model_validate(
+        {
+            "url": "https://pve.example:8006",
+            "token_id": "foghorn@pve!dns",
+            "token_secret": "secret",
+            "server_name": "proxmox.example.com",
+        }
+    )
+    assert ep2.tls_server_name == "proxmox.example.com"
+
+    captured: dict = {}
+
+    def fake_client(**kwargs):
+        captured.update(kwargs)
+
+        class _C:
+            def get_json(self, path, params=None):
+                if path.startswith("cluster/resources"):
+                    return []
+                return None
+
+            def close(self):
+                return None
+
+        return _C()
+
+    plugin = ProxmoxHosts(
+        endpoints=[
+            {
+                "url": "https://pve.example:8006",
+                "token_id": "foghorn@pve!dns",
+                "token_secret": "secret",
+                "verify_tls": False,
+                "server_name": "proxmox.example.com",
+            }
+        ],
+        reload_interval_second=0,
+    )
+    monkeypatch.setattr(mod, "_PveClient", fake_client)
+    plugin.setup()
+    assert plugin._endpoints[0]["tls_server_name"] == "proxmox.example.com"
+    # _get_client runs during reload and should pass SNI through.
+    assert captured.get("tls_server_name") == "proxmox.example.com"
+    plugin.shutdown()
+
+
+def test_pve_client_uses_sni_session(monkeypatch):
+    """Brief: _PveClient passes tls_server_name into get_sni_session.
+
+    Inputs:
+      - monkeypatch: pytest fixture.
+    Outputs:
+      - None.
+    """
+
+    mod = importlib.import_module("foghorn.plugins.resolve.proxmox_hosts")
+    seen: list[str | None] = []
+
+    class _Sess:
+        def __init__(self):
+            self.verify = True
+
+        def close(self):
+            return None
+
+    def fake_sni(name):
+        seen.append(name)
+        return _Sess()
+
+    monkeypatch.setattr(mod, "get_sni_session", fake_sni)
+    client = mod._PveClient(
+        base_url="https://pve.example:8006",
+        token_id="u@pve!t",
+        token_secret="s",
+        user=None,
+        password=None,
+        verify=True,
+        tls_server_name="proxmox.example.com",
+    )
+    assert seen == ["proxmox.example.com"]
+    assert client.tls_server_name == "proxmox.example.com"
+    client.close()
+
+
 def test_pve_client_suppresses_insecure_tls_warning(caplog):
     """Brief: verify=False suppresses urllib3 flood; one compact log per URL.
 
@@ -516,10 +623,12 @@ def test_pve_client_suppresses_insecure_tls_warning(caplog):
 
     import urllib3
 
+    from foghorn.plugins.resolve import hosts_common as hosts_common_mod
+
     mod = importlib.import_module("foghorn.plugins.resolve.proxmox_hosts")
-    # Reset module one-shot state for isolation.
-    mod._INSECURE_TLS_NOTICES.clear()
-    mod._INSECURE_WARNING_FILTER_INSTALLED = False
+    # Reset shared one-shot state for isolation.
+    hosts_common_mod._INSECURE_TLS_NOTICES.clear()
+    hosts_common_mod._INSECURE_WARNING_FILTER_INSTALLED = False
 
     with caplog.at_level(logging.WARNING, logger=mod.logger.name):
         c1 = mod._PveClient(
@@ -549,7 +658,7 @@ def test_pve_client_suppresses_insecure_tls_warning(caplog):
     assert len(msgs) == 1
     assert "pve-insecure.example" in msgs[0]
 
-    assert mod._INSECURE_WARNING_FILTER_INSTALLED is True
+    assert hosts_common_mod._INSECURE_WARNING_FILTER_INSTALLED is True
     # Global filters should ignore InsecureRequestWarning (urllib3 flood).
     assert any(
         f[0] == "ignore" and f[2] is urllib3.exceptions.InsecureRequestWarning

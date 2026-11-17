@@ -72,6 +72,7 @@ are not contacted unless earlier ones fail.
   - `token_id` / `token_secret`: API token (`USER@REALM!TOKENID` + secret)
   - `user` / `password`: Optional ticket auth instead of a token
   - `verify_tls` (default true), `tls_ca`: TLS settings
+  - `tls_server_name` (aliases `tls_name`, `server_name`): SNI / expected cert hostname
   - `use_ipv4` / `use_ipv6`: Answer with these host IPs for all guests
   - `ttl`, `suffix`, `reload_interval_second`: Per-endpoint overrides
 - `ttl` (default 60)

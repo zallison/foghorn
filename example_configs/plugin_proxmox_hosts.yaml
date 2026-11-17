@@ -72,6 +72,7 @@ plugins:
           token_secret: "${PVE_TOKEN_SECRET}"
           verify_tls: true
           # tls_ca: keys/pve-root-ca.pem
+          # tls_server_name: proxmox.example.com  # SNI / cert name (aliases: tls_name, server_name)
         # - url: https://pve2.${DOMAIN}:8006
         #   token_id: foghorn@pve!dns
         #   token_secret: "${PVE_TOKEN_SECRET}"

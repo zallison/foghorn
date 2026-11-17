@@ -11,16 +11,12 @@ from __future__ import annotations
 import ipaddress
 import logging
 import re
-import threading
 import time
-import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 from urllib.parse import urljoin
 
-import requests
-from pydantic import BaseModel, ConfigDict, Field
-from urllib3.exceptions import InsecureRequestWarning
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from foghorn.plugins.resolve.base import (
     AdminPageSpec,
@@ -29,21 +25,19 @@ from foghorn.plugins.resolve.base import (
 from foghorn.plugins.resolve.hosts_common import (
     DynamicHostsPlugin,
     apply_address_limit,
+    fold_tls_aliases,
+    get_sni_session,
     ip_passes_cidr_filters,
     is_valid_dns_label,
     normalize_publishable_hostname,
     normalize_suffix,
+    note_insecure_tls,
     parse_cidr_list,
     parse_str_list,
     resolve_plugin_tls_path,
 )
 
 logger = logging.getLogger(__name__)
-
-# Hosts we already logged the compact "TLS verify disabled" notice for.
-_INSECURE_TLS_NOTICES: set[str] = set()
-_INSECURE_TLS_NOTICES_LOCK = threading.Lock()
-_INSECURE_WARNING_FILTER_INSTALLED = False
 
 _IPCONFIG_RE = re.compile(
     r"(?:^|,)\s*ip=([^,/\s]+)(?:/(\d+))?",
@@ -65,6 +59,7 @@ class ProxmoxEndpointConfig(BaseModel):
       - user / password: Optional ticket-auth fallback when token is absent
       - verify_tls: Verify HTTPS certificates (default True)
       - tls_ca: Optional CA bundle path
+      - tls_server_name: SNI / expected cert hostname (aliases: tls_name, server_name)
       - use_ipv4 / use_ipv6: Optional host IP overrides for all guests
       - ttl: Optional TTL override for this endpoint
       - suffix: Optional DNS suffix override
@@ -81,6 +76,7 @@ class ProxmoxEndpointConfig(BaseModel):
     password: str | None = None
     verify_tls: bool = True
     tls_ca: str | None = None
+    tls_server_name: str | None = None
     use_ipv4: str | None = None
     use_ipv6: str | None = None
     ttl: int | None = Field(default=None, ge=0)
@@ -88,6 +84,25 @@ class ProxmoxEndpointConfig(BaseModel):
     # None means inherit plugin-level reload_interval_second (do not default here —
     # that would shadow a plugin-level value after model_dump).
     reload_interval_second: float | None = Field(default=None, ge=0)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_tls_aliases(cls, data: Any) -> Any:
+        """Brief: Map tls_name/server_name onto tls_server_name.
+
+        Inputs:
+          - data: Raw endpoint mapping or other value.
+        Outputs:
+          - Mapping with SNI aliases folded, or the original value.
+        """
+
+        return fold_tls_aliases(
+            data,
+            pairs=(
+                ("tls_name", "tls_server_name"),
+                ("server_name", "tls_server_name"),
+            ),
+        )
 
 
 class ProxmoxHostsConfig(BaseModel):
@@ -156,6 +171,7 @@ class _PveClient:
         user: str | None,
         password: str | None,
         verify: bool | str,
+        tls_server_name: str | None = None,
         timeout: float = 15.0,
     ) -> None:
         self.base_url = base_url.rstrip("/") + "/"
@@ -165,7 +181,9 @@ class _PveClient:
         self.password = password
         self.verify = verify
         self.timeout = timeout
-        self._session = requests.Session()
+        sni = str(tls_server_name or "").strip() or None
+        self.tls_server_name = sni
+        self._session = get_sni_session(sni)
         self._session.verify = verify
         self._ticket: str | None = None
         self._csrf: str | None = None
@@ -173,29 +191,7 @@ class _PveClient:
         # verify=False triggers urllib3 InsecureRequestWarning on every request;
         # silence that flood and emit one compact notice per URL instead.
         if verify is False:
-            self._note_insecure_tls()
-
-    def _note_insecure_tls(self) -> None:
-        """Brief: Suppress urllib3 flood; log one compact notice per base URL.
-
-        Inputs:
-          - None (uses self.base_url).
-        Outputs:
-          - None.
-        """
-
-        global _INSECURE_WARNING_FILTER_INSTALLED
-        host = self.base_url.rstrip("/")
-        with _INSECURE_TLS_NOTICES_LOCK:
-            if not _INSECURE_WARNING_FILTER_INSTALLED:
-                warnings.filterwarnings("ignore", category=InsecureRequestWarning)
-                _INSECURE_WARNING_FILTER_INSTALLED = True
-            already = host in _INSECURE_TLS_NOTICES
-            if not already:
-                _INSECURE_TLS_NOTICES.add(host)
-        if already:
-            return
-        logger.warning("TLS verify disabled for %s", host)
+            note_insecure_tls(self.base_url, log=logger)
 
     def close(self) -> None:
         """Brief: Close the underlying HTTP session.
@@ -443,10 +439,18 @@ class ProxmoxHosts(DynamicHostsPlugin):
 
         raw_endpoints = self.config.get("endpoints") or []
         endpoints_cfg: list[dict[str, object]] = []
-        for item in raw_endpoints:
-            if not isinstance(item, dict):
-                logger.warning("ignoring non-mapping endpoint %r", item)
+        for raw_item in raw_endpoints:
+            if not isinstance(raw_item, dict):
+                logger.warning("ignoring non-mapping endpoint %r", raw_item)
                 continue
+            # Accept tls_name / server_name as aliases for tls_server_name (k8s parity).
+            item = fold_tls_aliases(
+                raw_item,
+                pairs=(
+                    ("tls_name", "tls_server_name"),
+                    ("server_name", "tls_server_name"),
+                ),
+            )
             url_raw = str(item.get("url") or "").strip()
             if not url_raw:
                 logger.warning("endpoint missing url; skipping %r", item)
@@ -529,6 +533,8 @@ class ProxmoxHosts(DynamicHostsPlugin):
             else:
                 verify = True
 
+            tls_server_name = str(item.get("tls_server_name") or "").strip() or None
+
             ep_suffix = (
                 normalize_suffix(item.get("suffix")) if item.get("suffix") else ""
             )
@@ -541,6 +547,7 @@ class ProxmoxHosts(DynamicHostsPlugin):
                     "user": user,
                     "password": password,
                     "verify": verify,
+                    "tls_server_name": tls_server_name,
                     "interval": interval,
                     "host_ipv4": host_ipv4,
                     "host_ipv6": host_ipv6,
@@ -605,6 +612,7 @@ class ProxmoxHosts(DynamicHostsPlugin):
                 user=endpoint.get("user"),  # type: ignore[arg-type]
                 password=endpoint.get("password"),  # type: ignore[arg-type]
                 verify=endpoint["verify"],  # type: ignore[arg-type]
+                tls_server_name=endpoint.get("tls_server_name"),  # type: ignore[arg-type]
             )
         except Exception as exc:
             self._note_condition_failure(
