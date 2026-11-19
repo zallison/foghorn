@@ -38,6 +38,8 @@ All notable changes to this project will be documented in this file.
 - etc_hosts reverse maps include IPv6 as well as IPv4 via shared hosts helpers.
 
 ### Changed
+- Sticky condition logging lives in `foghorn.utils.condition_logging` (`note_condition_failure` / `note_condition_ok`); resolve plugins call it directly (no BasePlugin wrappers).
+- FileDownloader, EtcHosts, hosts plugins, and ZoneRecords (watchdog poll/reload, AXFR poll, NOTIFY send) use `foghorn.utils.condition_logging` for repeated failure paths instead of unbounded WARNING spam.
 - SIGUSR1 reloads configuration from disk (refreshing live config/plugin refs when the snapshot advances) before stats reset and plugin notifications; failures and restart-required reasons are logged.
 - Empty/default config webserver port is `5380` (was `8053`).
 - ZoneRecords AXFR token-bucket/concurrency and DNS UPDATE window counters delegate to `foghorn.utils.rate_limit` instead of plugin-local limiter state.
@@ -53,6 +55,7 @@ All notable changes to this project will be documented in this file.
 - Documented DockerHosts multi-endpoint client-failure continue behavior in `docs/plugins/resolve/docker_hosts.md`.
 
 ### Tests
+- Added `tests/test_condition_logging.py` for `foghorn.utils.condition_logging` helpers; owner-object coverage also in `tests/plugins/test_base_additional.py`.
 - Added `tests/test_cli_actions.py` for init/status/config/service/reload and PID helpers; updated main/config-parser coverage for action CLI and SIGUSR1 reload stubs.
 - Expanded hosts plugin tests for dns_name labels, endpoint ids, Proxmox SNI, shared hosts_common helpers, zone loader errors, and shared rate-limit wiring.
 - Added `tests/plugins/test_kubernetes_hosts.py` covering module import, Service/Pod map build and A/PTR answers, missing-auth error recording, kubeconfig token and client-cert parsing, and `tls_*` alias folding.
