@@ -9,14 +9,14 @@ Outputs:
 """
 
 import importlib
+
+from foghorn.plugins.resolve import hosts_common
 import ipaddress
 import types
 
 from dnslib import QTYPE, DNSRecord
 
-from foghorn.plugins.resolve import hosts_common
 from foghorn.plugins.resolve.base import PluginContext
-from foghorn.utils import condition_logging as condition_log
 
 
 def _make_example_containers():
@@ -677,14 +677,13 @@ def test_docker_hosts_iter_containers_state_change_logs_failures(monkeypatch, ca
     }
 
     # First failure at t=100, quiet repeats, hourly re-warn at t=3700.
-    # Sticky condition helpers use foghorn.utils.condition_logging.time.monotonic.
     timeline = iter([100.0, 101.0, 102.0, 3700.0, 3701.0])
-    cond_mod = importlib.import_module("foghorn.utils.condition_logging")
+    hc = importlib.import_module("foghorn.plugins.resolve.hosts_common")
 
     def _mono() -> float:
         return next(timeline)
 
-    monkeypatch.setattr(cond_mod.time, "monotonic", _mono)
+    monkeypatch.setattr(hc.time, "monotonic", _mono)
 
     caplog.set_level("DEBUG", logger=mod.__name__)
     endpoint = {"url": "unix:///var/run/docker.sock"}
@@ -746,18 +745,18 @@ def test_docker_hosts_condition_helpers_lazy_init(caplog):
     plugin.config = {}
     caplog.set_level(logging.INFO, logger=mod.__name__)
 
-    condition_log.note_condition_failure(plugin, "lazy-key", "lazy fail %s", "x")
+    plugin._note_condition_failure("lazy-key", "lazy fail %s", "x")
     assert plugin._condition_failed_by_key["lazy-key"] is True
     assert any("lazy fail" in r.getMessage() for r in caplog.records)
 
     caplog.clear()
-    condition_log.note_condition_ok(plugin, "lazy-key", "lazy ok %s", "x")
+    plugin._note_condition_ok("lazy-key", "lazy ok %s", "x")
     assert plugin._condition_failed_by_key["lazy-key"] is False
     assert any("lazy ok" in r.getMessage() for r in caplog.records)
 
     # Second ok while healthy is silent.
     caplog.clear()
-    condition_log.note_condition_ok(plugin, "lazy-key", "lazy ok %s", "x")
+    plugin._note_condition_ok("lazy-key", "lazy ok %s", "x")
     assert not any("lazy ok" in r.getMessage() for r in caplog.records)
 
 

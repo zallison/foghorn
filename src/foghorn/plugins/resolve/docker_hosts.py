@@ -30,7 +30,6 @@ from foghorn.plugins.resolve.hosts_common import (
     resolve_plugin_tls_path,
     sanitize_txt_chunk,
 )
-from foghorn.utils import condition_logging as condition_log
 
 try:  # docker SDK is optional at import time; plugin degrades gracefully.
     from docker.errors import DockerException
@@ -439,9 +438,8 @@ class DockerHosts(DynamicHostsPlugin):
                     client = self._build_docker_client(url=url, endpoint=ep)
                 except Exception as exc:
                     failed += 1
-                    condition_log.note_condition_failure(
-                        self,
-                        f"endpoint:{ep.get('id') or url}",
+                    self._note_condition_failure(
+                        f"endpoint:{url}",
                         "failed to create client for %s: %s",
                         ep.get("id") or url,
                         exc,
@@ -495,7 +493,7 @@ class DockerHosts(DynamicHostsPlugin):
         # Lazily create a client for this endpoint so that connection failures
         # during setup do not permanently disable refreshes. Each reload cycle
         # can retry endpoints that were previously unreachable.
-        endpoint_key = f"endpoint:{endpoint.get('id') or url}"
+        endpoint_key = f"endpoint:{url}"
 
         if client is None and docker is not None:
             try:
@@ -503,8 +501,7 @@ class DockerHosts(DynamicHostsPlugin):
             except (
                 Exception
             ) as exc:  # pragma: nocover defensive: connection and auth errors depend on external Docker daemon state
-                condition_log.note_condition_failure(
-                    self,
+                self._note_condition_failure(
                     endpoint_key,
                     "failed to create client for %s during reload: %s",
                     endpoint.get("id") or url,
@@ -528,8 +525,7 @@ class DockerHosts(DynamicHostsPlugin):
             containers = client.containers.list()
             result = [c.attrs for c in containers]
         except Exception as exc:
-            condition_log.note_condition_failure(
-                self,
+            self._note_condition_failure(
                 endpoint_key,
                 "failed to list containers for %s: %s",
                 endpoint.get("id") or url,
@@ -537,8 +533,7 @@ class DockerHosts(DynamicHostsPlugin):
             )
             return []
 
-        condition_log.note_condition_ok(
-            self,
+        self._note_condition_ok(
             endpoint_key,
             "endpoint %s is reachable again",
             endpoint.get("id") or url,
@@ -1185,22 +1180,20 @@ class DockerHosts(DynamicHostsPlugin):
                     )
 
         if total_containers and not mapped_containers:
-            condition_log.note_condition_failure(
-                self,
+            self._note_condition_failure(
                 "mapped-containers-empty",
                 "inspected %d containers but none had usable hostname/IP",
                 total_containers,
             )
         elif not new_v4 and not new_v6:
-            condition_log.note_condition_failure(
-                self,
+            self._note_condition_failure(
                 "no-hostname-ip-mappings",
                 "no hostname/IP mappings were added from any endpoint (no running containers or all were skipped)",
             )
         else:
             # Mappings are healthy again; clear sticky empty-map conditions.
-            condition_log.note_condition_ok(self, "mapped-containers-empty")
-            condition_log.note_condition_ok(self, "no-hostname-ip-mappings")
+            self._note_condition_ok("mapped-containers-empty")
+            self._note_condition_ok("no-hostname-ip-mappings")
 
         # Prepend a header line to each TXT record collection (if enabled).
         if new_txt:
