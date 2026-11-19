@@ -12,7 +12,6 @@ import importlib
 import os
 import signal
 import sys
-import types
 
 import pytest
 
@@ -23,18 +22,8 @@ if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
 
 # Compatibility shims for example plugins that were moved under
-# src/foghorn/plugins/resolve/examples without their own base.py or legacy
-# module names.
+# src/foghorn/plugins/resolve/examples (legacy module paths and package exports).
 try:
-    # Provide foghorn.plugins.resolve.examples.base so relative imports like
-    # `from .base import BasePlugin` continue to work.
-    from foghorn.plugins.resolve import base as _resolve_base
-
-    _examples_base = types.ModuleType("foghorn.plugins.resolve.examples.base")
-    for _name in ("BasePlugin", "PluginContext", "PluginDecision", "plugin_aliases"):
-        setattr(_examples_base, _name, getattr(_resolve_base, _name))
-    sys.modules["foghorn.plugins.resolve.examples.base"] = _examples_base
-
     # Alias old module paths to their new locations under the examples package.
     _examples_mod = importlib.import_module("foghorn.plugins.resolve.examples.examples")
     _dns_prefetch_mod = importlib.import_module(

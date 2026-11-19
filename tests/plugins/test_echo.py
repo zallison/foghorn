@@ -1,5 +1,5 @@
 """
-Brief: Tests for foghorn.plugins.resolve.echo module.
+Brief: Tests for foghorn.plugins.resolve.examples.echo module.
 
 Inputs:
   - None
@@ -11,7 +11,7 @@ Outputs:
 from dnslib import QTYPE, DNSRecord
 
 from foghorn.plugins.resolve.base import PluginContext
-from foghorn.plugins.resolve.echo import Echo
+from foghorn.plugins.resolve.examples.echo import Echo
 
 
 def test_echo_pre_resolve_not_targeted_returns_none():

@@ -16,7 +16,7 @@ from typing import Any, Dict
 import pytest
 
 from foghorn.plugins.resolve.access_control import AccessControl
-from foghorn.plugins.resolve.echo import Echo
+from foghorn.plugins.resolve.examples.echo import Echo
 from foghorn.plugins.resolve.file_downloader import FileDownloader
 from foghorn.plugins.resolve.filter import Filter
 from foghorn.plugins.resolve.flaky_server import FlakyServer
