@@ -1491,7 +1491,7 @@ def test_forward_local_blocking_does_not_affect_non_local_queries(
 
 def _make_ctx(
     data: bytes,
-    client_ip: str,
+    client_ip: str = "*********",
     *,
     listener: str | None = "udp",
     secure: bool | None = False,
@@ -1595,9 +1595,9 @@ def test_pipeline_stage_gate_short_circuits_on_deny(
       - None; asserts Gate short-circuits and CacheLookup is not required.
     """
 
-    set_runtime_snapshot(plugins=[_DenyPlugin()])
+    snap = set_runtime_snapshot(plugins=[_DenyPlugin()])
     q = DNSRecord.question("deny-stage.example", "A")
-    ctx = _make_ctx(q.pack())
+    ctx = _make_ctx(q.pack(), snap=snap)
     assert server_mod._stage_parse(ctx) is None
     early = server_mod._stage_gate(ctx)
     assert early is not None
@@ -1620,7 +1620,7 @@ def test_pipeline_stage_cache_lookup_hit_skips_resolve(
     set_runtime_snapshot(plugins=[])
     q = DNSRecord.question("cache-stage.example", "A")
     r = q.reply()
-    r.add_answer(RR("cache-stage.example", QTYPE.A, rdata=A("*************"), ttl=30))
+    r.add_answer(RR("cache-stage.example", QTYPE.A, rdata=A("203.0.113.10"), ttl=30))
     plugin_base.DNS_CACHE = InMemoryTTLCache()
     plugin_base.DNS_CACHE.set(("cache-stage.example", QTYPE.A), 30, r.pack())
 
@@ -1633,7 +1633,7 @@ def test_pipeline_stage_cache_lookup_hit_skips_resolve(
 
     monkeypatch.setattr(server_mod, "_stage_resolve", _resolve_guard)
 
-    resp = resolve_query_bytes(q.pack(), "*********")
+    resp = resolve_query_bytes(q.pack(), "192.0.2.50")
     out = DNSRecord.parse(resp)
     assert out.header.rcode == RCODE.NOERROR
     assert resolve_calls["n"] == 0
@@ -1656,7 +1656,7 @@ def test_pipeline_stage_order_parse_gate_cache_resolve_pack(
     order: list[str] = []
     q = DNSRecord.question("order.example", "A")
     r_ok = q.reply()
-    r_ok.add_answer(RR("order.example", QTYPE.A, rdata=A("*************"), ttl=60))
+    r_ok.add_answer(RR("order.example", QTYPE.A, rdata=A("203.0.113.10"), ttl=60))
 
     def _forward_ok(
         req,
@@ -1667,13 +1667,13 @@ def test_pipeline_stage_order_parse_gate_cache_resolve_pack(
         max_concurrent=None,
         on_attempt_result=None,
     ):
-        return r_ok.pack(), {"host": "*******", "port": 53}, "ok"
+        return r_ok.pack(), {"host": "192.0.2.1", "port": 53}, "ok"
 
     monkeypatch.setattr(server_mod, "send_query_with_failover", _forward_ok)
     plugin_base.DNS_CACHE = InMemoryTTLCache()
     set_runtime_snapshot(
         plugins=[],
-        upstream_addrs=[{"host": "*******", "port": 53}],
+        upstream_addrs=[{"host": "192.0.2.1", "port": 53}],
     )
 
     for name in (
@@ -1691,7 +1691,7 @@ def test_pipeline_stage_order_parse_gate_cache_resolve_pack(
 
         monkeypatch.setattr(server_mod, name, _wrap)
 
-    resp = resolve_query_bytes(q.pack(), "*********")
+    resp = resolve_query_bytes(q.pack(), "192.0.2.50")
     assert DNSRecord.parse(resp).header.rcode == RCODE.NOERROR
     assert order == [
         "_stage_parse",
@@ -1723,6 +1723,6 @@ def test_pipeline_exception_fallback_servfail(
         raise RuntimeError("stage boom")
 
     monkeypatch.setattr(server_mod, "_stage_parse", _boom)
-    resp = resolve_query_bytes(query, "*********")
+    resp = resolve_query_bytes(query, "192.0.2.50")
     assert bytes(resp) != bytes(query)
     assert DNSRecord.parse(resp).header.rcode == RCODE.SERVFAIL

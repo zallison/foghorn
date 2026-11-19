@@ -19,8 +19,10 @@ from dnslib import (  # noqa: F401  (re-exported for udp_server._ensure_edns)
 
 from foghorn.plugins.resolve import base as plugin_base  # noqa: F401
 from foghorn.plugins.resolve.base import PluginContext, PluginDecision  # noqa: F401
-from foghorn.plugins.resolve.zone_records import _client_allowed_for_axfr  # noqa: F401
-from foghorn.plugins.resolve.zone_records import iter_axfr_messages  # noqa: F401
+from foghorn.plugins.resolve.zone_records import (
+    _client_allowed_for_axfr,  # noqa: F401
+    iter_axfr_messages,  # noqa: F401
+)
 from foghorn.servers.recursive_resolver import RecursiveResolver  # noqa: F401
 from foghorn.servers.transports.dot import DoTError, get_dot_pool
 from foghorn.servers.transports.tcp import (
@@ -34,13 +36,13 @@ from .dns_runtime_state import DNSRuntimeState  # noqa: F401
 from .edns_utils import (
     synthesize_ecs_from_client_ip,
 )
-from .server_failover import _UPSTREAM_SKIP_LOCK  # noqa: F401
-from .server_failover import _UPSTREAM_SKIP_WARNED  # noqa: F401
-from .server_failover import _reset_upstream_skip_warning  # noqa: F401
-from .server_failover import _upstream_key_for_skip_warning  # noqa: F401
-from .server_failover import _warn_upstream_skip_once  # noqa: F401
 from .server_failover import (
+    _UPSTREAM_SKIP_LOCK,  # noqa: F401
+    _UPSTREAM_SKIP_WARNED,  # noqa: F401
+    _reset_upstream_skip_warning,  # noqa: F401
     _send_query_with_failover_impl,
+    _upstream_key_for_skip_warning,  # noqa: F401
+    _warn_upstream_skip_once,  # noqa: F401
 )
 from .server_opcode import _handle_non_query_opcode, _ResolveCoreResult
 from .server_resolve_cache import _try_cache_hit
@@ -76,7 +78,6 @@ from .server_response_utils import (  # noqa: F401
 )
 from .server_runtime import DNSServer  # noqa: F401
 from .server_upstream_health import _UPSTREAM_HEALTH, _UpstreamHealth  # noqa: F401
-from foghorn.utils.exception_logging import warn_suppressed_exception
 
 logger = logging.getLogger("foghorn.server")
 
@@ -491,10 +492,7 @@ def _record_suppressed_query_log_drop_candidate(
     try:
         handler(rcode=rcode, status=status)
     except Exception:
-        warn_suppressed_exception(
-            "best-effort operation failed in servers/server.py:_record_suppressed_query_log_drop_candidate",
-            logger=logger,
-        )
+        pass
 
 
 def _schedule_notify_axfr_refresh(zone_name: str, upstream: dict) -> None:
@@ -829,6 +827,508 @@ def _is_signed_authoritative_response(response_wire: bytes) -> bool:
         return False
 
 
+def _stage_parse(ctx: ResolutionContext) -> _ResolveCoreResult | None:
+    """Brief: Parse request wire bytes and handle non-QUERY / empty-question paths.
+
+    Inputs:
+      - ctx: Mutable per-query resolution context (uses data/client_ip/listener/secure/handler).
+
+    Outputs:
+      - _ResolveCoreResult on early completion (non-QUERY or FORMERR), else None after
+        setting ctx.req / ctx.qname / ctx.qtype / ctx.cache_key for later stages.
+
+    Example:
+      >>> early = _stage_parse(ctx)
+      >>> if early is not None:
+      ...     return early
+    """
+
+    data = ctx.data
+    # Compute opcode from header bits without parsing the full message. This
+    # allows us to handle UPDATE messages containing empty RRs (used for
+    # prerequisites/deletes) which dnslib cannot parse.
+    try:
+        if isinstance(data, (bytes, bytearray)) and len(data) >= 4:
+            flags = int.from_bytes(data[2:4], "big")
+            opcode = (flags >> 11) & 0x0F
+        else:
+            opcode = 0
+    except Exception:
+        opcode = 0
+
+    non_query_result = _handle_non_query_opcode(
+        opcode=opcode,
+        data=data,
+        client_ip=ctx.client_ip,
+        listener=ctx.listener,
+        secure=ctx.secure,
+        handler=ctx.handler,
+    )
+    if non_query_result is not None:
+        return non_query_result
+
+    req = DNSRecord.parse(data)
+    if not getattr(req, "questions", None):
+        # QDCOUNT=0 is syntactically valid. Treat it as a format error and
+        # reply with a minimal FORMERR without attempting additional parsing.
+        wire = _pack_minimal_dns_response_header(data, int(RCODE.FORMERR))
+        return _ResolveCoreResult(
+            wire=wire,
+            dnssec_status=None,
+            upstream_id=None,
+            rcode_name="FORMERR",
+        )
+
+    q = req.questions[0]
+    # Normalize the parsed qname by stripping the wire/root trailing dot.
+    # DNS wire format does not preserve whether the original client input
+    # included a textual trailing dot, so qualification decisions should be
+    # based on the normalized name.
+    qname = str(q.qname).rstrip(".")
+    qtype = q.qtype
+    ctx.req = req
+    ctx.qname = qname
+    ctx.qtype = qtype
+    ctx.cache_key = (qname.lower(), qtype)
+    return None
+
+
+def _stage_gate(ctx: ResolutionContext) -> _ResolveCoreResult | None:
+    """Brief: Cookie/TSIG gates, enrichment, telemetry, refuse_any, pre plugins.
+
+    Inputs:
+      - ctx: Context with req/qname/qtype set by Parse.
+
+    Outputs:
+      - _ResolveCoreResult when a gate or pre-plugin short-circuits, else None.
+        Mutates tsig_ctx, enrichment fields, plugins lists, request_result_meta.
+
+    Example:
+      >>> early = _stage_gate(ctx)
+    """
+
+    req = ctx.req
+    handler = ctx.handler
+    stats = ctx.stats
+    client_ip = ctx.client_ip
+    listener = ctx.listener
+    secure = ctx.secure
+    t0 = ctx.t0
+    data = ctx.data
+    request_result_meta = ctx.request_result_meta
+    snap = ctx.snap
+
+    # Downstream DNS COOKIE (RFC 7873) require_udp short-circuit.
+    # Runs before cache/plugins/upstream so invalid UDP cookies are cheap.
+    cookie_result = _handle_dns_cookies(
+        req=req,
+        handler=handler,
+        client_ip=client_ip,
+        listener=listener,
+        stats=stats,
+        t0=t0,
+    )
+    if cookie_result is not None:
+        return cookie_result
+
+    # Downstream QUERY TSIG (RFC 2845) gate.
+    # After cookies require_udp; before cache/plugins/upstream.
+    tsig_ctx, tsig_result = _handle_tsig(
+        data=data,
+        req=req,
+        handler=handler,
+        client_ip=client_ip,
+        listener=listener,
+        stats=stats,
+        t0=t0,
+        request_result_meta=request_result_meta,
+    )
+    ctx.tsig_ctx = tsig_ctx
+    if tsig_result is not None:
+        return tsig_result
+
+    qname = ctx.qname
+    qtype = ctx.qtype
+
+    # Search-domain qualification and ECS enrichment.
+    qname = _apply_search_domain_qualification(
+        qname=qname,
+        qtype=qtype,
+        snap=snap,
+        excluded_qtypes=_DNSSEC_SEARCH_QUALIFICATION_EXCLUDED_QTYPES,
+    )
+    ctx.qname = qname
+    ctx.cache_key = (qname.lower(), qtype)
+    (
+        inbound_ecs,
+        inbound_ecs_trusted,
+        trusted_inbound_ecs,
+        outbound_ecs,
+        effective_target_ip,
+        ecs_cache_bypass,
+        request_result_meta,
+    ) = _apply_ecs_processing(
+        req=req,
+        handler=handler,
+        client_ip=client_ip,
+        listener=listener,
+        secure=secure,
+        is_listener_trusted_for_ecs=_is_listener_trusted_for_ecs,
+        is_source_ip_trusted_for_ecs=_is_source_ip_trusted_for_ecs,
+        synthesize_ecs_for_source_ip=_synthesize_ecs_for_source_ip,
+        build_request_result_meta=_build_request_result_meta,
+    )
+    ctx.inbound_ecs = inbound_ecs
+    ctx.inbound_ecs_trusted = inbound_ecs_trusted
+    ctx.trusted_inbound_ecs = trusted_inbound_ecs
+    ctx.outbound_ecs = outbound_ecs
+    ctx.effective_target_ip = effective_target_ip
+    ctx.ecs_cache_bypass = ecs_cache_bypass
+    # Preserve TSIG metadata set by the earlier gate when present.
+    if tsig_ctx.get("ok"):
+        request_result_meta["tsig_ok"] = True
+        if tsig_ctx.get("keyname") is not None:
+            request_result_meta["tsig_key_name"] = tsig_ctx.get("keyname")
+    ctx.request_result_meta = request_result_meta
+
+    # Record query stats (mirrors DNSUDPHandler.handle)
+    if stats is not None:
+        try:
+            from foghorn.servers.resolve_telemetry import (
+                ResolveEvent,
+                ResolveEventKind,
+                telemetry_from_stats,
+            )
+
+            qtype_name = _qtype_label_for_stats(qtype)
+            telemetry_from_stats(stats).emit(
+                ResolveEvent(
+                    kind=ResolveEventKind.QUERY_RECEIVED,
+                    client_ip=client_ip,
+                    qname=qname,
+                    qtype_label=qtype_name,
+                    t0=t0,
+                    request_result_meta=dict(request_result_meta),
+                )
+            )
+        except (
+            Exception
+        ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+            pass
+
+    # Optional amplification mitigation: refuse QTYPE ANY (255).
+    refuse_result = _handle_refuse_any(
+        req=req,
+        handler=handler,
+        client_ip=client_ip,
+        qname=qname,
+        qtype=qtype,
+        qtype_label_fn=_qtype_label_for_stats,
+        stats=stats,
+        t0=t0,
+        request_result_meta=request_result_meta,
+    )
+    if refuse_result is not None:
+        return refuse_result
+
+    # Pre plugins
+    pre_plugins, post_plugins, pre_result = _run_pre_plugins(
+        data=data,
+        req=req,
+        client_ip=client_ip,
+        listener=listener,
+        secure=secure,
+        qname=qname,
+        qtype=qtype,
+        trusted_inbound_ecs=trusted_inbound_ecs,
+        effective_target_ip=effective_target_ip,
+        handler=handler,
+        snap=snap,
+        stats=stats,
+        t0=t0,
+        request_result_meta=request_result_meta,
+        get_ordered_plugins=_get_ordered_plugins,
+        resolve_plugin_label=_resolve_plugin_label,
+        qtype_label_fn=_qtype_label_for_stats,
+        record_suppressed_query_log_drop_candidate=_record_suppressed_query_log_drop_candidate,
+        classify_dnssec_status_for_response=_classify_dnssec_status_for_response,
+        apply_dnssec_ad_bit=_apply_dnssec_ad_bit,
+        is_signed_authoritative_response=_is_signed_authoritative_response,
+    )
+    ctx.pre_plugins = pre_plugins
+    ctx.post_plugins = post_plugins
+    if pre_result is not None:
+        return pre_result
+    return None
+
+
+def _stage_cache_lookup(ctx: ResolutionContext) -> _ResolveCoreResult | None:
+    """Brief: Attempt response cache hit (optional stale-while-revalidate).
+
+    Inputs:
+      - ctx: Context after Gate with cache_key and enrichment flags set.
+
+    Outputs:
+      - _ResolveCoreResult on cache hit, else None on miss.
+    """
+
+    return _try_cache_hit(
+        data=ctx.data,
+        req=ctx.req,
+        client_ip=ctx.client_ip,
+        qname=ctx.qname,
+        qtype=ctx.qtype,
+        cache_key=ctx.cache_key,
+        handler=ctx.handler,
+        stats=ctx.stats,
+        t0=ctx.t0,
+        request_result_meta=ctx.request_result_meta,
+        tsig_ctx=ctx.tsig_ctx,
+        ecs_cache_bypass=ctx.ecs_cache_bypass,
+        cache_local=_CACHE_LOCAL,
+        schedule_cache_refresh=_schedule_cache_refresh,
+        qtype_label_fn=_qtype_label_for_stats,
+    )
+
+
+def _stage_resolve(ctx: ResolutionContext) -> _ResolveCoreResult | None:
+    """Brief: Local-forward gate, upstream resolution, and post plugins.
+
+    Inputs:
+      - ctx: Context after a cache miss.
+
+    Outputs:
+      - _ResolveCoreResult on local-block / upstream-fail / post-plugin early
+        exit, else None after storing reply/out/upstream fields on ctx.
+    """
+
+    req = ctx.req
+    handler = ctx.handler
+    stats = ctx.stats
+    client_ip = ctx.client_ip
+    qname = ctx.qname
+    qtype = ctx.qtype
+    t0 = ctx.t0
+    request_result_meta = ctx.request_result_meta
+
+    # Block forwarding of .local queries and RFC1918 reverse PTRs unless
+    # forward_local is True.
+    # RFC 6762 reserves .local for mDNS; forwarding to upstream resolvers
+    # can cause delays and incorrect answers. RFC1918 reverse PTRs are
+    # often locally-served and should follow the same gate.
+    local_blocked_result = _handle_local_blocked(
+        req=req,
+        handler=handler,
+        client_ip=client_ip,
+        qname=qname,
+        qtype=qtype,
+        qtype_label_fn=_qtype_label_for_stats,
+        is_forward_local_blocked_query=_is_forward_local_blocked_query,
+        is_rfc1918_ptr_query_name=_is_rfc1918_ptr_query_name,
+        stats=stats,
+        t0=t0,
+        request_result_meta=request_result_meta,
+    )
+    if local_blocked_result is not None:
+        return local_blocked_result
+
+    (
+        reply,
+        used_upstream,
+        reason,
+        upstream_url,
+        upstream_id,
+        ede_code_for_logs,
+        ede_text_for_logs,
+        upstream_early,
+    ) = _resolve_upstream(
+        req=req,
+        data=ctx.data,
+        client_ip=client_ip,
+        qname=qname,
+        qtype=qtype,
+        handler=handler,
+        snap=ctx.snap,
+        stats=stats,
+        t0=t0,
+        request_result_meta=request_result_meta,
+        ede_code_for_logs=ctx.ede_code_for_logs,
+        ede_text_for_logs=ctx.ede_text_for_logs,
+        send_query_with_failover=send_query_with_failover,
+        ensure_edns_request=_ensure_edns_request,
+        sanitize_upstream_url=_sanitize_upstream_url,
+        qtype_label_fn=_qtype_label_for_stats,
+    )
+    ctx.reply = reply
+    ctx.used_upstream = used_upstream
+    ctx.reason = reason
+    ctx.upstream_url = upstream_url
+    ctx.upstream_id = upstream_id
+    ctx.ede_code_for_logs = ede_code_for_logs
+    ctx.ede_text_for_logs = ede_text_for_logs
+    if upstream_early is not None:
+        return upstream_early
+
+    # Post plugins
+    out, post_early = _run_post_plugins(
+        reply=reply,
+        req=req,
+        client_ip=client_ip,
+        listener=ctx.listener,
+        secure=ctx.secure,
+        qname=qname,
+        qtype=qtype,
+        trusted_inbound_ecs=ctx.trusted_inbound_ecs,
+        effective_target_ip=ctx.effective_target_ip,
+        post_plugins=ctx.post_plugins,
+        upstream_id=upstream_id,
+        stats=stats,
+        record_suppressed_query_log_drop_candidate=_record_suppressed_query_log_drop_candidate,
+    )
+    ctx.out = out
+    if post_early is not None:
+        return post_early
+    return None
+
+
+def _stage_pack(ctx: ResolutionContext) -> _ResolveCoreResult:
+    """Brief: Finalize response (DNSSEC, cache store, TSIG/cookie, stats).
+
+    Inputs:
+      - ctx: Context with out/upstream fields after successful Resolve.
+
+    Outputs:
+      - Final _ResolveCoreResult for the query.
+    """
+
+    return _finalize_resolved_response(
+        out=ctx.out,
+        req=ctx.req,
+        client_ip=ctx.client_ip,
+        qname=ctx.qname,
+        qtype=ctx.qtype,
+        cache_key=ctx.cache_key,
+        handler=ctx.handler,
+        stats=ctx.stats,
+        t0=ctx.t0,
+        request_result_meta=ctx.request_result_meta,
+        tsig_ctx=ctx.tsig_ctx,
+        ecs_cache_bypass=ctx.ecs_cache_bypass,
+        upstream_id=ctx.upstream_id,
+        upstream_url=ctx.upstream_url,
+        ede_code_for_logs=ctx.ede_code_for_logs,
+        ede_text_for_logs=ctx.ede_text_for_logs,
+        classify_dnssec_status_for_response=_classify_dnssec_status_for_response,
+        apply_dnssec_ad_bit=_apply_dnssec_ad_bit,
+        is_signed_authoritative_response=_is_signed_authoritative_response,
+        qtype_label_fn=_qtype_label_for_stats,
+    )
+
+
+def _handle_resolve_exception(
+    *,
+    exc: BaseException,
+    data: bytes,
+    client_ip: str,
+    listener: str | None,
+    secure: bool | None,
+    stats: object | None,
+    t0: float | None,
+    request_result_meta: dict,
+    time_mod,
+) -> _ResolveCoreResult:
+    """Brief: SERVFAIL recovery path for unhandled resolver exceptions.
+
+    Inputs:
+      - exc: Caught exception from the pipeline.
+      - data/client_ip/listener/secure: Original request identity.
+      - stats/t0/request_result_meta: Telemetry context.
+      - time_mod: time module (perf_counter) used for latency.
+
+    Outputs:
+      - _ResolveCoreResult with SERVFAIL wire (or minimal header fallback).
+    """
+
+    logger.exception(
+        "Unhandled resolver exception (client_ip=%s listener=%s secure=%s query_size=%s)",
+        client_ip,
+        listener,
+        secure,
+        len(data) if isinstance(data, (bytes, bytearray)) else "unknown",
+    )
+    # Outer exception handler: synthesize SERVFAIL and record stats.
+    try:
+        req = DNSRecord.parse(data)
+        r = req.reply()
+        r.header.rcode = RCODE.SERVFAIL
+        # Echo client EDNS(0) OPT, when present, into this synthetic SERVFAIL,
+        # and, when enabled, attach a generic EDE "Other" code so clients
+        # can distinguish internal errors from upstream failures.
+        _echo_client_edns(req, r)
+        ede_code = 0
+        ede_text = "internal server error"
+        _attach_ede_option(req, r, ede_code, ede_text)  # Other
+        wire = _set_response_id(r.pack(), req.header.id)
+        if stats is not None:
+            try:
+                if hasattr(stats, "record_ede_code"):
+                    try:
+                        stats.record_ede_code(ede_code)
+                    except Exception:  # pragma: no cover - defensive metrics hook
+                        pass
+                stats.record_response_rcode("SERVFAIL")
+                # Attempt to recover qname/qtype for logging when present.
+                if getattr(req, "questions", None):
+                    q = req.questions[0]
+                    qname = str(q.qname).rstrip(".")
+                    qtype = q.qtype
+                    qtype_name = _qtype_label_for_stats(qtype)
+                else:
+                    qname = ""
+                    qtype_name = ""
+                result_ctx = {"source": "server", "error": "unhandled_exception"}
+                result_ctx.update(request_result_meta)
+                if qtype_name:
+                    stats.record_query_result(
+                        client_ip=client_ip,
+                        qname=qname,
+                        qtype=qtype_name,
+                        rcode="SERVFAIL",
+                        upstream_id=None,
+                        status="error",
+                        error=str(exc),
+                        first=None,
+                        result=result_ctx,
+                    )
+            except (
+                Exception
+            ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+                pass
+        if stats is not None and t0 is not None:
+            try:
+                t1 = time_mod.perf_counter()
+                stats.record_latency(t1 - t0)
+            except (
+                Exception
+            ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+                pass
+        return _ResolveCoreResult(
+            wire=wire,
+            dnssec_status=None,
+            upstream_id=None,
+            rcode_name="SERVFAIL",
+        )
+    except Exception:
+        # Worst-case fallback: never reflect the original query bytes.
+        wire = _pack_minimal_dns_response_header(data, int(RCODE.SERVFAIL))
+        return _ResolveCoreResult(
+            wire=wire,
+            dnssec_status=None,
+            upstream_id=None,
+            rcode_name="SERVFAIL",
+        )
+
+
 def _resolve_core(
     data: bytes,
     client_ip: str,
@@ -845,6 +1345,10 @@ def _resolve_core(
 
     Outputs:
       - _ResolveCoreResult with final wire bytes and metadata.
+
+    Pipeline stages (Parse -> Gate -> CacheLookup -> Resolve -> Pack):
+      each stage may short-circuit with a complete result; otherwise it
+      mutates ResolutionContext for the next stage.
     """
     import time as _time  # Local import to avoid impacting module import time
 
@@ -859,12 +1363,6 @@ def _resolve_core(
 
     stats = getattr(handler, "stats_collector", None)
     t0 = _time.perf_counter() if stats is not None else None
-    # Optional EDE info-code/text for logging and metrics when responses carry
-    # Extended DNS Errors (RFC 8914). This is populated in specific branches
-    # (for example, DNSSEC bogus classification) and mirrored into stats and
-    # query_log result payloads when present.
-    ede_code_for_logs: int | None = None
-    ede_text_for_logs: str | None = None
     request_result_meta = _build_request_result_meta(
         source_ip=str(client_ip or ""),
         effective_target_ip=str(client_ip or ""),
@@ -876,389 +1374,49 @@ def _resolve_core(
         ecs_cache_bypass=False,
     )
 
+    ctx = ResolutionContext(
+        data=data,
+        client_ip=client_ip,
+        listener=listener,
+        secure=secure,
+        handler=handler,
+        snap=snap,
+        stats=stats,
+        t0=t0,
+        request_result_meta=request_result_meta,
+    )
+
     try:
-        # Compute opcode from header bits without parsing the full message. This
-        # allows us to handle UPDATE messages containing empty RRs (used for
-        # prerequisites/deletes) which dnslib cannot parse.
-        try:
-            if isinstance(data, (bytes, bytearray)) and len(data) >= 4:
-                flags = int.from_bytes(data[2:4], "big")
-                opcode = (flags >> 11) & 0x0F
-            else:
-                opcode = 0
-        except Exception:
-            opcode = 0
+        # Parse -> Gate -> CacheLookup -> Resolve -> Pack
+        early = _stage_parse(ctx)
+        if early is not None:
+            return early
 
-        non_query_result = _handle_non_query_opcode(
-            opcode=opcode,
-            data=data,
-            client_ip=client_ip,
-            listener=listener,
-            secure=secure,
-            handler=handler,
-        )
-        if non_query_result is not None:
-            return non_query_result
+        early = _stage_gate(ctx)
+        if early is not None:
+            return early
 
-        req = DNSRecord.parse(data)
-        if not getattr(req, "questions", None):
-            # QDCOUNT=0 is syntactically valid. Treat it as a format error and
-            # reply with a minimal FORMERR without attempting additional parsing.
-            wire = _pack_minimal_dns_response_header(data, int(RCODE.FORMERR))
-            return _ResolveCoreResult(
-                wire=wire,
-                dnssec_status=None,
-                upstream_id=None,
-                rcode_name="FORMERR",
-            )
+        early = _stage_cache_lookup(ctx)
+        if early is not None:
+            return early
 
-        # Downstream DNS COOKIE (RFC 7873) require_udp short-circuit.
-        # Runs before cache/plugins/upstream so invalid UDP cookies are cheap.
-        cookie_result = _handle_dns_cookies(
-            req=req,
-            handler=handler,
-            client_ip=client_ip,
-            listener=listener,
-            stats=stats,
-            t0=t0,
-        )
-        if cookie_result is not None:
-            return cookie_result
+        early = _stage_resolve(ctx)
+        if early is not None:
+            return early
 
-        # Downstream QUERY TSIG (RFC 2845) gate.
-        # After cookies require_udp; before cache/plugins/upstream.
-        tsig_ctx, tsig_result = _handle_tsig(
-            data=data,
-            req=req,
-            handler=handler,
-            client_ip=client_ip,
-            listener=listener,
-            stats=stats,
-            t0=t0,
-            request_result_meta=request_result_meta,
-        )
-        if tsig_result is not None:
-            return tsig_result
-
-        q = req.questions[0]
-        # Normalize the parsed qname by stripping the wire/root trailing dot.
-        # DNS wire format does not preserve whether the original client input
-        # included a textual trailing dot, so qualification decisions should be
-        # based on the normalized name.
-        qname = str(q.qname).rstrip(".")
-        qtype = q.qtype
-
-        # Search-domain qualification and ECS enrichment.
-        qname = _apply_search_domain_qualification(
-            qname=qname,
-            qtype=qtype,
-            snap=snap,
-            excluded_qtypes=_DNSSEC_SEARCH_QUALIFICATION_EXCLUDED_QTYPES,
-        )
-        (
-            inbound_ecs,
-            inbound_ecs_trusted,
-            trusted_inbound_ecs,
-            outbound_ecs,
-            effective_target_ip,
-            ecs_cache_bypass,
-            request_result_meta,
-        ) = _apply_ecs_processing(
-            req=req,
-            handler=handler,
-            client_ip=client_ip,
-            listener=listener,
-            secure=secure,
-            is_listener_trusted_for_ecs=_is_listener_trusted_for_ecs,
-            is_source_ip_trusted_for_ecs=_is_source_ip_trusted_for_ecs,
-            synthesize_ecs_for_source_ip=_synthesize_ecs_for_source_ip,
-            build_request_result_meta=_build_request_result_meta,
-        )
-        # Preserve TSIG metadata set by the earlier gate when present.
-        if tsig_ctx.get("ok"):
-            request_result_meta["tsig_ok"] = True
-            if tsig_ctx.get("keyname") is not None:
-                request_result_meta["tsig_key_name"] = tsig_ctx.get("keyname")
-
-        cache_key = (qname.lower(), qtype)
-
-        # Record query stats (mirrors DNSUDPHandler.handle)
-        if stats is not None:
-            try:
-                from foghorn.servers.resolve_telemetry import (
-                    ResolveEvent,
-                    ResolveEventKind,
-                    telemetry_from_stats,
-                )
-
-                qtype_name = _qtype_label_for_stats(qtype)
-                telemetry_from_stats(stats).emit(
-                    ResolveEvent(
-                        kind=ResolveEventKind.QUERY_RECEIVED,
-                        client_ip=client_ip,
-                        qname=qname,
-                        qtype_label=qtype_name,
-                        t0=t0,
-                        request_result_meta=dict(request_result_meta),
-                    )
-                )
-            except (
-                Exception
-            ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-                warn_suppressed_exception(
-                    "best-effort operation failed in servers/server.py:_resolve_core",
-                    logger=logger,
-                )
-
-        # Optional amplification mitigation: refuse QTYPE ANY (255).
-        refuse_result = _handle_refuse_any(
-            req=req,
-            handler=handler,
-            client_ip=client_ip,
-            qname=qname,
-            qtype=qtype,
-            qtype_label_fn=_qtype_label_for_stats,
-            stats=stats,
-            t0=t0,
-            request_result_meta=request_result_meta,
-        )
-        if refuse_result is not None:
-            return refuse_result
-
-        # Pre plugins
-        pre_plugins, post_plugins, pre_result = _run_pre_plugins(
-            data=data,
-            req=req,
-            client_ip=client_ip,
-            listener=listener,
-            secure=secure,
-            qname=qname,
-            qtype=qtype,
-            trusted_inbound_ecs=trusted_inbound_ecs,
-            effective_target_ip=effective_target_ip,
-            handler=handler,
-            snap=snap,
-            stats=stats,
-            t0=t0,
-            request_result_meta=request_result_meta,
-            get_ordered_plugins=_get_ordered_plugins,
-            resolve_plugin_label=_resolve_plugin_label,
-            qtype_label_fn=_qtype_label_for_stats,
-            record_suppressed_query_log_drop_candidate=_record_suppressed_query_log_drop_candidate,
-            classify_dnssec_status_for_response=_classify_dnssec_status_for_response,
-            apply_dnssec_ad_bit=_apply_dnssec_ad_bit,
-            is_signed_authoritative_response=_is_signed_authoritative_response,
-        )
-        if pre_result is not None:
-            return pre_result
-
-        # Cache lookup (with optional stale-while-revalidate prefetch).
-        cache_hit = _try_cache_hit(
-            data=data,
-            req=req,
-            client_ip=client_ip,
-            qname=qname,
-            qtype=qtype,
-            cache_key=cache_key,
-            handler=handler,
-            stats=stats,
-            t0=t0,
-            request_result_meta=request_result_meta,
-            tsig_ctx=tsig_ctx,
-            ecs_cache_bypass=ecs_cache_bypass,
-            cache_local=_CACHE_LOCAL,
-            schedule_cache_refresh=_schedule_cache_refresh,
-            qtype_label_fn=_qtype_label_for_stats,
-        )
-        if cache_hit is not None:
-            return cache_hit
-
-        # Block forwarding of .local queries and RFC1918 reverse PTRs unless
-        # forward_local is True.
-        # RFC 6762 reserves .local for mDNS; forwarding to upstream resolvers
-        # can cause delays and incorrect answers. RFC1918 reverse PTRs are
-        # often locally-served and should follow the same gate.
-        local_blocked_result = _handle_local_blocked(
-            req=req,
-            handler=handler,
-            client_ip=client_ip,
-            qname=qname,
-            qtype=qtype,
-            qtype_label_fn=_qtype_label_for_stats,
-            is_forward_local_blocked_query=_is_forward_local_blocked_query,
-            is_rfc1918_ptr_query_name=_is_rfc1918_ptr_query_name,
-            stats=stats,
-            t0=t0,
-            request_result_meta=request_result_meta,
-        )
-        if local_blocked_result is not None:
-            return local_blocked_result
-
-        reply: bytes | None = None
-        used_upstream: dict | None = None
-        reason: str | None = None
-        upstream_url = ""
-
-        (
-            reply,
-            used_upstream,
-            reason,
-            upstream_url,
-            upstream_id,
-            ede_code_for_logs,
-            ede_text_for_logs,
-            upstream_early,
-        ) = _resolve_upstream(
-            req=req,
-            data=data,
-            client_ip=client_ip,
-            qname=qname,
-            qtype=qtype,
-            handler=handler,
-            snap=snap,
-            stats=stats,
-            t0=t0,
-            request_result_meta=request_result_meta,
-            ede_code_for_logs=ede_code_for_logs,
-            ede_text_for_logs=ede_text_for_logs,
-            send_query_with_failover=send_query_with_failover,
-            ensure_edns_request=_ensure_edns_request,
-            sanitize_upstream_url=_sanitize_upstream_url,
-            qtype_label_fn=_qtype_label_for_stats,
-        )
-        if upstream_early is not None:
-            return upstream_early
-
-        # Post plugins
-        out, post_early = _run_post_plugins(
-            reply=reply,
-            req=req,
-            client_ip=client_ip,
-            listener=listener,
-            secure=secure,
-            qname=qname,
-            qtype=qtype,
-            trusted_inbound_ecs=trusted_inbound_ecs,
-            effective_target_ip=effective_target_ip,
-            post_plugins=post_plugins,
-            upstream_id=upstream_id,
-            stats=stats,
-            record_suppressed_query_log_drop_candidate=_record_suppressed_query_log_drop_candidate,
-        )
-        if post_early is not None:
-            return post_early
-
-        # Cache store, DNSSEC, TSIG/cookie bind, and stats finalize.
-        return _finalize_resolved_response(
-            out=out,
-            req=req,
-            client_ip=client_ip,
-            qname=qname,
-            qtype=qtype,
-            cache_key=cache_key,
-            handler=handler,
-            stats=stats,
-            t0=t0,
-            request_result_meta=request_result_meta,
-            tsig_ctx=tsig_ctx,
-            ecs_cache_bypass=ecs_cache_bypass,
-            upstream_id=upstream_id,
-            upstream_url=upstream_url,
-            ede_code_for_logs=ede_code_for_logs,
-            ede_text_for_logs=ede_text_for_logs,
-            classify_dnssec_status_for_response=_classify_dnssec_status_for_response,
-            apply_dnssec_ad_bit=_apply_dnssec_ad_bit,
-            is_signed_authoritative_response=_is_signed_authoritative_response,
-            qtype_label_fn=_qtype_label_for_stats,
-        )
+        return _stage_pack(ctx)
     except Exception as e:
-        logger.exception(
-            "Unhandled resolver exception (client_ip=%s listener=%s secure=%s query_size=%s)",
-            client_ip,
-            listener,
-            secure,
-            len(data) if isinstance(data, (bytes, bytearray)) else "unknown",
+        return _handle_resolve_exception(
+            exc=e,
+            data=data,
+            client_ip=client_ip,
+            listener=listener,
+            secure=secure,
+            stats=stats,
+            t0=t0,
+            request_result_meta=ctx.request_result_meta,
+            time_mod=_time,
         )
-        # Outer exception handler: synthesize SERVFAIL and record stats.
-        try:
-            req = DNSRecord.parse(data)
-            r = req.reply()
-            r.header.rcode = RCODE.SERVFAIL
-            # Echo client EDNS(0) OPT, when present, into this synthetic SERVFAIL,
-            # and, when enabled, attach a generic EDE "Other" code so clients
-            # can distinguish internal errors from upstream failures.
-            _echo_client_edns(req, r)
-            ede_code = 0
-            ede_text = "internal server error"
-            _attach_ede_option(req, r, ede_code, ede_text)  # Other
-            wire = _set_response_id(r.pack(), req.header.id)
-            if stats is not None:
-                try:
-                    if hasattr(stats, "record_ede_code"):
-                        try:
-                            stats.record_ede_code(ede_code)
-                        except Exception:  # pragma: no cover - defensive metrics hook
-                            warn_suppressed_exception(
-                                "best-effort operation failed in servers/server.py:_resolve_core",
-                                logger=logger,
-                            )
-                    stats.record_response_rcode("SERVFAIL")
-                    # Attempt to recover qname/qtype for logging when present.
-                    if getattr(req, "questions", None):
-                        q = req.questions[0]
-                        qname = str(q.qname).rstrip(".")
-                        qtype = q.qtype
-                        qtype_name = _qtype_label_for_stats(qtype)
-                    else:
-                        qname = ""
-                        qtype_name = ""
-                    result_ctx = {"source": "server", "error": "unhandled_exception"}
-                    result_ctx.update(request_result_meta)
-                    if qtype_name:
-                        stats.record_query_result(
-                            client_ip=client_ip,
-                            qname=qname,
-                            qtype=qtype_name,
-                            rcode="SERVFAIL",
-                            upstream_id=None,
-                            status="error",
-                            error=str(e),
-                            first=None,
-                            result=result_ctx,
-                        )
-                except (
-                    Exception
-                ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-                    warn_suppressed_exception(
-                        "best-effort operation failed in servers/server.py:_resolve_core",
-                        logger=logger,
-                    )
-            if stats is not None and t0 is not None:
-                try:
-                    t1 = _time.perf_counter()
-                    stats.record_latency(t1 - t0)
-                except (
-                    Exception
-                ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-                    warn_suppressed_exception(
-                        "best-effort operation failed in servers/server.py:_resolve_core",
-                        logger=logger,
-                    )
-            return _ResolveCoreResult(
-                wire=wire,
-                dnssec_status=None,
-                upstream_id=None,
-                rcode_name="SERVFAIL",
-            )
-        except Exception:
-            # Worst-case fallback: never reflect the original query bytes.
-            wire = _pack_minimal_dns_response_header(data, int(RCODE.SERVFAIL))
-            return _ResolveCoreResult(
-                wire=wire,
-                dnssec_status=None,
-                upstream_id=None,
-                rcode_name="SERVFAIL",
-            )
 
 
 def resolve_query_bytes(
