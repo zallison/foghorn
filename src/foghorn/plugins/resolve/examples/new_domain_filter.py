@@ -22,7 +22,12 @@ try:  # optional fallback library
 except Exception:  # pragma: no cover - import best effort
     _pythonwhois_mod = None
 
-from .base import BasePlugin, PluginContext, PluginDecision, plugin_aliases
+from foghorn.plugins.resolve.base import (
+    BasePlugin,
+    PluginContext,
+    PluginDecision,
+    plugin_aliases,
+)
 
 logger = logging.getLogger(__name__)
 

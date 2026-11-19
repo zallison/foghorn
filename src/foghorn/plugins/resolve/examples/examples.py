@@ -6,10 +6,13 @@ from typing import List, Optional, Union
 from dnslib import AAAA, QTYPE, A, DNSRecord
 from pydantic import BaseModel, Field, ConfigDict
 
-from foghorn.plugins.resolve.base import plugin_aliases
+from foghorn.plugins.resolve.base import (
+    BasePlugin,
+    PluginContext,
+    PluginDecision,
+    plugin_aliases,
+)
 from foghorn.utils.register_caches import registered_lru_cache
-
-from .base import BasePlugin, PluginContext, PluginDecision
 
 logger = logging.getLogger(__name__)
 

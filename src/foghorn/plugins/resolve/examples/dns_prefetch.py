@@ -10,8 +10,12 @@ from foghorn.servers.dns_runtime_state import DNSRuntimeState
 
 from foghorn.servers.server import resolve_query_bytes
 from foghorn.stats import StatsCollector, StatsSnapshot
-
-from .base import BasePlugin, PluginContext, PluginDecision, plugin_aliases
+from foghorn.plugins.resolve.base import (
+    BasePlugin,
+    PluginContext,
+    PluginDecision,
+    plugin_aliases,
+)
 
 logger = logging.getLogger(__name__)
 
