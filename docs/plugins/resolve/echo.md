@@ -1,4 +1,6 @@
-# Echo resolve plugin
+# Example: Echo resolve plugin
+
+This plugin is provided as an example of how to implement a simple resolve plugin that echoes the incoming query name and qtype in a TXT answer.
 
 ## Overview
 The `echo` resolve plugin is a lightweight diagnostic plugin that returns a TXT
