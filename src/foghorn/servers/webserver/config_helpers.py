@@ -23,6 +23,7 @@ import yaml
 from cachetools import TTLCache
 
 from foghorn.utils.register_caches import registered_cached, registered_lru_cache
+from foghorn.utils.exception_logging import warn_suppressed_exception
 
 # Short-lived cache for sanitized YAML configuration text returned by /config.
 # The underlying on-disk config rarely changes, so a small TTL avoids repeated
@@ -177,7 +178,10 @@ def _sync_config_text_cache_ttl() -> float:
     try:
         _CONFIG_TEXT_CACHE.ttl = max(0, int(ttl))
     except Exception:  # pragma: no cover - defensive ttl sync
-        pass
+        warn_suppressed_exception(
+            "best-effort operation failed in servers/webserver/config_helpers.py:_sync_config_text_cache_ttl",
+            logger_name="foghorn.servers.webserver.config_helpers",
+        )
     return max(0.0, float(ttl))
 
 
@@ -256,7 +260,10 @@ def _get_sanitized_config_yaml_cached(
         try:
             _CONFIG_TEXT_CACHE.pop(key, None)  # type: ignore[arg-type]
         except Exception:  # pragma: no cover - defensive pop
-            pass
+            warn_suppressed_exception(
+                "best-effort operation failed in servers/webserver/config_helpers.py:_get_sanitized_config_yaml_cached",
+                logger_name="foghorn.servers.webserver.config_helpers",
+            )
 
     body = _build_sanitized_config_yaml(cfg, cfg_path, redact_keys)
     now_ts = time.time()
@@ -272,7 +279,10 @@ def _get_sanitized_config_yaml_cached(
             setattr(web_core, "_last_config_text", body)
             setattr(web_core, "_last_config_text_ts", now_ts)
         except Exception:  # pragma: no cover - defensive mirror sync
-            pass
+            warn_suppressed_exception(
+                "best-effort operation failed in servers/webserver/config_helpers.py:_get_sanitized_config_yaml_cached",
+                logger_name="foghorn.servers.webserver.config_helpers",
+            )
     return body
 
 

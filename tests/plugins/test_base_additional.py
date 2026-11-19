@@ -7,6 +7,7 @@ Outputs:
   - None.
 """
 
+import importlib
 import logging
 
 import foghorn.plugins.resolve.base as base_mod
@@ -208,8 +209,59 @@ def test_targets_returns_false_on_invalid_client_ip() -> None:
       - None; asserts invalid client_ip leads to a False decision.
     """
 
-    plugin = BasePlugin(targets={"ips": ["10.0.0.0/8"]})
+    plugin = BasePlugin(targets={"ips": ["********/8"]})
     plugin.setup()
     ctx = PluginContext(client_ip="not-an-ip")
 
     assert plugin.targets(ctx) is False
+
+
+def test_condition_logging_via_owner_throttle_and_recovery(monkeypatch, caplog) -> None:
+    """Brief: condition_logging helpers warn once, re-warn hourly, recover once.
+
+    Inputs:
+      - monkeypatch/caplog: pytest fixtures.
+
+    Outputs:
+      - None; asserts WARNING/DEBUG/INFO transitions for a condition key.
+    """
+
+    plugin = BasePlugin(name="cond")
+    plugin.setup()
+    timeline = iter([100.0, 101.0, 102.0, 3700.0, 3701.0])
+    cond_mod = importlib.import_module("foghorn.utils.condition_logging")
+    monkeypatch.setattr(cond_mod.time, "monotonic", lambda: next(timeline))
+    caplog.set_level(logging.DEBUG, logger=plugin.logger.name)
+
+    cond_mod.note_condition_failure(plugin, "ep:a", "endpoint %s down", "a")
+    cond_mod.note_condition_failure(plugin, "ep:a", "endpoint %s down", "a")
+    cond_mod.note_condition_failure(plugin, "ep:a", "endpoint %s down", "a")
+
+    warnings = [
+        r
+        for r in caplog.records
+        if r.levelno >= logging.WARNING and "endpoint a down" in r.getMessage()
+    ]
+    assert len(warnings) == 1
+    assert any(
+        "suppressed repeated condition" in r.getMessage() for r in caplog.records
+    )
+
+    caplog.clear()
+    cond_mod.note_condition_failure(plugin, "ep:a", "endpoint %s down", "a")
+    warnings = [
+        r
+        for r in caplog.records
+        if r.levelno >= logging.WARNING and "endpoint a down" in r.getMessage()
+    ]
+    assert len(warnings) == 1
+    assert any("still failing" in r.getMessage() for r in warnings)
+    assert any("suppressed 2 repeated warning(s)" in r.getMessage() for r in warnings)
+
+    caplog.clear()
+    cond_mod.note_condition_ok(plugin, "ep:a", "endpoint %s recovered", "a")
+    assert any("endpoint a recovered" in r.getMessage() for r in caplog.records)
+
+    caplog.clear()
+    cond_mod.note_condition_ok(plugin, "ep:a", "endpoint %s recovered", "a")
+    assert not any("recovered" in r.getMessage() for r in caplog.records)

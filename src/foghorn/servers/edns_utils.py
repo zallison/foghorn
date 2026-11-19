@@ -15,6 +15,7 @@ import time
 from typing import Any, Dict, Optional, Tuple
 
 from dnslib import EDNS0, QTYPE, DNSHeader, DNSRecord, EDNSOption
+from foghorn.utils.exception_logging import warn_suppressed_exception
 
 logger = logging.getLogger("foghorn.server")
 
@@ -362,7 +363,10 @@ def upsert_ecs_option(
                 if int(getattr(opt, "code", -1)) == int(_ECS_OPTION_CODE):
                     continue
             except Exception:
-                pass
+                warn_suppressed_exception(
+                    "best-effort operation failed in servers/edns_utils.py:upsert_ecs_option",
+                    logger=logger,
+                )
         filtered.append(opt)
     filtered.append(ecs_opt)
     opt_rr.rdata = filtered
@@ -396,7 +400,10 @@ def strip_ecs_options_from_request(req: DNSRecord) -> bool:
                             removed = True
                             continue
                     except Exception:
-                        pass
+                        warn_suppressed_exception(
+                            "best-effort operation failed in servers/edns_utils.py:strip_ecs_options_from_request",
+                            logger=logger,
+                        )
                 filtered.append(opt)
             if removed:
                 rr.rdata = filtered
@@ -590,7 +597,10 @@ def attach_ede_option(
                     encoded = encoded[:255].decode("utf-8", "ignore").encode("utf-8")
                 payload += encoded
             except Exception:
-                pass
+                warn_suppressed_exception(
+                    "best-effort operation failed in servers/edns_utils.py:attach_ede_option",
+                    logger=logger,
+                )
 
         rdata_list = getattr(opt_rr, "rdata", None)
         if isinstance(rdata_list, list):
@@ -623,7 +633,10 @@ def decode_cookie_secret(value: object) -> Optional[bytes]:
         if decoded:
             return decoded
     except Exception:
-        pass
+        warn_suppressed_exception(
+            "best-effort operation failed in servers/edns_utils.py:decode_cookie_secret",
+            logger=logger,
+        )
     try:
         cleaned = text.replace(":", "").replace(" ", "")
         if len(cleaned) % 2 == 0 and all(
@@ -633,7 +646,10 @@ def decode_cookie_secret(value: object) -> Optional[bytes]:
             if decoded:
                 return decoded
     except Exception:
-        pass
+        warn_suppressed_exception(
+            "best-effort operation failed in servers/edns_utils.py:decode_cookie_secret",
+            logger=logger,
+        )
     return text.encode("utf-8")
 
 
@@ -955,18 +971,27 @@ def build_badcookie_response(
             if getattr(req, "q", None) is not None:
                 resp.add_question(req.q)
         except Exception:
-            pass
+            warn_suppressed_exception(
+                "best-effort operation failed in servers/edns_utils.py:build_badcookie_response",
+                logger=logger,
+            )
     # BADCOOKIE is RCODE 23: low 4 bits in header, high bits in OPT EXTENDED-RCODE.
     try:
         resp.header.rcode = int(RCODE_BADCOOKIE) & 0x0F
     except Exception:
-        pass
+        warn_suppressed_exception(
+            "best-effort operation failed in servers/edns_utils.py:build_badcookie_response",
+            logger=logger,
+        )
 
     # Ensure OPT exists when client sent EDNS, then attach cookie.
     try:
         echo_client_edns(req, resp)
     except Exception:
-        pass
+        warn_suppressed_exception(
+            "best-effort operation failed in servers/edns_utils.py:build_badcookie_response",
+            logger=logger,
+        )
     strip_cookie_options_from_response_record(resp)
 
     # Set EDNS extended RCODE high bits for full RCODE 23.
@@ -1001,7 +1026,10 @@ def build_badcookie_response(
             flags = ttl_val & 0xFFFF
             opt_rr.ttl = (ext_hi << 24) | (version << 16) | (flags & 0xFFFF)
     except Exception:
-        pass
+        warn_suppressed_exception(
+            "best-effort operation failed in servers/edns_utils.py:build_badcookie_response",
+            logger=logger,
+        )
 
     client_cookie = extract_client_cookie_from_request(req)
     if client_cookie is not None and secret:
@@ -1033,7 +1061,10 @@ def build_badcookie_response(
                 )
             )
         except Exception:
-            pass
+            warn_suppressed_exception(
+                "best-effort operation failed in servers/edns_utils.py:build_badcookie_response",
+                logger=logger,
+            )
     try:
         return resp.pack()
     except Exception:

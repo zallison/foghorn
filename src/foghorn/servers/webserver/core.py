@@ -44,6 +44,7 @@ from fastapi.responses import (
 from pydantic import BaseModel
 
 from foghorn.utils.register_caches import registered_cached, registered_lru_cache
+from foghorn.utils.exception_logging import warn_suppressed_exception
 
 # psutil is an optional dependency. stats_helpers.get_system_info() consults
 # foghorn.servers.webserver.psutil so tests can monkeypatch it.
@@ -238,7 +239,10 @@ def create_app(
         try:
             _stats_helpers._SYSTEM_INFO_CACHE.ttl = max(0, int(ttl_raw))
         except Exception:  # pragma: no cover - defensive ttl apply
-            pass
+            warn_suppressed_exception(
+                "best-effort operation failed in servers/webserver/core.py:create_app",
+                logger=logger,
+            )
 
     # Optional tuning for how often StatsCollector.snapshot() is recomputed.
     stats_ttl_raw = web_cfg.get("stats_snapshot_ttl_seconds")
@@ -247,7 +251,10 @@ def create_app(
         try:
             _stats_helpers._STATS_SNAPSHOT_CACHE.ttl = max(0, int(stats_ttl_raw))
         except Exception:  # pragma: no cover - defensive ttl apply
-            pass
+            warn_suppressed_exception(
+                "best-effort operation failed in servers/webserver/core.py:create_app",
+                logger=logger,
+            )
 
     # Optional tuning for how often sanitized YAML text is recomputed for /config.
     cfg_ttl_raw = web_cfg.get("config_cache_ttl_seconds")
@@ -257,7 +264,10 @@ def create_app(
         try:
             _config_helpers._CONFIG_TEXT_CACHE.ttl = max(0, int(cfg_ttl_raw))
         except Exception:  # pragma: no cover - defensive ttl apply
-            pass
+            warn_suppressed_exception(
+                "best-effort operation failed in servers/webserver/core.py:create_app",
+                logger=logger,
+            )
 
     # Optional control over how heavy the system metrics collection is.
     detail_raw = str(web_cfg.get("system_metrics_detail", "full")).lower()

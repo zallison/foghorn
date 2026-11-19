@@ -11,6 +11,7 @@ from foghorn.servers.overload_response import (
     build_overload_dns_response,
     normalize_overload_response,
 )
+from foghorn.utils.exception_logging import warn_suppressed_exception
 
 logger = logging.getLogger("foghorn.servers.tcp_server")
 
@@ -62,7 +63,12 @@ class _ThreadedConnLimiter:
                 try:
                     self._sem.release()
                 except Exception:
-                    pass
+                    warn_suppressed_exception(
+                        "TCP conn limiter: semaphore release failed after "
+                        "rejecting client_ip=%s (possible slot leak)",
+                        client_ip,
+                        logger=logger,
+                    )
 
     def release(self, client_ip: str) -> None:
         """Brief: Release one connection slot for client_ip.
@@ -85,7 +91,12 @@ class _ThreadedConnLimiter:
             try:
                 self._sem.release()
             except Exception:
-                pass
+                warn_suppressed_exception(
+                    "TCP conn limiter: semaphore release failed for "
+                    "client_ip=%s (possible slot leak)",
+                    client_ip,
+                    logger=logger,
+                )
 
 
 class _TCPHandler(socketserver.BaseRequestHandler):
@@ -209,7 +220,12 @@ class _TCPHandler(socketserver.BaseRequestHandler):
                 try:
                     limiter.release(peer_ip)
                 except Exception:
-                    pass
+                    warn_suppressed_exception(
+                        "TCP handler: conn limiter release failed for client_ip=%s "
+                        "(possible slot leak)",
+                        peer_ip,
+                        logger=logger,
+                    )
 
 
 def serve_tcp_threaded(
@@ -266,7 +282,10 @@ def serve_tcp_threaded(
         except (
             Exception
         ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-            pass  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+            warn_suppressed_exception(
+                "TCP threaded server: server_close failed during shutdown",
+                logger=logger,
+            )
 
 
 async def _read_exact(reader: asyncio.StreamReader, n: int) -> bytes:
@@ -401,7 +420,12 @@ class _ConnLimiter:
                 try:
                     self._sem.release()
                 except Exception:
-                    pass
+                    warn_suppressed_exception(
+                        "TCP conn limiter: semaphore release failed after "
+                        "rejecting client_ip=%s (possible slot leak)",
+                        client_ip,
+                        logger=logger,
+                    )
 
     async def release(self, client_ip: str) -> None:
         try:
@@ -415,7 +439,12 @@ class _ConnLimiter:
             try:
                 self._sem.release()
             except Exception:
-                pass
+                warn_suppressed_exception(
+                    "TCP conn limiter: semaphore release failed for "
+                    "client_ip=%s (possible slot leak)",
+                    client_ip,
+                    logger=logger,
+                )
 
 
 async def _handle_conn(
@@ -461,7 +490,12 @@ async def _handle_conn(
                 writer.close()
                 await writer.wait_closed()
             except Exception:
-                pass
+                warn_suppressed_exception(
+                    "TCP asyncio: writer close failed after overload reject "
+                    "for client_ip=%s",
+                    client_ip,
+                    logger=logger,
+                )
             return
 
     writer.transport.set_write_buffer_limits(1 << 20)
@@ -522,7 +556,11 @@ async def _handle_conn(
                 except (
                     Exception
                 ):  # pragma: no cover - defensive: AXFR failure falls back to closing
-                    pass
+                    warn_suppressed_exception(
+                        "TCP asyncio: AXFR/IXFR streaming failed for client_ip=%s",
+                        client_ip,
+                        logger=logger,
+                    )
                 # AXFR/IXFR consumes this connection; do not process further
                 # queries on the same TCP stream.
                 break
@@ -556,12 +594,21 @@ async def _handle_conn(
         except (
             Exception
         ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-            pass  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+            warn_suppressed_exception(
+                "TCP asyncio: writer close failed for client_ip=%s",
+                client_ip,
+                logger=logger,
+            )
         if limiter is not None and acquired:
             try:
                 await limiter.release(client_ip)
             except Exception:
-                pass
+                warn_suppressed_exception(
+                    "TCP asyncio: conn limiter release failed for client_ip=%s "
+                    "(possible slot leak)",
+                    client_ip,
+                    logger=logger,
+                )
 
 
 async def serve_tcp(

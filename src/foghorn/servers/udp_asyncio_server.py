@@ -28,6 +28,7 @@ from foghorn.servers.overload_response import (
     normalize_overload_response,
 )
 from foghorn.utils import ip_networks
+from foghorn.utils.exception_logging import warn_suppressed_exception
 
 logger = logging.getLogger("foghorn.udp_asyncio")
 
@@ -371,7 +372,10 @@ class _UDPProtocol(asyncio.DatagramProtocol):
                 Exception
             ):  # pragma: nocover - defensive: counter bookkeeping should not raise
                 # If counters drift due to an unexpected exception, keep going.
-                pass
+                warn_suppressed_exception(
+                    "best-effort operation failed in servers/udp_asyncio_server.py:_UDPProtocol._handle_one",
+                    logger=logger,
+                )
 
 
 async def serve_udp_asyncio(
@@ -429,7 +433,10 @@ async def serve_udp_asyncio(
         except (
             Exception
         ):  # pragma: nocover - defensive: transport_out may be a hostile mapping
-            pass
+            warn_suppressed_exception(
+                "best-effort operation failed in servers/udp_asyncio_server.py:serve_udp_asyncio",
+                logger=logger,
+            )
 
     if started is not None:
         try:
@@ -437,7 +444,10 @@ async def serve_udp_asyncio(
         except (
             Exception
         ):  # pragma: nocover - defensive: threading.Event.set should not raise
-            pass
+            warn_suppressed_exception(
+                "best-effort operation failed in servers/udp_asyncio_server.py:serve_udp_asyncio",
+                logger=logger,
+            )
 
     try:
         if stop_event is None:
@@ -450,7 +460,10 @@ async def serve_udp_asyncio(
         except (
             Exception
         ):  # pragma: nocover - defensive: transport.close() should not raise
-            pass
+            warn_suppressed_exception(
+                "best-effort operation failed in servers/udp_asyncio_server.py:serve_udp_asyncio",
+                logger=logger,
+            )
 
 
 class UDPAsyncioServerHandle:
@@ -580,7 +593,10 @@ def start_udp_asyncio_threaded(
             except (
                 Exception
             ):  # pragma: nocover - defensive: threading.Event.set should not raise
-                pass
+                warn_suppressed_exception(
+                    "best-effort operation failed in servers/udp_asyncio_server.py:start_udp_asyncio_threaded._runner",
+                    logger=logger,
+                )
         finally:
             try:
                 loop = state.get("loop")
@@ -589,7 +605,10 @@ def start_udp_asyncio_threaded(
             except (
                 Exception
             ):  # pragma: nocover - defensive: loop close may fail in unusual interpreter shutdown cases
-                pass
+                warn_suppressed_exception(
+                    "best-effort operation failed in servers/udp_asyncio_server.py:start_udp_asyncio_threaded._runner",
+                    logger=logger,
+                )
 
     t = threading.Thread(target=_runner, name=str(thread_name), daemon=True)
     t.start()
@@ -600,7 +619,10 @@ def start_udp_asyncio_threaded(
     except (
         Exception
     ):  # pragma: nocover - defensive: threading.Event.wait should not raise
-        pass
+        warn_suppressed_exception(
+            "best-effort operation failed in servers/udp_asyncio_server.py:start_udp_asyncio_threaded",
+            logger=logger,
+        )
 
     if not started.is_set():
         logger.warning(

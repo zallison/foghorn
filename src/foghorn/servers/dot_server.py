@@ -10,6 +10,7 @@ from foghorn.servers.overload_response import (
     build_overload_dns_response,
     normalize_overload_response,
 )
+from foghorn.utils.exception_logging import warn_suppressed_exception
 
 logger = logging.getLogger("foghorn.servers.dot_server")
 
@@ -120,7 +121,10 @@ class _ConnLimiter:
                 try:
                     self._sem.release()
                 except Exception:
-                    pass
+                    warn_suppressed_exception(
+                        "best-effort operation failed in servers/dot_server.py:acquire",
+                        logger=logger,
+                    )
 
     async def release(self, client_ip: str) -> None:
         try:
@@ -134,7 +138,10 @@ class _ConnLimiter:
             try:
                 self._sem.release()
             except Exception:
-                pass
+                warn_suppressed_exception(
+                    "best-effort operation failed in servers/dot_server.py:release",
+                    logger=logger,
+                )
 
 
 async def _handle_conn(
@@ -191,7 +198,10 @@ async def _handle_conn(
                 writer.close()
                 await writer.wait_closed()
             except Exception:
-                pass
+                warn_suppressed_exception(
+                    "best-effort operation failed in servers/dot_server.py:_handle_conn",
+                    logger=logger,
+                )
             return
 
     query_count = 0
@@ -265,12 +275,18 @@ async def _handle_conn(
         except (
             Exception
         ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-            pass  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+            warn_suppressed_exception(
+                "best-effort operation failed in servers/dot_server.py:_handle_conn",
+                logger=logger,
+            )
         if limiter is not None and acquired:
             try:
                 await limiter.release(client_ip)
             except Exception:
-                pass
+                warn_suppressed_exception(
+                    "best-effort operation failed in servers/dot_server.py:_handle_conn",
+                    logger=logger,
+                )
 
 
 async def serve_dot(

@@ -10,6 +10,7 @@ from foghorn.plugins.resolve.base import BasePlugin
 
 from .dns_runtime_state import DNSRuntimeState
 from .udp_server import DNSUDPHandler
+from foghorn.utils.exception_logging import warn_suppressed_exception
 
 logger = logging.getLogger("foghorn.server")
 _VALID_DNSSEC_MODES = {"ignore", "passthrough", "validate"}
@@ -271,7 +272,10 @@ class DNSServer:
         except (
             Exception
         ):  # pragma: nocover - defensive: assignment failure is environment-specific and low-value for tests
-            pass
+            warn_suppressed_exception(
+                "best-effort operation failed in servers/server_runtime.py:DNSServer.__init__",
+                logger=logger,
+            )
 
         DNSRuntimeState.upstream_addrs = _validate_upstreams(upstreams)
         DNSRuntimeState.plugins = plugins  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably

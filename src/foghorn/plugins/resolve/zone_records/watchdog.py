@@ -7,6 +7,8 @@ Inputs/Outputs:
 from __future__ import annotations
 
 import logging
+
+from foghorn.utils import condition_logging as condition_log
 import os
 import pathlib
 import threading
@@ -341,8 +343,16 @@ def _poll_loop(plugin: object) -> None:
         try:
             if have_files_changed(plugin):
                 plugin._reload_records_from_watchdog()
-        except Exception:  # pragma: no cover - defensive logging
-            logger.warning("Error during records polling loop", exc_info=True)
+            condition_log.note_condition_ok(
+                plugin, "poll-loop", "ZoneRecords polling loop recovered"
+            )
+        except Exception as exc:  # pragma: no cover - defensive logging
+            condition_log.note_condition_failure(
+                plugin,
+                "poll-loop",
+                "Error during records polling loop: %s",
+                exc,
+            )
 
         # Wait with wakeup on stop event or timeout.
         stop_event.wait(interval)
@@ -371,11 +381,18 @@ def have_files_changed(plugin: object) -> bool:
             st = os.stat(fp_text)
         except FileNotFoundError:
             snapshot.append((fp_text, None))
-        except OSError:
+        except OSError as exc:
             # Other OS-level errors are logged but do not crash the poller.
-            logger.warning("Failed to stat records file %s", fp_text, exc_info=True)
+            condition_log.note_condition_failure(
+                plugin,
+                f"stat:{fp_text}",
+                "Failed to stat records file %s: %s",
+                fp_text,
+                exc,
+            )
             snapshot.append((fp_text, None))
         else:
+            condition_log.note_condition_ok(plugin, f"stat:{fp_text}")
             snapshot.append((fp_text, (st.st_ino, st.st_size, st.st_mtime)))
         if len(snapshot) >= max_entries:
             logger.warning(
@@ -436,10 +453,17 @@ def schedule_debounced_reload(plugin: object, delay: float) -> None:
                 plugin._reload_debounce_timer = None
             try:
                 plugin._reload_records_from_watchdog()
-            except Exception:  # pragma: no cover - defensive logging
-                logger.warning(
-                    "Error during deferred records reload from watchdog",
-                    exc_info=True,
+                condition_log.note_condition_ok(
+                    plugin,
+                    "deferred-reload",
+                    "ZoneRecords deferred reload recovered",
+                )
+            except Exception as exc:  # pragma: no cover - defensive logging
+                condition_log.note_condition_failure(
+                    plugin,
+                    "deferred-reload",
+                    "Error during deferred records reload from watchdog: %s",
+                    exc,
                 )
 
         timer = threading.Timer(delay, _timer_cb)
@@ -502,8 +526,18 @@ def reload_records_from_watchdog(
     logger.info("Reloading records mapping due to filesystem change")
     try:
         plugin._load_records()
+        condition_log.note_condition_ok(
+            plugin,
+            "watchdog-reload",
+            "ZoneRecords watchdog reload recovered",
+        )
     except Exception as exc:  # pragma: no cover - defensive logging
-        logger.warning("Failed to reload records from watchdog event: %s", exc)
+        condition_log.note_condition_failure(
+            plugin,
+            "watchdog-reload",
+            "Failed to reload records from watchdog event: %s",
+            exc,
+        )
         return
 
     # After a successful reload, compute which authoritative zones changed

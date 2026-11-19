@@ -13,6 +13,7 @@ from foghorn.security_limits import (
 )
 
 from . import doh_logic as _logic
+from foghorn.utils.exception_logging import warn_suppressed_exception
 
 logger = logging.getLogger("foghorn.doh_api")
 
@@ -480,7 +481,10 @@ def _start_doh_server_threaded(
             try:
                 httpd.server_close()
             except Exception:
-                pass
+                warn_suppressed_exception(
+                    "best-effort operation failed in servers/doh_api.py:_start_doh_server_threaded",
+                    logger=logger,
+                )
             return None
 
     def _serve() -> None:
@@ -494,7 +498,10 @@ def _start_doh_server_threaded(
             except (
                 Exception
             ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-                pass
+                warn_suppressed_exception(
+                    "best-effort operation failed in servers/doh_api.py:_start_doh_server_threaded._serve",
+                    logger=logger,
+                )
 
     thread = threading.Thread(target=_serve, name="foghorn-doh-threaded", daemon=True)
     thread.start()

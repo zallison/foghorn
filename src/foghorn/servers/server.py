@@ -19,10 +19,8 @@ from dnslib import (  # noqa: F401  (re-exported for udp_server._ensure_edns)
 
 from foghorn.plugins.resolve import base as plugin_base  # noqa: F401
 from foghorn.plugins.resolve.base import PluginContext, PluginDecision  # noqa: F401
-from foghorn.plugins.resolve.zone_records import (
-    _client_allowed_for_axfr,  # noqa: F401
-    iter_axfr_messages,  # noqa: F401
-)
+from foghorn.plugins.resolve.zone_records import _client_allowed_for_axfr  # noqa: F401
+from foghorn.plugins.resolve.zone_records import iter_axfr_messages  # noqa: F401
 from foghorn.servers.recursive_resolver import RecursiveResolver  # noqa: F401
 from foghorn.servers.transports.dot import DoTError, get_dot_pool
 from foghorn.servers.transports.tcp import (
@@ -36,13 +34,13 @@ from .dns_runtime_state import DNSRuntimeState  # noqa: F401
 from .edns_utils import (
     synthesize_ecs_from_client_ip,
 )
+from .server_failover import _UPSTREAM_SKIP_LOCK  # noqa: F401
+from .server_failover import _UPSTREAM_SKIP_WARNED  # noqa: F401
+from .server_failover import _reset_upstream_skip_warning  # noqa: F401
+from .server_failover import _upstream_key_for_skip_warning  # noqa: F401
+from .server_failover import _warn_upstream_skip_once  # noqa: F401
 from .server_failover import (
-    _UPSTREAM_SKIP_LOCK,  # noqa: F401
-    _UPSTREAM_SKIP_WARNED,  # noqa: F401
-    _reset_upstream_skip_warning,  # noqa: F401
     _send_query_with_failover_impl,
-    _upstream_key_for_skip_warning,  # noqa: F401
-    _warn_upstream_skip_once,  # noqa: F401
 )
 from .server_opcode import _handle_non_query_opcode, _ResolveCoreResult
 from .server_resolve_cache import _try_cache_hit
@@ -78,6 +76,7 @@ from .server_response_utils import (  # noqa: F401
 )
 from .server_runtime import DNSServer  # noqa: F401
 from .server_upstream_health import _UPSTREAM_HEALTH, _UpstreamHealth  # noqa: F401
+from foghorn.utils.exception_logging import warn_suppressed_exception
 
 logger = logging.getLogger("foghorn.server")
 
@@ -492,7 +491,10 @@ def _record_suppressed_query_log_drop_candidate(
     try:
         handler(rcode=rcode, status=status)
     except Exception:
-        pass
+        warn_suppressed_exception(
+            "best-effort operation failed in servers/server.py:_record_suppressed_query_log_drop_candidate",
+            logger=logger,
+        )
 
 
 def _schedule_notify_axfr_refresh(zone_name: str, upstream: dict) -> None:
@@ -1003,7 +1005,10 @@ def _resolve_core(
             except (
                 Exception
             ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-                pass
+                warn_suppressed_exception(
+                    "best-effort operation failed in servers/server.py:_resolve_core",
+                    logger=logger,
+                )
 
         # Optional amplification mitigation: refuse QTYPE ANY (255).
         refuse_result = _handle_refuse_any(
@@ -1193,7 +1198,10 @@ def _resolve_core(
                         try:
                             stats.record_ede_code(ede_code)
                         except Exception:  # pragma: no cover - defensive metrics hook
-                            pass
+                            warn_suppressed_exception(
+                                "best-effort operation failed in servers/server.py:_resolve_core",
+                                logger=logger,
+                            )
                     stats.record_response_rcode("SERVFAIL")
                     # Attempt to recover qname/qtype for logging when present.
                     if getattr(req, "questions", None):
@@ -1221,7 +1229,10 @@ def _resolve_core(
                 except (
                     Exception
                 ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-                    pass
+                    warn_suppressed_exception(
+                        "best-effort operation failed in servers/server.py:_resolve_core",
+                        logger=logger,
+                    )
             if stats is not None and t0 is not None:
                 try:
                     t1 = _time.perf_counter()
@@ -1229,7 +1240,10 @@ def _resolve_core(
                 except (
                     Exception
                 ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-                    pass
+                    warn_suppressed_exception(
+                        "best-effort operation failed in servers/server.py:_resolve_core",
+                        logger=logger,
+                    )
             return _ResolveCoreResult(
                 wire=wire,
                 dnssec_status=None,

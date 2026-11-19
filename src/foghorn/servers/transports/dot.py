@@ -8,6 +8,7 @@ import time
 from typing import Optional
 
 from foghorn.utils.register_caches import registered_lru_cache
+from foghorn.utils.exception_logging import warn_suppressed_exception
 
 logger = logging.getLogger("foghorn.servers.transports.dot")
 
@@ -149,12 +150,18 @@ def _probe_remote_cert_subject(
             if tls_sock is not None:
                 tls_sock.close()
         except Exception:
-            pass
+            warn_suppressed_exception(
+                "best-effort operation failed in servers/transports/dot.py:_probe_remote_cert_subject",
+                logger=logger,
+            )
         try:
             if raw_sock is not None:  # pragma: nocover - defensive finalizer branch
                 raw_sock.close()
         except Exception:
-            pass
+            warn_suppressed_exception(
+                "best-effort operation failed in servers/transports/dot.py:_probe_remote_cert_subject",
+                logger=logger,
+            )
     return None
 
 
@@ -362,7 +369,10 @@ def _warn_ssl_error_details(
     try:
         setattr(error, _SSL_DETAILS_LOGGED_ATTR, True)
     except Exception:
-        pass
+        warn_suppressed_exception(
+            "best-effort operation failed in servers/transports/dot.py:_warn_ssl_error_details",
+            logger=logger,
+        )
 
 
 @registered_lru_cache(maxsize=64)
@@ -462,7 +472,10 @@ class _DotConn:
             try:
                 s.close()
             except Exception:
-                pass
+                warn_suppressed_exception(
+                    "best-effort operation failed in servers/transports/dot.py:connect",
+                    logger=logger,
+                )
             raise
         self._sock = s
         self._tls = t
@@ -501,14 +514,20 @@ class _DotConn:
                 except (
                     Exception
                 ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-                    pass  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+                    warn_suppressed_exception(
+                        "best-effort operation failed in servers/transports/dot.py:_DotConn.close",
+                        logger=logger,
+                    )
             if self._sock is not None:
                 try:
                     self._sock.close()
                 except (
                     Exception
                 ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-                    pass  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+                    warn_suppressed_exception(
+                        "best-effort operation failed in servers/transports/dot.py:_DotConn.close",
+                        logger=logger,
+                    )
         finally:
             self._tls = None
             self._sock = None
@@ -578,14 +597,20 @@ class DotConnectionPool:
             except (
                 Exception
             ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-                pass  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+                warn_suppressed_exception(
+                    "best-effort operation failed in servers/transports/dot.py:DotConnectionPool.set_limits",
+                    logger=logger,
+                )
         if idle_timeout_s is not None:
             try:
                 self._idle = max(1, int(idle_timeout_s))
             except (
                 Exception
             ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-                pass  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+                warn_suppressed_exception(
+                    "best-effort operation failed in servers/transports/dot.py:DotConnectionPool.set_limits",
+                    logger=logger,
+                )
 
     def send(
         self, query: bytes, connect_timeout_ms: int, read_timeout_ms: int
@@ -623,7 +648,10 @@ class DotConnectionPool:
             except (
                 Exception
             ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-                pass  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+                warn_suppressed_exception(
+                    "best-effort operation failed in servers/transports/dot.py:DotConnectionPool.send",
+                    logger=logger,
+                )
             raise
         finally:
             if conn is not None and conn._tls is not None:
@@ -729,14 +757,20 @@ def dot_query(
                 except (
                     Exception
                 ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-                    pass  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+                    warn_suppressed_exception(
+                        "best-effort operation failed in servers/transports/dot.py:dot_query",
+                        logger=logger,
+                    )
         finally:
             try:
                 sock.close()
             except (
                 Exception
             ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-                pass  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+                warn_suppressed_exception(
+                    "best-effort operation failed in servers/transports/dot.py:dot_query",
+                    logger=logger,
+                )
     except ssl.SSLError as e:
         _warn_ssl_error_details(
             e,

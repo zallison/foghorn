@@ -1487,3 +1487,242 @@ def test_forward_local_blocking_does_not_affect_non_local_queries(
     out = DNSRecord.parse(resp)
     assert out.header.rcode == RCODE.NOERROR
     assert upstream_calls["n"] == 1
+
+
+def _make_ctx(
+    data: bytes,
+    client_ip: str,
+    *,
+    listener: str | None = "udp",
+    secure: bool | None = False,
+    handler=None,
+    snap=None,
+    stats=None,
+):
+    """Brief: Build a ResolutionContext for direct stage unit tests.
+
+    Inputs:
+      - data: Query wire bytes.
+      - client_ip/listener/secure: Request identity.
+      - handler/snap/stats: Optional runtime handles.
+
+    Outputs:
+      - ResolutionContext ready for stage functions.
+    """
+
+    from foghorn.servers.server_resolve_context import ResolutionContext
+
+    if handler is None:
+        handler = server_mod._build_handler_from_snapshot(snap)
+    return ResolutionContext(
+        data=data,
+        client_ip=client_ip,
+        listener=listener,
+        secure=secure,
+        handler=handler,
+        snap=snap,
+        stats=stats,
+        t0=None,
+        request_result_meta=server_mod._build_request_result_meta(
+            source_ip=client_ip,
+            effective_target_ip=client_ip,
+            listener=listener,
+            secure=secure,
+            inbound_ecs=None,
+            inbound_ecs_trusted=False,
+            outbound_ecs=None,
+            ecs_cache_bypass=False,
+        ),
+    )
+
+
+def test_pipeline_stage_parse_sets_context(set_runtime_snapshot) -> None:
+    """Brief: Parse stage populates req/qname/qtype/cache_key without short-circuit.
+
+    Inputs:
+      - set_runtime_snapshot: runtime fixture.
+
+    Outputs:
+      - None; asserts Parse returns None and fills context fields.
+    """
+
+    set_runtime_snapshot(plugins=[])
+    q = DNSRecord.question("Stage.Example.", "A")
+    ctx = _make_ctx(q.pack())
+    early = server_mod._stage_parse(ctx)
+    assert early is None
+    assert ctx.req is not None
+    assert ctx.qname == "Stage.Example"
+    assert int(ctx.qtype) == int(QTYPE.A)
+    assert ctx.cache_key == ("stage.example", QTYPE.A)
+
+
+def test_pipeline_stage_parse_formerr_on_empty_question(set_runtime_snapshot) -> None:
+    """Brief: Parse stage returns FORMERR for QDCOUNT=0 without setting req.
+
+    Inputs:
+      - Header-only query with QDCOUNT=0.
+
+    Outputs:
+      - None; asserts early FORMERR result.
+    """
+
+    set_runtime_snapshot(plugins=[])
+    query = (
+        b"\xbe\xef"
+        + b"\x01\x00"
+        + b"\x00\x00"
+        + b"\x00\x00"
+        + b"\x00\x00"
+        + b"\x00\x00"
+    )
+    ctx = _make_ctx(query)
+    early = server_mod._stage_parse(ctx)
+    assert early is not None
+    assert early.rcode_name == "FORMERR"
+    assert ctx.req is None
+
+
+def test_pipeline_stage_gate_short_circuits_on_deny(
+    set_runtime_snapshot,
+) -> None:
+    """Brief: Gate stage returns early when a pre plugin denies.
+
+    Inputs:
+      - Runtime with a deny pre plugin.
+
+    Outputs:
+      - None; asserts Gate short-circuits and CacheLookup is not required.
+    """
+
+    set_runtime_snapshot(plugins=[_DenyPlugin()])
+    q = DNSRecord.question("deny-stage.example", "A")
+    ctx = _make_ctx(q.pack())
+    assert server_mod._stage_parse(ctx) is None
+    early = server_mod._stage_gate(ctx)
+    assert early is not None
+    assert early.rcode_name == "NXDOMAIN"
+
+
+def test_pipeline_stage_cache_lookup_hit_skips_resolve(
+    monkeypatch: pytest.MonkeyPatch,
+    set_runtime_snapshot,
+) -> None:
+    """Brief: CacheLookup hit returns a result so Resolve is never needed.
+
+    Inputs:
+      - Pre-seeded DNS_CACHE entry.
+
+    Outputs:
+      - None; asserts CacheLookup returns hit and Resolve is not invoked.
+    """
+
+    set_runtime_snapshot(plugins=[])
+    q = DNSRecord.question("cache-stage.example", "A")
+    r = q.reply()
+    r.add_answer(RR("cache-stage.example", QTYPE.A, rdata=A("*************"), ttl=30))
+    plugin_base.DNS_CACHE = InMemoryTTLCache()
+    plugin_base.DNS_CACHE.set(("cache-stage.example", QTYPE.A), 30, r.pack())
+
+    resolve_calls = {"n": 0}
+    real_resolve = server_mod._stage_resolve
+
+    def _resolve_guard(ctx):
+        resolve_calls["n"] += 1
+        return real_resolve(ctx)
+
+    monkeypatch.setattr(server_mod, "_stage_resolve", _resolve_guard)
+
+    resp = resolve_query_bytes(q.pack(), "*********")
+    out = DNSRecord.parse(resp)
+    assert out.header.rcode == RCODE.NOERROR
+    assert resolve_calls["n"] == 0
+
+
+def test_pipeline_stage_order_parse_gate_cache_resolve_pack(
+    monkeypatch: pytest.MonkeyPatch,
+    set_runtime_snapshot,
+) -> None:
+    """Brief: Full path runs Parse -> Gate -> CacheLookup -> Resolve -> Pack in order.
+
+    Inputs:
+      - monkeypatch wrappers around each stage.
+      - Upstream stub returning NOERROR.
+
+    Outputs:
+      - None; asserts ordered stage invocation and successful response.
+    """
+
+    order: list[str] = []
+    q = DNSRecord.question("order.example", "A")
+    r_ok = q.reply()
+    r_ok.add_answer(RR("order.example", QTYPE.A, rdata=A("*************"), ttl=60))
+
+    def _forward_ok(
+        req,
+        upstreams,
+        timeout_ms,
+        qname,
+        qtype,
+        max_concurrent=None,
+        on_attempt_result=None,
+    ):
+        return r_ok.pack(), {"host": "*******", "port": 53}, "ok"
+
+    monkeypatch.setattr(server_mod, "send_query_with_failover", _forward_ok)
+    plugin_base.DNS_CACHE = InMemoryTTLCache()
+    set_runtime_snapshot(
+        plugins=[],
+        upstream_addrs=[{"host": "*******", "port": 53}],
+    )
+
+    for name in (
+        "_stage_parse",
+        "_stage_gate",
+        "_stage_cache_lookup",
+        "_stage_resolve",
+        "_stage_pack",
+    ):
+        real = getattr(server_mod, name)
+
+        def _wrap(ctx, _real=real, _name=name):
+            order.append(_name)
+            return _real(ctx)
+
+        monkeypatch.setattr(server_mod, name, _wrap)
+
+    resp = resolve_query_bytes(q.pack(), "*********")
+    assert DNSRecord.parse(resp).header.rcode == RCODE.NOERROR
+    assert order == [
+        "_stage_parse",
+        "_stage_gate",
+        "_stage_cache_lookup",
+        "_stage_resolve",
+        "_stage_pack",
+    ]
+
+
+def test_pipeline_exception_fallback_servfail(
+    monkeypatch: pytest.MonkeyPatch,
+    set_runtime_snapshot,
+) -> None:
+    """Brief: Unhandled stage exception yields SERVFAIL without reflecting query.
+
+    Inputs:
+      - monkeypatch forces Parse to raise after setup.
+
+    Outputs:
+      - None; asserts SERVFAIL rcode and distinct response bytes.
+    """
+
+    set_runtime_snapshot(plugins=[])
+    q = DNSRecord.question("boom.example", "A")
+    query = q.pack()
+
+    def _boom(_ctx):
+        raise RuntimeError("stage boom")
+
+    monkeypatch.setattr(server_mod, "_stage_parse", _boom)
+    resp = resolve_query_bytes(query, "*********")
+    assert bytes(resp) != bytes(query)
+    assert DNSRecord.parse(resp).header.rcode == RCODE.SERVFAIL

@@ -1,5 +1,6 @@
 import socket
 from typing import Optional
+from foghorn.utils.exception_logging import warn_suppressed_exception
 
 
 def _resolve_ipv4_host(host: str) -> str:
@@ -96,6 +97,9 @@ def udp_query(
             except (
                 Exception
             ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-                pass
+                warn_suppressed_exception(
+                    "best-effort operation failed in servers/transports/udp.py:udp_query",
+                    logger_name="foghorn.servers.transports.udp",
+                )
     except OSError as e:
         raise UDPError(f"UDP error: {e}")

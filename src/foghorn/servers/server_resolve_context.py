@@ -8,6 +8,7 @@ from typing import Any
 
 from .dns_runtime_state import DNSRuntimeState
 from .server_opcode import _ResolveCoreResult
+from foghorn.utils.exception_logging import warn_suppressed_exception
 
 
 def _build_handler_from_snapshot(snap: object) -> object:
@@ -159,7 +160,10 @@ def _finish_early_result(
                 )
             )
         except Exception:
-            pass
+            warn_suppressed_exception(
+                "best-effort operation failed in servers/server_resolve_context.py:_finish_early_result",
+                logger_name="foghorn.servers.server_resolve_context",
+            )
 
     return _ResolveCoreResult(
         wire=wire,

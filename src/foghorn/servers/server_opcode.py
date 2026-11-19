@@ -17,6 +17,7 @@ from foghorn.plugins.resolve.base import PluginContext, PluginDecision
 from foghorn.utils import dns_names, ip_networks
 
 from .server_response_utils import _set_response_id
+from foghorn.utils.exception_logging import warn_suppressed_exception
 
 logger = logging.getLogger("foghorn.server")
 
@@ -311,14 +312,20 @@ def _handle_non_query_opcode(
             if snap_keys:
                 key_configs.extend([dict(k) for k in snap_keys if isinstance(k, dict)])
         except Exception:
-            pass
+            warn_suppressed_exception(
+                "best-effort operation failed in servers/server_opcode.py:_looks_like_dns_name",
+                logger=logger,
+            )
         try:
             handler_keys = list(getattr(handler, "tsig_keys", []) or [])
             for k in handler_keys:
                 if isinstance(k, dict):
                     key_configs.append(dict(k))
         except Exception:
-            pass
+            warn_suppressed_exception(
+                "best-effort operation failed in servers/server_opcode.py:_looks_like_dns_name",
+                logger=logger,
+            )
         try:
             plugins = list(getattr(handler, "plugins", []) or [])
         except Exception:
@@ -412,7 +419,10 @@ def _handle_non_query_opcode(
     try:
         ctx.qname = qname
     except Exception:  # pragma: no cover - defensive
-        pass
+        warn_suppressed_exception(
+            "best-effort operation failed in servers/server_opcode.py:_handle_non_query_opcode",
+            logger=logger,
+        )
 
     try:
         plugins_list = list(getattr(handler, "plugins", []) or [])
@@ -432,7 +442,10 @@ def _handle_non_query_opcode(
             if hasattr(p, "targets_opcode") and not p.targets_opcode(opcode):
                 continue
         except Exception:  # pragma: no cover - defensive
-            pass
+            warn_suppressed_exception(
+                "best-effort operation failed in servers/server_opcode.py:_handle_non_query_opcode",
+                logger=logger,
+            )
 
         try:
             decision = p.handle_opcode(opcode, qname, qtype, raw_data, ctx)
@@ -457,13 +470,19 @@ def _handle_non_query_opcode(
             try:
                 wire = _set_response_id(wire, int.from_bytes(data_bytes[0:2], "big"))
             except Exception:
-                pass
+                warn_suppressed_exception(
+                    "best-effort operation failed in servers/server_opcode.py:_looks_like_dns_name",
+                    logger=logger,
+                )
             # Ensure QR bit is set in case a plugin accidentally returns a query.
             try:
                 if len(wire) >= 3 and not (wire[2] & 0x80):
                     wire = wire[:2] + bytes([wire[2] | 0x80]) + wire[3:]
             except Exception:
-                pass
+                warn_suppressed_exception(
+                    "best-effort operation failed in servers/server_opcode.py:_looks_like_dns_name",
+                    logger=logger,
+                )
             try:
                 # dnslib expects at least a full DNS header (12 bytes). For
                 # shorter payloads, keep a synthetic label rather than deriving
@@ -500,7 +519,10 @@ def _handle_non_query_opcode(
                         wire, int.from_bytes(data_bytes[0:2], "big")
                     )
                 except Exception:
-                    pass
+                    warn_suppressed_exception(
+                        "best-effort operation failed in servers/server_opcode.py:_looks_like_dns_name",
+                        logger=logger,
+                    )
             return _ResolveCoreResult(
                 wire=wire,
                 dnssec_status=None,
@@ -525,7 +547,10 @@ def _handle_non_query_opcode(
         try:
             wire = _set_response_id(wire, int.from_bytes(data_bytes[0:2], "big"))
         except Exception:
-            pass
+            warn_suppressed_exception(
+                "best-effort operation failed in servers/server_opcode.py:_looks_like_dns_name",
+                logger=logger,
+            )
     return _ResolveCoreResult(
         wire=wire,
         dnssec_status=None,

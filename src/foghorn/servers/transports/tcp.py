@@ -1,6 +1,7 @@
 import socket
 import threading
 import time
+from foghorn.utils.exception_logging import warn_suppressed_exception
 
 
 class TCPError(Exception):
@@ -69,7 +70,10 @@ class _TCPConn:
             except (
                 Exception
             ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-                pass
+                warn_suppressed_exception(
+                    "best-effort operation failed in servers/transports/tcp.py:_TCPConn.close",
+                    logger_name="foghorn.servers.transports.tcp",
+                )
         self._sock = None
 
 
@@ -114,14 +118,20 @@ class TCPConnectionPool:
             except (
                 Exception
             ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-                pass
+                warn_suppressed_exception(
+                    "best-effort operation failed in servers/transports/tcp.py:TCPConnectionPool.set_limits",
+                    logger_name="foghorn.servers.transports.tcp",
+                )
         if idle_timeout_s is not None:
             try:
                 self._idle = max(1, int(idle_timeout_s))
             except (
                 Exception
             ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-                pass
+                warn_suppressed_exception(
+                    "best-effort operation failed in servers/transports/tcp.py:TCPConnectionPool.set_limits",
+                    logger_name="foghorn.servers.transports.tcp",
+                )
 
     def send(
         self, query: bytes, connect_timeout_ms: int, read_timeout_ms: int
@@ -152,7 +162,10 @@ class TCPConnectionPool:
             try:
                 conn.close()
             except Exception:
-                pass
+                warn_suppressed_exception(
+                    "best-effort operation failed in servers/transports/tcp.py:send",
+                    logger_name="foghorn.servers.transports.tcp",
+                )
             raise
         finally:
             if conn is not None and conn._sock is not None:
@@ -238,7 +251,10 @@ def tcp_query(
             except (
                 Exception
             ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-                pass
+                warn_suppressed_exception(
+                    "best-effort operation failed in servers/transports/tcp.py:tcp_query",
+                    logger_name="foghorn.servers.transports.tcp",
+                )
     except (OSError, TimeoutError) as e:
         raise TCPError(f"Network error: {e}")
 

@@ -7,6 +7,7 @@ from typing import Any, Dict, Final
 
 from foghorn.utils.register_caches import registered_ttl_cache
 from .stats_helpers import _utc_now_iso
+from foghorn.utils.exception_logging import warn_suppressed_exception
 
 _GITHUB_URL: Final[str] = "https://github.com/zallison/foghorn"
 
@@ -75,7 +76,10 @@ def _get_package_build_info() -> Dict[str, Any]:
             if payload.get("url") and not info.get("vcs_url"):
                 info["vcs_url"] = str(payload.get("url"))
     except Exception:  # pragma: no cover - best effort
-        pass
+        warn_suppressed_exception(
+            "best-effort operation failed in servers/webserver/meta_helpers.py:_get_package_build_info",
+            logger_name="foghorn.servers.webserver.meta_helpers",
+        )
 
     return info
 

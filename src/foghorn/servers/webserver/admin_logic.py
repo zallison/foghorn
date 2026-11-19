@@ -26,6 +26,7 @@ from ...security_limits import (
 from ...stats import StatsCollector
 from ...utils import dns_names
 from .config_helpers import _ts_to_utc_iso
+from foghorn.utils.exception_logging import warn_suppressed_exception
 
 
 @dataclass(frozen=True)
@@ -628,7 +629,9 @@ def build_upstream_status_payload(
             "max_concurrent": max_concurrent,
             "items": items,
         }
-    except Exception:  # pragma: nocover - runtime snapshot import/state can be unavailable in minimal test environments
+    except (
+        Exception
+    ):  # pragma: nocover - runtime snapshot import/state can be unavailable in minimal test environments
         # Best-effort fallback when runtime snapshot is unavailable.
         return {"strategy": "failover", "max_concurrent": 1, "items": []}
 
@@ -1584,9 +1587,7 @@ def build_plugin_zone_records_dns_update_zone_payload(
             "replay_entries": int(
                 getattr(target, "_dns_update_replay_entries", 0) or 0
             ),
-            "compactions": int(
-                getattr(target, "_dns_update_compact_count", 0) or 0
-            ),
+            "compactions": int(getattr(target, "_dns_update_compact_count", 0) or 0),
             "rate_limit_hits": int(
                 getattr(target, "_dns_update_rate_limit_hits", 0) or 0
             ),
@@ -1884,13 +1885,23 @@ def build_config_verify_payload(
             if fd is not None:
                 try:
                     os.close(fd)
-                except Exception:  # pragma: nocover - defensive cleanup after tempfile parse failure
-                    pass
+                except (
+                    Exception
+                ):  # pragma: nocover - defensive cleanup after tempfile parse failure
+                    warn_suppressed_exception(
+                        "best-effort operation failed in servers/webserver/admin_logic.py:build_config_verify_payload",
+                        logger_name="foghorn.servers.webserver.admin_logic",
+                    )
             if tmp_path:
                 try:
                     os.remove(tmp_path)
-                except Exception:  # pragma: nocover - defensive cleanup after tempfile parse failure
-                    pass
+                except (
+                    Exception
+                ):  # pragma: nocover - defensive cleanup after tempfile parse failure
+                    warn_suppressed_exception(
+                        "best-effort operation failed in servers/webserver/admin_logic.py:build_config_verify_payload",
+                        logger_name="foghorn.servers.webserver.admin_logic",
+                    )
     else:
         try:
             desired_cfg = _runtime_config.load_config_from_disk(
@@ -1988,7 +1999,9 @@ def _find_plugins_by_class_name(
         try:
             if str(type(plugin).__name__) == str(class_name):
                 out.append(plugin)
-        except Exception:  # pragma: nocover - defensive against malformed plugin objects
+        except (
+            Exception
+        ):  # pragma: nocover - defensive against malformed plugin objects
             continue
     return out
 
@@ -2181,7 +2194,9 @@ def _runtime_add_task(
         return
     try:
         add_fn(task_type=str(task_type), status=str(status), details=details or {})
-    except Exception:  # pragma: nocover - best-effort task logging must not break admin actions
+    except (
+        Exception
+    ):  # pragma: nocover - best-effort task logging must not break admin actions
         return
 
 
@@ -2254,9 +2269,13 @@ def build_admin_restart_status_payload(
             "delay_seconds": float(pending.get("delay_seconds", 0.0) or 0.0),
             "reason": pending.get("reason"),
             "scheduled_at_ts": scheduled_at_ts,
-            "scheduled_at": _ts_to_utc_iso(scheduled_at_ts) if scheduled_at_ts > 0.0 else None,
+            "scheduled_at": (
+                _ts_to_utc_iso(scheduled_at_ts) if scheduled_at_ts > 0.0 else None
+            ),
             "expected_at_ts": expected_at_ts,
-            "expected_at": _ts_to_utc_iso(expected_at_ts) if expected_at_ts > 0.0 else None,
+            "expected_at": (
+                _ts_to_utc_iso(expected_at_ts) if expected_at_ts > 0.0 else None
+            ),
         },
     }
 
@@ -2292,7 +2311,9 @@ def build_admin_tasks_payload(
                 items = []
     for item in items:
         created_at_ts = float(item.get("created_at_ts", 0.0) or 0.0)
-        item["created_at"] = _ts_to_utc_iso(created_at_ts) if created_at_ts > 0.0 else None
+        item["created_at"] = (
+            _ts_to_utc_iso(created_at_ts) if created_at_ts > 0.0 else None
+        )
     return {"status": "ok", "items": items, "count": len(items)}
 
 
@@ -2313,23 +2334,42 @@ def build_admin_version_compat_payload(
 
     items: List[Dict[str, Any]] = []
     for plugin in plugins or []:
-        plugin_name = str(getattr(plugin, "name", type(plugin).__name__) or type(plugin).__name__)
+        plugin_name = str(
+            getattr(plugin, "name", type(plugin).__name__) or type(plugin).__name__
+        )
         class_name = str(type(plugin).__name__)
         item: Dict[str, Any] = {
             "plugin": plugin_name,
             "class_name": class_name,
             "capabilities": {
-                "records_validate": bool(callable(getattr(plugin, "admin_validate_record_mutation", None))),
-                "records_apply": bool(callable(getattr(plugin, "admin_apply_record_mutation", None))),
-                "records_delete": bool(callable(getattr(plugin, "admin_delete_record_mutation", None))),
-                "rate_limit_list_keys": bool(callable(getattr(plugin, "admin_list_profile_keys", None))),
-                "rate_limit_clear": bool(callable(getattr(plugin, "admin_clear_profiles", None))),
+                "records_validate": bool(
+                    callable(getattr(plugin, "admin_validate_record_mutation", None))
+                ),
+                "records_apply": bool(
+                    callable(getattr(plugin, "admin_apply_record_mutation", None))
+                ),
+                "records_delete": bool(
+                    callable(getattr(plugin, "admin_delete_record_mutation", None))
+                ),
+                "rate_limit_list_keys": bool(
+                    callable(getattr(plugin, "admin_list_profile_keys", None))
+                ),
+                "rate_limit_clear": bool(
+                    callable(getattr(plugin, "admin_clear_profiles", None))
+                ),
             },
         }
         items.append(item)
 
-    store = _get_store_from_collector(stats_collector) if stats_collector is not None else None
-    query_log: Dict[str, Any] = {"enabled": bool(store is not None), "clear_supported": False}
+    store = (
+        _get_store_from_collector(stats_collector)
+        if stats_collector is not None
+        else None
+    )
+    query_log: Dict[str, Any] = {
+        "enabled": bool(store is not None),
+        "clear_supported": False,
+    }
     if store is not None:
         supports_clear_fn = getattr(store, "supports_query_log_clear", None)
         if callable(supports_clear_fn):
@@ -2377,11 +2417,15 @@ def build_config_diff_payload(
         fd: int | None = None
         tmp_path: str | None = None
         try:
-            fd, tmp_path = tempfile.mkstemp(prefix="foghorn-admin-diff-", suffix=".yaml")
+            fd, tmp_path = tempfile.mkstemp(
+                prefix="foghorn-admin-diff-", suffix=".yaml"
+            )
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 fd = None
                 f.write(raw_yaml)
-            desired_cfg = _runtime_config.load_config_from_disk(config_path=str(tmp_path))
+            desired_cfg = _runtime_config.load_config_from_disk(
+                config_path=str(tmp_path)
+            )
             path_used = str(tmp_path)
         except Exception as exc:
             raise AdminLogicHttpError(
@@ -2391,16 +2435,28 @@ def build_config_diff_payload(
             if fd is not None:
                 try:
                     os.close(fd)
-                except Exception:  # pragma: nocover - defensive cleanup after tempfile parse failure
-                    pass
+                except (
+                    Exception
+                ):  # pragma: nocover - defensive cleanup after tempfile parse failure
+                    warn_suppressed_exception(
+                        "best-effort operation failed in servers/webserver/admin_logic.py:build_config_diff_payload",
+                        logger_name="foghorn.servers.webserver.admin_logic",
+                    )
             if tmp_path:
                 try:
                     os.remove(tmp_path)
-                except Exception:  # pragma: nocover - defensive cleanup after tempfile parse failure
-                    pass
+                except (
+                    Exception
+                ):  # pragma: nocover - defensive cleanup after tempfile parse failure
+                    warn_suppressed_exception(
+                        "best-effort operation failed in servers/webserver/admin_logic.py:build_config_diff_payload",
+                        logger_name="foghorn.servers.webserver.admin_logic",
+                    )
     else:
         try:
-            desired_cfg = _runtime_config.load_config_from_disk(config_path=str(cfg_path_text))
+            desired_cfg = _runtime_config.load_config_from_disk(
+                config_path=str(cfg_path_text)
+            )
         except Exception as exc:
             raise AdminLogicHttpError(
                 status_code=400, detail=f"failed to parse/validate config: {exc}"
@@ -2434,7 +2490,9 @@ def build_config_diff_payload(
     added = sorted(desired_paths - current_paths)
     removed = sorted(current_paths - desired_paths)
     modified = sorted(
-        p for p in (current_paths & desired_paths) if current_flat.get(p) != desired_flat.get(p)
+        p
+        for p in (current_paths & desired_paths)
+        if current_flat.get(p) != desired_flat.get(p)
     )
 
     return {
@@ -2475,8 +2533,16 @@ def build_config_lint_payload(
         config_path=config_path,
         current_cfg=current_cfg,
     )
-    analysis = diff_payload.get("analysis", {}) if isinstance(diff_payload.get("analysis"), dict) else {}
-    diff_obj = diff_payload.get("diff", {}) if isinstance(diff_payload.get("diff"), dict) else {}
+    analysis = (
+        diff_payload.get("analysis", {})
+        if isinstance(diff_payload.get("analysis"), dict)
+        else {}
+    )
+    diff_obj = (
+        diff_payload.get("diff", {})
+        if isinstance(diff_payload.get("diff"), dict)
+        else {}
+    )
     issues: List[Dict[str, Any]] = []
 
     if not bool(diff_payload.get("changed", False)):
@@ -2497,7 +2563,9 @@ def build_config_lint_payload(
                 "message": "Changes require restart for full effect.",
             }
         )
-    if bool(analysis.get("reload_required", False)) and not bool(analysis.get("restart_required", False)):
+    if bool(analysis.get("reload_required", False)) and not bool(
+        analysis.get("restart_required", False)
+    ):
         issues.append(
             {
                 "level": "info",
@@ -2577,7 +2645,9 @@ def execute_query_log_export(
                 page_size=page_size,
             )
         except Exception as exc:
-            raise AdminLogicHttpError(status_code=500, detail=f"query_log export failed: {exc}") from exc
+            raise AdminLogicHttpError(
+                status_code=500, detail=f"query_log export failed: {exc}"
+            ) from exc
 
         items = payload.get("items") if isinstance(payload, dict) else None
         if not isinstance(items, list) or not items:
@@ -2602,7 +2672,19 @@ def execute_query_log_export(
             "data": "\n".join(lines),
         }
 
-    csv_columns = ["id", "ts", "timestamp", "client_ip", "qname", "qtype", "rcode", "status", "upstream_id", "error", "first"]
+    csv_columns = [
+        "id",
+        "ts",
+        "timestamp",
+        "client_ip",
+        "qname",
+        "qtype",
+        "rcode",
+        "status",
+        "upstream_id",
+        "error",
+        "first",
+    ]
     csv_lines = [",".join(csv_columns)]
     for row in rows:
         values = []
@@ -2645,22 +2727,33 @@ def execute_query_log_compact(
         raise AdminLogicHttpError(status_code=404, detail="query_log store unavailable")
     mode_text = str(mode or "vacuum").strip().lower()
     if mode_text not in {"vacuum", "optimize", "prune_only"}:
-        raise AdminLogicHttpError(status_code=400, detail="mode must be vacuum, optimize, or prune_only")
+        raise AdminLogicHttpError(
+            status_code=400, detail="mode must be vacuum, optimize, or prune_only"
+        )
 
     if str(type(store).__name__) != "StatsSQLiteStore":
-        raise AdminLogicHttpError(status_code=400, detail="query_log compact is supported only for sqlite backend")
+        raise AdminLogicHttpError(
+            status_code=400,
+            detail="query_log compact is supported only for sqlite backend",
+        )
 
     conn = getattr(store, "_conn", None)
     if conn is None:
-        raise AdminLogicHttpError(status_code=500, detail="sqlite backend connection unavailable")
+        raise AdminLogicHttpError(
+            status_code=500, detail="sqlite backend connection unavailable"
+        )
     lock = getattr(store, "_lock", None)
     if lock is None:
-        raise AdminLogicHttpError(status_code=500, detail="sqlite backend lock unavailable")
+        raise AdminLogicHttpError(
+            status_code=500, detail="sqlite backend lock unavailable"
+        )
 
     def _count_rows() -> int:
         cur = conn.execute("SELECT COUNT(1) FROM query_log")
         row = cur.fetchone()
-        return int(row[0] or 0) if row else 0  # pragma: nocover - COUNT(1) in sqlite returns a row unless cursor/driver is corrupted
+        return (
+            int(row[0] or 0) if row else 0
+        )  # pragma: nocover - COUNT(1) in sqlite returns a row unless cursor/driver is corrupted
 
     with lock:
         try:
@@ -2670,16 +2763,30 @@ def execute_query_log_compact(
                     flush_fn()
             before_rows = _count_rows()
             if dry_run:
-                return {"status": "ok", "mode": mode_text, "dry_run": True, "before_rows": before_rows, "after_rows": before_rows}
+                return {
+                    "status": "ok",
+                    "mode": mode_text,
+                    "dry_run": True,
+                    "before_rows": before_rows,
+                    "after_rows": before_rows,
+                }
             if mode_text == "vacuum":
                 conn.execute("VACUUM")
             elif mode_text == "optimize":
                 conn.execute("PRAGMA optimize")
             conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
             after_rows = _count_rows()
-            return {"status": "ok", "mode": mode_text, "dry_run": False, "before_rows": before_rows, "after_rows": after_rows}
+            return {
+                "status": "ok",
+                "mode": mode_text,
+                "dry_run": False,
+                "before_rows": before_rows,
+                "after_rows": after_rows,
+            }
         except Exception as exc:
-            raise AdminLogicHttpError(status_code=500, detail=f"query_log compact failed: {exc}") from exc
+            raise AdminLogicHttpError(
+                status_code=500, detail=f"query_log compact failed: {exc}"
+            ) from exc
 
 
 def execute_rate_limit_hot_keys(
@@ -2730,7 +2837,9 @@ def execute_rate_limit_hot_keys(
                         "SELECT key, avg_rps, max_rps, samples, last_update FROM rate_profiles WHERE key != ?",
                         ("global",),
                     )
-                    for key, avg_rps, max_rps, samples, last_update in list(cur.fetchall() or []):
+                    for key, avg_rps, max_rps, samples, last_update in list(
+                        cur.fetchall() or []
+                    ):
                         profile_meta[str(key)] = {
                             "avg_rps": float(avg_rps or 0.0),
                             "max_rps": float(max_rps or 0.0),
@@ -2753,12 +2862,24 @@ def execute_rate_limit_hot_keys(
                     "max_rps": float(meta.get("max_rps", 0.0) or 0.0),
                     "samples": int(meta.get("samples", 0) or 0),
                     "last_seen_ts": last_update_ts,
-                    "last_seen": _ts_to_utc_iso(float(last_update_ts)) if last_update_ts > 0 else None,
+                    "last_seen": (
+                        _ts_to_utc_iso(float(last_update_ts))
+                        if last_update_ts > 0
+                        else None
+                    ),
                     "denies": 0,
                 }
             )
-        rows.sort(key=lambda r: (float(r.get("current_rps", 0.0)), float(r.get("avg_rps", 0.0))), reverse=True)
-        out_items.append({"plugin": str(getattr(plugin, "name", "RateLimit")), "items": rows[:lim]})
+        rows.sort(
+            key=lambda r: (
+                float(r.get("current_rps", 0.0)),
+                float(r.get("avg_rps", 0.0)),
+            ),
+            reverse=True,
+        )
+        out_items.append(
+            {"plugin": str(getattr(plugin, "name", "RateLimit")), "items": rows[:lim]}
+        )
 
     return {"status": "ok", "items": out_items}
 
@@ -2796,7 +2917,11 @@ def execute_rate_limit_reset_counters(
                 active_map.clear()
                 setattr(plugin, "_active_window_id", None)
 
-        for attr in ["_deny_episode_count", "_burst_exceeded_count", "_below_threshold_count"]:
+        for attr in [
+            "_deny_episode_count",
+            "_burst_exceeded_count",
+            "_below_threshold_count",
+        ]:
             m = getattr(plugin, attr, None)
             if isinstance(m, dict):
                 m.clear()
@@ -2844,15 +2969,27 @@ def execute_records_list(
             limit=int(limit),
         )
     except Exception as exc:
-        raise AdminLogicHttpError(status_code=500, detail=f"failed to list temporary records: {exc}") from exc
-    items = [dict(it) for it in raw if isinstance(it, dict)] if isinstance(raw, list) else []
+        raise AdminLogicHttpError(
+            status_code=500, detail=f"failed to list temporary records: {exc}"
+        ) from exc
+    items = (
+        [dict(it) for it in raw if isinstance(it, dict)]
+        if isinstance(raw, list)
+        else []
+    )
     for item in items:
         expires_at_ts = float(item.get("expires_at_ts", 0.0) or 0.0)
         created_at_ts = float(item.get("created_at_ts", 0.0) or 0.0)
         updated_at_ts = float(item.get("updated_at_ts", 0.0) or 0.0)
-        item["expires_at"] = _ts_to_utc_iso(expires_at_ts) if expires_at_ts > 0.0 else None
-        item["created_at"] = _ts_to_utc_iso(created_at_ts) if created_at_ts > 0.0 else None
-        item["updated_at"] = _ts_to_utc_iso(updated_at_ts) if updated_at_ts > 0.0 else None
+        item["expires_at"] = (
+            _ts_to_utc_iso(expires_at_ts) if expires_at_ts > 0.0 else None
+        )
+        item["created_at"] = (
+            _ts_to_utc_iso(created_at_ts) if created_at_ts > 0.0 else None
+        )
+        item["updated_at"] = (
+            _ts_to_utc_iso(updated_at_ts) if updated_at_ts > 0.0 else None
+        )
     return {"status": "ok", "items": items, "count": len(items)}
 
 
@@ -2888,15 +3025,24 @@ def execute_records_purge_expired(
     try:
         raw_items = purge_fn()
     except Exception as exc:
-        raise AdminLogicHttpError(status_code=500, detail=f"failed to purge expired records: {exc}") from exc
+        raise AdminLogicHttpError(
+            status_code=500, detail=f"failed to purge expired records: {exc}"
+        ) from exc
     candidates = [dict(it) for it in raw_items if isinstance(it, dict)]
-    candidates = [it for it in candidates if str(it.get("target", "")) == str(target) and str(it.get("plugin", "")) == str(plugin_name)]
+    candidates = [
+        it
+        for it in candidates
+        if str(it.get("target", "")) == str(target)
+        and str(it.get("plugin", "")) == str(plugin_name)
+    ]
 
     removed = 0
     failed = 0
     out_items: List[Dict[str, Any]] = []
     for item in candidates:
-        payload = item.get("payload", {}) if isinstance(item.get("payload"), dict) else {}
+        payload = (
+            item.get("payload", {}) if isinstance(item.get("payload"), dict) else {}
+        )
         try:
             if str(target) == "etc_hosts":
                 delete_fn = getattr(plugin, "admin_delete_record_mutation", None)
@@ -2922,8 +3068,15 @@ def execute_records_purge_expired(
             out_items.append({"key": item.get("key"), "status": "removed"})
         except Exception as exc:
             failed += 1
-            out_items.append({"key": item.get("key"), "status": "failed", "detail": str(exc)})
-    return {"status": "ok", "removed": int(removed), "failed": int(failed), "items": out_items}
+            out_items.append(
+                {"key": item.get("key"), "status": "failed", "detail": str(exc)}
+            )
+    return {
+        "status": "ok",
+        "removed": int(removed),
+        "failed": int(failed),
+        "items": out_items,
+    }
 
 
 def build_admin_diag_runtime_snapshot(
@@ -3016,7 +3169,12 @@ def execute_records_apply(
             )
         except Exception as exc:
             raise AdminLogicHttpError(status_code=400, detail=str(exc)) from exc
-        result_payload = {"status": "ok", "target": target, "plugin": plugin_name, "result": out}
+        result_payload = {
+            "status": "ok",
+            "target": target,
+            "plugin": plugin_name,
+            "result": out,
+        }
         if runtime_state is not None:
             key_text = _build_temporary_record_tracking_key(
                 target=target,
@@ -3028,8 +3186,13 @@ def execute_records_apply(
                 if callable(remove_fn):
                     try:
                         remove_fn(key=key_text)
-                    except Exception:  # pragma: nocover - best-effort state cleanup must not fail request
-                        pass
+                    except (
+                        Exception
+                    ):  # pragma: nocover - best-effort state cleanup must not fail request
+                        warn_suppressed_exception(
+                            "best-effort operation failed in servers/webserver/admin_logic.py:execute_records_apply",
+                            logger_name="foghorn.servers.webserver.admin_logic",
+                        )
             else:
                 upsert_fn = getattr(runtime_state, "upsert_temporary_record", None)
                 if callable(upsert_fn):
@@ -3042,8 +3205,13 @@ def execute_records_apply(
                             ttl_seconds=int(ttl_seconds),
                             persist=False,
                         )
-                    except Exception:  # pragma: nocover - best-effort state tracking must not fail request
-                        pass
+                    except (
+                        Exception
+                    ):  # pragma: nocover - best-effort state tracking must not fail request
+                        warn_suppressed_exception(
+                            "best-effort operation failed in servers/webserver/admin_logic.py:execute_records_apply",
+                            logger_name="foghorn.servers.webserver.admin_logic",
+                        )
         return result_payload
     if target == "zone_records":
         fn = getattr(plugin, "admin_apply_record_mutation", None)
@@ -3062,7 +3230,12 @@ def execute_records_apply(
             )
         except Exception as exc:
             raise AdminLogicHttpError(status_code=400, detail=str(exc)) from exc
-        result_payload = {"status": "ok", "target": target, "plugin": plugin_name, "result": out}
+        result_payload = {
+            "status": "ok",
+            "target": target,
+            "plugin": plugin_name,
+            "result": out,
+        }
         if runtime_state is not None:
             key_text = _build_temporary_record_tracking_key(
                 target=target,
@@ -3074,8 +3247,13 @@ def execute_records_apply(
                 if callable(remove_fn):
                     try:
                         remove_fn(key=key_text)
-                    except Exception:  # pragma: nocover - best-effort state cleanup must not fail request
-                        pass
+                    except (
+                        Exception
+                    ):  # pragma: nocover - best-effort state cleanup must not fail request
+                        warn_suppressed_exception(
+                            "best-effort operation failed in servers/webserver/admin_logic.py:execute_records_apply",
+                            logger_name="foghorn.servers.webserver.admin_logic",
+                        )
             else:
                 upsert_fn = getattr(runtime_state, "upsert_temporary_record", None)
                 if callable(upsert_fn):
@@ -3092,8 +3270,13 @@ def execute_records_apply(
                             ttl_seconds=int(ttl_seconds),
                             persist=False,
                         )
-                    except Exception:  # pragma: nocover - best-effort state tracking must not fail request
-                        pass
+                    except (
+                        Exception
+                    ):  # pragma: nocover - best-effort state tracking must not fail request
+                        warn_suppressed_exception(
+                            "best-effort operation failed in servers/webserver/admin_logic.py:execute_records_apply",
+                            logger_name="foghorn.servers.webserver.admin_logic",
+                        )
         return result_payload
     raise AdminLogicHttpError(status_code=400, detail="unknown records target")
 
@@ -3138,7 +3321,12 @@ def execute_records_delete(
             )
         except Exception as exc:
             raise AdminLogicHttpError(status_code=400, detail=str(exc)) from exc
-        result_payload = {"status": "ok", "target": target, "plugin": plugin_name, "result": out}
+        result_payload = {
+            "status": "ok",
+            "target": target,
+            "plugin": plugin_name,
+            "result": out,
+        }
         if runtime_state is not None:
             key_text = _build_temporary_record_tracking_key(
                 target=target,
@@ -3149,8 +3337,13 @@ def execute_records_delete(
             if callable(remove_fn):
                 try:
                     remove_fn(key=key_text)
-                except Exception:  # pragma: nocover - best-effort state cleanup must not fail request
-                    pass
+                except (
+                    Exception
+                ):  # pragma: nocover - best-effort state cleanup must not fail request
+                    warn_suppressed_exception(
+                        "best-effort operation failed in servers/webserver/admin_logic.py:execute_records_delete",
+                        logger_name="foghorn.servers.webserver.admin_logic",
+                    )
         return result_payload
     if target == "zone_records":
         fn = getattr(plugin, "admin_delete_record_mutation", None)
@@ -3168,12 +3361,20 @@ def execute_records_delete(
             )
         except Exception as exc:
             raise AdminLogicHttpError(status_code=400, detail=str(exc)) from exc
-        result_payload = {"status": "ok", "target": target, "plugin": plugin_name, "result": out}
+        result_payload = {
+            "status": "ok",
+            "target": target,
+            "plugin": plugin_name,
+            "result": out,
+        }
         if runtime_state is not None:
             remove_fn = getattr(runtime_state, "remove_temporary_record", None)
             list_fn = getattr(runtime_state, "list_temporary_records", None)
             if callable(remove_fn):
-                if str(payload.get("qtype", "")).strip() or str(payload.get("value", "")).strip():
+                if (
+                    str(payload.get("qtype", "")).strip()
+                    or str(payload.get("value", "")).strip()
+                ):
                     key_text = _build_temporary_record_tracking_key(
                         target=target,
                         plugin_name=plugin_name,
@@ -3181,8 +3382,13 @@ def execute_records_delete(
                     )
                     try:
                         remove_fn(key=key_text)
-                    except Exception:  # pragma: nocover - best-effort state cleanup must not fail request
-                        pass
+                    except (
+                        Exception
+                    ):  # pragma: nocover - best-effort state cleanup must not fail request
+                        warn_suppressed_exception(
+                            "best-effort operation failed in servers/webserver/admin_logic.py:execute_records_delete",
+                            logger_name="foghorn.servers.webserver.admin_logic",
+                        )
                 elif callable(list_fn):
                     try:
                         raw_items = list_fn(
@@ -3201,14 +3407,21 @@ def execute_records_delete(
                             payload_map = item.get("payload", {})
                             if not isinstance(payload_map, dict):
                                 continue
-                            if dns_names.normalize_name(str(payload_map.get("owner", ""))) != owner_norm:
+                            if (
+                                dns_names.normalize_name(
+                                    str(payload_map.get("owner", ""))
+                                )
+                                != owner_norm
+                            ):
                                 continue
                             key_text = str(item.get("key", "")).strip()
                             if not key_text:
                                 continue
                             try:
                                 remove_fn(key=key_text)
-                            except Exception:  # pragma: nocover - best-effort per-key cleanup
+                            except (
+                                Exception
+                            ):  # pragma: nocover - best-effort per-key cleanup
                                 continue
         return result_payload
     raise AdminLogicHttpError(status_code=400, detail="unknown records target")

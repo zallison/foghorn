@@ -20,6 +20,7 @@ from .server_response_utils import (
     _echo_client_edns,
     _set_response_id,
 )
+from foghorn.utils.exception_logging import warn_suppressed_exception
 
 logger = logging.getLogger("foghorn.server")
 
@@ -112,13 +113,19 @@ def _run_pre_plugins(
     try:
         ctx.qname = qname
     except Exception:  # pragma: no cover - defensive
-        pass
+        warn_suppressed_exception(
+            "best-effort operation failed in servers/server_resolve_plugins.py:_run_pre_plugins",
+            logger=logger,
+        )
     try:
         ctx.ecs = dict(trusted_inbound_ecs) if trusted_inbound_ecs is not None else None
         ctx.effective_target_ip = str(effective_target_ip or client_ip or "")
         ctx.source_ip = str(client_ip or "")
     except Exception:  # pragma: no cover - defensive
-        pass
+        warn_suppressed_exception(
+            "best-effort operation failed in servers/server_resolve_plugins.py:_run_pre_plugins",
+            logger=logger,
+        )
     plugins_list = list(getattr(handler, "plugins", []) or [])
     if snap is not None and hasattr(snap, "generation"):
         pre_plugins, post_plugins = _get_ordered_plugins(
@@ -148,7 +155,10 @@ def _run_pre_plugins(
         ):  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
             # On failure, fall back to running the plugin to avoid hiding
             # errors behind targeting decisions.
-            pass
+            warn_suppressed_exception(
+                "best-effort operation failed in servers/server_resolve_plugins.py:_run_pre_plugins",
+                logger=logger,
+            )
 
         try:
             decision = time_plugin_call(
@@ -307,7 +317,10 @@ def _run_pre_plugins(
                     except (
                         Exception
                     ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-                        pass
+                        warn_suppressed_exception(
+                            "best-effort operation failed in servers/server_resolve_plugins.py:_run_pre_plugins",
+                            logger=logger,
+                        )
                 log_plugin_telemetry(logger, "pre", qname, pre_telemetry)
                 return (
                     pre_plugins,
@@ -329,7 +342,10 @@ def _run_pre_plugins(
                     _echo_client_edns(req, override_msg)
                     resp_wire = override_msg.pack()
                 except Exception:  # pragma: no cover - defensive: parse failure
-                    pass
+                    warn_suppressed_exception(
+                        "best-effort operation failed in servers/server_resolve_plugins.py:_run_pre_plugins",
+                        logger=logger,
+                    )
                 dnssec_status = _classify_dnssec_status_for_response(
                     handler=handler,
                     qname=qname,
@@ -396,7 +412,10 @@ def _run_pre_plugins(
                     except (
                         Exception
                     ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-                        pass
+                        warn_suppressed_exception(
+                            "best-effort operation failed in servers/server_resolve_plugins.py:_run_pre_plugins",
+                            logger=logger,
+                        )
                 log_plugin_telemetry(logger, "pre", qname, pre_telemetry)
                 return (
                     pre_plugins,
@@ -455,7 +474,10 @@ def _run_post_plugins(
     try:
         ctx2.qname = qname
     except Exception:  # pragma: no cover - defensive
-        pass
+        warn_suppressed_exception(
+            "best-effort operation failed in servers/server_resolve_plugins.py:_run_post_plugins",
+            logger=logger,
+        )
     try:
         ctx2.ecs = (
             dict(trusted_inbound_ecs) if trusted_inbound_ecs is not None else None
@@ -463,7 +485,10 @@ def _run_post_plugins(
         ctx2.effective_target_ip = str(effective_target_ip or client_ip or "")
         ctx2.source_ip = str(client_ip or "")
     except Exception:  # pragma: no cover - defensive
-        pass
+        warn_suppressed_exception(
+            "best-effort operation failed in servers/server_resolve_plugins.py:_run_post_plugins",
+            logger=logger,
+        )
     out = reply
     record_plugin_timing = plugin_telemetry_enabled(logger)
     post_telemetry: list = []
@@ -478,7 +503,10 @@ def _run_post_plugins(
         except (
             Exception
         ):  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
-            pass
+            warn_suppressed_exception(
+                "best-effort operation failed in servers/server_resolve_plugins.py:_run_post_plugins",
+                logger=logger,
+            )
 
         try:
             decision = time_plugin_call(

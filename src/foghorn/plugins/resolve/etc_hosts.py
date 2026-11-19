@@ -33,6 +33,7 @@ from foghorn.plugins.resolve.hosts_common import (
 )
 from foghorn.plugins.resolve.zone_records import update_helpers
 from foghorn.utils import dns_names
+from foghorn.utils import condition_logging as condition_log
 
 logger = logging.getLogger(__name__)
 
@@ -953,8 +954,18 @@ class EtcHosts(BasePlugin):
             try:
                 if self._have_files_changed():
                     self._reload_hosts_from_watchdog()
-            except Exception:  # pragma: no cover - defensive logging
-                logger.warning("Error during hosts polling loop", exc_info=True)
+                condition_log.note_condition_ok(
+                    self,
+                    "poll-loop",
+                    "EtcHosts polling loop recovered",
+                )
+            except Exception as exc:  # pragma: no cover - defensive logging
+                condition_log.note_condition_failure(
+                    self,
+                    "poll-loop",
+                    "Error during hosts polling loop: %s",
+                    exc,
+                )
 
             # Wait with wakeup on stop event or timeout.
             stop_event.wait(interval)
@@ -978,11 +989,18 @@ class EtcHosts(BasePlugin):
                 st = os.stat(fp)
             except FileNotFoundError:
                 snapshot.append((fp, None))
-            except OSError:
+            except OSError as exc:
                 # Other OS-level errors are logged but do not crash the poller.
-                logger.warning("Failed to stat hosts file %s", fp, exc_info=True)
+                condition_log.note_condition_failure(
+                    self,
+                    f"stat:{fp}",
+                    "Failed to stat hosts file %s: %s",
+                    fp,
+                    exc,
+                )
                 snapshot.append((fp, None))
             else:
+                condition_log.note_condition_ok(self, f"stat:{fp}")
                 snapshot.append((fp, (st.st_ino, st.st_size, st.st_mtime)))
 
         last = getattr(self, "_last_stat_snapshot", None)
@@ -1029,10 +1047,17 @@ class EtcHosts(BasePlugin):
                 # performed.
                 try:
                     self._reload_hosts_from_watchdog()
-                except Exception:  # pragma: no cover - defensive logging
-                    logger.warning(
-                        "Error during deferred hosts reload from watchdog",
-                        exc_info=True,
+                    condition_log.note_condition_ok(
+                        self,
+                        "deferred-reload",
+                        "EtcHosts deferred reload recovered",
+                    )
+                except Exception as exc:  # pragma: no cover - defensive logging
+                    condition_log.note_condition_failure(
+                        self,
+                        "deferred-reload",
+                        "Error during deferred hosts reload from watchdog: %s",
+                        exc,
                     )
 
             timer = threading.Timer(delay, _timer_cb)
@@ -1078,8 +1103,18 @@ class EtcHosts(BasePlugin):
         logger.info("Reloading hosts mapping due to filesystem change")
         try:
             self._load_hosts()
+            condition_log.note_condition_ok(
+                self,
+                "watchdog-reload",
+                "EtcHosts watchdog reload recovered",
+            )
         except Exception as exc:  # pragma: no cover - defensive logging
-            logger.warning("Failed to reload hosts from watchdog event: %s", exc)
+            condition_log.note_condition_failure(
+                self,
+                "watchdog-reload",
+                "Failed to reload hosts from watchdog event: %s",
+                exc,
+            )
 
     def close(self) -> None:
         """

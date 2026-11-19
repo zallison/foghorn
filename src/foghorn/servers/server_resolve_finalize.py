@@ -16,6 +16,7 @@ from .server_response_utils import (
     _set_response_id,
     _strip_response_cookie_options,
 )
+from foghorn.utils.exception_logging import warn_suppressed_exception
 
 
 def _finalize_resolved_response(
@@ -147,7 +148,10 @@ def _finalize_resolved_response(
 
                     cache_payload = strip_tsig_from_wire(cache_payload)
                 except Exception:
-                    pass
+                    warn_suppressed_exception(
+                        "best-effort operation failed in servers/server_resolve_finalize.py:_finalize_resolved_response",
+                        logger_name="foghorn.servers.server_resolve_finalize",
+                    )
                 cache.set(cache_key, int(ttl), cache_payload)
 
         # Attach a DNSSEC-related EDE only for explicitly bogus
@@ -163,11 +167,17 @@ def _finalize_resolved_response(
                 )
                 out = r.pack()
             except Exception:  # pragma: no cover - defensive: best-effort only
-                pass
+                warn_suppressed_exception(
+                    "best-effort operation failed in servers/server_resolve_finalize.py:_finalize_resolved_response",
+                    logger_name="foghorn.servers.server_resolve_finalize",
+                )
     except (
         Exception
     ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-        pass  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+        warn_suppressed_exception(
+            "best-effort operation failed in servers/server_resolve_finalize.py:_finalize_resolved_response",
+            logger_name="foghorn.servers.server_resolve_finalize",
+        )
 
     try:
         from foghorn.servers.tsig_utils import (
@@ -185,7 +195,10 @@ def _finalize_resolved_response(
                 request_msg=tsig_ctx.get("request_msg"),
             )
     except Exception:
-        pass
+        warn_suppressed_exception(
+            "best-effort operation failed in servers/server_resolve_finalize.py:_finalize_resolved_response",
+            logger_name="foghorn.servers.server_resolve_finalize",
+        )
     out = _bind_response_cookie_to_request(
         req,
         out,
@@ -233,7 +246,10 @@ def _finalize_resolved_response(
         except (
             Exception
         ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-            pass
+            warn_suppressed_exception(
+                "best-effort operation failed in servers/server_resolve_finalize.py:_finalize_resolved_response",
+                logger_name="foghorn.servers.server_resolve_finalize",
+            )
 
     return _ResolveCoreResult(
         wire=wire,

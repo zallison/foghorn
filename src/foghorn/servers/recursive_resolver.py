@@ -17,6 +17,7 @@ from foghorn.utils import dns_names
 from . import (
     recursive_resolver as _recursive_module,  # Self-import to honour test monkeypatching.
 )
+from foghorn.utils.exception_logging import warn_suppressed_exception
 
 """Iterative recursive resolver for Foghorn.
 
@@ -285,7 +286,10 @@ class RecursiveResolver:
         except (
             Exception
         ):  # pragma: nocover defensive: random.shuffle failure would indicate interpreter corruption and is not practical to test
-            pass
+            warn_suppressed_exception(
+                "best-effort operation failed in servers/recursive_resolver.py:RecursiveResolver._choose_initial_servers",
+                logger=logger,
+            )
         return servers
 
     @staticmethod
@@ -321,7 +325,10 @@ class RecursiveResolver:
         except (
             Exception
         ):  # pragma: nocover defensive: unexpected structure in resp is already exercised via higher-level resolver tests
-            pass
+            warn_suppressed_exception(
+                "best-effort operation failed in servers/recursive_resolver.py:RecursiveResolver._ttl_from_response",
+                logger=logger,
+            )
         return max(1, int(default_ttl))
 
     def _destination_allowed(self, host: str) -> bool:
@@ -776,7 +783,10 @@ class RecursiveResolver:
                 except (
                     Exception
                 ):  # pragma: nocover defensive: cache backend write failures should not break recursion and are difficult to force portably
-                    pass
+                    warn_suppressed_exception(
+                        "best-effort operation failed in servers/recursive_resolver.py:RecursiveResolver.resolve",
+                        logger=logger,
+                    )
 
             rcode = resp.header.rcode
             has_answer = bool(resp.rr)

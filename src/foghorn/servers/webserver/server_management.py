@@ -16,6 +16,7 @@ import os
 import socket
 import ssl
 import threading
+from foghorn.utils.exception_logging import warn_suppressed_exception
 
 # Forward declaration for create_app - actual import happens in start_webserver
 # to avoid circular dependency
@@ -106,7 +107,10 @@ def _derive_uvicorn_limit_concurrency(web_cfg: dict[str, Any]) -> int:
         if override > 0:
             return override
     except Exception:
-        pass
+        warn_suppressed_exception(
+            "best-effort operation failed in servers/webserver/server_management.py:_derive_uvicorn_limit_concurrency",
+            logger=logger,
+        )
 
     # Keep a conservative default under small fd limits (for example, 1024).
     soft_nofile = _get_soft_nofile_limit()
@@ -352,7 +356,10 @@ def _start_admin_server_threaded(
             try:
                 httpd.server_close()
             except Exception:
-                pass
+                warn_suppressed_exception(
+                    "best-effort operation failed in servers/webserver/server_management.py:_start_admin_server_threaded",
+                    logger=logger,
+                )
             return None
 
     def _serve() -> None:
@@ -368,7 +375,10 @@ def _start_admin_server_threaded(
             except (
                 Exception
             ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-                pass
+                warn_suppressed_exception(
+                    "best-effort operation failed in servers/webserver/server_management.py:_start_admin_server_threaded._serve",
+                    logger=logger,
+                )
 
     thread = threading.Thread(
         target=_serve,

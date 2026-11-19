@@ -26,6 +26,7 @@ import dns.tsig
 import dns.tsigkeyring
 
 from foghorn.utils import dns_names
+from foghorn.utils.exception_logging import warn_suppressed_exception
 
 logger = logging.getLogger(__name__)
 
@@ -404,7 +405,10 @@ def strip_tsig_from_wire(wire: bytes | bytearray | memoryview | None) -> bytes:
                 try:
                     setattr(msg, attr, None)
                 except Exception:
-                    pass
+                    warn_suppressed_exception(
+                        "best-effort operation failed in servers/tsig_utils.py:strip_tsig_from_wire",
+                        logger=logger,
+                    )
         return msg.to_wire()
     except Exception:
         return raw
@@ -445,7 +449,10 @@ def sign_response_tsig(
     try:
         resp.tsig = []
     except Exception:
-        pass
+        warn_suppressed_exception(
+            "best-effort operation failed in servers/tsig_utils.py:sign_response_tsig",
+            logger=logger,
+        )
     alg = normalize_tsig_algorithm(
         algorithm or getattr(request_msg, "keyalgorithm", None) or "hmac-sha256"
     )
@@ -508,7 +515,10 @@ def build_tsig_error_response(
                 )
             return wire
         except Exception:
-            pass
+            warn_suppressed_exception(
+                "best-effort operation failed in servers/tsig_utils.py:build_tsig_error_response",
+                logger=logger,
+            )
 
     try:
         mid = int.from_bytes(request_data[0:2], "big") if len(request_data) >= 2 else 0
@@ -524,7 +534,10 @@ def build_tsig_error_response(
     try:
         resp.set_opcode(opcode)
     except Exception:
-        pass
+        warn_suppressed_exception(
+            "best-effort operation failed in servers/tsig_utils.py:build_tsig_error_response",
+            logger=logger,
+        )
     resp.set_rcode(int(rcode))
     try:
         return resp.to_wire()

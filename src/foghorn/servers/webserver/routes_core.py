@@ -40,6 +40,7 @@ from .config_helpers import (
 )
 from .http_helpers import _schedule_process_signal
 from .stats_helpers import _utc_now_iso
+from foghorn.utils.exception_logging import warn_suppressed_exception
 
 
 def _json_safe(value: Any) -> Any:
@@ -304,7 +305,10 @@ def _register_config_routes(
             try:
                 await file.close()
             except Exception:
-                pass
+                warn_suppressed_exception(
+                    "best-effort operation failed in servers/webserver/routes_core.py:upload_config_diagram_png",
+                    logger_name="foghorn.servers.webserver.routes_core",
+                )
 
         if not isinstance(data, (bytes, bytearray, memoryview)):
             raise HTTPException(
@@ -341,7 +345,10 @@ def _register_config_routes(
                 if tmp_path.exists():
                     tmp_path.unlink()
             except Exception:
-                pass
+                warn_suppressed_exception(
+                    "best-effort operation failed in servers/webserver/routes_core.py:upload_config_diagram_png",
+                    logger_name="foghorn.servers.webserver.routes_core",
+                )
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"failed to write diagram png: {exc}",
@@ -419,7 +426,10 @@ def _register_config_routes(
                     signal_name="SIGHUP",
                 )
             except Exception:
-                pass
+                warn_suppressed_exception(
+                    "best-effort operation failed in servers/webserver/routes_core.py:_schedule_restart",
+                    logger_name="foghorn.servers.webserver.routes_core",
+                )
         _admin_logic.add_admin_audit_event(
             runtime_state,
             action="restart.schedule",
@@ -612,7 +622,10 @@ def _register_config_routes(
 
                 ensure_config_diagram_png(config_path=str(cfg_path_abs))
             except Exception:
-                pass
+                warn_suppressed_exception(
+                    "best-effort operation failed in servers/webserver/routes_core.py:_save_config_to_disk",
+                    logger_name="foghorn.servers.webserver.routes_core",
+                )
 
         return {
             "cfg_path_abs": cfg_path_abs,
@@ -745,7 +758,10 @@ def _register_config_routes(
                     app.state.config = snap.cfg
                     app.state.plugins = list(snap.plugins or [])
                 except Exception:
-                    pass
+                    warn_suppressed_exception(
+                        "best-effort operation failed in servers/webserver/routes_core.py:save_and_reload_config",
+                        logger_name="foghorn.servers.webserver.routes_core",
+                    )
             # reload_from_disk(mode='reload_only') can report restart_required when
             # listener/http changes are present. Under /save_and_reload semantics we
             # refuse to apply reload in that case.
@@ -901,7 +917,10 @@ def _register_config_routes(
                     app.state.config = snap.cfg
                     app.state.plugins = list(snap.plugins or [])
                 except Exception:
-                    pass
+                    warn_suppressed_exception(
+                        "best-effort operation failed in servers/webserver/routes_core.py:reload_config",
+                        logger_name="foghorn.servers.webserver.routes_core",
+                    )
             msg = "reloaded" if reload_res.ok else "reload failed"
             payload = {
                 "status": "ok" if reload_res.ok else "error",
@@ -988,7 +1007,10 @@ def _register_config_routes(
                     app.state.config = snap.cfg
                     app.state.plugins = list(snap.plugins or [])
                 except Exception:
-                    pass
+                    warn_suppressed_exception(
+                        "best-effort operation failed in servers/webserver/routes_core.py:reload_reloadable",
+                        logger_name="foghorn.servers.webserver.routes_core",
+                    )
             msg = "reloaded" if reload_res.ok else "reload failed"
             if reload_res.ok and analysis.get("restart_required"):
                 msg = "reloaded reloadable settings (restart required for some changes)"
@@ -1454,7 +1476,10 @@ def _register_admin_routes(app: FastAPI, auth_dep: Any) -> None:
             try:
                 set_last(dict(payload))
             except Exception:
-                pass
+                warn_suppressed_exception(
+                    "best-effort operation failed in servers/webserver/routes_core.py:admin_config_verify",
+                    logger_name="foghorn.servers.webserver.routes_core",
+                )
         _audit(
             action="config.verify",
             target="config",

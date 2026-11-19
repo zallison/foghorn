@@ -120,7 +120,7 @@ def test_send_notify_for_zones_skips_local_self_loop_targets(monkeypatch) -> Non
     monkeypatch.setattr(
         notify,
         "send_notify_to_target",
-        lambda z, t: calls.append((z, dict(t))),
+        lambda z, t, **_kw: calls.append((z, dict(t))),
         raising=True,
     )
 
@@ -149,7 +149,7 @@ def test_send_notify_for_zones_blocks_private_targets_by_default(monkeypatch) ->
     monkeypatch.setattr(
         notify,
         "send_notify_to_target",
-        lambda z, t: calls.append((z, dict(t))),
+        lambda z, t, **_kw: calls.append((z, dict(t))),
         raising=True,
     )
 
@@ -177,7 +177,7 @@ def test_send_notify_for_zones_throttles_repeated_sends(monkeypatch) -> None:
     monkeypatch.setattr(
         notify,
         "send_notify_to_target",
-        lambda z, t: calls.append((z, dict(t))),
+        lambda z, t, **_kw: calls.append((z, dict(t))),
         raising=True,
     )
 
@@ -195,7 +195,7 @@ def test_schedule_delayed_notify_deduplicates_existing_timer(monkeypatch) -> Non
     monkeypatch.setattr(
         notify,
         "send_notify_to_target",
-        lambda z, t: send_calls.append((z, dict(t))),
+        lambda z, t, **_kw: send_calls.append((z, dict(t))),
         raising=True,
     )
 
@@ -255,7 +255,7 @@ def test_send_notify_for_zones_blocks_mixed_public_private_resolution(
     monkeypatch.setattr(
         notify,
         "send_notify_to_target",
-        lambda z, t: calls.append((z, dict(t))),
+        lambda z, t, **_kw: calls.append((z, dict(t))),
         raising=True,
     )
 
@@ -325,7 +325,7 @@ def test_send_notify_for_zones_allows_target_when_hostname_is_allowlisted(
     monkeypatch.setattr(
         notify,
         "send_notify_to_target",
-        lambda z, t: calls.append((z, dict(t))),
+        lambda z, t, **_kw: calls.append((z, dict(t))),
         raising=True,
     )
 
@@ -366,7 +366,7 @@ def test_send_notify_for_zones_allows_target_when_ip_matches_allowlist_cidr(
     monkeypatch.setattr(
         notify,
         "send_notify_to_target",
-        lambda z, t: calls.append((z, dict(t))),
+        lambda z, t, **_kw: calls.append((z, dict(t))),
         raising=True,
     )
 
@@ -407,7 +407,7 @@ def test_send_notify_for_zones_blocks_target_when_resolution_mixes_allowlisted_a
     monkeypatch.setattr(
         notify,
         "send_notify_to_target",
-        lambda z, t: calls.append((z, dict(t))),
+        lambda z, t, **_kw: calls.append((z, dict(t))),
         raising=True,
     )
 
@@ -434,7 +434,7 @@ def test_send_notify_for_zones_allows_target_when_allowlist_unset(monkeypatch) -
     monkeypatch.setattr(
         notify,
         "send_notify_to_target",
-        lambda z, t: calls.append((z, dict(t))),
+        lambda z, t, **_kw: calls.append((z, dict(t))),
         raising=True,
     )
 
@@ -527,7 +527,7 @@ def test_send_notify_for_zones_blocks_ipv6_ula_targets_by_default(monkeypatch) -
     monkeypatch.setattr(
         notify,
         "send_notify_to_target",
-        lambda z, t: calls.append((z, dict(t))),
+        lambda z, t, **_kw: calls.append((z, dict(t))),
         raising=True,
     )
 
@@ -553,7 +553,7 @@ def test_send_notify_for_zones_allows_ipv6_global_target(monkeypatch) -> None:
     monkeypatch.setattr(
         notify,
         "send_notify_to_target",
-        lambda z, t: calls.append((z, dict(t))),
+        lambda z, t, **_kw: calls.append((z, dict(t))),
         raising=True,
     )
 

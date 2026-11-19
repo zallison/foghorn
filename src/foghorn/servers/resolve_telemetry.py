@@ -20,6 +20,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Protocol, runtime_checkable
+from foghorn.utils.exception_logging import warn_suppressed_exception
 
 logger = logging.getLogger("foghorn.resolve_telemetry")
 
@@ -186,7 +187,10 @@ def telemetry_from_stats(stats: object | None) -> ResolveTelemetry:
     try:
         stats._resolve_telemetry = tel
     except Exception:
-        pass
+        warn_suppressed_exception(
+            "best-effort operation failed in servers/resolve_telemetry.py:telemetry_from_stats",
+            logger=logger,
+        )
     return tel
 
 

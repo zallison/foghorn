@@ -18,6 +18,7 @@ from .server_response_utils import (
     _echo_client_edns,
     _set_response_id,
 )
+from foghorn.utils.exception_logging import warn_suppressed_exception
 
 logger = logging.getLogger("foghorn.server")
 
@@ -256,7 +257,10 @@ def _resolve_upstream(
                             if random.random() * 100.0 < current_probe_percent:
                                 selected.append(upstream)
                         except Exception:
-                            pass
+                            warn_suppressed_exception(
+                                "best-effort operation failed in servers/server_resolve_upstream.py:_select_upstreams_with_probe",
+                                logger=logger,
+                            )
                     continue
                 selected.append(upstream)
                 healthy_count += 1
@@ -324,7 +328,10 @@ def _resolve_upstream(
             try:
                 random.shuffle(upstreams)
             except Exception:
-                pass
+                warn_suppressed_exception(
+                    "best-effort operation failed in servers/server_resolve_upstream.py:_all_primaries_degraded",
+                    logger=logger,
+                )
         try:
             mode = str(getattr(handler, "dnssec_mode", "ignore")).lower()
             if mode in ("ignore", "passthrough", "validate") and upstreams:
@@ -339,7 +346,10 @@ def _resolve_upstream(
         except (
             Exception
         ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-            pass  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+            warn_suppressed_exception(
+                "best-effort operation failed in servers/server_resolve_upstream.py:_resolve_upstream",
+                logger=logger,
+            )
 
         # Forward with failover using the same helper as UDP handlers. Tests
         # frequently monkeypatch send_query_with_failover directly, so we call
@@ -435,7 +445,10 @@ def _resolve_upstream(
         except (
             Exception
         ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-            pass
+            warn_suppressed_exception(
+                "best-effort operation failed in servers/server_resolve_upstream.py:_resolve_upstream",
+                logger=logger,
+            )
 
     if reply is None:
         r = req.reply()
@@ -503,7 +516,10 @@ def _resolve_upstream(
             except (
                 Exception
             ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-                pass
+                warn_suppressed_exception(
+                    "best-effort operation failed in servers/server_resolve_upstream.py:_resolve_upstream",
+                    logger=logger,
+                )
         early = _ResolveCoreResult(
             wire=wire,
             dnssec_status=None,

@@ -17,6 +17,7 @@ import signal
 import time
 import urllib.parse
 from datetime import UTC, datetime, timezone
+from foghorn.utils.exception_logging import warn_suppressed_exception
 
 # Forward declaration - _AdminHTTPServer is defined in server_management
 from typing import TYPE_CHECKING, Any, ClassVar, Dict, Optional
@@ -1334,7 +1335,10 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
                 if "tmp_path" in locals() and tmp_path.exists():
                     tmp_path.unlink()
             except Exception:
-                pass
+                warn_suppressed_exception(
+                    "best-effort operation failed in servers/webserver/threaded_handlers.py:_handle_config_diagram_png_upload",
+                    logger=logger,
+                )
             self._send_json(
                 500,
                 {
@@ -1979,7 +1983,10 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             try:
                 set_last(dict(payload))
             except Exception:
-                pass
+                warn_suppressed_exception(
+                    "best-effort operation failed in servers/webserver/threaded_handlers.py:_handle_admin_config_verify",
+                    logger=logger,
+                )
         self._admin_audit(
             action="config.verify",
             target="config",
@@ -2282,7 +2289,10 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             except (
                 Exception
             ):  # pragma: nocover - best-effort restart metadata must not block signal scheduling
-                pass
+                warn_suppressed_exception(
+                    "best-effort operation failed in servers/webserver/threaded_handlers.py:_ThreadedAdminRequestHandler._schedule_restart",
+                    logger=logger,
+                )
         _admin_logic.add_admin_audit_event(
             runtime_state,
             action="restart.schedule",
@@ -2434,7 +2444,10 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
                 if os.path.exists(upload_path):
                     os.remove(upload_path)
             except Exception:
-                pass
+                warn_suppressed_exception(
+                    "best-effort operation failed in servers/webserver/threaded_handlers.py:_save_config_to_disk",
+                    logger=logger,
+                )
             raise
 
         from foghorn import runtime_config as _runtime_config
@@ -2473,7 +2486,10 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
 
                 ensure_config_diagram_png(config_path=str(cfg_path_abs))
             except Exception:
-                pass
+                warn_suppressed_exception(
+                    "best-effort operation failed in servers/webserver/threaded_handlers.py:_save_config_to_disk",
+                    logger=logger,
+                )
 
         return {
             "cfg_path_abs": cfg_path_abs,
@@ -2593,7 +2609,10 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
                 self._server().config = snap.cfg
                 self._server().plugins = list(snap.plugins or [])
             except Exception:
-                pass
+                warn_suppressed_exception(
+                    "best-effort operation failed in servers/webserver/threaded_handlers.py:_handle_config_save_and_reload",
+                    logger=logger,
+                )
 
         if reload_res.ok and reload_res.restart_required:
             self._send_json(
@@ -2750,7 +2769,10 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
                 self._server().config = snap.cfg
                 self._server().plugins = list(snap.plugins or [])
             except Exception:
-                pass
+                warn_suppressed_exception(
+                    "best-effort operation failed in servers/webserver/threaded_handlers.py:_handle_config_reload_reloadable",
+                    logger=logger,
+                )
 
         msg = "reloaded" if reload_res.ok else "reload failed"
         if reload_res.ok and analysis.get("restart_required"):
@@ -2846,7 +2868,10 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
                 self._server().config = snap.cfg
                 self._server().plugins = list(snap.plugins or [])
             except Exception:
-                pass
+                warn_suppressed_exception(
+                    "best-effort operation failed in servers/webserver/threaded_handlers.py:_handle_config_reload",
+                    logger=logger,
+                )
 
         msg = "reloaded" if reload_res.ok else "reload failed"
 

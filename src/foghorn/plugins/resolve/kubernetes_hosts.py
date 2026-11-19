@@ -35,6 +35,7 @@ from foghorn.plugins.resolve.hosts_common import (
     resolve_plugin_tls_path,
     get_sni_session,
 )
+from foghorn.utils import condition_logging as condition_log
 
 logger = logging.getLogger(__name__)
 
@@ -505,8 +506,16 @@ class KubernetesHosts(DynamicHostsPlugin):
                     # Back-compat if older parse left _ca_temp alone.
                     if hints.get("_ca_temp"):
                         temps.append(str(hints["_ca_temp"]))
+                    condition_log.note_condition_ok(
+                        self,
+                        f"kubeconfig-parse:{kc_path}",
+                        "[%s]: kubeconfig parse recovered",
+                        self.name,
+                    )
                 except Exception as exc:
-                    logger.warning(
+                    condition_log.note_condition_failure(
+                        self,
+                        f"kubeconfig-parse:{kc_path}",
                         "[%s]: kubeconfig parse failed: %s",
                         self.name,
                         exc,
@@ -879,8 +888,11 @@ class KubernetesHosts(DynamicHostsPlugin):
         namespaces = self._endpoint_namespaces(endpoint)
         single_ns = len([n for n in namespaces if n]) == 1
 
+        api_id = str(conn.get("api_server") or endpoint.api_server or "k8s")
         for ns in namespaces:
+            ns_label = ns or "*"
             if include_services:
+                list_key = f"list-services:{api_id}:{ns_label}"
                 try:
                     services = self._list_namespaced(
                         conn,
@@ -893,13 +905,23 @@ class KubernetesHosts(DynamicHostsPlugin):
                     msg = str(exc)
                     if "max_list_pages" in msg or "max_list_items" in msg:
                         raise
-                    logger.warning(
+                    condition_log.note_condition_failure(
+                        self,
+                        list_key,
                         "[%s]: list services failed (ns=%s): %s",
                         self.name,
-                        ns or "*",
+                        ns_label,
                         exc,
                     )
                     services = []
+                else:
+                    condition_log.note_condition_ok(
+                        self,
+                        list_key,
+                        "[%s]: list services recovered (ns=%s)",
+                        self.name,
+                        ns_label,
+                    )
                 for svc in services:
                     meta = (
                         svc.get("metadata")
@@ -963,6 +985,7 @@ class KubernetesHosts(DynamicHostsPlugin):
                     )
 
             if include_pods:
+                list_key = f"list-pods:{api_id}:{ns_label}"
                 try:
                     pods = self._list_namespaced(
                         conn,
@@ -975,13 +998,23 @@ class KubernetesHosts(DynamicHostsPlugin):
                     msg = str(exc)
                     if "max_list_pages" in msg or "max_list_items" in msg:
                         raise
-                    logger.warning(
+                    condition_log.note_condition_failure(
+                        self,
+                        list_key,
                         "[%s]: list pods failed (ns=%s): %s",
                         self.name,
-                        ns or "*",
+                        ns_label,
                         exc,
                     )
                     pods = []
+                else:
+                    condition_log.note_condition_ok(
+                        self,
+                        list_key,
+                        "[%s]: list pods recovered (ns=%s)",
+                        self.name,
+                        ns_label,
+                    )
                 for pod in pods:
                     meta = (
                         pod.get("metadata")
@@ -1084,6 +1117,7 @@ class KubernetesHosts(DynamicHostsPlugin):
 
         cap_exceeded = False
         for endpoint in self._effective_endpoints():
+            endpoint_key = f"endpoint-collect:{getattr(endpoint, 'api_server', None) or id(endpoint)}"
             try:
                 (
                     e_v4,
@@ -1101,13 +1135,21 @@ class KubernetesHosts(DynamicHostsPlugin):
                 errors.append(msg)
                 if "max_list_pages" in msg or "max_list_items" in msg:
                     cap_exceeded = True
-                self._note_condition_failure(
-                    f"endpoint-collect:{getattr(endpoint, 'api_server', None) or id(endpoint)}",
+                condition_log.note_condition_failure(
+                    self,
+                    endpoint_key,
                     "[%s]: endpoint collect failed: %s",
                     self.name,
                     exc,
                 )
                 continue
+            condition_log.note_condition_ok(
+                self,
+                endpoint_key,
+                "[%s]: endpoint collect recovered (%s)",
+                self.name,
+                getattr(endpoint, "api_server", None) or "endpoint",
+            )
             merge_list_map(forward_v4, e_v4)
             merge_list_map(forward_v6, e_v6)
             ttl_v4.update(e_ttl4)
@@ -1125,7 +1167,8 @@ class KubernetesHosts(DynamicHostsPlugin):
             with self._lock:
                 self._last_reload_ts = time.time()
                 self._last_error = "; ".join(errors) if errors else "list cap exceeded"
-            self._note_condition_failure(
+            condition_log.note_condition_failure(
+                self,
                 "cluster-reload",
                 "[%s]: reload aborted (list cap exceeded); keeping previous maps: %s",
                 self.name,
@@ -1146,14 +1189,16 @@ class KubernetesHosts(DynamicHostsPlugin):
             self._last_reload_ts = time.time()
             self._last_error = "; ".join(errors) if errors else None
         if errors:
-            self._note_condition_failure(
+            condition_log.note_condition_failure(
+                self,
                 "cluster-reload",
                 "[%s]: reload completed with errors: %s",
                 self.name,
                 self._last_error,
             )
         else:
-            self._note_condition_ok(
+            condition_log.note_condition_ok(
+                self,
                 "cluster-reload",
                 "[%s]: reload recovered",
                 self.name,

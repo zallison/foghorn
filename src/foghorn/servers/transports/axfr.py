@@ -15,6 +15,7 @@ from foghorn.security_limits import MAX_AXFR_FRAME_BYTES
 from foghorn.utils import dns_names
 
 from .dot import _build_ssl_context
+from foghorn.utils.exception_logging import warn_suppressed_exception
 
 
 class AXFRError(Exception):
@@ -290,14 +291,23 @@ def axfr_transfer(
                 try:
                     tls_sock.close()
                 except Exception:  # pragma: no cover - defensive
-                    pass
+                    warn_suppressed_exception(
+                        "best-effort operation failed in servers/transports/axfr.py:axfr_transfer",
+                        logger_name="foghorn.servers.transports.axfr",
+                    )
             if sock is not None:
                 try:
                     sock.close()
                 except Exception:  # pragma: no cover - defensive
-                    pass
+                    warn_suppressed_exception(
+                        "best-effort operation failed in servers/transports/axfr.py:axfr_transfer",
+                        logger_name="foghorn.servers.transports.axfr",
+                    )
         except Exception:  # pragma: no cover - defensive
-            pass
+            warn_suppressed_exception(
+                "best-effort operation failed in servers/transports/axfr.py:axfr_transfer",
+                logger_name="foghorn.servers.transports.axfr",
+            )
 
     if not seen_any_message:
         raise AXFRError(f"AXFR from {host}:{port} for {zone_qname!r} returned no data")

@@ -19,6 +19,7 @@ from foghorn.servers.transports.tcp import TCPError, get_tcp_pool, tcp_query
 from foghorn.utils import dns_names
 
 from .dns_runtime_state import DNSRuntimeState
+from foghorn.utils.exception_logging import warn_suppressed_exception
 
 logger = logging.getLogger("foghorn.server")
 
@@ -244,7 +245,10 @@ def _is_connection_refused_error(exc: Exception) -> bool:
         if isinstance(exc, ConnectionRefusedError):
             return True
     except Exception:
-        pass
+        warn_suppressed_exception(
+            "best-effort operation failed in servers/server_failover.py:_is_connection_refused_error",
+            logger=logger,
+        )
 
     try:
         err = int(getattr(exc, "errno", 0) or 0)
@@ -475,7 +479,10 @@ def _warn_upstream_skip_once(upstream_key: str, fmt: str, *args) -> None:
                 try:
                     _UPSTREAM_SKIP_WARNED.move_to_end(upstream_key, last=True)
                 except Exception:  # pragma: no cover - defensive
-                    pass
+                    warn_suppressed_exception(
+                        "best-effort operation failed in servers/server_failover.py:_warn_upstream_skip_once",
+                        logger=logger,
+                    )
                 return
             while len(_UPSTREAM_SKIP_WARNED) >= int(_MAX_SKIP_WARNED_ENTRIES):
                 _UPSTREAM_SKIP_WARNED.popitem(last=False)
@@ -505,7 +512,10 @@ def _reset_upstream_skip_warning(upstream_key: str) -> None:
         with _UPSTREAM_SKIP_LOCK:
             _UPSTREAM_SKIP_WARNED.pop(upstream_key, None)
     except Exception:  # pragma: no cover - defensive
-        pass
+        warn_suppressed_exception(
+            "best-effort operation failed in servers/server_failover.py:_reset_upstream_skip_warning",
+            logger=logger,
+        )
 
 
 def _all_upstreams_failed_key(upstreams: list[dict]) -> str:
@@ -558,7 +568,10 @@ def _warn_all_upstreams_failed_once(all_failed_key: str, fmt: str, *args) -> boo
                 try:
                     _ALL_UPSTREAMS_FAILED_WARNED.move_to_end(all_failed_key, last=True)
                 except Exception:  # pragma: no cover - defensive
-                    pass
+                    warn_suppressed_exception(
+                        "best-effort operation failed in servers/server_failover.py:_warn_all_upstreams_failed_once",
+                        logger=logger,
+                    )
                 return False
             while len(_ALL_UPSTREAMS_FAILED_WARNED) >= int(
                 _MAX_ALL_FAILED_WARNED_ENTRIES
@@ -591,7 +604,10 @@ def _reset_all_upstreams_failed_warning(all_failed_key: str) -> None:
         with _UPSTREAM_SKIP_LOCK:
             _ALL_UPSTREAMS_FAILED_WARNED.pop(all_failed_key, None)
     except Exception:  # pragma: no cover - defensive
-        pass
+        warn_suppressed_exception(
+            "best-effort operation failed in servers/server_failover.py:_reset_all_upstreams_failed_warning",
+            logger=logger,
+        )
 
 
 def _send_query_with_failover_impl(
@@ -826,7 +842,10 @@ def _send_query_with_failover_impl(
                     ),
                 )
             except Exception:  # pragma: no cover - defensive: pool tuning only
-                pass
+                warn_suppressed_exception(
+                    "best-effort operation failed in servers/server_failover.py:_send_query_with_failover_impl._send_transport_query",
+                    logger=logger,
+                )
             return pool.send(query.pack(), timeout_ms, timeout_ms)
 
         if transport == "tcp":
@@ -846,7 +865,10 @@ def _send_query_with_failover_impl(
                     ),
                 )
             except Exception:  # pragma: no cover - defensive: pool tuning only
-                pass
+                warn_suppressed_exception(
+                    "best-effort operation failed in servers/server_failover.py:_send_query_with_failover_impl._send_transport_query",
+                    logger=logger,
+                )
             return pool.send(query.pack(), timeout_ms, timeout_ms)
 
         if transport == "doh":
@@ -1167,7 +1189,10 @@ def _send_query_with_failover_impl(
                 if getattr(exc, "errno", None) == 2:
                     file_info = f" (file: {str(tls_ca_file_hint)!r})"
             except Exception:  # pragma: no cover - defensive
-                pass
+                warn_suppressed_exception(
+                    "best-effort operation failed in servers/server_failover.py:_send_query_with_failover_impl._format_transport_error_file_info",
+                    logger=logger,
+                )
 
         return file_info
 
@@ -1275,7 +1300,10 @@ def _send_query_with_failover_impl(
                 attempted_upstream_states[summary_label] = upstream_state
                 attempted_upstream_fail_counts[summary_label] = fail_count
         except Exception:
-            pass
+            warn_suppressed_exception(
+                "best-effort operation failed in servers/server_failover.py:_try_single",
+                logger=logger,
+            )
 
         try:
             logger.debug(
@@ -1414,7 +1442,10 @@ def _send_query_with_failover_impl(
                         try:
                             fut.cancel()
                         except Exception:
-                            pass
+                            warn_suppressed_exception(
+                                "best-effort operation failed in servers/server_failover.py:_try_single",
+                                logger=logger,
+                            )
                     _reset_all_upstreams_failed_warning(all_failed_key)
                     return resp, used, reason
 

@@ -18,6 +18,170 @@ from .plugin_telemetry import (
 logger = logging.getLogger("foghorn.server")
 
 
+def _best_effort_set_attr(obj: object, name: str, value: object) -> None:
+    """Brief: Set an attribute when possible; ignore failures.
+
+    Inputs:
+      - obj: Target object.
+      - name: Attribute name.
+      - value: Value to assign.
+
+    Outputs:
+      - None. Immutable objects / type errors are ignored.
+    """
+    try:
+        setattr(obj, name, value)
+    except Exception:
+        return
+
+
+def _best_effort_clear_attr(
+    obj: object,
+    name: str,
+    *,
+    fallback: object = False,
+) -> None:
+    """Brief: Delete an attribute; assign fallback if delete is refused.
+
+    Inputs:
+      - obj: Target object (no-op when None or attribute missing).
+      - name: Attribute name to clear.
+      - fallback: Value written via setattr when delattr fails.
+
+    Outputs:
+      - None.
+    """
+    if obj is None or not hasattr(obj, name):
+        return
+    try:
+        delattr(obj, name)
+    except Exception:
+        _best_effort_set_attr(obj, name, fallback)
+
+
+def _plugin_opts_out_of_qtype(plugin: object, qtype: int) -> bool:
+    """Brief: True when a plugin should be skipped for this qtype.
+
+    Inputs:
+      - plugin: Resolve plugin instance.
+      - qtype: Query type integer.
+
+    Outputs:
+      - bool: True only when ``targets_qtype`` exists and returns False.
+        Targeting errors return False so the plugin still runs.
+    """
+    try:
+        targets = getattr(plugin, "targets_qtype", None)
+        if callable(targets) and not targets(qtype):
+            return True
+    except Exception:
+        return False
+    return False
+
+
+def _best_effort_echo_client_edns(req: DNSRecord, resp: DNSRecord) -> None:
+    """Brief: Echo client EDNS OPT onto a response; ignore helper failures.
+
+    Inputs:
+      - req: Parsed client request.
+      - resp: Response record mutated in place.
+
+    Outputs:
+      - None. Import or helper failures leave ``resp`` unchanged.
+    """
+    try:
+        from . import server as _server_mod
+
+        _server_mod._echo_client_edns(req, resp)
+    except Exception:
+        return
+
+
+def _best_effort_enrich_synthetic_edns(
+    req: DNSRecord,
+    resp: DNSRecord,
+    *,
+    ede_code: int,
+    ede_text: str,
+) -> None:
+    """Brief: Echo client EDNS and attach EDE on synthetic error responses.
+
+    Inputs:
+      - req: Parsed client request.
+      - resp: Synthetic response mutated in place.
+      - ede_code: RFC 8914 EDE info-code.
+      - ede_text: Optional human-readable EDE text.
+
+    Outputs:
+      - None. Failures leave ``resp`` usable without EDNS/EDE.
+    """
+    try:
+        from . import server as _server_mod
+
+        _server_mod._echo_client_edns(req, resp)
+        _server_mod._attach_ede_option(req, resp, ede_code, ede_text)
+    except Exception:
+        return
+
+
+def _best_effort_clear_additional(record: DNSRecord) -> None:
+    """Brief: Clear the additional section when shrinking a truncated reply.
+
+    Inputs:
+      - record: DNSRecord whose ``ar`` list should be emptied.
+
+    Outputs:
+      - None. Assignment failures leave the record unchanged.
+    """
+    try:
+        record.ar = []
+    except Exception:
+        return
+
+
+def _best_effort_apply_udp_size_ceiling(
+    *,
+    query_wire: bytes,
+    response_wire: bytes,
+    server_max_bytes: int | None,
+) -> bytes:
+    """Brief: Apply UDP size ceiling; keep original wire if enforcement fails.
+
+    Inputs:
+      - query_wire: Original request bytes.
+      - response_wire: Response bytes before ceiling enforcement.
+      - server_max_bytes: Optional server UDP max payload.
+
+    Outputs:
+      - bytes: Possibly truncated response, or the original wire on failure.
+    """
+    try:
+        return enforce_udp_response_size_ceiling(
+            query_wire=query_wire,
+            response_wire=response_wire,
+            server_max_bytes=server_max_bytes,
+        )
+    except Exception:
+        return response_wire
+
+
+def _best_effort_close_udp_server(server: object) -> None:
+    """Brief: Close a UDP server socket without raising.
+
+    Inputs:
+      - server: socketserver server with optional ``server_close``.
+
+    Outputs:
+      - None.
+    """
+    try:
+        close = getattr(server, "server_close", None)
+        if callable(close):
+            close()
+    except Exception:
+        return
+
+
 def _client_udp_payload_limit(req: DNSRecord) -> int:
     """Brief: Determine the client-advertised UDP response size limit.
 
@@ -165,22 +329,14 @@ def enforce_udp_response_size_ceiling(
 
         # Echo client EDNS OPT when possible so EDNS-capable clients can still
         # see a consistent EDNS envelope.
-        try:
-            from . import server as _server_mod
-
-            _server_mod._echo_client_edns(req, r)
-        except Exception:
-            pass
+        _best_effort_echo_client_edns(req, r)
 
         out = r.pack()
         if len(out) <= effective:
             return _set_response_id(out, req.header.id)
 
         # If OPT makes the response too large, retry without additional records.
-        try:
-            r.ar = []
-        except Exception:
-            pass
+        _best_effort_clear_additional(r)
 
         out2 = r.pack()
         if len(out2) <= effective:
@@ -331,23 +487,15 @@ class DNSUDPHandler(DNSRuntimeState, socketserver.BaseRequestHandler):
         # Pre-resolve plugin checks in priority order
         # Attach qname to the context when available so BasePlugin domain
         # targeting helpers can operate on it.
-        try:
-            setattr(ctx, "qname", qname)
-        except Exception:  # pragma: no cover - defensive
-            pass
+        _best_effort_set_attr(ctx, "qname", qname)
 
         pre_telemetry = []
         record_plugin_timing = plugin_telemetry_enabled(logger)
         for p in sorted(self.plugins, key=lambda p: getattr(p, "pre_priority", 50)):
             # Skip plugins that do not target this qtype when they opt in via
             # BasePlugin.target_qtypes.
-            try:
-                if hasattr(p, "targets_qtype") and not p.targets_qtype(qtype):
-                    continue
-            except (
-                Exception
-            ):  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
-                pass
+            if _plugin_opts_out_of_qtype(p, qtype):
+                continue
 
             decision = time_plugin_call(
                 pre_telemetry,
@@ -550,32 +698,18 @@ class DNSUDPHandler(DNSRuntimeState, socketserver.BaseRequestHandler):
         """
         reply = response_wire
         # Clear any previous override marker on the context to avoid leakage
-        if ctx is not None and hasattr(ctx, "_post_override"):
-            try:
-                delattr(ctx, "_post_override")
-            except (
-                Exception
-            ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-                setattr(ctx, "_post_override", False)
+        _best_effort_clear_attr(ctx, "_post_override", fallback=False)
 
         # Post-resolve plugin hooks in priority order
-        try:
-            setattr(ctx, "qname", qname)
-        except Exception:  # pragma: no cover - defensive
-            pass
+        _best_effort_set_attr(ctx, "qname", qname)
 
         post_telemetry = []
         record_plugin_timing = plugin_telemetry_enabled(logger)
         for p in sorted(self.plugins, key=lambda p: getattr(p, "post_priority", 50)):
             # Skip plugins that do not target this qtype when they opt in via
             # BasePlugin.target_qtypes.
-            try:
-                if hasattr(p, "targets_qtype") and not p.targets_qtype(qtype):
-                    continue
-            except (
-                Exception
-            ):  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
-                pass
+            if _plugin_opts_out_of_qtype(p, qtype):
+                continue
 
             decision = time_plugin_call(
                 post_telemetry,
@@ -607,12 +741,7 @@ class DNSUDPHandler(DNSRuntimeState, socketserver.BaseRequestHandler):
                         # Mark on context so callers (e.g., handle()) can
                         # distinguish override paths without changing the
                         # return type of this helper.
-                        try:
-                            setattr(ctx, "_post_override", True)
-                        except (
-                            Exception
-                        ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-                            pass
+                        _best_effort_set_attr(ctx, "_post_override", True)
                     break
                 if decision.action == "allow":
                     logger.info(
@@ -643,18 +772,12 @@ class DNSUDPHandler(DNSRuntimeState, socketserver.BaseRequestHandler):
         reply.header.rcode = RCODE.NXDOMAIN
         # Echo client EDNS(0) OPT, when present, into this synthetic NXDOMAIN and
         # attach a generic policy EDE when enabled.
-        try:
-            from . import server as _server_mod
-
-            _server_mod._echo_client_edns(request, reply)
-            _server_mod._attach_ede_option(
-                request,
-                reply,
-                15,
-                "blocked by policy",
-            )  # Blocked
-        except Exception:  # pragma: no cover - defensive: best-effort only
-            pass
+        _best_effort_enrich_synthetic_edns(
+            request,
+            reply,
+            ede_code=15,  # Blocked
+            ede_text="blocked by policy",
+        )
         return _set_response_id(reply.pack(), request.header.id)
 
     def _make_servfail_response(self, request: DNSRecord):
@@ -674,18 +797,12 @@ class DNSUDPHandler(DNSRuntimeState, socketserver.BaseRequestHandler):
         r.header.rcode = RCODE.SERVFAIL
         # Echo client EDNS(0) OPT, when present, into this synthetic SERVFAIL and
         # attach a generic EDE "Other" code when enabled.
-        try:
-            from . import server as _server_mod
-
-            _server_mod._echo_client_edns(request, r)
-            _server_mod._attach_ede_option(
-                request,
-                r,
-                0,
-                "internal server error",
-            )  # Other
-        except Exception:  # pragma: no cover - defensive: best-effort only
-            pass
+        _best_effort_enrich_synthetic_edns(
+            request,
+            r,
+            ede_code=0,  # Other
+            ede_text="internal server error",
+        )
         return _set_response_id(r.pack(), request.header.id)
 
     def handle(self):
@@ -736,18 +853,12 @@ class DNSUDPHandler(DNSRuntimeState, socketserver.BaseRequestHandler):
                 r.header.rcode = RCODE.SERVFAIL
                 # Echo client EDNS(0) OPT, when present, into this synthetic SERVFAIL
                 # and attach a generic EDE "Other" code when enabled.
-                try:
-                    from . import server as _server_mod
-
-                    _server_mod._echo_client_edns(req, r)
-                    _server_mod._attach_ede_option(
-                        req,
-                        r,
-                        0,
-                        "internal server error",
-                    )  # Other
-                except Exception:  # pragma: no cover - defensive: best-effort only
-                    pass
+                _best_effort_enrich_synthetic_edns(
+                    req,
+                    r,
+                    ede_code=0,  # Other
+                    ede_text="internal server error",
+                )
                 wire = _set_response_id(r.pack(), req.header.id)
             except Exception:
                 # Worst-case: never reflect the original query bytes. Return a
@@ -778,14 +889,11 @@ class DNSUDPHandler(DNSRuntimeState, socketserver.BaseRequestHandler):
         except Exception:
             server_max = None
 
-        try:
-            wire = enforce_udp_response_size_ceiling(
-                query_wire=data,
-                response_wire=wire,
-                server_max_bytes=server_max,
-            )
-        except Exception:  # pragma: no cover - defensive
-            pass
+        wire = _best_effort_apply_udp_size_ceiling(
+            query_wire=data,
+            response_wire=wire,
+            server_max_bytes=server_max,
+        )
 
         sock.sendto(wire, self.client_address)
 
@@ -848,8 +956,5 @@ def serve_udp(host: str, port: int, resolver: Callable[[bytes, str], bytes]) -> 
     server.daemon_threads = True
     try:
         server.serve_forever()
-    finally:  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-        try:
-            server.server_close()
-        except Exception:
-            pass
+    finally:  # pragma: no cover - shutdown path
+        _best_effort_close_udp_server(server)

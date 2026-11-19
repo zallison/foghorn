@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import shutil
+from foghorn.utils.exception_logging import warn_suppressed_exception
 
 DEFAULT_CONFIG_BACKUP_RETENTION_COUNT = 20
 
@@ -113,7 +114,10 @@ def prune_timestamped_backups(*, dst_path: str, keep_count: int) -> None:
         try:
             os.remove(old_path)
         except Exception:  # pragma: nocover - prune must ignore delete failures
-            pass
+            warn_suppressed_exception(
+                "best-effort operation failed in servers/webserver/config_persistence.py:prune_timestamped_backups",
+                logger_name="foghorn.servers.webserver.config_persistence",
+            )
 
 
 def write_raw_yaml_via_copy(
@@ -226,11 +230,17 @@ def safe_write_raw_yaml(
                     keep_count=int(backup_retention_count),
                 )
             except Exception:  # pragma: nocover - retention pruning is best-effort
-                pass
+                warn_suppressed_exception(
+                    "best-effort operation failed in servers/webserver/config_persistence.py:safe_write_raw_yaml",
+                    logger_name="foghorn.servers.webserver.config_persistence",
+                )
         if cleanup_tmp:
             # Best-effort cleanup: remove tmp_path if it still exists.
             try:
                 if os.path.exists(tmp_path):
                     os.remove(tmp_path)
             except Exception:  # pragma: nocover - cleanup failures are non-fatal
-                pass
+                warn_suppressed_exception(
+                    "best-effort operation failed in servers/webserver/config_persistence.py:safe_write_raw_yaml",
+                    logger_name="foghorn.servers.webserver.config_persistence",
+                )

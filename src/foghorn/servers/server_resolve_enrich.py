@@ -9,6 +9,7 @@ from .edns_utils import (
     strip_ecs_options_from_request,
     upsert_ecs_option,
 )
+from foghorn.utils.exception_logging import warn_suppressed_exception
 
 
 def _apply_search_domain_qualification(
@@ -59,7 +60,10 @@ def _apply_search_domain_qualification(
     except (
         Exception
     ):  # pragma: no cover - defensive: qualification failure is non-fatal
-        pass
+        warn_suppressed_exception(
+            "best-effort operation failed in servers/server_resolve_enrich.py:_apply_search_domain_qualification",
+            logger_name="foghorn.servers.server_resolve_enrich",
+        )
     return qname
 
 
@@ -176,7 +180,10 @@ def _apply_ecs_processing(
             try:
                 strip_ecs_options_from_request(req)
             except Exception:
-                pass
+                warn_suppressed_exception(
+                    "best-effort operation failed in servers/server_resolve_enrich.py:_apply_ecs_processing",
+                    logger_name="foghorn.servers.server_resolve_enrich",
+                )
 
         if outbound_ecs is not None:
             try:

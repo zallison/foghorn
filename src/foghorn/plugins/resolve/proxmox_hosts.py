@@ -36,6 +36,7 @@ from foghorn.plugins.resolve.hosts_common import (
     parse_str_list,
     resolve_plugin_tls_path,
 )
+from foghorn.utils import condition_logging as condition_log
 
 logger = logging.getLogger(__name__)
 
@@ -615,7 +616,8 @@ class ProxmoxHosts(DynamicHostsPlugin):
                 tls_server_name=endpoint.get("tls_server_name"),  # type: ignore[arg-type]
             )
         except Exception as exc:
-            self._note_condition_failure(
+            condition_log.note_condition_failure(
+                self,
                 f"endpoint:{url}",
                 "failed to create client for %s: %s",
                 url,
@@ -1049,14 +1051,16 @@ class ProxmoxHosts(DynamicHostsPlugin):
                 continue
             try:
                 resources = self._fetch_cluster_vms(client)
-                self._note_condition_ok(
+                condition_log.note_condition_ok(
+                    self,
                     f"endpoint:{url}",
                     "endpoint %s is reachable again",
                     url,
                 )
             except Exception as exc:
                 last_error = exc
-                self._note_condition_failure(
+                condition_log.note_condition_failure(
+                    self,
                     f"endpoint:{url}",
                     "failed listing VMs on %s: %s",
                     url,
@@ -1193,7 +1197,8 @@ class ProxmoxHosts(DynamicHostsPlugin):
 
         if not loaded:
             if last_error is not None:
-                self._note_condition_failure(
+                condition_log.note_condition_failure(
+                    self,
                     "cluster-reload",
                     "all endpoints failed; keeping previous mappings: %s",
                     last_error,
@@ -1201,13 +1206,14 @@ class ProxmoxHosts(DynamicHostsPlugin):
             return
 
         if not new_v4 and not new_v6:
-            self._note_condition_failure(
+            condition_log.note_condition_failure(
+                self,
                 "no-guest-ip-mappings",
                 "reload succeeded but no guest " "hostname/IP mappings were added",
             )
         else:
-            self._note_condition_ok("no-guest-ip-mappings")
-            self._note_condition_ok("cluster-reload")
+            condition_log.note_condition_ok(self, "no-guest-ip-mappings")
+            condition_log.note_condition_ok(self, "cluster-reload")
 
         if new_txt:
             for owner, lines in new_txt.items():

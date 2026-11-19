@@ -16,7 +16,9 @@ Outputs:
 
 import threading
 from concurrent.futures import Future, ThreadPoolExecutor
-from typing import Any, Callable, Optional, Final
+from typing import Any, Callable, Final, Optional
+
+from foghorn.utils.exception_logging import warn_suppressed_exception
 
 _BG_EXECUTOR: ThreadPoolExecutor | None = None
 _BG_EXECUTOR_LOCK = threading.Lock()
@@ -147,7 +149,11 @@ def submit_bg_executor_task(
         try:
             sem.release()
         except Exception:
-            pass
+            warn_suppressed_exception(
+                "bg executor: capacity semaphore release failed after task "
+                "completion (possible pending-slot leak)",
+                logger_name="foghorn.servers.bg_executor",
+            )
 
     try:
         fut = get_bg_executor().submit(fn)
@@ -157,7 +163,11 @@ def submit_bg_executor_task(
         try:
             sem.release()
         except Exception:
-            pass
+            warn_suppressed_exception(
+                "bg executor: capacity semaphore release failed after submit "
+                "error (possible pending-slot leak)",
+                logger_name="foghorn.servers.bg_executor",
+            )
         return None
 
 
@@ -189,4 +199,7 @@ def shutdown_bg_executor(*, wait: bool = True) -> None:
     try:
         executor.shutdown(wait=bool(wait), cancel_futures=not bool(wait))
     except Exception:
-        pass
+        warn_suppressed_exception(
+            "bg executor: shutdown failed",
+            logger_name="foghorn.servers.bg_executor",
+        )

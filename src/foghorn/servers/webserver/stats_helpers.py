@@ -12,6 +12,7 @@ from cachetools import TTLCache
 from foghorn.utils.register_caches import registered_cached, registered_ttl_cache
 
 from ...stats import StatsCollector, StatsSnapshot
+from foghorn.utils.exception_logging import warn_suppressed_exception
 
 logger = logging.getLogger("foghorn.webserver")
 
@@ -277,7 +278,10 @@ def _sync_stats_snapshot_cache_ttl() -> None:
         ttl_i = max(0, int(float(_STATS_SNAPSHOT_CACHE_TTL_SECONDS)))
         _STATS_SNAPSHOT_CACHE.ttl = ttl_i
     except Exception:  # pragma: no cover - defensive ttl sync
-        pass
+        warn_suppressed_exception(
+            "best-effort operation failed in servers/webserver/stats_helpers.py:_sync_stats_snapshot_cache_ttl",
+            logger=logger,
+        )
 
 
 def _get_stats_snapshot_cached(collector: StatsCollector, reset: bool) -> StatsSnapshot:
@@ -305,7 +309,10 @@ def _get_stats_snapshot_cached(collector: StatsCollector, reset: bool) -> StatsS
             _STATS_SNAPSHOT_CACHE.pop(cache_key, None)  # type: ignore[arg-type]
             _STATS_SNAPSHOT_CACHE[cache_key] = snap  # type: ignore[index]
         except Exception:  # pragma: no cover - defensive cache update
-            pass
+            warn_suppressed_exception(
+                "best-effort operation failed in servers/webserver/stats_helpers.py:_get_stats_snapshot_cached",
+                logger=logger,
+            )
         with _STATS_SNAPSHOT_CACHE_LOCK:
             _last_stats_snapshots[collector_id] = (snap, time.time())
         return snap
@@ -407,7 +414,10 @@ def _sync_system_info_cache_ttl(web_core: Any | None = None) -> float:
         ttl_i = max(0, int(ttl))
         _SYSTEM_INFO_CACHE.ttl = ttl_i
     except Exception:  # pragma: no cover - defensive ttl sync
-        pass
+        warn_suppressed_exception(
+            "best-effort operation failed in servers/webserver/stats_helpers.py:_sync_system_info_cache_ttl",
+            logger=logger,
+        )
     return max(0.0, float(ttl))
 
 
@@ -449,7 +459,10 @@ def _collect_system_info(web_core: Any | None) -> Dict[str, Any]:
             payload["load_5m"] = float(load5)
             payload["load_15m"] = float(load15)
     except Exception:  # pragma: no cover - environment specific
-        pass
+        warn_suppressed_exception(
+            "best-effort operation failed in servers/webserver/stats_helpers.py:_collect_system_info",
+            logger=logger,
+        )
 
     # Memory statistics from /proc/meminfo when available.
     #
@@ -617,7 +630,10 @@ def get_system_info() -> Dict[str, Any]:
         try:
             _SYSTEM_INFO_CACHE.clear()
         except Exception:  # pragma: no cover - defensive clear
-            pass
+            warn_suppressed_exception(
+                "best-effort operation failed in servers/webserver/stats_helpers.py:get_system_info",
+                logger=logger,
+            )
     else:
         # If legacy cache is still valid under the effective TTL, reuse it so
         # tests that only advance webserver.time.time continue to work.
@@ -632,7 +648,10 @@ def get_system_info() -> Dict[str, Any]:
             # Expired legacy entry: force registered cache miss.
             _SYSTEM_INFO_CACHE.clear()
         except Exception:
-            pass
+            warn_suppressed_exception(
+                "best-effort operation failed in servers/webserver/stats_helpers.py:get_system_info",
+                logger=logger,
+            )
 
     payload = _get_system_info_cached()
     snapshot = dict(payload)
@@ -654,7 +673,10 @@ def get_system_info() -> Dict[str, Any]:
             setattr(web_core, "_last_system_info", snapshot)
             setattr(web_core, "_last_system_info_ts", now)
         except Exception:  # pragma: no cover - defensive
-            pass
+            warn_suppressed_exception(
+                "best-effort operation failed in servers/webserver/stats_helpers.py:get_system_info",
+                logger=logger,
+            )
 
     return dict(snapshot)
 

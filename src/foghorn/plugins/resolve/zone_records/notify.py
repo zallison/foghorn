@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import ipaddress
 import logging
+
+from foghorn.utils import condition_logging as condition_log
 import socket
 import threading
 import time
@@ -347,7 +349,11 @@ def _should_send_notify(plugin: object, target: Dict[str, object]) -> bool:
     return True
 
 
-def send_notify_to_target(zone_apex: str, target: Dict[str, object]) -> None:
+def send_notify_to_target(
+    zone_apex: str,
+    target: Dict[str, object],
+    plugin: object | None = None,
+) -> None:
     """Brief: Send a DNS NOTIFY for *zone_apex* to a single downstream target.
 
     Inputs:
@@ -355,6 +361,7 @@ def send_notify_to_target(zone_apex: str, target: Dict[str, object]) -> None:
       - target: Mapping with at least ``host`` and ``port`` keys and
         optional ``timeout_ms``, ``transport``, ``server_name``, ``verify``,
         and ``ca_file`` entries.
+      - plugin: Optional ZoneRecords instance for sticky condition logging.
 
     Outputs:
       - None; logs but otherwise ignores transport errors.
@@ -395,6 +402,7 @@ def send_notify_to_target(zone_apex: str, target: Dict[str, object]) -> None:
 
     wire = notify_msg.pack()
 
+    cond_key = f"notify-send:{_target_key(target)}:{apex}"
     try:
         if transport == "dot":
             dot_query(
@@ -415,14 +423,38 @@ def send_notify_to_target(zone_apex: str, target: Dict[str, object]) -> None:
                 connect_timeout_ms=timeout_ms,
                 read_timeout_ms=timeout_ms,
             )
-    except Exception:  # pragma: no cover - defensive logging only
-        logger.warning(
-            "ZoneRecords: NOTIFY send to %s:%d via %s failed for zone %s",
+    except Exception as exc:  # pragma: no cover - defensive logging only
+        if plugin is not None:
+            condition_log.note_condition_failure(
+                plugin,
+                cond_key,
+                "ZoneRecords: NOTIFY send to %s:%d via %s failed for zone %s: %s",
+                host,
+                port,
+                transport,
+                apex,
+                exc,
+            )
+        else:
+            logger.warning(
+                "ZoneRecords: NOTIFY send to %s:%d via %s failed for zone %s: %s",
+                host,
+                port,
+                transport,
+                apex,
+                exc,
+            )
+        return
+
+    if plugin is not None:
+        condition_log.note_condition_ok(
+            plugin,
+            cond_key,
+            "ZoneRecords: NOTIFY send to %s:%d via %s recovered for zone %s",
             host,
             port,
             transport,
             apex,
-            exc_info=True,
         )
 
 
@@ -495,13 +527,15 @@ def send_notify_for_zones(
                 continue
 
             try:
-                send_notify_to_target(zone_norm, target)
-            except Exception:  # pragma: no cover - defensive logging only
-                logger.warning(
-                    "ZoneRecords: failed to send NOTIFY for zone %s to target %r",
+                send_notify_to_target(zone_norm, target, plugin=plugin)
+            except Exception as exc:  # pragma: no cover - defensive logging only
+                condition_log.note_condition_failure(
+                    plugin,
+                    f"notify-dispatch:{_target_key(target)}:{zone_norm}",
+                    "ZoneRecords: failed to send NOTIFY for zone %s to target %r: %s",
                     zone_norm,
                     target,
-                    exc_info=True,
+                    exc,
                 )
 
 
@@ -509,6 +543,7 @@ def schedule_delayed_notify(
     zone_apex: str,
     target: Dict[str, object],
     delay_s: float,
+    plugin: object | None = None,
 ) -> None:
     """Brief: Schedule a delayed DNS NOTIFY with per-target deduplication.
 
@@ -516,19 +551,29 @@ def schedule_delayed_notify(
       - zone_apex: Zone apex name.
       - target: Target mapping as accepted by send_notify_to_target.
       - delay_s: Delay in seconds before sending NOTIFY.
+      - plugin: Optional ZoneRecords instance for sticky condition logging.
 
     Outputs:
       - None; starts/cancels background timers.
     """
     if delay_s <= 0.0:
         try:
-            send_notify_to_target(zone_apex, target)
-        except Exception:  # pragma: no cover - defensive logging only
-            logger.warning(
-                "ZoneRecords: failed to send immediate scheduled NOTIFY for %s",
-                zone_apex,
-                exc_info=True,
-            )
+            send_notify_to_target(zone_apex, target, plugin=plugin)
+        except Exception as exc:  # pragma: no cover - defensive logging only
+            if plugin is not None:
+                condition_log.note_condition_failure(
+                    plugin,
+                    f"notify-delayed:{_target_key(target)}:{zone_apex}",
+                    "ZoneRecords: failed to send immediate scheduled NOTIFY for %s: %s",
+                    zone_apex,
+                    exc,
+                )
+            else:
+                logger.warning(
+                    "ZoneRecords: failed to send immediate scheduled NOTIFY for %s: %s",
+                    zone_apex,
+                    exc,
+                )
         return
 
     zone_key = str(zone_apex).strip().lower().rstrip(".")
@@ -538,13 +583,22 @@ def schedule_delayed_notify(
         with _PENDING_NOTIFY_TIMERS_LOCK:
             _PENDING_NOTIFY_TIMERS.pop(timer_key, None)
         try:
-            send_notify_to_target(zone_apex, target)
-        except Exception:  # pragma: no cover - defensive logging only
-            logger.warning(
-                "ZoneRecords: failed to send delayed NOTIFY for %s",
-                zone_apex,
-                exc_info=True,
-            )
+            send_notify_to_target(zone_apex, target, plugin=plugin)
+        except Exception as exc:  # pragma: no cover - defensive logging only
+            if plugin is not None:
+                condition_log.note_condition_failure(
+                    plugin,
+                    f"notify-delayed:{_target_key(target)}:{zone_apex}",
+                    "ZoneRecords: failed to send delayed NOTIFY for %s: %s",
+                    zone_apex,
+                    exc,
+                )
+            else:
+                logger.warning(
+                    "ZoneRecords: failed to send delayed NOTIFY for %s: %s",
+                    zone_apex,
+                    exc,
+                )
 
     timer = threading.Timer(float(delay_s), _cb)
     timer.daemon = True

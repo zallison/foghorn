@@ -4,8 +4,8 @@ Brief:
   - Pure helpers for TXT sanitize, TLS path resolve, DNS labels, map merge,
     and authoritative A/AAAA/PTR reply packing (used by Docker/Proxmox/K8s,
     EtcHosts, and MdnsBridge).
-  - DynamicHostsPlugin base: sticky condition logs, host maps, reload loop,
-    shutdown, and shared A/AAAA/PTR/TXT pre_resolve answering.
+  - DynamicHostsPlugin base: host maps, reload loop, shutdown, and shared
+    A/AAAA/PTR/TXT pre_resolve answering (sticky condition logs via condition_logging).
 """
 
 from __future__ import annotations
@@ -14,17 +14,16 @@ import logging
 import os
 import re
 import threading
-import time
 import warnings
 from collections.abc import Iterable
 from typing import Any, ClassVar
 
 import requests
+from dnslib import AAAA, PTR, QTYPE, RR, TXT, A, DNSHeader, DNSRecord
 from requests.adapters import HTTPAdapter
 
-from dnslib import AAAA, PTR, QTYPE, RR, TXT, A, DNSHeader, DNSRecord
-
 from foghorn.plugins.resolve.base import BasePlugin, PluginContext, PluginDecision
+from foghorn.utils import condition_logging as condition_log
 from foghorn.utils.dns_names import normalize_name, qualify_name
 from foghorn.utils.ip_networks import parse_ip, parse_network
 
@@ -811,15 +810,14 @@ def fold_tls_aliases(
 class DynamicHostsPlugin(BasePlugin):
     """Brief: Base for inventory-backed hosts plugins (Docker/Proxmox/K8s).
 
-    Provides sticky condition logging, in-memory host maps, background reload
-    loop, shutdown signaling, and shared A/AAAA/PTR/TXT pre_resolve answers.
-    Subclasses implement `_reload_maps()` and call `_init_dynamic_hosts_state()`
-    from setup().
+    Provides in-memory host maps, background reload loop, shutdown signaling,
+    and shared A/AAAA/PTR/TXT pre_resolve answers. Sticky condition logging via
+    foghorn.utils.condition_logging. Subclasses implement `_reload_maps()` and call
+    `_init_dynamic_hosts_state()` from setup().
     """
 
     setup_provides_dns: ClassVar[bool] = True
     setup_requires_dns: ClassVar[bool] = True
-    _condition_rewarn_interval_seconds: ClassVar[float] = 3600.0
 
     def _init_dynamic_hosts_state(self, *, default_ttl: int = 300) -> None:
         """Brief: Initialize maps, locks, stop event, and condition-log state.
@@ -845,157 +843,7 @@ class DynamicHostsPlugin(BasePlugin):
         self._stop_event = threading.Event()
         self._reload_interval = 0.0
         self._expose_txt_in_additional = False
-        self._init_condition_logging()
-
-    def _init_condition_logging(self) -> None:
-        """Brief: Initialize sticky condition-log lock and maps.
-
-        Inputs:
-          - None.
-
-        Outputs:
-          - None.
-        """
-
-        self._condition_log_lock = threading.Lock()
-        self._condition_failed_by_key: dict[str, bool] = {}
-        self._condition_suppressed_by_key: dict[str, int] = {}
-        self._condition_last_warned_by_key: dict[str, float] = {}
-        if not hasattr(self, "_condition_rewarn_interval_seconds"):
-            self._condition_rewarn_interval_seconds = 3600.0
-
-    def _ensure_condition_log_state(self) -> None:
-        """Brief: Lazily initialize sticky condition-log lock and maps.
-
-        Inputs:
-          - None.
-
-        Outputs:
-          - None; creates lock/maps when setup() has not run yet (tests).
-        """
-
-        if not hasattr(self, "_condition_log_lock") or self._condition_log_lock is None:
-            self._condition_log_lock = threading.Lock()
-        if (
-            not hasattr(self, "_condition_failed_by_key")
-            or self._condition_failed_by_key is None
-        ):
-            self._condition_failed_by_key = {}
-        if (
-            not hasattr(self, "_condition_suppressed_by_key")
-            or self._condition_suppressed_by_key is None
-        ):
-            self._condition_suppressed_by_key = {}
-        if (
-            not hasattr(self, "_condition_last_warned_by_key")
-            or self._condition_last_warned_by_key is None
-        ):
-            self._condition_last_warned_by_key = {}
-        if not hasattr(self, "_condition_rewarn_interval_seconds"):
-            self._condition_rewarn_interval_seconds = 3600.0
-
-    def _note_condition_failure(self, key: str, message: str, *args: object) -> None:
-        """Brief: Log sticky-condition failures without flooding reload loops.
-
-        Inputs:
-          - key: Stable identifier for the condition.
-          - message: Log message template for logger.warning().
-          - args: Optional %-format arguments for message.
-
-        Outputs:
-          - None.
-        """
-
-        self._ensure_condition_log_state()
-        now = time.monotonic()
-        interval = float(getattr(self, "_condition_rewarn_interval_seconds", 3600.0))
-        with self._condition_log_lock:
-            prev_failed = bool(self._condition_failed_by_key.get(key, False))
-            last_warned = self._condition_last_warned_by_key.get(key)
-            if prev_failed:
-                should_rewarn = interval > 0 and (
-                    last_warned is None or (now - last_warned) >= interval
-                )
-                if should_rewarn:
-                    suppressed = self._condition_suppressed_by_key.get(key, 0)
-                    self._condition_suppressed_by_key[key] = 0
-                    self._condition_last_warned_by_key[key] = now
-                else:
-                    self._condition_suppressed_by_key[key] = (
-                        self._condition_suppressed_by_key.get(key, 0) + 1
-                    )
-                    suppressed = self._condition_suppressed_by_key[key]
-            else:
-                self._condition_failed_by_key[key] = True
-                self._condition_suppressed_by_key[key] = 0
-                self._condition_last_warned_by_key[key] = now
-                suppressed = 0
-                should_rewarn = False
-
-        log = logging.getLogger(type(self).__module__)
-        if not prev_failed:
-            log.warning(message, *args)
-            return
-
-        if should_rewarn:
-            if suppressed > 0:
-                log.warning(
-                    message + " (still failing; suppressed %d repeated warning(s))",
-                    *args,
-                    suppressed,
-                )
-            else:
-                log.warning(message + " (still failing)", *args)
-            return
-
-        log.debug(
-            "suppressed repeated condition %s (count=%d): " + message,
-            key,
-            suppressed,
-            *args,
-        )
-
-    def _note_condition_ok(
-        self,
-        key: str,
-        recovery_message: str | None = None,
-        *args: object,
-    ) -> None:
-        """Brief: Clear a sticky failure condition and log recovery once.
-
-        Inputs:
-          - key: Same identifier passed to _note_condition_failure().
-          - recovery_message: Optional logger.info() template.
-          - args: Optional %-format arguments for recovery_message.
-
-        Outputs:
-          - None.
-        """
-
-        self._ensure_condition_log_state()
-        with self._condition_log_lock:
-            was_failed = bool(self._condition_failed_by_key.get(key, False))
-            suppressed = int(self._condition_suppressed_by_key.get(key, 0) or 0)
-            self._condition_failed_by_key[key] = False
-            self._condition_suppressed_by_key[key] = 0
-            self._condition_last_warned_by_key.pop(key, None)
-
-        if not was_failed or not recovery_message:
-            return
-
-        log = logging.getLogger(type(self).__module__)
-        if suppressed > 0:
-            log.info(
-                recovery_message + " (suppressed %d repeated failure warning(s))",
-                *args,
-                suppressed,
-            )
-            return
-
-        if args:
-            log.info(recovery_message, *args)
-        else:
-            log.info("%s", recovery_message)
+        condition_log.init_condition_logging(self)
 
     def _reload_maps(self) -> None:
         """Brief: Rebuild in-memory host maps from the backend.
@@ -1056,12 +904,14 @@ class DynamicHostsPlugin(BasePlugin):
                 return
             try:
                 self._reload_maps()
-                self._note_condition_ok(
+                condition_log.note_condition_ok(
+                    self,
                     "periodic-reload-error",
                     "periodic reload recovered",
                 )
             except Exception as exc:  # pragma: nocover defensive
-                self._note_condition_failure(
+                condition_log.note_condition_failure(
+                    self,
                     "periodic-reload-error",
                     "error during periodic reload; keeping previous mappings: %s",
                     format_exception_brief(exc),
@@ -1077,7 +927,7 @@ class DynamicHostsPlugin(BasePlugin):
           - None.
         """
 
-        return None
+        return
 
     def shutdown(self) -> None:
         """Brief: Signal background reload thread to stop and release resources.

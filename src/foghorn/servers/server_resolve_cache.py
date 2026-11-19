@@ -13,6 +13,7 @@ from .server_response_utils import (
     _bind_response_cookie_to_request,
     _set_response_id,
 )
+from foghorn.utils.exception_logging import warn_suppressed_exception
 
 
 def _try_cache_hit(
@@ -138,7 +139,10 @@ def _try_cache_hit(
             except (
                 Exception
             ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-                pass
+                warn_suppressed_exception(
+                    "best-effort operation failed in servers/server_resolve_cache.py:_try_cache_hit",
+                    logger_name="foghorn.servers.server_resolve_cache",
+                )
 
         # Decide whether to schedule a background refresh for this cache hit
         min_ttl = int(getattr(handler, "cache_prefetch_min_ttl", 0) or 0)
@@ -202,7 +206,10 @@ def _try_cache_hit(
                     request_msg=tsig_ctx.get("request_msg"),
                 )
         except Exception:
-            pass
+            warn_suppressed_exception(
+                "best-effort operation failed in servers/server_resolve_cache.py:_try_cache_hit",
+                logger_name="foghorn.servers.server_resolve_cache",
+            )
         cached = _bind_response_cookie_to_request(
             req,
             cached,
@@ -240,6 +247,9 @@ def _try_cache_hit(
         except (
             Exception
         ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-            pass
+            warn_suppressed_exception(
+                "best-effort operation failed in servers/server_resolve_cache.py:_try_cache_hit",
+                logger_name="foghorn.servers.server_resolve_cache",
+            )
 
     return None

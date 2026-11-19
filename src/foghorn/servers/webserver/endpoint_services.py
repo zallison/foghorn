@@ -38,6 +38,7 @@ from .stats_helpers import (
     _trim_top_fields,
     _utc_now_iso,
 )
+from foghorn.utils.exception_logging import warn_suppressed_exception
 
 
 def build_health_payload() -> dict[str, Any]:
@@ -728,7 +729,10 @@ def build_config_diagram_png_result(
                 ensure_config_diagram_png(config_path=str(config_path))
                 png_file = find_first_existing_path(candidate_paths_fn(config_path))
         except Exception:
-            pass
+            warn_suppressed_exception(
+                "best-effort operation failed in servers/webserver/endpoint_services.py:build_config_diagram_png_result",
+                logger_name="foghorn.servers.webserver.endpoint_services",
+            )
 
     warn: str | None = None
     if png_file is not None:
@@ -757,7 +761,10 @@ def build_config_diagram_png_result(
                             diagram_path=str(png_file),
                         )
             except Exception:
-                pass
+                warn_suppressed_exception(
+                    "best-effort operation failed in servers/webserver/endpoint_services.py:build_config_diagram_png_result",
+                    logger_name="foghorn.servers.webserver.endpoint_services",
+                )
 
     headers: dict[str, str] = {
         "X-Foghorn-Exists": "1" if png_file is not None else "0",

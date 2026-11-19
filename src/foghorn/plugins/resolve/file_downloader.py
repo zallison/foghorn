@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field, ConfigDict
 from foghorn.security_limits import maybe_parse_content_length
 
 from .base import BasePlugin
+from foghorn.utils import condition_logging as condition_log
 
 logger = logging.getLogger(__name__)
 
@@ -251,7 +252,12 @@ class FileDownloader(BasePlugin):
             if added_count:
                 logger.debug("FileDownloader added %d URLs from url_files", added_count)
         except Exception as exc:  # pragma: no cover - defensive logging only
-            logger.warning("Failed reading url_files: %s", exc)
+            condition_log.note_condition_failure(
+                self,
+                "url-files-read",
+                "Failed reading url_files: %s",
+                exc,
+            )
 
     # Run early in the setup phase so files exist before Filter runs
     setup_priority = 15
@@ -296,7 +302,12 @@ class FileDownloader(BasePlugin):
             except (
                 Exception
             ) as e:  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-                logger.warning("Failed reading url_files: %s", e)
+                condition_log.note_condition_failure(
+                    self,
+                    "url-files-read",
+                    "Failed reading url_files: %s",
+                    e,
+                )
 
         os.makedirs(self.download_path, exist_ok=True)
         # Initial fetch at startup; failures propagate to caller so that
@@ -345,10 +356,20 @@ class FileDownloader(BasePlugin):
             while not self._stop_event.is_set():
                 try:
                     self._maybe_run(force=False)
+                    condition_log.note_condition_ok(
+                        self,
+                        "periodic-update",
+                        "FileDownloader periodic update recovered",
+                    )
                 except (
                     Exception
                 ) as exc:  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-                    logger.warning("FileDownloader periodic update failed: %s", exc)
+                    condition_log.note_condition_failure(
+                        self,
+                        "periodic-update",
+                        "FileDownloader periodic update failed: %s",
+                        exc,
+                    )
                 # Wait for the interval or until stop is requested
                 self._stop_event.wait(interval)
 
@@ -384,10 +405,20 @@ class FileDownloader(BasePlugin):
         try:
             self._download_all(self.urls)
             self._last_run = now
+            condition_log.note_condition_ok(
+                self,
+                "update",
+                "FileDownloader update recovered",
+            )
         except (
             Exception
         ) as e:  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-            logger.warning("FileDownloader update failed: %s", e)
+            condition_log.note_condition_failure(
+                self,
+                "update",
+                "FileDownloader update failed: %s",
+                e,
+            )
 
     def _should_delay_startup_check(self) -> bool:
         """Brief: Decide whether startup refresh should be delayed.
@@ -438,8 +469,18 @@ class FileDownloader(BasePlugin):
         def _delayed() -> None:
             try:
                 self._maybe_run(force=False)
+                condition_log.note_condition_ok(
+                    self,
+                    "delayed-startup-update",
+                    "FileDownloader delayed startup update recovered",
+                )
             except Exception as exc:  # pragma: no cover - defensive
-                logger.warning("FileDownloader delayed startup update failed: %s", exc)
+                condition_log.note_condition_failure(
+                    self,
+                    "delayed-startup-update",
+                    "FileDownloader delayed startup update failed: %s",
+                    exc,
+                )
 
         t = threading.Thread(
             target=_delayed,

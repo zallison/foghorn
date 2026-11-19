@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict
+from foghorn.utils.exception_logging import warn_suppressed_exception
 
 
 logger = logging.getLogger("foghorn.webserver")
@@ -273,7 +274,10 @@ class ApiRequestAuditLogger:
                     else:
                         retention_max_records = None
                 except Exception:
-                    pass
+                    warn_suppressed_exception(
+                        "best-effort operation failed in servers/webserver/api_request_audit.py:from_web_cfg",
+                        logger=logger,
+                    )
 
             raw_max_age_seconds = audit_cfg.get("retention_max_age_seconds")
             if raw_max_age_seconds is not None:
@@ -293,7 +297,10 @@ class ApiRequestAuditLogger:
                     else:
                         retention_max_db_bytes = None
                 except Exception:
-                    pass
+                    warn_suppressed_exception(
+                        "best-effort operation failed in servers/webserver/api_request_audit.py:from_web_cfg",
+                        logger=logger,
+                    )
 
             raw_prune_every = audit_cfg.get("retention_prune_every_n_inserts")
             if raw_prune_every is not None:
@@ -538,7 +545,10 @@ class ApiRequestAuditLogger:
                 try:
                     conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
                 except Exception:
-                    pass
+                    warn_suppressed_exception(
+                        "best-effort operation failed in servers/webserver/api_request_audit.py:_apply_retention_prune",
+                        logger=logger,
+                    )
                 max_bytes = int(self.retention_max_db_bytes)
                 if max_bytes > 0:
                     while self._audit_db_size_bytes() > max_bytes:
@@ -566,7 +576,10 @@ class ApiRequestAuditLogger:
                         try:
                             conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
                         except Exception:
-                            pass
+                            warn_suppressed_exception(
+                                "best-effort operation failed in servers/webserver/api_request_audit.py:_apply_retention_prune",
+                                logger=logger,
+                            )
         finally:
             self._set_allow_delete_for_prune(conn, enabled=False)
 

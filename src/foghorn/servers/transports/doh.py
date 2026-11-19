@@ -7,6 +7,7 @@ from typing import Dict, Optional, Tuple
 
 from foghorn.security_limits import MAX_DOH_DNS_MESSAGE_BYTES
 from foghorn.utils.register_caches import registered_lru_cache
+from foghorn.utils.exception_logging import warn_suppressed_exception
 
 try:
     FOGHORN_VERSION = importlib.metadata.version("foghorn")
@@ -220,7 +221,10 @@ def doh_query(
             except (
                 Exception
             ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-                pass  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+                warn_suppressed_exception(
+                    "best-effort operation failed in servers/transports/doh.py:doh_query",
+                    logger_name="foghorn.servers.transports.doh",
+                )
     except ssl.SSLError as e:
         raise DoHError(f"TLS error: {e}")
     except OSError as e:

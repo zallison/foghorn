@@ -7,6 +7,8 @@ Inputs/Outputs:
 from __future__ import annotations
 
 import logging
+
+from foghorn.utils import condition_logging as condition_log
 import threading
 from typing import Optional
 
@@ -110,10 +112,13 @@ def start_axfr_polling(plugin: object) -> None:
                 except Exception:  # pragma: no cover - defensive
                     acquired = True
                 if not acquired:
-                    logger.warning(
-                        "ZoneRecords AXFR: poll skipped because a reload is already in progress"
+                    condition_log.note_condition_failure(
+                        plugin,
+                        "axfr-poll-busy",
+                        "ZoneRecords AXFR: poll skipped because a reload is already in progress",
                     )
                     continue
+                condition_log.note_condition_ok(plugin, "axfr-poll-busy")
             else:
                 acquired = False
             try:
@@ -125,10 +130,17 @@ def start_axfr_polling(plugin: object) -> None:
                 # _load_records() call.
                 setattr(plugin, "_axfr_loaded_once", False)
                 loader_fn()
-            except Exception:  # pragma: no cover - defensive logging only
-                logger.warning(
-                    "ZoneRecords AXFR: error during scheduled AXFR poll",
-                    exc_info=True,
+                condition_log.note_condition_ok(
+                    plugin,
+                    "axfr-poll",
+                    "ZoneRecords AXFR: scheduled poll recovered",
+                )
+            except Exception as exc:  # pragma: no cover - defensive logging only
+                condition_log.note_condition_failure(
+                    plugin,
+                    "axfr-poll",
+                    "ZoneRecords AXFR: error during scheduled AXFR poll: %s",
+                    exc,
                 )
             finally:
                 if acquired and reload_lock is not None:
