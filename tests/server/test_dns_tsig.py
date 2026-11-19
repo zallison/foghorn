@@ -126,6 +126,28 @@ def test_strip_and_sign_response():
     assert getattr(msg, "had_tsig", False) is True
 
 
+def test_strip_tsig_from_signed_query_is_quiet(caplog):
+    """Brief: strip_tsig_from_wire on QueryMessage does not warn on read-only mac.
+
+    Inputs:
+      - caplog: captures foghorn.servers.tsig_utils warnings.
+
+    Outputs:
+      - Stripped wire has no TSIG; no AttributeError warning for mac setter.
+    """
+
+    qwire = _sign_query("strip-quiet.example")
+    with caplog.at_level("WARNING", logger="foghorn.servers.tsig_utils"):
+        stripped = tsig.strip_tsig_from_wire(qwire)
+
+    msg = dns.message.from_wire(stripped, continue_on_error=True)
+    assert not getattr(msg, "tsig", None)
+    assert not any(
+        "strip_tsig_from_wire" in rec.getMessage() or "mac" in rec.getMessage()
+        for rec in caplog.records
+    )
+
+
 def test_optional_mode_accepts_unsigned(monkeypatch, set_runtime_snapshot):
     """Brief: optional mode leaves unsigned queries working.
 

@@ -400,15 +400,22 @@ def strip_tsig_from_wire(wire: bytes | bytearray | memoryview | None) -> bytes:
         if getattr(msg, "tsig", None):
             msg.tsig = []
         # Some dnspython versions keep mac context; clear best-effort.
+        # Skip read-only properties (e.g. QueryMessage.mac has no setter).
         for attr in ("mac", "keyname", "keyalgorithm", "tsig_error"):
-            if hasattr(msg, attr):
-                try:
-                    setattr(msg, attr, None)
-                except Exception:
-                    warn_suppressed_exception(
-                        "best-effort operation failed in servers/tsig_utils.py:strip_tsig_from_wire",
-                        logger=logger,
-                    )
+            if not hasattr(msg, attr):
+                continue
+            prop = getattr(type(msg), attr, None)
+            if isinstance(prop, property) and prop.fset is None:
+                continue
+            try:
+                setattr(msg, attr, None)
+            except AttributeError:
+                continue
+            except Exception:
+                warn_suppressed_exception(
+                    "best-effort operation failed in servers/tsig_utils.py:strip_tsig_from_wire",
+                    logger=logger,
+                )
         return msg.to_wire()
     except Exception:
         return raw
