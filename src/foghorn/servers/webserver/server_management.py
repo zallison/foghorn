@@ -102,15 +102,16 @@ def _derive_uvicorn_limit_concurrency(web_cfg: dict[str, Any]) -> int:
 
     # Optional explicit override when provided by callers.
     raw_override = web_cfg.get("limit_concurrency")
-    try:
-        override = int(raw_override)
-        if override > 0:
-            return override
-    except Exception:
-        warn_suppressed_exception(
-            "best-effort operation failed in servers/webserver/server_management.py:_derive_uvicorn_limit_concurrency",
-            logger=logger,
-        )
+    if raw_override is not None:
+        try:
+            override = int(raw_override)
+            if override > 0:
+                return override
+        except Exception:
+            warn_suppressed_exception(
+                "best-effort operation failed in servers/webserver/server_management.py:_derive_uvicorn_limit_concurrency",
+                logger=logger,
+            )
 
     # Keep a conservative default under small fd limits (for example, 1024).
     soft_nofile = _get_soft_nofile_limit()

@@ -3519,6 +3519,51 @@ def test_start_webserver_other_asyncio_error_keeps_async_path(monkeypatch) -> No
     assert state2.get("ran") is True
 
 
+def test_derive_uvicorn_limit_concurrency_missing_override_is_quiet(
+    monkeypatch, caplog
+) -> None:
+    """Brief: Missing/None limit_concurrency uses defaults without warning spam.
+
+    Inputs:
+      - monkeypatch: forces soft nofile helper to a known value.
+      - caplog: captures foghorn.webserver warnings.
+
+    Outputs:
+      - Derived concurrency from nofile; no suppressed-exception warning.
+    """
+
+    import foghorn.servers.webserver.server_management as web_mgmt
+
+    monkeypatch.setattr(web_mgmt, "_get_soft_nofile_limit", lambda: 1000, raising=True)
+
+    with caplog.at_level("WARNING", logger="foghorn.webserver"):
+        assert web_mgmt._derive_uvicorn_limit_concurrency({}) == 500
+        assert (
+            web_mgmt._derive_uvicorn_limit_concurrency({"limit_concurrency": None})
+            == 500
+        )
+
+    assert not any(
+        "_derive_uvicorn_limit_concurrency" in rec.getMessage()
+        for rec in caplog.records
+    )
+
+
+def test_derive_uvicorn_limit_concurrency_honors_positive_override() -> None:
+    """Brief: Explicit positive limit_concurrency override wins.
+
+    Inputs:
+      - web_cfg with limit_concurrency=128.
+
+    Outputs:
+      - 128.
+    """
+
+    import foghorn.servers.webserver.server_management as web_mgmt
+
+    assert web_mgmt._derive_uvicorn_limit_concurrency({"limit_concurrency": 128}) == 128
+
+
 def test_start_webserver_sets_uvicorn_limits_from_nofile(monkeypatch) -> None:
     """Brief: start_webserver forwards fd-derived uvicorn hardening kwargs.
 
