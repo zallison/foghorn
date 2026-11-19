@@ -114,7 +114,13 @@ def is_valid_dns_hostname(name: str) -> bool:
       - name: Candidate hostname; may contain dots (no trailing dot).
 
     Outputs:
-      - True when every label is publishable under LDH rules.
+      - True when every label is publishable under LDH rules after
+        normalize_host_label (lowercase, strip dots, underscores to hyphens).
+
+    Notes:
+      - Validation runs on the normalized form, so names with underscores can
+        pass when the hyphenated equivalent is valid (e.g. "api_internal" ->
+        "api-internal" -> True).
 
     Example:
       is_valid_dns_hostname("api") -> True
@@ -759,7 +765,9 @@ def normalize_publishable_hostname(value: str) -> str:
 
     Outputs:
       - Lowercase hostname with underscores as hyphens. Multi-label names are
-        kept when every label is valid; otherwise the first valid label, or "".
+        kept when every label is valid; otherwise only the first label is
+        considered and returned if it is a valid DNS label, else "". Later
+        labels are not scanned for a valid fallback.
     """
 
     text = normalize_host_label(value)
@@ -844,6 +852,16 @@ class DynamicHostsPlugin(BasePlugin):
         self._reload_interval = 0.0
         self._expose_txt_in_additional = False
         condition_log.init_condition_logging(self)
+
+    def _note_condition_failure(self, key: str, message: str, *args: object) -> None:
+        """Brief: Log a sticky condition failure (wraps condition_log.note_condition_failure)."""
+        condition_log.note_condition_failure(self, key, message, *args)
+
+    def _note_condition_ok(
+        self, key: str, recovery_message: str | None = None, *args: object
+    ) -> None:
+        """Brief: Clear a sticky failure condition (wraps condition_log.note_condition_ok)."""
+        condition_log.note_condition_ok(self, key, recovery_message, *args)
 
     def _reload_maps(self) -> None:
         """Brief: Rebuild in-memory host maps from the backend.

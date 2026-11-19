@@ -142,14 +142,13 @@ class UpstreamRouter(BasePlugin):
           - req: raw DNS request
           - ctx: PluginContext with client_ip etc.
         Outputs:
-          - PluginDecision or None:
-              * Typically returns None after setting ctx.upstream_candidates to a list
-                of {'host', 'port} if a route matches; server will honor it.
-              * Return an override or deny decision only if explicitly configured.
+          - Always None. When a route matches, sets ctx.upstream_candidates to a
+            list of upstream dicts (host/port and related fields) for the server
+            to honor; does not emit override/deny decisions.
         Example:
           # For qname ending with '.corp', route to two internal resolvers
           if qname.endswith('.corp'):
-              ctx.upstream_candidates = [{'host': '10.0.0.2', 'port': 53}, {'host': '10.0.0.3', 'port': 53}]
+              ctx.upstream_candidates = [{'host': '********', 'port': 53}, {'host': '********', 'port': 53}]
               return None
         """
         if not self.targets(ctx):

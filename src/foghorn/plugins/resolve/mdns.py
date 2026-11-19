@@ -368,12 +368,9 @@ class MdnsBridge(BasePlugin):
         """Brief: Initialize internal record caches and start zeroconf browsing.
 
         Inputs:
-          - domain (str): DNS suffix under which to *serve* discovered mDNS data.
-          - ttl (int): TTL for synthesized answers.
-          - network_enabled (bool): When True, start background zeroconf browsing.
-          - include_ipv4 (bool): When True, synthesize A records.
-          - include_ipv6 (bool): When True, synthesize AAAA records.
-          - info_timeout_ms (int): Timeout in milliseconds for fetching ServiceInfo.
+          - self: Plugin instance; config is read from self.config / MdnsBridgeConfig
+            (domain, ttl, network_enabled, include_ipv4, include_ipv6,
+            info_timeout_ms, and related fields).
 
         Outputs:
           - None.
@@ -1629,6 +1626,15 @@ class MdnsBridge(BasePlugin):
         owner_wire = request.q.qname
 
         def _added_any() -> bool:
+            """Brief: True when at least one answer RR was added to reply.
+
+            Inputs:
+              - None (closes over reply).
+
+            Outputs:
+              - bool: True when reply.rr is non-empty.
+            """
+
             return len(reply.rr) > 0
 
         def _append_host_additionals(host_name: str) -> None:
@@ -1710,10 +1716,14 @@ class MdnsBridge(BasePlugin):
             """Brief: Infer the underlying host name from a service-node owner.
 
             Inputs:
-              - owner: Normalized owner name (no trailing dot).
+              - owner: Normalized owner name (no trailing dot), typically
+                ``_svc._proto.<host-label><suffix>``.
 
             Outputs:
-              - Optional[str]: Host owner name (no trailing dot) or None.
+              - Optional[str]: ``<first-host-label><matched-suffix>`` when the
+                owner matches a service-node shape under a configured suffix;
+                otherwise None. Only the first host label after the protocol is
+                used (multi-label host parts after that label are ignored).
             """
 
             if not owner:

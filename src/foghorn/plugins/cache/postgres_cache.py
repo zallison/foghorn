@@ -171,6 +171,15 @@ class PostgresCache(CachePlugin):
             pass
 
     def __del__(self) -> None:
+        """Brief: Best-effort close of underlying PostgreSQL resources on GC.
+
+        Inputs:
+          - None.
+
+        Outputs:
+          - None.
+        """
+
         try:
             self.close()
         except Exception:  # pragma: nocover - defensive cleanup

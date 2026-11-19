@@ -55,6 +55,9 @@ class SQLite3Cache(CachePlugin):
               - table: Backward-compatible alias for namespace.
               - min_cache_ttl: Optional cache TTL floor used by resolver.
               - journal_mode: SQLite journal mode (e.g., 'WAL').
+              - max_size: Max cached DNS responses (default 65536, capped).
+              - pct_nxdomain: Fraction of max_size reserved for NXDOMAIN
+                (default 0.10).
 
         Outputs:
           - None.
@@ -155,6 +158,7 @@ class SQLite3Cache(CachePlugin):
           - dict with keys:
               * summary: High-level statistics for the primary DNS cache.
               * caches: List of per-cache summaries for well-known caches.
+              * decorated: List of registered decorated-cache function rows.
         """
 
         total_entries = 0
@@ -226,7 +230,8 @@ class SQLite3Cache(CachePlugin):
               - cache_obj: Cache instance exposing _store and _lock.
 
             Outputs:
-              - Mapping with label/backend/entries counts.
+              - Mapping with label, backend, entries/live_entries/expired_entries,
+                optional calls_total/cache_hits/cache_misses, and hit_pct.
             """
 
             try:
@@ -703,6 +708,15 @@ class SQLite3Cache(CachePlugin):
                 pass
 
     def __del__(self) -> None:
+        """Brief: Best-effort close of underlying sqlite resources on GC.
+
+        Inputs:
+          - None.
+
+        Outputs:
+          - None.
+        """
+
         try:
             self.close()
         except (

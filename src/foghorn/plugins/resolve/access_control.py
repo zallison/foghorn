@@ -126,6 +126,18 @@ class AccessControl(BasePlugin):
             self.default = "allow"
 
         def _parse_network_or_raise(value: object) -> ipaddress._BaseNetwork:
+            """Brief: Parse a CIDR/IP string into a network or raise.
+
+            Inputs:
+              - value: CIDR or IP string (or other parse_network input).
+
+            Outputs:
+              - ipaddress network object.
+
+            Raises:
+              - ValueError when the value is not a valid network.
+            """
+
             net = ip_networks.parse_network(value)
             if net is None:
                 raise ValueError(f"invalid network {value!r}")

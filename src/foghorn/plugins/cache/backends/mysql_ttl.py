@@ -31,7 +31,7 @@ def _stable_digest_for_key(key: Any) -> str:
       - str: Hex digest suitable for use as a database primary key.
 
     Notes:
-      - We hash a pickle of the key to avoid ambiguities.
+      - We hash a safe_serialize (JSON) encoding of the key to avoid ambiguities.
     """
 
     payload = safe_serialize(key)
@@ -68,7 +68,9 @@ class MySQLTTLCache:
 
     Notes:
       - Keys and values are stored as BLOBs. Bytes-like objects are stored
-        directly; other objects are stored as pickles.
+        directly; other objects use safe_serialize (JSON) with
+        SAFE_SERIALIZED_FLAG. Column names still use the legacy
+        ``*_is_pickle`` naming.
       - get() enforces expiry (expired entries are treated as misses and are
         removed).
       - get_with_meta() returns the value even when expired (with a negative
@@ -204,9 +206,10 @@ class MySQLTTLCache:
           - obj: Any Python object.
 
         Outputs:
-          - (payload, is_pickle):
+          - (payload, encoding_flag):
               - payload: bytes to store.
-              - is_pickle: 1 when payload is pickle-encoded, 0 otherwise.
+              - encoding_flag: RAW_BYTES_FLAG (0) for raw bytes-like values;
+                SAFE_SERIALIZED_FLAG (2) for safe_serialize JSON payloads.
         """
 
         if isinstance(obj, (bytes, bytearray, memoryview)):
@@ -219,7 +222,9 @@ class MySQLTTLCache:
 
         Inputs:
           - payload: Stored bytes.
-          - is_pickle: 1 if payload is a pickle.
+          - is_pickle: Encoding flag (legacy name). RAW_BYTES_FLAG (0) returns
+            raw bytes; SAFE_SERIALIZED_FLAG (2) runs safe_deserialize. Other
+            values raise ValueError.
 
         Outputs:
           - Any: Decoded object.
@@ -473,6 +478,15 @@ class MySQLTTLCache:
                 pass
 
     def __del__(self) -> None:
+        """Brief: Best-effort close of the DB connection on GC.
+
+        Inputs:
+          - None.
+
+        Outputs:
+          - None.
+        """
+
         try:
             self.close()
         except Exception:  # pragma: nocover - defensive cleanup

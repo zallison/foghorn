@@ -17,6 +17,15 @@ _CAMEL_2 = re.compile(r"([a-z0-9])([A-Z])")
 
 @registered_lru_cache(maxsize=1024)
 def _camel_to_snake(name: str) -> str:
+    """Brief: Convert a CamelCase identifier to snake_case.
+
+    Inputs:
+      - name: Class or identifier name in CamelCase.
+
+    Outputs:
+      - Lowercase snake_case string.
+    """
+
     s1 = _CAMEL_1.sub(r"\1_\2", name)
     s2 = _CAMEL_2.sub(r"\1_\2", s1)
     return s2.lower()
@@ -24,6 +33,15 @@ def _camel_to_snake(name: str) -> str:
 
 @registered_lru_cache(maxsize=1024)
 def _default_alias_for(cls: Type[CachePlugin]) -> str:
+    """Brief: Derive the default cache plugin alias from the class name.
+
+    Inputs:
+      - cls: CachePlugin subclass.
+
+    Outputs:
+      - snake_case alias with trailing Cache/CachePlugin stripped.
+    """
+
     name = cls.__name__
     # Common suffixes used by cache implementations.
     for suffix in ("CachePlugin", "Cache"):
@@ -35,12 +53,30 @@ def _default_alias_for(cls: Type[CachePlugin]) -> str:
 
 @registered_lru_cache(maxsize=1024)
 def _normalize(alias: str) -> str:
+    """Brief: Normalize a cache plugin alias for registry lookup.
+
+    Inputs:
+      - alias: Raw alias string.
+
+    Outputs:
+      - Lowercased alias with hyphens replaced by underscores.
+    """
+
     return alias.strip().lower().replace("-", "_")
 
 
 def _iter_cache_plugin_modules(
     package_name: str = "foghorn.plugins.cache",
 ) -> Iterable[str]:
+    """Brief: Yield fully-qualified module names under the cache package.
+
+    Inputs:
+      - package_name: Root package to walk (default foghorn.plugins.cache).
+
+    Outputs:
+      - Iterable of module dotted paths for import/discovery.
+    """
+
     pkg = importlib.import_module(package_name)
     for modinfo in pkgutil.walk_packages(pkg.__path__, pkg.__name__ + "."):
         yield modinfo.name

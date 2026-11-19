@@ -398,6 +398,15 @@ class FileDownloader(BasePlugin):
 
     # Internal helpers
     def _maybe_run(self, force: bool) -> None:
+        """Brief: Run downloads when forced or the refresh interval has elapsed.
+
+        Inputs:
+          - force: When True, skip the interval gate and download immediately.
+
+        Outputs:
+          - None; updates files under download_path and _last_run on success.
+        """
+
         now = time.time()
         if not force and self.interval_seconds is not None:
             if (now - self._last_run) < int(self.interval_seconds):
@@ -789,7 +798,8 @@ class FileDownloader(BasePlugin):
           - (base, ext): base without extension, ext including leading '.' or empty string.
 
         Notes:
-          - If URL has no path component, fall back to netloc.
+          - Falls back to netloc when basename is empty or '.'/'..' (e.g. no
+            path, or a trailing-slash path whose basename is empty).
           - If the path basename has no extension, ext is ''.
           - Only the final path segment is considered (os.path.basename).
 

@@ -906,14 +906,17 @@ class BasePlugin:
             logic).
           - When both are provided, "targets_ignore" acts as an override to
             exclude specific clients from the targeted set.
-          - When "targets_listener" is set to "secure", only queries where
-            ctx.secure is True are targeted. When set to "unsecure", only
-            queries where ctx.secure is False are targeted. Any other value is
-            treated as "any" and does not restrict targeting by listener.
+          - When "targets_listener" is set, matching uses ctx.listener against
+            a set of concrete listener names. Alias "secure" expands to
+            {"dot", "doh"}; "unsecure"/"insecure" expand to {"udp", "tcp"}.
+            This is not equivalent to checking ctx.secure. Empty set means any
+            listener.
+          - When targets_domains is non-empty with a non-"any" mode and ctx has
+            no qname-like attribute, the query is rejected (returns False).
 
         Example use:
-            >>> ctx = PluginContext(client_ip="192.0.2.1")
-            >>> p = BasePlugin(targets=["192.0.2.0/24"])
+            >>> ctx = PluginContext(client_ip="*********")
+            >>> p = BasePlugin(targets=["*********/24"])
             >>> p.targets(ctx)
             True
         """
@@ -931,8 +934,8 @@ class BasePlugin:
 
         # Domain-level targeting: when targets_domains are configured, restrict
         # this plugin to matching qnames. Callers may attach a qname-like
-        # attribute (for example, ctx.qname) for this purpose; when absent,
-        # domain filters are not applied.
+        # attribute (for example, ctx.qname); when absent and a domain filter
+        # is active, treat as non-targeted.
         domains_cfg: List[str] = getattr(self, "_targets_domains", [])
         domains_mode: str = getattr(self, "_targets_domains_mode", "any")
         if domains_cfg and domains_mode != "any":
@@ -1126,10 +1129,17 @@ class BasePlugin:
         """Brief: Determine whether this plugin targets the given DNS opcode.
 
         Inputs:
-          - opcode: Integer opcode from dnslib header (0=QUERY, 2=STATUS, 4=NOTIFY, 5=UPDATE).
+          - opcode: Integer opcode from dnslib header (0=QUERY, 2=STATUS,
+            4=NOTIFY, 5=UPDATE). Must be int-coercible; mnemonic strings are
+            not accepted as the opcode argument (int(opcode) is required).
 
         Outputs:
           - bool: True if this plugin should be considered for handling this opcode.
+
+        Notes:
+          - Configured target_opcodes may be int codes and/or mnemonic strings;
+            matching compares opcode as an int against int targets and the
+            OPCODE mnemonic against string targets.
         """
         try:
             op_list = list(getattr(self, "_target_opcodes", ["QUERY"]))
@@ -1139,8 +1149,8 @@ class BasePlugin:
             return False
         if "*" in op_list:
             return True
-        # Accept match by numeric code and by mnemonic string regardless of
-        # whether the configured targets are int codes or text mnemonics.
+        # Match configured int codes by numeric value and string targets by
+        # OPCODE mnemonic. opcode itself must be int-coercible.
         try:
             name = OPCODE.get(int(opcode), str(opcode))
         except Exception:
@@ -1387,6 +1397,15 @@ class BasePlugin:
         """
 
         def _targets_to_strings(values: object) -> list[str]:
+            """Brief: Coerce a targets collection to a list of strings.
+
+            Inputs:
+              - values: Iterable of target values (or None).
+
+            Outputs:
+              - list[str]: Stringified values, or [] on failure.
+            """
+
             out: list[str] = []
             try:
                 for v in list(values or []):

@@ -61,9 +61,10 @@ def _encode_value(value: Any) -> Tuple[bytes, int]:
       - value: Any Python object.
 
     Outputs:
-      - (payload, is_pickle):
+      - (payload, encoding_flag):
           - payload: bytes to store.
-          - is_pickle: 1 when payload is pickle-encoded, 0 otherwise.
+          - encoding_flag: RAW_BYTES_FLAG (0) for raw bytes-like values;
+            SAFE_SERIALIZED_FLAG (2) for safe_serialize JSON payloads.
     """
 
     if isinstance(value, (bytes, bytearray, memoryview)):
@@ -76,7 +77,9 @@ def _decode_value(payload: bytes, is_pickle: int) -> Any:
 
     Inputs:
       - payload: Stored bytes.
-      - is_pickle: 1 if payload is a pickle.
+      - is_pickle: Encoding flag (legacy name). RAW_BYTES_FLAG (0) returns
+        raw bytes; SAFE_SERIALIZED_FLAG (2) runs safe_deserialize. Other
+        values raise ValueError.
 
     Outputs:
       - Any: Decoded object.

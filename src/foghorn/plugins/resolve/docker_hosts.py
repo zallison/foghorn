@@ -54,6 +54,7 @@ class DockerEndpointConfig(BaseModel):
     short container ID alias (the first 12 hex characters) for convenience.
 
     Inputs:
+      - id: Optional identifier for the endpoint.
       - url: Docker endpoint URL (e.g. "unix:///var/run/docker.sock",
         "tcp://127.0.0.1:2375").
       - reload_interval_second: Interval in seconds between background refreshes
@@ -78,6 +79,7 @@ class DockerEndpointConfig(BaseModel):
       - DockerEndpointConfig instance with normalized field types.
     """
 
+    id: str | None = None
     url: str
     reload_interval_second: float = Field(default=60.0, ge=0)
     use_ipv4: str | None = None
@@ -1593,7 +1595,9 @@ class DockerHosts(DynamicHostsPlugin):
           - max_len: Maximum length for the returned TXT chunk.
 
         Outputs:
-          - A string suitable for inclusion as one TXT "character-string".
+          - (txt_line, hostports):
+              - txt_line: Compact string for one TXT character-string.
+              - hostports: Host/exposed port strings collected for the container.
         """
 
         cfg = container.get("Config") or {}
@@ -1607,6 +1611,16 @@ class DockerHosts(DynamicHostsPlugin):
         proj = str(project_name).strip() if project_name else ""
 
         def _join(items: list[str], limit: int = 4) -> str:
+            """Brief: Join values with a cap; append +N when truncated.
+
+            Inputs:
+              - items: Values to join.
+              - limit: Max items before appending a +remainder count.
+
+            Outputs:
+              - Comma-joined string (possibly truncated with +N).
+            """
+
             vals = [str(x) for x in items if str(x).strip()]
             if len(vals) > limit:
                 return ",".join(vals[:limit]) + f"+{len(vals) - limit}"
@@ -1730,6 +1744,15 @@ class DockerHosts(DynamicHostsPlugin):
                             flat: list[str] = []
 
                             def _flatten_label(obj: object) -> None:
+                                """Brief: Flatten label path values into flat strings.
+
+                                Inputs:
+                                  - obj: Nested label value (list/dict/scalar).
+
+                                Outputs:
+                                  - None; appends to outer ``flat`` list.
+                                """
+
                                 if isinstance(obj, (list, tuple, set)):
                                     for item in obj:
                                         _flatten_label(item)
@@ -1785,6 +1808,15 @@ class DockerHosts(DynamicHostsPlugin):
                 flat: list[str] = []
 
                 def _flatten(obj: object) -> None:
+                    """Brief: Flatten JSONPath terminal values into flat strings.
+
+                    Inputs:
+                      - obj: Nested path result (list/dict/scalar).
+
+                    Outputs:
+                      - None; appends to outer ``flat`` list.
+                    """
+
                     if isinstance(obj, (list, tuple, set)):
                         for item in obj:
                             _flatten(item)
