@@ -467,17 +467,18 @@ def test_handle_one_empty_response_decrements_counters() -> None:
     asyncio.run(_run())
 
 
-def test_handle_one_sendto_exception_falls_back_to_overload_response(
+def test_handle_one_sendto_exception_does_not_fallback_as_resolver_error(
     monkeypatch: Any,
 ) -> None:
-    """Brief: sendto exceptions trigger best-effort overload response.
+    """Brief: sendto failures stay isolated from resolver-error fallback.
 
     Inputs:
       - resolver returns bytes.
-      - transport.sendto raises on first call.
+      - transport.sendto raises on every call.
 
     Outputs:
-      - None; asserts fallback response is attempted.
+      - None; asserts no overload fallback is attempted after send failure,
+        and inflight counters still decrement.
     """
 
     async def _run() -> None:
@@ -487,6 +488,7 @@ def test_handle_one_sendto_exception_falls_back_to_overload_response(
             return b"normal"
 
         sent: list[bytes] = []
+        overload_calls = {"n": 0}
 
         class DummyTransport:
             def __init__(self) -> None:
@@ -494,11 +496,13 @@ def test_handle_one_sendto_exception_falls_back_to_overload_response(
 
             def sendto(self, data: bytes, addr: Any) -> None:  # noqa: ANN401
                 self.calls += 1
-                if self.calls == 1:
-                    raise RuntimeError("boom")
-                sent.append(data)
+                raise RuntimeError("boom")
 
-        monkeypatch.setattr(udp_mod, "_make_overloaded_response", lambda _b: b"ovl")
+        def _fake_overload(_b: bytes) -> bytes:
+            overload_calls["n"] += 1
+            return b"ovl"
+
+        monkeypatch.setattr(udp_mod, "_make_overloaded_response", _fake_overload)
 
         proto = udp_mod._UDPProtocol(
             resolver,
@@ -507,17 +511,60 @@ def test_handle_one_sendto_exception_falls_back_to_overload_response(
             max_inflight_per_ip=10,
             max_query_bytes=4096,
         )
-        proto._transport = DummyTransport()  # type: ignore[assignment]
+        transport = DummyTransport()
+        proto._transport = transport  # type: ignore[assignment]
         proto._inflight_total = 1
-        proto._inflight_per_ip["127.0.0.1"] = 2
+        proto._inflight_per_ip["*********"] = 2
 
-        await proto._handle_one(query, ("127.0.0.1", 12345), "127.0.0.1", None)
+        await proto._handle_one(query, ("*********", 12345), "*********", None)
 
-        assert sent == [b"ovl"]
+        # Send failure must not be treated as a resolver failure.
+        assert overload_calls["n"] == 0
+        assert sent == []
+        assert transport.calls == 1
         assert proto._inflight_total == 0
-        assert proto._inflight_per_ip["127.0.0.1"] == 1
+        assert proto._inflight_per_ip["*********"] == 1
 
     asyncio.run(_run())
+
+
+def test_sendto_safe_returns_false_on_missing_transport_or_error() -> None:
+    """Brief: shared sendto_safe and protocol wrapper handle send failures.
+
+    Inputs:
+      - protocol with no transport, empty payload, and a raising transport.
+
+    Outputs:
+      - None; asserts False on failure paths and True on success.
+    """
+    from foghorn.servers.udp_send import sendto_safe
+
+    assert sendto_safe(None, b"x", ("*********", 53)) is False
+    assert sendto_safe(object(), b"", ("*********", 53)) is False
+
+    class OkTransport:
+        def sendto(self, data: bytes, addr: Any) -> None:  # noqa: ANN401
+            return None
+
+    class BoomTransport:
+        def sendto(self, data: bytes, addr: Any) -> None:  # noqa: ANN401
+            raise OSError("no route")
+
+    assert sendto_safe(OkTransport(), b"ok", ("*********", 53)) is True
+    assert sendto_safe(BoomTransport(), b"x", ("*********", 53)) is False
+
+    proto = udp_mod._UDPProtocol(
+        lambda _q, _ip: b"",
+        executor=None,
+        max_inflight=10,
+        max_inflight_per_ip=10,
+        max_query_bytes=4096,
+    )
+    assert proto._sendto_safe(b"x", ("*********", 53)) is False
+    proto._transport = OkTransport()  # type: ignore[assignment]
+    assert proto._sendto_safe(b"ok", ("*********", 53)) is True
+    proto._transport = BoomTransport()  # type: ignore[assignment]
+    assert proto._sendto_safe(b"x", ("*********", 53)) is False
 
 
 def test_handle_one_resolver_exception_sends_overload_response(

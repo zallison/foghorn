@@ -27,6 +27,7 @@ from foghorn.servers.overload_response import (
     build_overload_dns_response,
     normalize_overload_response,
 )
+from foghorn.servers.udp_send import sendto_safe
 from foghorn.utils import ip_networks
 from foghorn.utils.exception_logging import warn_suppressed_exception
 
@@ -154,6 +155,18 @@ class _UDPProtocol(asyncio.DatagramProtocol):
         self._inflight_per_cidr: dict[str, int] = {}
 
         self._transport: asyncio.DatagramTransport | None = None
+
+    def _sendto_safe(self, data: bytes, addr) -> bool:
+        """Brief: Delegate to shared sendto_safe for this protocol transport.
+
+        Inputs:
+          - data: Wire bytes to send.
+          - addr: Destination address tuple (ip, port) from asyncio.
+
+        Outputs:
+          - bool: True when send completed without error; False otherwise.
+        """
+        return sendto_safe(self._transport, data, addr, log=logger)
 
     def connection_made(self, transport: asyncio.BaseTransport) -> None:  # noqa: D401
         """Brief: Record the datagram transport.
@@ -285,15 +298,8 @@ class _UDPProtocol(asyncio.DatagramProtocol):
 
         if limited:
             resp = build_overload_dns_response(data, self._overload_response)
-            if resp and self._transport is not None:
-                try:
-                    self._transport.sendto(resp, addr)
-                except Exception:
-                    logger.debug(
-                        "Failed to send UDP overload response to %s",
-                        client_ip,
-                        exc_info=True,
-                    )
+            if resp:
+                self._sendto_safe(resp, addr)
             return
 
         self._inflight_total += 1
@@ -327,23 +333,17 @@ class _UDPProtocol(asyncio.DatagramProtocol):
             resp = await loop.run_in_executor(
                 self._executor, self._resolver, data, client_ip
             )
-            if not resp:
-                return
-            if self._transport is not None:
-                self._transport.sendto(resp, addr)
+            if resp:
+                self._sendto_safe(resp, addr)
         except Exception as _exc:
             # Defensive: do not crash the protocol on resolver failures.
+            # Send failures are handled inside _sendto_safe and must not
+            # reach this path (avoids logging them as resolver errors or
+            # attempting a useless fallback SERVFAIL).
             logger.debug("Resolver error for %s: %s", client_ip, _exc, exc_info=True)
-            try:
-                resp = _make_overloaded_response(data)
-                if resp and self._transport is not None:
-                    self._transport.sendto(resp, addr)
-            except Exception:
-                logger.debug(
-                    "Failed to send UDP fallback response to %s",
-                    client_ip,
-                    exc_info=True,
-                )
+            resp = _make_overloaded_response(data)
+            if resp:
+                self._sendto_safe(resp, addr)
         finally:
             try:
                 self._inflight_total = max(0, int(self._inflight_total) - 1)

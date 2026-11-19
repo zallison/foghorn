@@ -14,6 +14,7 @@ from .plugin_telemetry import (
     plugin_telemetry_enabled,
     time_plugin_call,
 )
+from .udp_send import sendto_safe
 
 logger = logging.getLogger("foghorn.server")
 
@@ -460,7 +461,7 @@ class DNSUDPHandler(DNSRuntimeState, socketserver.BaseRequestHandler):
 
         # Ensure the response ID matches the request ID before sending
         response_wire = _set_response_id(response_wire, req.header.id)
-        sock.sendto(response_wire, client_address)
+        sendto_safe(sock, response_wire, client_address, log=logger)
 
     def _apply_pre_plugins(
         self, request: DNSRecord, qname: str, qtype: int, data: bytes, ctx
@@ -895,7 +896,7 @@ class DNSUDPHandler(DNSRuntimeState, socketserver.BaseRequestHandler):
             server_max_bytes=server_max,
         )
 
-        sock.sendto(wire, self.client_address)
+        sendto_safe(sock, wire, self.client_address, log=logger)
 
 
 class _UDPHandler(socketserver.BaseRequestHandler):
@@ -920,11 +921,10 @@ class _UDPHandler(socketserver.BaseRequestHandler):
         peer_ip = (
             self.client_address[0]
             if isinstance(self.client_address, tuple)
-            else "0.0.0.0"
+            else "*******"
         )
         try:
             resp = self.resolver(data, peer_ip)
-            sock.sendto(resp, self.client_address)
         except (ConnectionError, OSError, TimeoutError):
             return
         except Exception:  # pragma: no cover - defensive: unexpected transport failure
@@ -932,6 +932,10 @@ class _UDPHandler(socketserver.BaseRequestHandler):
                 "Unhandled exception in UDP request handler for client %s",
                 peer_ip,
             )
+            return
+        if resp:
+            # Send failures are isolated so they are not logged as resolver errors.
+            sendto_safe(sock, resp, self.client_address, log=logger)
 
 
 def serve_udp(host: str, port: int, resolver: Callable[[bytes, str], bytes]) -> None:
