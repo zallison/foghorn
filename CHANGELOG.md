@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+- Moved the Echo resolve plugin to `foghorn.plugins.resolve.examples.echo` (was `foghorn.plugins.resolve.echo`) so it ships with other opt-in example plugins.
+- Example resolve plugins (`dns_prefetch`, `examples`, `new_domain_filter`) now import `foghorn.plugins.resolve.base` directly instead of a relative `.base` shim.
+
+### Documentation
+- Marked Echo as an example/diagnostic plugin in `docs/plugins/resolve/echo.md`.
+
+### Tests
+- Updated Echo and admin-snapshot tests for the examples package path; removed the conftest `examples.base` compatibility shim.
+
 ### Added
 - KubernetesHosts resolve plugin (`foghorn.plugins.resolve.kubernetes_hosts`): indexes Kubernetes Services and Pods via the API (in-cluster service account, kubeconfig, or explicit api_server + token and/or mTLS), builds forward/reverse maps, and answers matching A/AAAA/PTR/TXT queries in `pre_resolve`. Uses `requests` only (no official Kubernetes client). Supports multi-endpoint config, namespace/label selectors, optional DNS suffix, poll interval, and TXT metadata on answers.
 - Admin snapshot routes for KubernetesHosts: `GET /api/v1/plugins/{plugin_name}/k8s_hosts` and `/kubernetes_hosts` (FastAPI and threaded), plus generic `/snapshot` via `get_http_snapshot()`.
