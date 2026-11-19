@@ -64,6 +64,28 @@ All notable changes to this project will be documented in this file.
 - KubernetesHosts page-cap coverage; ProxmoxHosts `_reload_maps` regression; SSHKeys allowlisted DB path and fallback failure; ZoneRecords invalid CNAME commit rejection.
 - Config parser undefined-alias message coverage; admin pre-auth IP rate-limit shared-bucket coverage; YAML copy `os.replace` persistence coverage; DNSSEC trust-anchor/cache path updates.
 
+## 0.8.0
+
+### Added
+- Shared inbound UDP helper `foghorn.servers.udp_send.sendto_safe` for best-effort datagram replies that never raise into callers.
+- Shared DNS-over-TCP framed write helpers in `foghorn.servers.tcp_framed_write` (`frame_dns_message`, `sendall_framed`, `write_framed`) for RFC 7766/7858 length-prefixed replies on TCP and DoT.
+
+### Changed
+- Asyncio and threaded inbound UDP listeners route client replies through `sendto_safe`, isolating send failures from resolver-error handling (no overload/SERVFAIL fallback after a failed send).
+- Threaded TCP, asyncio TCP, and DoT listeners write framed replies via the shared helpers; write failures end the connection/stream loop cleanly.
+- Core `_resolve_core` path is staged as parse → gate → cache lookup → resolve → pack, with a shared SERVFAIL recovery helper for unhandled exceptions.
+
+### Fixed
+- TSIG strip path tolerates read-only dnslib attributes instead of failing or warning noisily when clearing request TSIG fields.
+- DockerHosts sticky condition logging keys endpoints by URL through plugin helper methods for stable multi-endpoint tracking.
+- Admin uvicorn startup skips `limit_concurrency` when the override is `None` (avoids applying a null concurrency limit).
+
+### Tests
+- UDP asyncio coverage for send isolation vs resolver fallback, plus direct `sendto_safe` success/failure cases.
+- Added `tests/servers/test_tcp_framed_write.py` for framing and blocking/async write helpers.
+- Resolve pipeline stage tests updated for the staged `_resolve_core` flow.
+- TSIG strip quiet-path coverage; DockerHosts condition-key coverage; webserver `limit_concurrency=None` coverage.
+
 ## 0.7.2 — 2026-11-10
 
 ### Added
