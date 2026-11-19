@@ -10,6 +10,7 @@ from foghorn.servers.overload_response import (
     build_overload_dns_response,
     normalize_overload_response,
 )
+from foghorn.servers.tcp_framed_write import write_framed
 from foghorn.utils.exception_logging import warn_suppressed_exception
 
 logger = logging.getLogger("foghorn.servers.dot_server")
@@ -78,8 +79,7 @@ async def _send_connection_overload_response(
         if not response:
             return
 
-        writer.write(len(response).to_bytes(2, "big") + response)
-        await writer.drain()
+        await write_framed(writer, response, log=logger)
     except Exception:
         return
 
@@ -245,8 +245,10 @@ async def _handle_conn(
                 for wire in messages:
                     if not wire:
                         continue
-                    writer.write(len(wire).to_bytes(2, "big") + wire)
-                    await writer.drain()
+                    if not await write_framed(
+                        writer, wire, client_ip=client_ip, log=logger
+                    ):
+                        break
                 break
 
             loop = asyncio.get_running_loop()
@@ -257,8 +259,10 @@ async def _handle_conn(
             if not response:
                 break
             query_count += 1
-            writer.write(len(response).to_bytes(2, "big") + response)
-            await writer.drain()
+            if not await write_framed(
+                writer, response, client_ip=client_ip, log=logger
+            ):
+                break
     except TimeoutError:
         pass  # pragma: no cover - defensive: idle timeout closes connection
     except (ConnectionError, OSError, ssl.SSLError):

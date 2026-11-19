@@ -11,6 +11,7 @@ from foghorn.servers.overload_response import (
     build_overload_dns_response,
     normalize_overload_response,
 )
+from foghorn.servers.tcp_framed_write import sendall_framed, write_framed
 from foghorn.utils.exception_logging import warn_suppressed_exception
 
 logger = logging.getLogger("foghorn.servers.tcp_server")
@@ -195,7 +196,10 @@ class _TCPHandler(socketserver.BaseRequestHandler):
                     for wire in messages:
                         if not wire:
                             continue
-                        sock.sendall(len(wire).to_bytes(2, "big") + wire)
+                        if not sendall_framed(
+                            sock, wire, client_ip=peer_ip, log=logger
+                        ):
+                            break
                     # AXFR/IXFR consumes this connection; do not process
                     # additional queries on the same TCP stream.
                     break
@@ -207,7 +211,8 @@ class _TCPHandler(socketserver.BaseRequestHandler):
                 if not resp:
                     break
                 query_count += 1
-                sock.sendall(len(resp).to_bytes(2, "big") + resp)
+                if not sendall_framed(sock, resp, client_ip=peer_ip, log=logger):
+                    break
         except (ConnectionError, OSError, TimeoutError):
             return
         except Exception:  # pragma: no cover - defensive: unexpected transport failure
@@ -377,8 +382,7 @@ async def _send_connection_overload_response(
         if not response:
             return
 
-        writer.write(len(response).to_bytes(2, "big") + response)
-        await writer.drain()
+        await write_framed(writer, response, log=logger)
     except Exception:
         return
 
@@ -551,8 +555,10 @@ async def _handle_conn(
                     for wire in messages:
                         if not wire:
                             continue
-                        writer.write(len(wire).to_bytes(2, "big") + wire)
-                        await writer.drain()
+                        if not await write_framed(
+                            writer, wire, client_ip=client_ip, log=logger
+                        ):
+                            break
                 except (
                     Exception
                 ):  # pragma: no cover - defensive: AXFR failure falls back to closing
@@ -575,9 +581,10 @@ async def _handle_conn(
                 break
 
             query_count += 1
-            # Write back
-            writer.write(len(response).to_bytes(2, "big") + response)
-            await writer.drain()
+            if not await write_framed(
+                writer, response, client_ip=client_ip, log=logger
+            ):
+                break
     except asyncio.TimeoutError:
         pass  # pragma: no cover - defensive: idle timeout closes connection
     except (ConnectionError, OSError):
