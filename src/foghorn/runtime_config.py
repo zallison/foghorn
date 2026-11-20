@@ -356,16 +356,8 @@ def resolve_server_feature_flags(server_cfg: dict[str, Any]) -> dict[str, Any]:
             parsed = int(default)
         return max(int(minimum), min(int(maximum), int(parsed)))
 
-    enable_ede = (
-        _to_bool(features.get("enable_ede"), False)
-        if "enable_ede" in features
-        else _to_bool(cfg.get("enable_ede"), False)
-    )
-    forward_local = (
-        _to_bool(features.get("forward_local"), False)
-        if "forward_local" in features
-        else _to_bool(cfg.get("forward_local"), False)
-    )
+    enable_ede = _to_bool(features.get("enable_ede"), False)
+    forward_local = _to_bool(features.get("forward_local"), False)
     refuse_any = _to_bool(features.get("refuse_any"), False)
 
     ecs_obj = features.get("ecs")
@@ -1547,6 +1539,8 @@ def _apply_snapshot_to_runtime_globals(snapshot: RuntimeSnapshot) -> None:
       - The shared resolver pipeline consults RuntimeSnapshot directly.
       - plugin_base.DNS_CACHE remains a global reference used by multiple
         plugins and resolver helpers.
+      - DNSSEC trust-anchor mode/store/custom anchors and validation resolver
+        routing are re-applied so reload picks up server.dnssec changes.
     """
 
     try:
@@ -1554,7 +1548,42 @@ def _apply_snapshot_to_runtime_globals(snapshot: RuntimeSnapshot) -> None:
 
         plugin_base.DNS_CACHE = snapshot.cache_plugin  # type: ignore[assignment]
     except Exception:
-        return  # pragma: no cover - defensive: import/assign failures are unlikely
+        pass  # pragma: no cover - defensive: import/assign failures are unlikely
+
+    try:
+        from foghorn.dnssec.dnssec_validate import apply_dnssec_validation_runtime
+
+        server_cfg = (
+            snapshot.cfg.get("server") if isinstance(snapshot.cfg, dict) else {}
+        )
+        if not isinstance(server_cfg, dict):
+            server_cfg = {}
+        dnssec_cfg = server_cfg.get("dnssec") or {}
+        if not isinstance(dnssec_cfg, dict):
+            dnssec_cfg = {}
+        upstream_hosts = [
+            str(u.get("host"))
+            for u in (snapshot.upstream_addrs or [])
+            if isinstance(u, dict) and u.get("host")
+        ]
+        apply_dnssec_validation_runtime(
+            dnssec_cfg=dnssec_cfg,
+            dnssec_mode=str(snapshot.dnssec_mode or "ignore"),
+            dnssec_validation=str(snapshot.dnssec_validation or "upstream_ad"),
+            resolver_mode=str(snapshot.resolver_mode or "forward"),
+            upstream_hosts=upstream_hosts,
+            enforce_data_root=True,
+        )
+    except ValueError as exc:
+        logger.error(
+            "DNSSEC trust-anchor path validation failed during reload: %s", exc
+        )
+        raise
+    except Exception:
+        logger.debug(
+            "DNSSEC runtime configuration skipped during snapshot apply",
+            exc_info=True,
+        )
 
 
 def _default_snapshot() -> RuntimeSnapshot:

@@ -97,7 +97,7 @@ server:
 
   # ----- DNSSEC / EDNS defaults -----
   dnssec:
-    # ignore | validate
+    # ignore | passthrough | validate
     mode: ignore
 
     # upstream_ad | local | local_extended
@@ -105,6 +105,28 @@ server:
 
     # Default EDNS UDP payload size advertised/used by the server.
     udp_payload_size: 1232
+
+    # Trust anchors for local validation (dnssec.mode=validate + local*).
+    # static (default): baked-in IANA root KSK-2017 + optional trust_anchors.
+    # rfc5011: automated root KSK management (requires store path).
+    trust_anchor_mode: static  # static | rfc5011
+    trust_anchor_store_path: null  # e.g. ./var/trust-anchors.json (under data_root when set)
+    hold_down_add_days: 2
+    hold_down_remove_days: 2
+    # Optional static DNSKEY and/or DS anchors (root supplements or islands of trust):
+    # trust_anchors:
+    #   - zone: "."
+    #     type: dnskey
+    #     algorithm: 8
+    #     flags: 257
+    #     public_key: "AwEA..."
+    #   - zone: internal.example.
+    #     type: ds
+    #     key_tag: 12345
+    #     algorithm: 8
+    #     digest_type: 2
+    #     digest: "ABCD..."
+    trust_anchors: []
 
   # ----- Resolver mode -----
   resolver:

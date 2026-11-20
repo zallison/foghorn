@@ -2392,53 +2392,36 @@ def _configure_dnssec_validation_resolver(
       - bool: True when startup should continue; False on fatal dependency errors.
     """
 
-    # Best-effort RFC 5011 trust-anchor store configuration. Path containment is
-    # enforced when server.data_root is set.
-    try:
-        from foghorn.dnssec.dnssec_validate import configure_trust_anchors
-        from foghorn.utils.safe_paths import enforce_data_root_path
+    dnssec_cfg: dict = {}
+    if isinstance(server_cfg, dict):
+        raw_dnssec = server_cfg.get("dnssec") or {}
+        if isinstance(raw_dnssec, dict):
+            dnssec_cfg = raw_dnssec
 
-        dnssec_cfg = {}
-        if isinstance(server_cfg, dict):
-            raw_dnssec = server_cfg.get("dnssec") or {}
-            if isinstance(raw_dnssec, dict):
-                dnssec_cfg = raw_dnssec
-        ta_mode = str(
-            dnssec_cfg.get("trust_anchor_mode")
-            or dnssec_cfg.get("trust_anchors_mode")
-            or "static"
-        ).lower()
-        raw_store = (
-            dnssec_cfg.get("trust_anchor_store_path")
-            or dnssec_cfg.get("store_path")
-            or dnssec_cfg.get("trust_anchors_path")
-        )
-        store_path = None
-        if raw_store is not None and str(raw_store).strip():
-            store_path = enforce_data_root_path(
-                raw_store, kind="DNSSEC trust_anchor_store_path"
-            )
-        hold_add = int(dnssec_cfg.get("hold_down_add_days", 2) or 2)
-        hold_remove = int(dnssec_cfg.get("hold_down_remove_days", 2) or 2)
-        configure_trust_anchors(
-            mode=ta_mode,
-            store_path=store_path,
-            hold_down_add_days=hold_add,
-            hold_down_remove_days=hold_remove,
+    upstream_hosts = [
+        str(u["host"]) for u in (upstreams or []) if isinstance(u, dict) and "host" in u
+    ]
+
+    # Trust-anchor + validation-resolver wiring (also applied on runtime reload).
+    try:
+        from foghorn.dnssec.dnssec_validate import apply_dnssec_validation_runtime
+
+        apply_dnssec_validation_runtime(
+            dnssec_cfg=dnssec_cfg,
+            dnssec_mode=dnssec_mode,
+            dnssec_validation=dnssec_validation,
+            resolver_mode=resolver_mode,
+            upstream_hosts=upstream_hosts,
+            enforce_data_root=True,
         )
     except ValueError as exc:
         logger.error("DNSSEC trust-anchor path validation failed: %s", exc)
         return False
-    except Exception:
-        # Optional path: DNSSEC module may be unavailable in minimal builds.
-        logger.debug("DNSSEC trust-anchor configuration skipped", exc_info=True)
-
-    if dnssec_mode == "validate" and dnssec_validation in {"local", "local_extended"}:
-        try:
-            from foghorn.dnssec.dnssec_validate import (
-                configure_dnssec_resolver as _configure_dnssec_resolver,
-            )
-        except Exception as exc:
+    except Exception as exc:
+        if dnssec_mode == "validate" and dnssec_validation in {
+            "local",
+            "local_extended",
+        }:
             logger.warning(
                 "DNSSEC local validation requested but dependencies are unavailable; install dnspython+cryptography or switch dnssec.validation to upstream_ad"
             )
@@ -2449,29 +2432,8 @@ def _configure_dnssec_validation_resolver(
                 exc,
             )
             return False
-
-        if resolver_mode == "forward":
-            upstream_hosts = [
-                str(u["host"]) for u in upstreams if isinstance(u, dict) and "host" in u
-            ]
-            _configure_dnssec_resolver(upstream_hosts or None)
-        else:
-            # Empty list is a sentinel telling foghorn.dnssec.dnssec_validate to use
-            # RecursiveResolver for all validation lookups.
-            _configure_dnssec_resolver([])
-    else:
-        # DNSSEC validation is not using local lookups. Avoid importing dnspython
-        # at startup so minimal/headless builds can omit it.
-        try:
-            from foghorn.dnssec.dnssec_validate import (
-                configure_dnssec_resolver as _configure_dnssec_resolver,
-            )
-
-            _configure_dnssec_resolver(None)
-        except (
-            Exception
-        ):  # pragma: nocover - optional dependency path; safe to ignore outside local DNSSEC validation
-            pass
+        # Optional path: DNSSEC module may be unavailable in minimal builds.
+        logger.debug("DNSSEC trust-anchor configuration skipped", exc_info=True)
 
     return True
 

@@ -1,7 +1,8 @@
 import base64
 import logging
+import threading
 import time
-from typing import Final
+from typing import Any, Final
 
 try:  # Ensure required crypto backend is present before enabling DNSSEC logic.
     import importlib.util as _importlib_util
@@ -24,8 +25,10 @@ import dns.dnssec
 import dns.flags
 import dns.message
 import dns.name
+import dns.rdataclass
 import dns.rdatatype
 import dns.resolver
+import dns.rrset
 
 from foghorn.utils.register_caches import registered_ttl_cache
 
@@ -110,10 +113,127 @@ def configure_dnssec_resolver(nameservers: list[str] | None) -> None:
 
 # RFC 5011-style trust anchor configuration (wired in by the application
 # config loader). Defaults keep existing static behavior.
-_TRUST_ANCHOR_MODE: Final[str] = "rfc5011"  # "static" or "rfc5011"
+_TRUST_ANCHOR_MODE: str = "static"  # "static" or "rfc5011"
 _TRUST_ANCHOR_STORE_PATH: str | None = None
-_TRUST_ANCHOR_HOLD_ADD_DAYS: Final[int] = 2
-_TRUST_ANCHOR_HOLD_REMOVE_DAYS: Final[int] = 2
+_TRUST_ANCHOR_HOLD_ADD_DAYS: int = 2
+_TRUST_ANCHOR_HOLD_REMOVE_DAYS: int = 2
+# zone_text (absolute, trailing-dot) -> DNSKEY rdatas from operator config
+_CUSTOM_DNSKEY_ANCHORS: dict[str, list] = {}
+# zone_text -> DS rdatas from operator config (islands of trust)
+_CUSTOM_DS_ANCHORS: dict[str, list] = {}
+_TRUST_ANCHOR_STORE_LOCK = threading.Lock()
+
+
+def _normalize_zone_text(zone: str | None) -> str:
+    """Brief: Normalize a zone name to absolute text with trailing dot.
+
+    Inputs:
+      - zone: Zone name string (e.g. '.', 'example.com').
+
+    Outputs:
+      - Absolute zone text ending with '.'; root is '.'.
+    """
+
+    text = str(zone or ".").strip() or "."
+    try:
+        return dns.name.from_text(text).to_text()
+    except Exception:
+        if not text.endswith("."):
+            text = text + "."
+        return text
+
+
+def _clear_trust_anchor_caches() -> None:
+    """Brief: Drop cached root anchors and chain results after TA changes.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None.
+    """
+
+    for fn in (_root_dnskey_rrset, _validate_chain_cached, _find_zone_apex_cached):
+        clear_fn = getattr(fn, "cache_clear", None) or getattr(
+            getattr(fn, "cache", None), "clear", None
+        )
+        if callable(clear_fn):
+            try:
+                clear_fn()
+            except Exception:
+                pass
+
+
+def _parse_custom_trust_anchor_entries(
+    entries: list | None,
+) -> tuple[dict[str, list], dict[str, list]]:
+    """Brief: Parse operator trust_anchors list into DNSKEY/DS maps.
+
+    Inputs:
+      - entries: Optional list of mapping objects from config.
+
+    Outputs:
+      - (dnskey_by_zone, ds_by_zone) maps of zone_text -> list[rdata].
+
+    Entry shapes:
+      - DNSKEY: {zone, algorithm, public_key[, flags, protocol]}
+      - DS: {zone, key_tag, algorithm, digest_type, digest}
+      - type: optional "dnskey"|"ds" discriminator when both forms possible
+    """
+
+    dnskey_by_zone: dict[str, list] = {}
+    ds_by_zone: dict[str, list] = {}
+    if not isinstance(entries, list):
+        return dnskey_by_zone, ds_by_zone
+
+    import dns.rdata
+    import dns.rdataclass
+
+    for raw in entries:
+        if not isinstance(raw, dict):
+            continue
+        zone = _normalize_zone_text(raw.get("zone") or raw.get("name") or ".")
+        kind = str(raw.get("type") or raw.get("kind") or "").strip().lower()
+        digest = raw.get("digest")
+        public_key = raw.get("public_key") or raw.get("public_key_b64")
+        if not kind:
+            if digest is not None:
+                kind = "ds"
+            elif public_key is not None:
+                kind = "dnskey"
+            else:
+                continue
+        try:
+            if kind == "ds":
+                key_tag = int(raw.get("key_tag"))
+                algorithm = int(raw.get("algorithm"))
+                digest_type = int(raw.get("digest_type") or raw.get("digest_alg") or 2)
+                digest_text = str(digest or "").strip()
+                if not digest_text:
+                    continue
+                rdata = dns.rdata.from_text(
+                    dns.rdataclass.IN,
+                    dns.rdatatype.DS,
+                    f"{key_tag} {algorithm} {digest_type} {digest_text}",
+                )
+                ds_by_zone.setdefault(zone, []).append(rdata)
+            elif kind in {"dnskey", "key"}:
+                algorithm = int(raw.get("algorithm"))
+                pub = str(public_key or "").strip()
+                if not pub:
+                    continue
+                flags = int(raw.get("flags", 257) or 257)
+                protocol = int(raw.get("protocol", 3) or 3)
+                rdata = dns.rdata.from_text(
+                    dns.rdataclass.IN,
+                    dns.rdatatype.DNSKEY,
+                    f"{flags} {protocol} {algorithm} {pub}",
+                )
+                dnskey_by_zone.setdefault(zone, []).append(rdata)
+        except Exception as exc:
+            logger.warning("Ignoring invalid trust_anchors entry %r: %s", raw, exc)
+            continue
+    return dnskey_by_zone, ds_by_zone
 
 
 def configure_trust_anchors(
@@ -121,28 +241,138 @@ def configure_trust_anchors(
     store_path: str | None = None,
     hold_down_add_days: int = 2,
     hold_down_remove_days: int = 2,
+    custom_anchors: list | None = None,
 ) -> None:
     """Configure DNSSEC trust-anchor management mode.
 
     Inputs:
-      - mode: 'static' to use the baked-in root KSK only, or 'rfc5011' to enable
-        RFC 5011-style automated trust anchor management.
+      - mode: 'static' to use baked-in/custom root keys, or 'rfc5011' to enable
+        RFC 5011-style automated trust anchor management (requires store_path).
       - store_path: Optional filesystem path to the JSON trust anchor store.
-      - hold_down_add_days: Number of days a new key must be continuously
-        present before promotion from pending_add to trusted.
-      - hold_down_remove_days: Number of days a removed/revoked key must remain
-        absent before being dropped from the trusted set.
+      - hold_down_add_days: Days a new key must remain present before promotion.
+      - hold_down_remove_days: Days a missing key must remain absent before drop.
+      - custom_anchors: Optional operator trust_anchors list (DNSKEY and/or DS).
 
     Outputs:
       - None; updates module-level configuration used by validation helpers.
     """
     global _TRUST_ANCHOR_MODE, _TRUST_ANCHOR_STORE_PATH
     global _TRUST_ANCHOR_HOLD_ADD_DAYS, _TRUST_ANCHOR_HOLD_REMOVE_DAYS
+    global _CUSTOM_DNSKEY_ANCHORS, _CUSTOM_DS_ANCHORS
 
-    _TRUST_ANCHOR_MODE = (mode or "static").lower()
-    _TRUST_ANCHOR_STORE_PATH = store_path
-    _TRUST_ANCHOR_HOLD_ADD_DAYS = int(hold_down_add_days or 2)
-    _TRUST_ANCHOR_HOLD_REMOVE_DAYS = int(hold_down_remove_days or 2)
+    mode_norm = (mode or "static").lower()
+    if mode_norm not in {"static", "rfc5011"}:
+        mode_norm = "static"
+    _TRUST_ANCHOR_MODE = mode_norm
+    _TRUST_ANCHOR_STORE_PATH = store_path if store_path else None
+    _TRUST_ANCHOR_HOLD_ADD_DAYS = max(0, int(hold_down_add_days or 0))
+    _TRUST_ANCHOR_HOLD_REMOVE_DAYS = max(0, int(hold_down_remove_days or 0))
+    dnskeys, ds_map = _parse_custom_trust_anchor_entries(custom_anchors)
+    _CUSTOM_DNSKEY_ANCHORS = dnskeys
+    _CUSTOM_DS_ANCHORS = ds_map
+    if _TRUST_ANCHOR_MODE == "rfc5011" and not _TRUST_ANCHOR_STORE_PATH:
+        logger.warning(
+            "dnssec.trust_anchor_mode=rfc5011 without trust_anchor_store_path; "
+            "falling back to static anchors (no automated key management)"
+        )
+    _clear_trust_anchor_caches()
+
+
+def configure_trust_anchors_from_dnssec_cfg(
+    dnssec_cfg: dict[str, Any] | None,
+    *,
+    enforce_data_root: bool = True,
+) -> None:
+    """Brief: Apply server.dnssec trust-anchor knobs from a config mapping.
+
+    Inputs:
+      - dnssec_cfg: server.dnssec mapping (or None).
+      - enforce_data_root: When True, resolve store_path under server.data_root.
+
+    Outputs:
+      - None. Raises ValueError when store_path escapes data_root.
+
+    Example:
+      >>> configure_trust_anchors_from_dnssec_cfg({
+      ...     "trust_anchor_mode": "rfc5011",
+      ...     "trust_anchor_store_path": "/var/lib/foghorn/ta.json",
+      ... })
+    """
+
+    cfg = dnssec_cfg if isinstance(dnssec_cfg, dict) else {}
+    ta_mode = str(
+        cfg.get("trust_anchor_mode") or cfg.get("trust_anchors_mode") or "static"
+    ).lower()
+    raw_store = (
+        cfg.get("trust_anchor_store_path")
+        or cfg.get("store_path")
+        or cfg.get("trust_anchors_path")
+    )
+    store_path = None
+    if raw_store is not None and str(raw_store).strip():
+        if enforce_data_root:
+            from foghorn.utils.safe_paths import enforce_data_root_path
+
+            store_path = enforce_data_root_path(
+                raw_store, kind="DNSSEC trust_anchor_store_path"
+            )
+        else:
+            store_path = str(raw_store).strip()
+    try:
+        hold_add = int(cfg.get("hold_down_add_days", 2) or 2)
+    except Exception:
+        hold_add = 2
+    try:
+        hold_remove = int(cfg.get("hold_down_remove_days", 2) or 2)
+    except Exception:
+        hold_remove = 2
+    custom = cfg.get("trust_anchors")
+    if custom is None:
+        custom = cfg.get("anchors")
+    configure_trust_anchors(
+        mode=ta_mode,
+        store_path=store_path,
+        hold_down_add_days=hold_add,
+        hold_down_remove_days=hold_remove,
+        custom_anchors=custom if isinstance(custom, list) else None,
+    )
+
+
+def apply_dnssec_validation_runtime(
+    *,
+    dnssec_cfg: dict[str, Any] | None,
+    dnssec_mode: str,
+    dnssec_validation: str,
+    resolver_mode: str,
+    upstream_hosts: list[str] | None = None,
+    enforce_data_root: bool = True,
+) -> None:
+    """Brief: Apply trust-anchor + validation-resolver settings together.
+
+    Inputs:
+      - dnssec_cfg: server.dnssec mapping.
+      - dnssec_mode / dnssec_validation / resolver_mode: Effective runtime knobs.
+      - upstream_hosts: Forward-mode upstream IP/host strings for local validation.
+      - enforce_data_root: Path containment for the trust-anchor store.
+
+    Outputs:
+      - None. Raises ValueError on bad store paths.
+    """
+
+    configure_trust_anchors_from_dnssec_cfg(
+        dnssec_cfg, enforce_data_root=enforce_data_root
+    )
+    mode = str(dnssec_mode or "ignore").lower()
+    validation = str(dnssec_validation or "upstream_ad").lower()
+    if mode == "validate" and validation in {"local", "local_extended"}:
+        if str(resolver_mode or "").lower() == "forward":
+            hosts = [str(h) for h in (upstream_hosts or []) if str(h).strip()]
+            configure_dnssec_resolver(hosts or None)
+        else:
+            # Empty list => RecursiveResolver-backed validation lookups.
+            configure_dnssec_resolver([])
+    else:
+        configure_dnssec_resolver(None)
 
 
 # Root trust anchor (KSK-2017) as DNSKEY public key (RFC 7958) in presentation form.
@@ -287,59 +517,221 @@ def _fetch(r: dns.resolver.Resolver, name: dns.name.Name, rdtype: str):
     return r.resolve(name, rdtype, raise_on_no_answer=True)
 
 
-@registered_ttl_cache(maxsize=16, ttl=86400)
+@registered_ttl_cache(maxsize=17, ttl=86400)
+def _baked_in_root_dnskey_rrset() -> dns.rrset.RRset:
+    """Brief: Parse the constant IANA root KSK into a DNSKEY RRset.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - dns.rrset.RRset for '.' containing ROOT_DNSKEY_STR.
+    """
+
+    name = dns.name.from_text(".")
+    txt = ROOT_DNSKEY_STR.replace("\n", " ")
+    rrset = dns.rrset.from_text_list(
+        name,
+        0,
+        dns.rdataclass.IN,
+        dns.rdatatype.DNSKEY,
+        [txt.split(" DNSKEY ")[1]],
+    )
+    rrset.name = name
+    return rrset
+
+
+def _merge_dnskey_rrset(
+    base: dns.rrset.RRset | None, extra: list | None
+) -> dns.rrset.RRset | None:
+    """Brief: Merge extra DNSKEY rdatas into a copy of base.
+
+    Inputs:
+      - base: Existing DNSKEY RRset (or None).
+      - extra: Iterable of DNSKEY rdatas to add.
+
+    Outputs:
+      - Combined RRset, or None when empty.
+    """
+
+    if not extra and base is None:
+        return None
+    name = dns.name.from_text(".") if base is None else base.name
+    out = dns.rrset.RRset(name, dns.rdataclass.IN, dns.rdatatype.DNSKEY)
+    seen: set[tuple[object, ...]] = set()
+    for src in (list(base or []), list(extra or [])):
+        for rd in src:
+            ident = _dnskey_material_key(rd)
+            if ident is not None and ident in seen:
+                continue
+            if ident is not None:
+                seen.add(ident)
+            try:
+                out.add(rd)
+            except Exception:
+                continue
+    return out if len(out) else None
+
+
+def _dnskey_rrset_for_zone(zone: str) -> dns.rrset.RRset | None:
+    """Brief: Build a DNSKEY trust-anchor RRset for a zone.
+
+    Inputs:
+      - zone: Zone name text (normalized or not).
+
+    Outputs:
+      - DNSKEY RRset of trusted anchors for the zone, or None.
+    """
+
+    zone_text = _normalize_zone_text(zone)
+    custom = list(_CUSTOM_DNSKEY_ANCHORS.get(zone_text) or [])
+    if zone_text != ".":
+        if not custom:
+            return None
+        name = dns.name.from_text(zone_text)
+        rrset = dns.rrset.RRset(name, dns.rdataclass.IN, dns.rdatatype.DNSKEY)
+        for rd in custom:
+            try:
+                rrset.add(rd)
+            except Exception:
+                continue
+        return rrset if len(rrset) else None
+
+    # Root: store / baked-in plus any custom root DNSKEY anchors.
+    from . import trust_anchors as _ta  # local import to avoid cycles
+
+    base: dns.rrset.RRset | None = None
+    use_store = _TRUST_ANCHOR_MODE == "rfc5011" and bool(_TRUST_ANCHOR_STORE_PATH)
+    if use_store:
+        store = _ta.load_store(_TRUST_ANCHOR_STORE_PATH or "")
+        anchors = _ta.anchors_for_zone(store, ".")
+        if not anchors:
+            base = _baked_in_root_dnskey_rrset()
+            store = _ta.bootstrap_from_rrset(store, ".", base)
+            with _TRUST_ANCHOR_STORE_LOCK:
+                _ta.save_store(_TRUST_ANCHOR_STORE_PATH or "", store)
+        else:
+            name = dns.name.from_text(".")
+            base = dns.rrset.RRset(name, dns.rdataclass.IN, dns.rdatatype.DNSKEY)
+            for rdata in anchors:
+                try:
+                    base.add(rdata)
+                except Exception:
+                    continue
+    else:
+        base = _baked_in_root_dnskey_rrset()
+    return _merge_dnskey_rrset(base, custom)
+
+
+@registered_ttl_cache(maxsize=16, ttl=300)
 def _root_dnskey_rrset() -> dns.rrset.RRset | None:
     """Return the current root trust anchor DNSKEY RRset.
 
-    In 'static' mode this is derived from the baked-in constant. In 'rfc5011'
-    mode the baked-in key is used to seed the on-disk trust anchor store if
-    needed, and the store contents are then returned.
+    Static mode uses the baked-in KSK plus any custom root DNSKEY anchors.
+    RFC 5011 mode loads trusted keys from the on-disk store (bootstrapping from
+    the baked-in key when empty), then merges custom root anchors.
     """
-    from . import trust_anchors as _ta  # local import to avoid cycles
-
     try:
-        if _TRUST_ANCHOR_MODE != "rfc5011" or not _TRUST_ANCHOR_STORE_PATH:
-            # Static behavior: parse the constant line into an rrset.
-            name = dns.name.from_text(".")
-            txt = ROOT_DNSKEY_STR.replace("\n", " ")
-            rrset = dns.rrset.from_text_list(
-                name,
-                0,
-                dns.rdataclass.IN,
-                dns.rdatatype.DNSKEY,
-                [txt.split(" DNSKEY ")[1]],
-            )
-            rrset.name = name
-            return rrset
-
-        # RFC 5011 mode: load/store-backed anchors.
-        store = _ta.load_store(_TRUST_ANCHOR_STORE_PATH)
-        anchors = _ta.anchors_for_zone(store, ".")
-        if not anchors:
-            # Bootstrap the store from the baked-in root key.
-            name = dns.name.from_text(".")
-            txt = ROOT_DNSKEY_STR.replace("\n", " ")
-            rrset = dns.rrset.from_text_list(
-                name,
-                0,
-                dns.rdataclass.IN,
-                dns.rdatatype.DNSKEY,
-                [txt.split(" DNSKEY ")[1]],
-            )
-            rrset.name = name
-            store = _ta.bootstrap_from_rrset(store, ".", rrset)
-            _ta.save_store(_TRUST_ANCHOR_STORE_PATH, store)
-            return rrset
-
-        # Build an rrset from trusted anchors in the store.
-        name = dns.name.from_text(".")
-        rrset = dns.rrset.RRset(name, dns.rdataclass.IN, dns.rdatatype.DNSKEY)
-        for rdata in anchors:
-            rrset.add(rdata)
-        return rrset
+        return _dnskey_rrset_for_zone(".")
     except Exception as e:  # pragma: no cover - defensive around store handling
         logger.warning("Failed to construct root trust anchor: %s", e)
         return None
+
+
+def _maybe_rfc5011_update_from_live_dnskey(
+    zone: str, live_dnskey: dns.rrset.RRset
+) -> None:
+    """Brief: Feed an authenticated live DNSKEY set into the RFC 5011 store.
+
+    Inputs:
+      - zone: Zone name text (typically '.').
+      - live_dnskey: DNSKEY RRset already authenticated by current anchors.
+
+    Outputs:
+      - None. Persists store and clears TA caches when the store changes.
+
+    Notes:
+      - No-op unless trust_anchor_mode=rfc5011 and store_path is configured.
+      - Only call after RRSIG(DNSKEY) validation against current trust anchors.
+    """
+
+    if _TRUST_ANCHOR_MODE != "rfc5011" or not _TRUST_ANCHOR_STORE_PATH:
+        return
+    from . import trust_anchors as _ta
+
+    zone_text = _normalize_zone_text(zone)
+    changed = False
+    try:
+        with _TRUST_ANCHOR_STORE_LOCK:
+            store = _ta.load_store(_TRUST_ANCHOR_STORE_PATH)
+            changed = bool(
+                _ta.update_from_dnskey_rrset(
+                    store,
+                    zone_text,
+                    live_dnskey,
+                    hold_down_add_days=_TRUST_ANCHOR_HOLD_ADD_DAYS,
+                    hold_down_remove_days=_TRUST_ANCHOR_HOLD_REMOVE_DAYS,
+                )
+            )
+            if changed:
+                _ta.save_store(_TRUST_ANCHOR_STORE_PATH, store)
+                logger.info(
+                    "RFC 5011 trust-anchor store updated for zone %s at %s",
+                    zone_text,
+                    _TRUST_ANCHOR_STORE_PATH,
+                )
+        if changed:
+            _clear_trust_anchor_caches()
+    except Exception as exc:
+        logger.warning("RFC 5011 trust-anchor update failed for %s: %s", zone_text, exc)
+
+
+def _closest_custom_dnskey_anchor_zone(apex: dns.name.Name) -> dns.name.Name | None:
+    """Brief: Deepest ancestor of apex (incl. apex) with custom DNSKEY anchors.
+
+    Inputs:
+      - apex: Zone apex being validated.
+
+    Outputs:
+      - dns.name.Name of the closest custom-TA zone, or None (use root path).
+    """
+
+    cur = apex
+    while True:
+        text = cur.to_text()
+        if _CUSTOM_DNSKEY_ANCHORS.get(text):
+            return cur
+        if cur == dns.name.root:
+            return None
+        cur = cur.parent()
+
+
+def _ds_matches_dnskey(
+    child: dns.name.Name, ds_rrset: dns.rrset.RRset, child_dnskey: dns.rrset.RRset
+) -> bool:
+    """Brief: True when any DS in ds_rrset matches a child DNSKEY.
+
+    Inputs:
+      - child: Child zone name.
+      - ds_rrset: DS RRset (parent or custom).
+      - child_dnskey: Child DNSKEY RRset.
+
+    Outputs:
+      - bool.
+    """
+
+    for dnskey in child_dnskey:
+        try:
+            for algorithm in (dns.dnssec.DSDigest.SHA256, dns.dnssec.DSDigest.SHA1):
+                computed = dns.dnssec.make_ds(child, dnskey, algorithm)
+                if any(
+                    x.digest == computed.digest and x.key_tag == computed.key_tag
+                    for x in ds_rrset
+                ):
+                    return True
+        except Exception:
+            continue
+    return False
 
 
 def _find_zone_apex(
@@ -592,7 +984,7 @@ def _validate_chain(
     dns.rrset.RRset | None
 ):  # pragma: no cover - networked DNSSEC chain validation exercised via higher-level tests
     """
-    Validates the DNSKEY rrset at apex back to the root trust anchor.
+    Validates the DNSKEY rrset at apex back to a trust anchor.
 
     Inputs:
       - r: Resolver (with DO)
@@ -601,95 +993,162 @@ def _validate_chain(
       - dnskey_rrset if validated, else None
 
     Brief:
-      Root: require live root DNSKEY to contain the trust anchor, then verify
-      RRSIG(DNSKEY@root) against the anchor keys only.
-      For each child: verify RRSIG(DS) with parent DNSKEY, DS matches child
-      DNSKEY, and child DNSKEY self-signature is valid.
+      Starts at root (or a closer custom DNSKEY trust anchor). Root: require
+      live DNSKEY to contain the trust anchor, verify RRSIG(DNSKEY) against
+      anchor keys only, then optionally feed the live set into RFC 5011.
+      For each child: verify RRSIG(DS) with parent DNSKEY (or accept a custom
+      DS trust anchor), DS matches child DNSKEY, and child DNSKEY self-sig.
     """
     try:
-        root_keys = _root_dnskey_rrset()
-        if root_keys is None:
-            logger.debug("_validate_chain: no root_keys available")
-            return None
-        # Initialize parent at the root using the baked-in trust anchor and the
-        # live DNSKEY RRset from the resolver.
-        parent = dns.name.root
-        try:
-            parent_dnskey, parent_dnskey_sig = _fetch_dnskey_and_rrsig(r, parent)
-        except Exception as e:
-            logger.debug("_validate_chain: root DNSKEY/RRSIG fetch failed: %s", e)
-            return None
-        logger.debug(
-            "_validate_chain: starting at parent=%s with %d DNSKEY records",
-            parent,
-            len(parent_dnskey or []),
-        )
-        # Fail closed: live root DNSKEY must contain our trust anchor material.
-        if not _rrset_contains_any_dnskey(parent_dnskey, root_keys):
-            logger.warning(
-                "_validate_chain: live root DNSKEY does not contain trust anchor"
+        # Prefer the deepest operator DNSKEY trust anchor on the apex path
+        # (island of trust); otherwise start from the root anchors.
+        custom_start = _closest_custom_dnskey_anchor_zone(apex)
+        if custom_start is not None and custom_start != dns.name.root:
+            parent = custom_start
+            anchor_keys = _dnskey_rrset_for_zone(parent.to_text())
+            if anchor_keys is None:
+                logger.debug(
+                    "_validate_chain: missing custom DNSKEY anchors for %s", parent
+                )
+                return None
+            try:
+                parent_dnskey, parent_dnskey_sig = _fetch_dnskey_and_rrsig(r, parent)
+            except Exception as e:
+                logger.debug(
+                    "_validate_chain: custom-TA DNSKEY/RRSIG fetch failed for %s: %s",
+                    parent,
+                    e,
+                )
+                return None
+            if not _rrset_contains_any_dnskey(parent_dnskey, anchor_keys):
+                logger.warning(
+                    "_validate_chain: live DNSKEY at %s does not contain custom trust anchor",
+                    parent,
+                )
+                return None
+            if parent_dnskey_sig is None:
+                logger.debug(
+                    "_validate_chain: missing RRSIG(DNSKEY) at custom TA %s", parent
+                )
+                return None
+            try:
+                dns.dnssec.validate(
+                    parent_dnskey, parent_dnskey_sig, {parent: anchor_keys}
+                )
+            except Exception as e:
+                logger.warning(
+                    "_validate_chain: custom-TA DNSKEY RRSIG validation failed for %s: %s",
+                    parent,
+                    e,
+                )
+                return None
+        else:
+            root_keys = _root_dnskey_rrset()
+            if root_keys is None:
+                logger.debug("_validate_chain: no root_keys available")
+                return None
+            parent = dns.name.root
+            try:
+                parent_dnskey, parent_dnskey_sig = _fetch_dnskey_and_rrsig(r, parent)
+            except Exception as e:
+                logger.debug("_validate_chain: root DNSKEY/RRSIG fetch failed: %s", e)
+                return None
+            logger.debug(
+                "_validate_chain: starting at parent=%s with %d DNSKEY records",
+                parent,
+                len(parent_dnskey or []),
             )
-            return None
-        if parent_dnskey_sig is None:
-            logger.debug("_validate_chain: missing RRSIG(DNSKEY) at root")
-            return None
-        try:
-            # Validate using anchor keys only so a forged self-consistent root
-            # set (attacker ZSK + included public KSK) cannot pass.
-            dns.dnssec.validate(
-                parent_dnskey, parent_dnskey_sig, {dns.name.root: root_keys}
-            )
-        except Exception as e:
-            logger.warning(
-                "_validate_chain: root DNSKEY RRSIG validation failed: %s", e
-            )
-            return None
-        # Seed DNSKEY cache with the authenticated root set.
+            # Fail closed: live root DNSKEY must contain our trust anchor material.
+            if not _rrset_contains_any_dnskey(parent_dnskey, root_keys):
+                logger.warning(
+                    "_validate_chain: live root DNSKEY does not contain trust anchor"
+                )
+                return None
+            if parent_dnskey_sig is None:
+                logger.debug("_validate_chain: missing RRSIG(DNSKEY) at root")
+                return None
+            try:
+                # Validate using anchor keys only so a forged self-consistent root
+                # set (attacker ZSK + included public KSK) cannot pass.
+                dns.dnssec.validate(
+                    parent_dnskey, parent_dnskey_sig, {dns.name.root: root_keys}
+                )
+            except Exception as e:
+                logger.warning(
+                    "_validate_chain: root DNSKEY RRSIG validation failed: %s", e
+                )
+                return None
+            # Authenticated live root set may drive RFC 5011 store updates.
+            _maybe_rfc5011_update_from_live_dnskey(".", parent_dnskey)
+
+        # Seed DNSKEY cache with the authenticated trust-start set.
         try:
             now = time.time()
             ttl = getattr(parent_dnskey, "ttl", _MAX_KEY_CACHE_TTL_SECONDS)
             ttl = max(0, min(int(ttl), _MAX_KEY_CACHE_TTL_SECONDS))
-            _DNSKEY_CACHE[dns.name.root.to_text()] = (parent_dnskey, now + ttl)
+            _DNSKEY_CACHE[parent.to_text()] = (parent_dnskey, now + ttl)
             _enforce_cache_entry_limit(_DNSKEY_CACHE, _MAX_KEY_CACHE_ENTRIES)
         except Exception:
             pass
-        # Walk down from parent to apex
-        cur = apex
+
+        # Walk down from parent to apex (skip labels at/above the trust start).
         labels = []
-        while cur != dns.name.root:
+        cur = apex
+        while cur != parent and cur != dns.name.root:
             labels.append(cur)
             cur = cur.parent()
+        if cur != parent and parent != dns.name.root:
+            # apex is not under the chosen custom TA
+            logger.debug(
+                "_validate_chain: apex %s is not under trust start %s", apex, parent
+            )
+            return None
         for child in reversed(labels):
             logger.debug(
                 "_validate_chain: descending to child=%s from parent=%s", child, parent
             )
-            # DS at the child owner must be signed by the already-authenticated
-            # parent DNSKEY set (RRSIG(DS) required).
-            try:
-                ds, ds_sig = _fetch_ds_and_rrsig(r, child)
-            except Exception as e:
-                # No DS for this child — treat the delegation as insecure and
-                # stop strict validation.
-                logger.debug("_validate_chain: DS fetch failed for %s: %s", child, e)
-                return None
-            if ds_sig is None:
-                logger.debug("_validate_chain: missing RRSIG(DS) for %s", child)
-                return None
-            try:
-                dns.dnssec.validate(ds, ds_sig, {parent: parent_dnskey})
-            except Exception as e:
-                logger.warning(
-                    "_validate_chain: RRSIG(DS) validation failed for %s: %s",
-                    child,
-                    e,
-                )
-                return None
+            child_text = child.to_text()
+            custom_ds_list = list(_CUSTOM_DS_ANCHORS.get(child_text) or [])
+            ds = None
+            used_custom_ds = False
+            if custom_ds_list:
+                ds = dns.rrset.RRset(child, dns.rdataclass.IN, dns.rdatatype.DS)
+                for rd in custom_ds_list:
+                    try:
+                        ds.add(rd)
+                    except Exception:
+                        continue
+                used_custom_ds = len(ds) > 0
+            if not used_custom_ds:
+                # DS at the child owner must be signed by the already-authenticated
+                # parent DNSKEY set (RRSIG(DS) required).
+                try:
+                    ds, ds_sig = _fetch_ds_and_rrsig(r, child)
+                except Exception as e:
+                    # No DS for this child — treat the delegation as insecure and
+                    # stop strict validation.
+                    logger.debug(
+                        "_validate_chain: DS fetch failed for %s: %s", child, e
+                    )
+                    return None
+                if ds_sig is None:
+                    logger.debug("_validate_chain: missing RRSIG(DS) for %s", child)
+                    return None
+                try:
+                    dns.dnssec.validate(ds, ds_sig, {parent: parent_dnskey})
+                except Exception as e:
+                    logger.warning(
+                        "_validate_chain: RRSIG(DS) validation failed for %s: %s",
+                        child,
+                        e,
+                    )
+                    return None
             # Cache authenticated DS.
             try:
                 now = time.time()
                 ttl = getattr(ds, "ttl", _MAX_KEY_CACHE_TTL_SECONDS)
                 ttl = max(0, min(int(ttl), _MAX_KEY_CACHE_TTL_SECONDS))
-                _DS_CACHE[child.to_text()] = (ds, now + ttl)
+                _DS_CACHE[child_text] = (ds, now + ttl)
                 _enforce_cache_entry_limit(_DS_CACHE, _MAX_KEY_CACHE_ENTRIES)
             except Exception:
                 pass
@@ -704,27 +1163,7 @@ def _validate_chain(
                     "_validate_chain: DNSKEY/RRSIG fetch failed for %s: %s", child, e
                 )
                 return None
-            # Compare DS against child DNSKEY (at least one matches)
-            match = False
-            for dnskey in child_dnskey:
-                try:
-                    for algorithm in (
-                        dns.dnssec.DSDigest.SHA256,
-                        dns.dnssec.DSDigest.SHA1,
-                    ):
-                        computed = dns.dnssec.make_ds(child, dnskey, algorithm)
-                        if any(
-                            x.digest == computed.digest
-                            and x.key_tag == computed.key_tag
-                            for x in ds
-                        ):
-                            match = True
-                            break
-                    if match:
-                        break
-                except Exception:
-                    continue
-            if not match:
+            if not _ds_matches_dnskey(child, ds, child_dnskey):
                 logger.debug("_validate_chain: no DS/DNSKEY match for %s", child)
                 return None
             # Validate child DNSKEY RRset self-signature (requires RRSIG).

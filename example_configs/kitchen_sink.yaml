@@ -320,6 +320,11 @@ server:
     mode: ignore
     validation: upstream_ad
     udp_payload_size: 1232
+    trust_anchor_mode: static
+    trust_anchor_store_path: null
+    hold_down_add_days: 2
+    hold_down_remove_days: 2
+    trust_anchors: []
   resolver:
     mode: forward
     timeout_ms: 2000

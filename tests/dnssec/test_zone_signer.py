@@ -204,6 +204,56 @@ def test_save_key_tolerates_chmod_failure(tmp_path: Path, monkeypatch) -> None:
     assert zone_signer.load_key(key_dir, "docker.example.", "zsk") is not None
 
 
+def test_write_private_bytes_is_atomic_replace(tmp_path: Path) -> None:
+    """Brief: _write_private_bytes replaces via temp + os.replace at 0o600.
+
+    Inputs:
+      - tmp_path: pytest temporary directory.
+
+    Outputs:
+      - Asserts final path content/mode and that no leftover temp files remain.
+    """
+
+    dest = tmp_path / "secret.key"
+    dest.write_bytes(b"old-material")
+    zone_signer._write_private_bytes(dest, b"new-material")
+
+    assert dest.read_bytes() == b"new-material"
+    assert (dest.stat().st_mode & 0o777) == 0o600
+    leftovers = list(tmp_path.glob(".secret.key.*.tmp"))
+    assert leftovers == []
+
+
+def test_write_private_bytes_failure_leaves_existing_file(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Brief: Failed write does not clobber an existing destination key file.
+
+    Inputs:
+      - tmp_path: pytest temporary directory.
+      - monkeypatch: Forces write to raise after temp open.
+
+    Outputs:
+      - Asserts original destination bytes remain and temp is cleaned up.
+    """
+
+    dest = tmp_path / "secret.key"
+    dest.write_bytes(b"keep-me")
+
+    def _boom_fdopen(fd, mode="r", *args, **kwargs):
+        zone_signer.os.close(fd)
+        raise OSError("simulated write failure")
+
+    monkeypatch.setattr(zone_signer.os, "fdopen", _boom_fdopen)
+
+    with pytest.raises(OSError, match="simulated write failure"):
+        zone_signer._write_private_bytes(dest, b"should-not-land")
+
+    assert dest.read_bytes() == b"keep-me"
+    leftovers = list(tmp_path.glob(".secret.key.*.tmp"))
+    assert leftovers == []
+
+
 def test_load_key_invalid_pem_returns_none(tmp_path: Path) -> None:
     """Brief: load_key returns None on invalid PEM key material.
 

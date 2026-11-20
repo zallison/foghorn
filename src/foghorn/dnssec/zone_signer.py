@@ -35,6 +35,8 @@ import dns.zone
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec, rsa
 
+from foghorn.utils.exception_logging import warn_suppressed_exception
+
 logger = logging.getLogger(__name__)
 
 
@@ -111,7 +113,7 @@ def _best_effort_chmod(path: Path, mode: int) -> None:
 
 
 def _write_private_bytes(path: Path, data: bytes) -> None:
-    """Brief: Write bytes creating the file with owner-only permissions.
+    """Brief: Atomically write bytes with owner-only permissions.
 
     Inputs:
       - path: Destination file path.
@@ -121,20 +123,50 @@ def _write_private_bytes(path: Path, data: bytes) -> None:
       - None. File contents replaced; mode set to 0o600 when the OS allows it.
 
     Notes:
-      - Opens with mode 0o600 so new files are private even if a later chmod
-        fails (e.g. process does not own a bind-mounted key file in Docker).
-      - chmod is best-effort and never raises.
+      - Writes to a same-directory temp file with mode 0o600, then uses
+        os.replace so readers never see a truncated destination after a crash.
+      - chmod on the final path is best-effort and never raises.
     """
 
-    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
-    fd = os.open(str(path), flags, 0o600)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    fd = -1
     try:
+        fd = os.open(str(tmp_path), flags, 0o600)
         with os.fdopen(fd, "wb") as handle:
             fd = -1  # ownership transferred to the file object
             handle.write(data)
-    finally:
-        if fd >= 0:  # pragma: no cover - only if fdopen failed before transfer
-            os.close(fd)
+            handle.flush()
+            try:
+                os.fsync(handle.fileno())
+            except OSError:  # pragma: no cover - some filesystems lack fsync
+                warn_suppressed_exception(
+                    "fsync failed while writing private key temp file %s",
+                    tmp_path,
+                    logger=logger,
+                )
+        os.replace(str(tmp_path), str(path))
+    except Exception:
+        try:
+            if tmp_path.exists():
+                tmp_path.unlink()
+        except OSError:  # pragma: no cover - best-effort temp cleanup
+            warn_suppressed_exception(
+                "failed to remove private key temp file %s after write error",
+                tmp_path,
+                logger=logger,
+            )
+        if fd >= 0:  # pragma: no cover - only if open succeeded before fdopen
+            try:
+                os.close(fd)
+            except OSError:
+                warn_suppressed_exception(
+                    "failed to close private key temp fd for %s after write error",
+                    tmp_path,
+                    logger=logger,
+                )
+        raise
     _best_effort_chmod(path, 0o600)
 
 
