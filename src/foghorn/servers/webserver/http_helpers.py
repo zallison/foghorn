@@ -156,23 +156,98 @@ def ensure_web_auth_token(
     return generated
 
 
+# Fixed Basic username accepted in auth.mode=token when allow_basic_token
+# (password must be the token).
+_TOKEN_MODE_BASIC_USERNAME = "foghorn"
+# 401 challenges for token mode (with/without optional Basic browser prompt).
+_TOKEN_MODE_WWW_AUTHENTICATE_BEARER = "Bearer"
+_TOKEN_MODE_WWW_AUTHENTICATE_BEARER_AND_BASIC = 'Bearer, Basic realm="foghorn"'
+
+_BASIC_MODE_WITH_TOKEN_ERROR = (
+    "server.http.auth.mode=basic must not set auth.token "
+    "(token is only valid with mode=token); remove token or switch mode"
+)
+
+
+def validate_web_auth_config(web_cfg: dict[str, Any] | None) -> None:
+    """Brief: Fail closed on unclear server.http.auth combinations.
+
+    Inputs:
+      - web_cfg: server.http mapping (or None).
+
+    Outputs:
+      - None when auth settings are coherent or absent.
+
+    Raises:
+      - ValueError: when mode=basic is combined with a non-empty token (ambiguous
+        whether Basic password or token auth is intended).
+    """
+
+    if not isinstance(web_cfg, dict):
+        return
+    auth_cfg = web_cfg.get("auth")
+    if not isinstance(auth_cfg, dict):
+        return
+    mode = str(auth_cfg.get("mode", "token") or "token").strip().lower()
+    token = str(auth_cfg.get("token") or "").strip()
+    if mode == "basic" and token:
+        raise ValueError(_BASIC_MODE_WITH_TOKEN_ERROR)
+
+
+def _auth_allow_basic_token(auth_cfg: dict[str, Any] | None) -> bool:
+    """Brief: Whether token mode may accept Basic foghorn:<token>.
+
+    Inputs:
+      - auth_cfg: server.http.auth mapping (or None).
+
+    Outputs:
+      - True when allow_basic_token is enabled (default true when unset).
+    """
+
+    if not isinstance(auth_cfg, dict):
+        return True
+    if "allow_basic_token" not in auth_cfg:
+        return True
+    return bool(auth_cfg.get("allow_basic_token"))
+
+
 def _extract_provided_auth_token(
     authorization_header: str | None,
     api_key_header: str | None,
+    *,
+    allow_basic_token: bool = True,
 ) -> str:
-    """Brief: Extract a provided auth token from bearer or API key headers.
+    """Brief: Extract a provided auth token from bearer, Basic, or API key headers.
 
     Inputs:
       - authorization_header: Raw Authorization header value.
       - api_key_header: Raw X-API-Key header value.
+      - allow_basic_token: When true, accept Basic foghorn:<token>.
 
     Outputs:
       - Token string when present; empty string when absent.
+
+    Notes:
+      - Bearer and X-API-Key supply the token directly.
+      - When allow_basic_token is true, Basic is accepted only as
+        ``foghorn:<token>`` (username must be exactly ``foghorn``); the password
+        is treated as the token for browser prompts.
     """
 
     auth_value = str(authorization_header or "")
     if auth_value.lower().startswith("bearer "):
         return auth_value[7:].strip()
+
+    if allow_basic_token:
+        basic = _decode_basic_credentials(authorization_header)
+        if basic is not None:
+            username, password = basic
+            if hmac.compare_digest(
+                username.encode("utf-8"),
+                _TOKEN_MODE_BASIC_USERNAME.encode("utf-8"),
+            ):
+                return str(password)
+
     if api_key_header is None:
         return ""
     return str(api_key_header).strip()
@@ -241,7 +316,9 @@ def _evaluate_web_auth(
 
     Behaviour:
       - ``mode=none`` allows all requests.
-      - ``mode=token`` (default) enforces a static bearer/API key token.
+      - ``mode=token`` (default) enforces a static token via Bearer or X-API-Key;
+        when ``allow_basic_token`` is true (default), also accepts Basic
+        ``foghorn:<token>`` and advertises Basic on 401.
       - ``mode=basic`` enforces HTTP Basic credentials
         (``Authorization: Basic base64(user:pass)``).
       - Unknown auth modes fail closed.
@@ -285,13 +362,25 @@ def _evaluate_web_auth(
     if not token:
         return False, 500, "webserver.auth.token not configured", None
 
+    allow_basic_token = _auth_allow_basic_token(auth_cfg)
     provided = _extract_provided_auth_token(
         authorization_header=authorization_header,
         api_key_header=api_key_header,
+        allow_basic_token=allow_basic_token,
     )
     token_text = str(token)
     if not provided or not hmac.compare_digest(provided, token_text):
-        return False, 401, "unauthorized", {"WWW-Authenticate": "Bearer"}
+        www_authenticate = (
+            _TOKEN_MODE_WWW_AUTHENTICATE_BEARER_AND_BASIC
+            if allow_basic_token
+            else _TOKEN_MODE_WWW_AUTHENTICATE_BEARER
+        )
+        return (
+            False,
+            401,
+            "unauthorized",
+            {"WWW-Authenticate": www_authenticate},
+        )
 
     return True, None, None, None
 
@@ -307,7 +396,8 @@ def _build_auth_dependency(web_cfg: dict[str, Any], *, default_mode: str = "toke
       - Dependency callable usable with FastAPI Depends().
 
     Modes:
-      - token (default): require Authorization: Bearer <token> or X-API-Key header.
+      - token (default): require Authorization: Bearer <token> or X-API-Key;
+        with allow_basic_token (default true) also Basic foghorn:<token>.
       - none: no authentication.
       - basic: require HTTP Basic credentials (Authorization: Basic base64(user:pass))
         matching server.http.auth.username/password.
