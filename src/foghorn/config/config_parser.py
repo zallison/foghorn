@@ -352,6 +352,31 @@ def _validate_tls_ca_files(cfg: dict[str, Any]) -> None:
             )
 
 
+def _validate_http_auth_config(cfg: dict[str, Any]) -> None:
+    """Brief: Fail closed on unclear server.http.auth combinations.
+
+    Inputs:
+      - cfg: Parsed configuration mapping.
+
+    Outputs:
+      - None when auth is absent or coherent.
+
+    Raises:
+      - ValueError: when mode=basic is set together with a non-empty token.
+    """
+
+    server_cfg = cfg.get("server") if isinstance(cfg, dict) else None
+    if not isinstance(server_cfg, dict):
+        return
+    web_cfg = server_cfg.get("http")
+    if not isinstance(web_cfg, dict):
+        return
+    # Local import avoids a hard dependency cycle with servers.webserver at module load.
+    from foghorn.servers.webserver.http_helpers import validate_web_auth_config
+
+    validate_web_auth_config(web_cfg)
+
+
 def _format_yaml_load_error(config_path: str, exc: yaml.YAMLError) -> str:
     """Brief: Build a concise operator-facing message for YAML load failures.
 
@@ -457,6 +482,7 @@ def parse_config_file(
         skip_schema_validation=bool(skip_schema_validation),
     )
     _validate_tls_ca_files(cfg)
+    _validate_http_auth_config(cfg)
 
     return cfg
 
