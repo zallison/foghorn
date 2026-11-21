@@ -9,11 +9,11 @@ Outputs:
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any, Literal, Self
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
-from foghorn.config.models.common import OpenModel, PortInt, StrictModel
+from foghorn.config.models.common import PortInt, StrictModel
 
 OverloadResponse = Literal["servfail", "refused", "drop"]
 TrustedListener = Literal["udp", "tcp", "dot", "doh", "secure", "insecure"]
@@ -102,7 +102,7 @@ class UdpCidrInflightLimit(StrictModel):
     )
 
 
-class ListenerConnLimits(OpenModel):
+class ListenerConnLimits(StrictModel):
     """Brief: Shared connection-limit knobs for TCP/DoT-style listeners.
 
     Inputs:
@@ -122,7 +122,7 @@ class ListenerConnLimits(OpenModel):
     )
 
 
-class ListenerUdp(OpenModel):
+class ListenerUdp(StrictModel):
     """Brief: UDP listener configuration under server.listen.udp.
 
     Inputs:
@@ -179,7 +179,7 @@ class ListenerDot(ListenerConnLimits):
     tls_days: int = Field(default=3650, ge=1)
 
 
-class ListenerDoh(OpenModel):
+class ListenerDoh(StrictModel):
     """Brief: DNS-over-HTTPS listener configuration under server.listen.doh."""
 
     enabled: bool | None = None
@@ -216,11 +216,45 @@ class ServerListenConfig(StrictModel):
     doh: ListenerDoh | None = None
 
 
-class ServerResolverConfig(OpenModel):
+class ResolverSearchConfig(StrictModel):
+    """Brief: server.resolver.search domain qualification settings.
+
+    Inputs:
+      - domain: Search/qualification suffix (e.g. lan domain).
+      - qualify_single_label: Append domain to single-label queries.
+      - qualify_non_proper_tld: Bool or list of non-proper TLD suffixes to qualify.
+      - non_proper_tld_mode: Match mode for list entries (suffix|exact).
+
+    Outputs:
+      - ResolverSearchConfig nested under server.resolver.search.
+    """
+
+    domain: str = Field(
+        default="", description="Search domain suffix without trailing dot."
+    )
+    qualify_single_label: bool = Field(
+        default=True,
+        description="When true, append search domain to single-label queries.",
+    )
+    qualify_non_proper_tld: bool | list[str] = Field(
+        default=False,
+        description=(
+            "When true, qualify names under non-proper TLDs; when a list, "
+            "only those suffixes/names are qualified."
+        ),
+    )
+    non_proper_tld_mode: Literal["suffix", "exact"] = Field(
+        default="suffix",
+        description="How list entries in qualify_non_proper_tld are matched.",
+    )
+
+
+class ServerResolverConfig(StrictModel):
     """Brief: server.resolver configuration.
 
     Inputs:
       - mode / timeouts / recursion controls.
+      - search: Optional search-domain qualification block.
 
     Outputs:
       - ServerResolverConfig model.
@@ -241,42 +275,155 @@ class ServerResolverConfig(OpenModel):
     destination_allowlist: list[str] = Field(default_factory=list)
     per_try_timeout_ms: int = Field(default=2000, ge=0)
     use_asyncio: bool = Field(default=True)
+    search: ResolverSearchConfig | None = Field(
+        default=None,
+        description="Optional search-domain qualification for short names.",
+    )
 
 
-class ServerLimitsConfig(OpenModel):
+class ServerLimitsConfig(StrictModel):
     """Brief: server.limits hardening knobs."""
 
     resolver_executor_workers: int | None = Field(default=None, ge=1)
     bg_executor_workers: int | None = Field(default=4, ge=1)
     bg_executor_max_pending: int | None = Field(default=None, ge=1)
+    allow_unsafe_threaded_listeners: bool = Field(
+        default=False,
+        description=(
+            "When true, allow threaded UDP/TCP listeners on non-loopback binds "
+            "(DoS-exposed; asyncio is preferred)."
+        ),
+    )
 
 
-class ServerCacheConfig(OpenModel):
+class ServerCacheConfig(StrictModel):
     """Brief: server.cache DNS cache selection and decorated overrides."""
 
     module: str | None = None
-    config: dict[str, Any] | None = None
-    modify: list[DecoratedCacheOverride] | None = None
-    decorated_overrides: list[DecoratedCacheOverride] | None = None
+    config: dict[str, Any] | None = Field(
+        default=None,
+        description="Opaque cache-backend configuration mapping.",
+    )
+    func_caches: list[DecoratedCacheOverride] | None = Field(
+        default=None,
+        description="Decorated helper cache overrides (preferred key).",
+    )
+    modify: list[DecoratedCacheOverride] | None = Field(
+        default=None,
+        description="Deprecated alias for func_caches.",
+    )
+    decorated_overrides: list[DecoratedCacheOverride] | None = Field(
+        default=None,
+        description="Deprecated alias for func_caches.",
+    )
 
 
-class ServerDnssecConfig(OpenModel):
+class TrustAnchorEntry(StrictModel):
+    """Brief: One operator trust anchor under server.dnssec.trust_anchors.
+
+    Inputs:
+      - zone: Zone apex (default '.').
+      - type: Optional 'dnskey' | 'ds' (inferred from fields when omitted).
+      - DNSKEY form: algorithm + public_key (flags/protocol optional).
+      - DS form: key_tag + algorithm + digest_type + digest.
+
+    Outputs:
+      - TrustAnchorEntry model used by schema generation.
+    """
+
+    zone: str = Field(default=".", description="Zone apex for this trust anchor.")
+    type: Literal["dnskey", "ds", "key"] | None = Field(
+        default=None,
+        description="Anchor kind; inferred from public_key vs digest when omitted.",
+    )
+    # DNSKEY fields
+    flags: int | None = Field(
+        default=257, description="DNSKEY flags (default 257 KSK)."
+    )
+    protocol: int | None = Field(default=3, description="DNSKEY protocol (always 3).")
+    algorithm: int | None = Field(
+        default=None, description="DNSKEY/DS algorithm number."
+    )
+    public_key: str | None = Field(
+        default=None, description="Base64 DNSKEY public key material."
+    )
+    public_key_b64: str | None = Field(
+        default=None, description="Alias for public_key."
+    )
+    # DS fields
+    key_tag: int | None = Field(default=None, description="DS key tag.")
+    digest_type: int | None = Field(
+        default=None, description="DS digest type (2=SHA-256)."
+    )
+    digest_alg: int | None = Field(default=None, description="Alias for digest_type.")
+    digest: str | None = Field(default=None, description="DS digest hex string.")
+
+
+class ServerDnssecConfig(StrictModel):
     """Brief: server.dnssec configuration.
 
     Inputs:
-      - Open mapping for DNSSEC knobs (validation/signing/payload size, etc.).
-      - Common keys include mode, validation, udp_payload_size, and for RFC 5011
-        trust-anchor management: trust_anchor_mode, trust_anchor_store_path.
+      - mode / validation / udp_payload_size for EDNS and validation strategy.
+      - trust_anchor_mode / trust_anchor_store_path / hold-downs for RFC 5011.
+      - trust_anchors: optional static DNSKEY/DS anchors (root or islands).
 
     Outputs:
-      - Permissive dnssec object; detailed constraints live in runtime code.
+      - Permissive dnssec object; runtime applies knobs via dnssec_validate.
     """
 
+    mode: Literal["ignore", "passthrough", "validate"] | None = Field(
+        default="ignore",
+        description="DNSSEC mode: ignore | passthrough | validate.",
+    )
+    validation: Literal["upstream_ad", "local", "local_extended"] | None = Field(
+        default="upstream_ad",
+        description=(
+            "When mode=validate: upstream_ad trusts upstream AD bit; "
+            "local/local_extended perform local chain validation."
+        ),
+    )
+    udp_payload_size: int | None = Field(
+        default=1232,
+        ge=512,
+        le=65535,
+        description="Default EDNS UDP payload size.",
+    )
+    trust_anchor_mode: Literal["static", "rfc5011"] | None = Field(
+        default="static",
+        description=(
+            "static uses baked-in root KSK (+ trust_anchors); rfc5011 enables "
+            "automated root trust-anchor management (requires store path)."
+        ),
+    )
     trust_anchor_store_path: str | None = Field(
         default=None,
         description=(
             "Filesystem path for the RFC 5011 trust-anchor JSON store. When "
             "server.data_root is set, must resolve under that directory."
+        ),
+    )
+    hold_down_add_days: int | None = Field(
+        default=2,
+        ge=0,
+        description=(
+            "RFC 5011: days a new KSK must remain present before promotion "
+            "from pending_add to trusted."
+        ),
+    )
+    hold_down_remove_days: int | None = Field(
+        default=2,
+        ge=0,
+        description=(
+            "RFC 5011: days a missing/revoked KSK must remain absent before "
+            "removal from the trusted set."
+        ),
+    )
+    trust_anchors: list[TrustAnchorEntry] | None = Field(
+        default=None,
+        description=(
+            "Optional static DNSKEY and/or DS trust anchors. DNSKEY entries "
+            "for '.' supplement the root anchors; non-root DNSKEY/DS entries "
+            "create islands of trust for local validation."
         ),
     )
 
@@ -286,7 +433,10 @@ class HttpAuthConfig(StrictModel):
 
     Inputs:
       - mode: Auth mode (default "token"): none | token | basic.
-      - token: Static bearer/API key token for mode=token.
+      - token: Static token for mode=token (Bearer, X-API-Key, and optionally
+        Basic foghorn:<token>). Must not be set when mode=basic.
+      - allow_basic_token: When mode=token, accept Basic foghorn:<token> and
+        advertise Basic on 401 (default true).
       - username: HTTP Basic auth user name for mode=basic.
       - password: HTTP Basic auth password for mode=basic.
 
@@ -296,14 +446,94 @@ class HttpAuthConfig(StrictModel):
 
     mode: Literal["none", "token", "basic"] = Field(default="token")
     token: str | None = None
+    allow_basic_token: bool = Field(
+        default=True,
+        description=(
+            "When mode=token, accept Authorization: Basic foghorn:<token> "
+            "(password is the token) and include Basic in WWW-Authenticate. "
+            "Set false to require Bearer or X-API-Key only."
+        ),
+    )
     username: str | None = None
     password: str | None = None
 
+    @model_validator(mode="after")
+    def _reject_basic_mode_with_token(self) -> Self:
+        """Brief: Reject mode=basic combined with a non-empty token.
 
-class ServerHttpConfig(OpenModel):
+        Inputs:
+          - self: Validated HttpAuthConfig fields.
+
+        Outputs:
+          - Self when the combination is allowed.
+
+        Raises:
+          - ValueError: when mode is basic and token is non-empty (ambiguous).
+        """
+
+        mode = str(self.mode or "token").strip().lower()
+        token = str(self.token or "").strip()
+        if mode == "basic" and token:
+            raise ValueError(
+                "server.http.auth.mode=basic must not set auth.token "
+                "(token is only valid with mode=token); remove token or switch mode"
+            )
+        return self
+
+
+class HttpLogsConfig(StrictModel):
+    """Brief: server.http.logs ring-buffer settings."""
+
+    buffer_size: int = Field(default=500, ge=1)
+
+
+class HttpCorsConfig(StrictModel):
+    """Brief: server.http.cors settings."""
+
+    enabled: bool = Field(default=False)
+    allowlist: list[str] = Field(default_factory=list)
+    allow_credentials: bool = Field(default=False)
+
+
+class HttpApiRequestAuditConfig(StrictModel):
+    """Brief: server.http.api_request_audit settings."""
+
+    enabled: bool = Field(default=True)
+    db_path: str | None = None
+    retention_max_records: int | None = Field(default=None, ge=0)
+    retention_max_age_seconds: float | None = Field(default=None, ge=0)
+    retention_max_db_bytes: int | None = Field(
+        default=None,
+        ge=0,
+        description="Optional SQLite file size cap for audit log pruning (bytes).",
+    )
+    retention_prune_every_n_inserts: int | None = Field(
+        default=None,
+        ge=1,
+        description="Run retention prune after this many inserts (default 100 at runtime).",
+    )
+
+
+class HttpAdminRateLimitConfig(StrictModel):
+    """Brief: server.http.admin_rate_limit settings."""
+
+    enabled: bool = Field(default=True)
+    backend: Literal["plugin", "memory"] = Field(default="plugin")
+    requests_per_window: int = Field(default=60, ge=1)
+    window_seconds: int = Field(default=60, ge=1)
+    burst: int = Field(default=0, ge=0)
+    key_mode: Literal["client", "client_action"] = Field(default="client_action")
+    excluded_actions: list[str] = Field(default_factory=list)
+
+
+class ServerHttpConfig(StrictModel):
     """Brief: Admin HTTP server configuration under server.http."""
 
-    host: str = Field(default="127.0.0.1")
+    enabled: bool | None = Field(
+        default=None,
+        description="When unset, presence of the http block enables the admin server.",
+    )
+    host: str = Field(default="*********")
     port: PortInt = Field(default=5380)
     allow_threaded_fallback: bool = Field(default=True)
     cert_file: str | None = None
@@ -321,7 +551,30 @@ class ServerHttpConfig(OpenModel):
     enable_admin: bool = Field(default=False)
     enable_schema: bool = Field(default=False)
     enable_docs: bool = Field(default=False)
+    www_root: str | None = Field(
+        default=None,
+        description="Static admin UI root directory override.",
+    )
+    index: bool = Field(default=True, description="Serve / and /index.html when true.")
+    logs: HttpLogsConfig | None = None
+    system_info_ttl_seconds: float | None = Field(default=None, ge=0)
+    stats_snapshot_ttl_seconds: float | None = Field(default=None, ge=0)
+    config_cache_ttl_seconds: float | None = Field(default=None, ge=0)
+    system_metrics_detail: Literal["basic", "full"] | None = Field(default=None)
+    debug_timings: bool = Field(default=False)
+    limit_concurrency: int | None = Field(
+        default=None,
+        ge=1,
+        description="Optional uvicorn concurrency cap override for admin HTTP.",
+    )
+    cors: HttpCorsConfig | None = None
     auth: HttpAuthConfig | None = None
+    redact_keys: list[str] | None = Field(
+        default=None,
+        description="Extra secret key names redacted in /config responses.",
+    )
+    api_request_audit: HttpApiRequestAuditConfig | None = None
+    admin_rate_limit: HttpAdminRateLimitConfig | None = None
 
 
 class AxfrTsigKey(StrictModel):
@@ -332,13 +585,12 @@ class AxfrTsigKey(StrictModel):
     secret: str
 
 
-class AxfrTsigKeySource(OpenModel):
+class AxfrTsigKeySource(StrictModel):
     """Brief: External TSIG key source entry under server.axfr.tsig.key_sources.
 
     Inputs:
       - type: Source type (required), e.g. file.
       - path: Optional filesystem path for file sources.
-      - Additional source-specific keys allowed.
 
     Outputs:
       - AxfrTsigKeySource model.
@@ -357,7 +609,7 @@ class AxfrTsigConfig(StrictModel):
     key_sources: list[AxfrTsigKeySource] = Field(default_factory=list)
 
 
-class ServerAxfrConfig(OpenModel):
+class ServerAxfrConfig(StrictModel):
     """Brief: server.axfr zone-transfer controls."""
 
     enabled: bool = Field(default=False)
@@ -394,7 +646,7 @@ class TsigFeatureKey(StrictModel):
     secret: str
 
 
-class TsigFeatureKeySource(OpenModel):
+class TsigFeatureKeySource(StrictModel):
     """Brief: External key source under server.features.tsig.key_sources.
 
     Inputs:

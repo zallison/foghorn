@@ -13,10 +13,10 @@ from typing import Any
 
 from pydantic import Field
 
-from foghorn.config.models.common import OpenModel, StrictModel
+from foghorn.config.models.common import StrictModel
 
 
-class PluginHookNode(OpenModel):
+class PluginHookNode(StrictModel):
     """Brief: Mapping form of a single plugin hook priority.
 
     Inputs:
@@ -29,7 +29,7 @@ class PluginHookNode(OpenModel):
     priority: int | None = None
 
 
-class PluginHooksConfig(OpenModel):
+class PluginHooksConfig(StrictModel):
     """Brief: Per-hook enablement and priorities for a plugin instance.
 
     Inputs:
@@ -37,7 +37,7 @@ class PluginHooksConfig(OpenModel):
       - setup / pre_resolve / post_resolve: Integer priority or {priority: int}.
 
     Outputs:
-      - Hooks object (strict key checks remain in config_schema.py).
+      - Hooks object with known keys only.
     """
 
     priority: int | None = None
@@ -46,26 +46,35 @@ class PluginHooksConfig(OpenModel):
     setup: int | PluginHookNode | None = None
 
 
-class PluginSetupConfig(OpenModel):
+class PluginSetupConfig(StrictModel):
     """Brief: Setup-phase behaviour for a plugin instance.
 
     Inputs:
-      - enabled / priority / abort_on_failure and related keys.
+      - enabled / priority / abort_on_failure (and abort_on_fail alias).
 
     Outputs:
-      - Permissive setup object.
+      - Setup object with known keys only.
     """
 
+    enabled: bool | None = None
+    priority: int | None = None
+    abort_on_failure: bool | None = None
+    abort_on_fail: bool | None = None
 
-class PluginLoggingConfig(OpenModel):
+
+class PluginLoggingConfig(StrictModel):
     """Brief: Per-plugin logging overrides.
 
     Inputs:
-      - Arbitrary logging override mapping.
+      - level / logger name style overrides used by plugin loaders.
 
     Outputs:
-      - Permissive logging object.
+      - Logging object with known keys only.
     """
+
+    level: str | None = None
+    logger: str | None = None
+    name: str | None = None
 
 
 class PluginInstance(StrictModel):

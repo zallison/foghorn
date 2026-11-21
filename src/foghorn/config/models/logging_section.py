@@ -48,7 +48,7 @@ class PythonLoggingConfig(StrictModel):
         description="Syslog toggle or syslog configuration object.",
     )
 
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="forbid")
 
 
 class LoggingBackendConfig(StrictModel):

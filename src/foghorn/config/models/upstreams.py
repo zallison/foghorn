@@ -79,13 +79,17 @@ class UpstreamEndpointBase(StrictModel):
       - Base fields mixed into concrete endpoint models.
     """
 
+    id: str | None = Field(
+        default=None,
+        description="Optional endpoint identifier for logs and health views.",
+    )
     abort_on_fail: bool | None = None
     abort_on_failure: bool | None = None
     tls: UpstreamTlsConfig | None = None
     pool: UpstreamPoolConfig | None = None
     notify: UpstreamNotifyConfig | None = None
 
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="forbid")
 
 
 class UpstreamHost(UpstreamEndpointBase):
@@ -162,7 +166,7 @@ class UpstreamsBackup(StrictModel):
     endpoints: list[UpstreamEndpoint] = Field(default_factory=list)
     strategy: Literal["failover", "round_robin", "random"] | None = None
 
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="forbid")
 
 
 class UpstreamsHealth(StrictModel):
