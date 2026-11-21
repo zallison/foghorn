@@ -26,7 +26,7 @@ from ...stats import StatsCollector
 from .admin_state import AdminRuntimeState
 from .api_request_audit import ApiRequestAuditLogger
 from .config_helpers import _get_web_cfg
-from .http_helpers import ensure_web_auth_token
+from .http_helpers import ensure_web_auth_token, validate_web_auth_config
 from .logging_utils import RingBuffer
 from .runtime import RuntimeState
 from .threaded_handlers import _ThreadedAdminRequestHandler
@@ -451,6 +451,14 @@ def start_webserver(
         )
         return None
 
+    # Fail closed on ambiguous auth (mode=basic plus a token) before generating
+    # tokens or binding sockets.
+    try:
+        validate_web_auth_config(web_cfg if isinstance(web_cfg, dict) else {})
+    except ValueError as exc:
+        logger.error("%s", exc)
+        raise
+
     # When auth.mode=token and token is missing, generate a temporary token and
     # log it so operators can still access the admin API.
     ensure_web_auth_token(web_cfg)
@@ -462,6 +470,7 @@ def start_webserver(
     auth_mode = str(auth_cfg.get("mode", "token")).strip().lower()
     auth_token = auth_cfg.get("token")
     api_enabled = bool(web_cfg.get("enable_api", False))
+    admin_enabled = bool(web_cfg.get("enable_admin", False))
     basic_username = str(auth_cfg.get("username") or "").strip()
     basic_password = str(auth_cfg.get("password") or "")
     api_auth_missing = (
@@ -485,6 +494,11 @@ def start_webserver(
         cors_allowlist_values = []
     cors_has_wildcard = "*" in cors_allowlist_values
     cors_allow_credentials = bool(cors_cfg.get("allow_credentials", False))
+    if admin_enabled and not api_enabled:
+        logger.warning(
+            "server.http.enable_admin=true has no effect while enable_api=false; "
+            "admin control-plane routes are not registered without the API surface"
+        )
     if api_enabled and api_auth_missing:
         logger.warning(
             "Foghorn API is enabled but authentication is not configured; "

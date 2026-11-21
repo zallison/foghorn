@@ -1888,15 +1888,20 @@ def test_root_index_serves_project_html_index(monkeypatch, tmp_path) -> None:
 
 
 def test_token_auth_blocks_unauthorized_and_allows_with_token() -> None:
-    """Brief: auth.mode=token enforces bearer or X-API-Key token on protected endpoints.
+    """Brief: auth.mode=token enforces bearer, X-API-Key, and optional Basic.
 
     Inputs:
-      - server.http config with auth.mode=token and a fixed token value.
+      - server.http config with auth.mode=token and a fixed token value
+        (allow_basic_token defaults true).
 
     Outputs:
-      - /stats returns 401 without token and includes WWW-Authenticate header.
-      - /stats returns 200 when valid token is supplied.
+      - /stats returns 401 without token and includes Bearer + Basic WWW-Authenticate.
+      - /stats returns 200 for Bearer, X-API-Key, and Basic foghorn:<token>.
+      - Basic with a non-foghorn username is rejected even when the password matches.
+      - allow_basic_token=false rejects Basic and advertises Bearer only.
     """
+
+    import base64
 
     cfg = {
         "server": {
@@ -1911,10 +1916,13 @@ def test_token_auth_blocks_unauthorized_and_allows_with_token() -> None:
     app = create_app(stats=collector, config=cfg, log_buffer=RingBuffer())
     client = TestClient(app)
 
-    # No token -> unauthorized
+    # No token -> unauthorized; advertise Bearer and Basic when allow_basic_token.
     resp_no_auth = client.get("/stats")
     assert resp_no_auth.status_code == 401
-    assert "bearer" in (resp_no_auth.headers.get("www-authenticate") or "").lower()
+    www_auth = (resp_no_auth.headers.get("www-authenticate") or "").lower()
+    assert "bearer" in www_auth
+    assert "basic" in www_auth
+    assert 'realm="foghorn"' in www_auth
 
     # Bearer token
     resp_bearer = client.get("/stats", headers={"Authorization": "Bearer secret-token"})
@@ -1923,6 +1931,56 @@ def test_token_auth_blocks_unauthorized_and_allows_with_token() -> None:
     # X-API-Key header
     resp_api_key = client.get("/stats", headers={"X-API-Key": "secret-token"})
     assert resp_api_key.status_code == 200
+
+    # Browser-friendly Basic: username foghorn, password = token
+    basic_ok = base64.b64encode(b"foghorn:secret-token").decode("ascii")
+    resp_basic = client.get("/stats", headers={"Authorization": f"Basic {basic_ok}"})
+    assert resp_basic.status_code == 200
+
+    # Wrong Basic username must not authenticate even with the correct token password
+    basic_bad_user = base64.b64encode(b"admin:secret-token").decode("ascii")
+    resp_bad_user = client.get(
+        "/stats", headers={"Authorization": f"Basic {basic_bad_user}"}
+    )
+    assert resp_bad_user.status_code == 401
+
+    # Wrong Basic password rejected
+    basic_bad_pass = base64.b64encode(b"foghorn:not-the-token").decode("ascii")
+    resp_bad_pass = client.get(
+        "/stats", headers={"Authorization": f"Basic {basic_bad_pass}"}
+    )
+    assert resp_bad_pass.status_code == 401
+
+    # allow_basic_token=false: Basic rejected; 401 advertises Bearer only.
+    cfg_no_basic = {
+        "server": {
+            "http": {
+                "enabled": True,
+                "auth": {
+                    "mode": "token",
+                    "token": "secret-token",
+                    "allow_basic_token": False,
+                },
+            }
+        }
+    }
+    app_no_basic = create_app(
+        stats=StatsCollector(track_uniques=False),
+        config=cfg_no_basic,
+        log_buffer=RingBuffer(),
+    )
+    client_no_basic = TestClient(app_no_basic)
+    resp_basic_off = client_no_basic.get(
+        "/stats", headers={"Authorization": f"Basic {basic_ok}"}
+    )
+    assert resp_basic_off.status_code == 401
+    www_off = (resp_basic_off.headers.get("www-authenticate") or "").lower()
+    assert "bearer" in www_off
+    assert "basic" not in www_off
+    resp_bearer_still = client_no_basic.get(
+        "/stats", headers={"Authorization": "Bearer secret-token"}
+    )
+    assert resp_bearer_still.status_code == 200
 
 
 def test_ringbuffer_capacity_and_snapshot_limit() -> None:
@@ -2763,6 +2821,63 @@ def test_admin_api_auth_enforced_by_default_when_mode_unset() -> None:
     assert resp.status_code == 401
     body = resp.json()
     assert body["detail"] == "unauthorized"
+
+
+def test_auth_mode_basic_with_token_is_rejected() -> None:
+    """Brief: mode=basic plus a non-empty token is rejected as ambiguous.
+
+    Inputs:
+      - server.http.auth with mode=basic, username/password, and token set.
+
+    Outputs:
+      - validate_web_auth_config and create_app raise ValueError mentioning token.
+      - HttpAuthConfig model_validate also rejects the combination.
+    """
+
+    import pytest
+    from pydantic import ValidationError
+
+    from foghorn.config.models.server import HttpAuthConfig
+    from foghorn.servers.webserver.http_helpers import validate_web_auth_config
+
+    web_cfg = {
+        "auth": {
+            "mode": "basic",
+            "username": "admin",
+            "password": "secret",
+            "token": "also-a-token",
+        }
+    }
+    with pytest.raises(ValueError, match="mode=basic must not set auth.token"):
+        validate_web_auth_config(web_cfg)
+
+    cfg = {"server": {"http": {"enabled": True, **web_cfg}}}
+    with pytest.raises(ValueError, match="mode=basic must not set auth.token"):
+        create_app(
+            stats=StatsCollector(track_uniques=False),
+            config=cfg,
+            log_buffer=RingBuffer(),
+        )
+
+    with pytest.raises(ValidationError):
+        HttpAuthConfig(
+            mode="basic",
+            username="admin",
+            password="secret",
+            token="also-a-token",
+        )
+
+    # Blank token is ignored (not "listed").
+    validate_web_auth_config(
+        {
+            "auth": {
+                "mode": "basic",
+                "username": "admin",
+                "password": "secret",
+                "token": "   ",
+            }
+        }
+    )
 
 
 def test_auth_mode_basic_without_credentials_fails_closed() -> None:
@@ -3681,6 +3796,64 @@ def test_start_webserver_refuses_public_host_without_auth(monkeypatch, caplog) -
     assert handle is None
     assert any(
         "Refusing to start admin webserver on non-loopback host" in rec.getMessage()
+        for rec in caplog.records
+    )
+
+
+def test_start_webserver_warns_when_enable_admin_without_enable_api(
+    monkeypatch, caplog
+) -> None:
+    """Brief: start_webserver warns if enable_admin is true while enable_api is false.
+
+    Inputs:
+      - Config with enable_admin=true and enable_api=false on loopback.
+
+    Outputs:
+      - Warning log that admin has no effect without the API surface.
+    """
+
+    import sys
+    import types
+
+    class DummyConfig:
+        def __init__(self, app, host, port, log_level):
+            self.app = app
+            self.host = host
+            self.port = port
+            self.log_level = log_level
+
+    class DummyServer:
+        def __init__(self, config):
+            self.config = config
+
+        def run(self) -> None:
+            return None
+
+    monkeypatch.setitem(
+        sys.modules,
+        "uvicorn",
+        types.SimpleNamespace(Config=DummyConfig, Server=DummyServer),
+    )
+
+    cfg = {
+        "server": {
+            "http": {
+                "enabled": True,
+                "host": "127.0.0.1",
+                "port": 0,
+                "enable_api": False,
+                "enable_admin": True,
+                "auth": {"mode": "token", "token": "abc123"},
+            }
+        }
+    }
+
+    with caplog.at_level("WARNING", logger="foghorn.webserver"):
+        handle = start_webserver(stats=None, config=cfg, log_buffer=RingBuffer())
+
+    assert isinstance(handle, WebServerHandle)
+    assert any(
+        "enable_admin=true has no effect while enable_api=false" in rec.getMessage()
         for rec in caplog.records
     )
 

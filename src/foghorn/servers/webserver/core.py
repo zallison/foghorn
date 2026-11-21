@@ -72,6 +72,7 @@ from .http_helpers import (
     _json_safe,
     ensure_web_auth_token,
     resolve_www_root,
+    validate_web_auth_config,
 )
 
 from .logging_utils import (
@@ -313,6 +314,9 @@ def create_app(
             allow_methods=allow_methods,
             allow_headers=allow_headers,
         )
+
+    # Fail closed on ambiguous auth before wiring dependencies.
+    validate_web_auth_config(web_cfg)
 
     # When auth.mode=token and no token is configured, generate one and log it.
     ensure_web_auth_token(web_cfg)
