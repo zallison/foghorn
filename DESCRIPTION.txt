@@ -8,7 +8,8 @@ transports are supported across UDP, TCP, DNS-over-TLS (DoT), and DNS-over-HTTPS
 
 Features
 --------
-- Caching DNS forwarder with DNSSEC support (passthrough, with optional experimental local validation).
+- Caching DNS forwarder with DNSSEC support (passthrough, with optional local validation
+  note: "Partial" RFC implementations, because the RFCs are enormous.
 - Flexible YAML configuration with a published JSON Schema and variable substitution (CLI/env/config).
 - Pluggable pre/post resolution pipeline with configurable priorities and per-plugin targeting (allowlist-style by CIDR/IP and qtype).
 - Multiple cache backends: in‑memory TTL (default), SQLite, Redis/Valkey, or disabled.
