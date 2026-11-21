@@ -492,7 +492,13 @@ def _record_suppressed_query_log_drop_candidate(
     try:
         handler(rcode=rcode, status=status)
     except Exception:
-        pass
+        logger.debug(
+            "Failed to account for suppressed query_log drop candidate "
+            "(rcode=%r status=%r)",
+            rcode,
+            status,
+            exc_info=True,
+        )
 
 
 def _schedule_notify_axfr_refresh(zone_name: str, upstream: dict) -> None:
