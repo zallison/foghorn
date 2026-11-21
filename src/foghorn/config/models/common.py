@@ -62,20 +62,24 @@ class OpenModel(MetaFields):
       - Inherits comment/id from MetaFields plus subclass fields.
 
     Outputs:
-      - Base for intentionally open nested maps (backend config, etc.).
+      - Base for intentionally free-form maps only (e.g. opaque backend blobs).
+
+    Notes:
+      - Prefer StrictModel for operator-facing config objects so unknown keys fail
+        validation. Keep OpenModel rare.
     """
 
     model_config = ConfigDict(extra="allow")
 
 
 class EmptyOpenObject(OpenModel):
-    """Brief: Permissive object placeholder for sections not yet fully modeled.
+    """Brief: Permissive object placeholder for truly free-form nested maps.
 
     Inputs:
-      - Arbitrary keys allowed until the section is ported in a later phase.
+      - Arbitrary keys (opaque plugin/backend payloads).
 
     Outputs:
-      - Open mapping used only as a Phase 0 scaffold stand-in.
+      - Open mapping; avoid for structured sections — use StrictModel instead.
     """
 
     model_config = ConfigDict(extra="allow")
