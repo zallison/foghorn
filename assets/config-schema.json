@@ -117,8 +117,8 @@
       "type": "object"
     },
     "AxfrTsigKeySource": {
-      "additionalProperties": true,
-      "description": "Brief: External TSIG key source entry under server.axfr.tsig.key_sources.\n\nInputs:\n  - type: Source type (required), e.g. file.\n  - path: Optional filesystem path for file sources.\n  - Additional source-specific keys allowed.\n\nOutputs:\n  - AxfrTsigKeySource model.",
+      "additionalProperties": false,
+      "description": "Brief: External TSIG key source entry under server.axfr.tsig.key_sources.\n\nInputs:\n  - type: Source type (required), e.g. file.\n  - path: Optional filesystem path for file sources.\n\nOutputs:\n  - AxfrTsigKeySource model.",
       "properties": {
         "comment": {
           "anyOf": [
@@ -504,10 +504,237 @@
       "title": "EcsFeatureConfig",
       "type": "object"
     },
+    "HttpAdminRateLimitConfig": {
+      "additionalProperties": false,
+      "description": "Brief: server.http.admin_rate_limit settings.",
+      "properties": {
+        "backend": {
+          "default": "plugin",
+          "description": "Type: string. Valid values: \"plugin\", \"memory\". Default: \"plugin\".",
+          "enum": [
+            "plugin",
+            "memory"
+          ],
+          "title": "Backend",
+          "type": "string"
+        },
+        "burst": {
+          "default": 0,
+          "description": "Type: integer. Default: 0.",
+          "minimum": 0,
+          "title": "Burst",
+          "type": "integer"
+        },
+        "comment": {
+          "anyOf": [
+            {
+              "description": "Type: string.",
+              "maxLength": 254,
+              "type": "string"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional human metadata string (max 254 characters).",
+          "title": "Comment"
+        },
+        "enabled": {
+          "default": true,
+          "description": "Type: boolean. Default: true.",
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "excluded_actions": {
+          "description": "Type: array.",
+          "items": {
+            "description": "Type: string.",
+            "type": "string"
+          },
+          "title": "Excluded Actions",
+          "type": "array"
+        },
+        "id": {
+          "anyOf": [
+            {
+              "description": "Type: string.",
+              "maxLength": 254,
+              "type": "string"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional human metadata string (max 254 characters).",
+          "title": "Id"
+        },
+        "key_mode": {
+          "default": "client_action",
+          "description": "Type: string. Valid values: \"client\", \"client_action\". Default: \"client_action\".",
+          "enum": [
+            "client",
+            "client_action"
+          ],
+          "title": "Key Mode",
+          "type": "string"
+        },
+        "requests_per_window": {
+          "default": 60,
+          "description": "Type: integer. Default: 60.",
+          "minimum": 1,
+          "title": "Requests Per Window",
+          "type": "integer"
+        },
+        "window_seconds": {
+          "default": 60,
+          "description": "Type: integer. Default: 60.",
+          "minimum": 1,
+          "title": "Window Seconds",
+          "type": "integer"
+        }
+      },
+      "title": "HttpAdminRateLimitConfig",
+      "type": "object"
+    },
+    "HttpApiRequestAuditConfig": {
+      "additionalProperties": false,
+      "description": "Brief: server.http.api_request_audit settings.",
+      "properties": {
+        "comment": {
+          "anyOf": [
+            {
+              "description": "Type: string.",
+              "maxLength": 254,
+              "type": "string"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional human metadata string (max 254 characters).",
+          "title": "Comment"
+        },
+        "db_path": {
+          "anyOf": [
+            {
+              "description": "Type: string.",
+              "type": "string"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Types: string, null.",
+          "title": "Db Path"
+        },
+        "enabled": {
+          "default": true,
+          "description": "Type: boolean. Default: true.",
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "id": {
+          "anyOf": [
+            {
+              "description": "Type: string.",
+              "maxLength": 254,
+              "type": "string"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional human metadata string (max 254 characters).",
+          "title": "Id"
+        },
+        "retention_max_age_seconds": {
+          "anyOf": [
+            {
+              "description": "Type: number.",
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Types: number, null.",
+          "title": "Retention Max Age Seconds"
+        },
+        "retention_max_db_bytes": {
+          "anyOf": [
+            {
+              "description": "Type: integer.",
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional SQLite file size cap for audit log pruning (bytes).",
+          "title": "Retention Max Db Bytes"
+        },
+        "retention_max_records": {
+          "anyOf": [
+            {
+              "description": "Type: integer.",
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Types: integer, null.",
+          "title": "Retention Max Records"
+        },
+        "retention_prune_every_n_inserts": {
+          "anyOf": [
+            {
+              "description": "Type: integer.",
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Run retention prune after this many inserts (default 100 at runtime).",
+          "title": "Retention Prune Every N Inserts"
+        }
+      },
+      "title": "HttpApiRequestAuditConfig",
+      "type": "object"
+    },
     "HttpAuthConfig": {
       "additionalProperties": false,
-      "description": "Brief: server.http.auth configuration.\n\nInputs:\n  - mode: Auth mode (default \"token\"): none | token | basic.\n  - token: Static bearer/API key token for mode=token.\n  - username: HTTP Basic auth user name for mode=basic.\n  - password: HTTP Basic auth password for mode=basic.\n\nOutputs:\n  - HttpAuthConfig instance used by the config schema and runtime checks.",
+      "description": "Brief: server.http.auth configuration.\n\nInputs:\n  - mode: Auth mode (default \"token\"): none | token | basic.\n  - token: Static token for mode=token (Bearer, X-API-Key, and optionally\n    Basic foghorn:<token>). Must not be set when mode=basic.\n  - allow_basic_token: When mode=token, accept Basic foghorn:<token> and\n    advertise Basic on 401 (default true).\n  - username: HTTP Basic auth user name for mode=basic.\n  - password: HTTP Basic auth password for mode=basic.\n\nOutputs:\n  - HttpAuthConfig instance used by the config schema and runtime checks.",
       "properties": {
+        "allow_basic_token": {
+          "default": true,
+          "description": "When mode=token, accept Authorization: Basic foghorn:<token> (password is the token) and include Basic in WWW-Authenticate. Set false to require Bearer or X-API-Key only. Default: true.",
+          "title": "Allow Basic Token",
+          "type": "boolean"
+        },
         "comment": {
           "anyOf": [
             {
@@ -600,6 +827,114 @@
       "title": "HttpAuthConfig",
       "type": "object"
     },
+    "HttpCorsConfig": {
+      "additionalProperties": false,
+      "description": "Brief: server.http.cors settings.",
+      "properties": {
+        "allow_credentials": {
+          "default": false,
+          "description": "Type: boolean. Default: false.",
+          "title": "Allow Credentials",
+          "type": "boolean"
+        },
+        "allowlist": {
+          "description": "Type: array.",
+          "items": {
+            "description": "Type: string.",
+            "type": "string"
+          },
+          "title": "Allowlist",
+          "type": "array"
+        },
+        "comment": {
+          "anyOf": [
+            {
+              "description": "Type: string.",
+              "maxLength": 254,
+              "type": "string"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional human metadata string (max 254 characters).",
+          "title": "Comment"
+        },
+        "enabled": {
+          "default": false,
+          "description": "Type: boolean. Default: false.",
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "id": {
+          "anyOf": [
+            {
+              "description": "Type: string.",
+              "maxLength": 254,
+              "type": "string"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional human metadata string (max 254 characters).",
+          "title": "Id"
+        }
+      },
+      "title": "HttpCorsConfig",
+      "type": "object"
+    },
+    "HttpLogsConfig": {
+      "additionalProperties": false,
+      "description": "Brief: server.http.logs ring-buffer settings.",
+      "properties": {
+        "buffer_size": {
+          "default": 500,
+          "description": "Type: integer. Default: 500.",
+          "minimum": 1,
+          "title": "Buffer Size",
+          "type": "integer"
+        },
+        "comment": {
+          "anyOf": [
+            {
+              "description": "Type: string.",
+              "maxLength": 254,
+              "type": "string"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional human metadata string (max 254 characters).",
+          "title": "Comment"
+        },
+        "id": {
+          "anyOf": [
+            {
+              "description": "Type: string.",
+              "maxLength": 254,
+              "type": "string"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional human metadata string (max 254 characters).",
+          "title": "Id"
+        }
+      },
+      "title": "HttpLogsConfig",
+      "type": "object"
+    },
     "ListenDnsDefaults": {
       "additionalProperties": false,
       "description": "Brief: Default host/port for UDP/TCP listeners under server.listen.dns.\n\nInputs:\n  - host / port defaults shared by plain DNS listeners.\n\nOutputs:\n  - ListenDnsDefaults model.",
@@ -673,7 +1008,7 @@
       "type": "object"
     },
     "ListenerDoh": {
-      "additionalProperties": true,
+      "additionalProperties": false,
       "description": "Brief: DNS-over-HTTPS listener configuration under server.listen.doh.",
       "properties": {
         "allow_threaded_fallback": {
@@ -810,7 +1145,7 @@
       "type": "object"
     },
     "ListenerDot": {
-      "additionalProperties": true,
+      "additionalProperties": false,
       "description": "Brief: DNS-over-TLS listener configuration under server.listen.dot.",
       "properties": {
         "cert_file": {
@@ -1010,7 +1345,7 @@
       "type": "object"
     },
     "ListenerTcp": {
-      "additionalProperties": true,
+      "additionalProperties": false,
       "description": "Brief: TCP listener configuration under server.listen.tcp.",
       "properties": {
         "comment": {
@@ -1139,7 +1474,7 @@
       "type": "object"
     },
     "ListenerUdp": {
-      "additionalProperties": true,
+      "additionalProperties": false,
       "description": "Brief: UDP listener configuration under server.listen.udp.\n\nInputs:\n  - enabled/host/port plus in-flight and size limits.\n\nOutputs:\n  - ListenerUdp model.",
       "properties": {
         "allow_threaded_fallback": {
@@ -1703,51 +2038,6 @@
         },
         "module": "foghorn.plugins.resolve.access_control.AccessControl"
       },
-      "dns_prefetch": {
-        "aliases": [
-          "dns_prefetch",
-          "prefetch"
-        ],
-        "config_schema": {
-          "additionalProperties": true,
-          "description": "Brief: Typed configuration model for DnsPrefetch.\n\nInputs:\n  - interval_seconds: How often to sample statistics and perform prefetch cycles.\n  - prefetch_top_n: Maximum number of domains considered per cycle based on\n    cache_hit_domains/top_domains statistics.\n  - max_consecutive_misses: Per-domain cap on consecutive prefetch cycles\n    without any observed cache hit; once exceeded, prefetching for that\n    domain is paused until a new cache hit is seen.\n  - qtypes: List of DNS qtype names to prefetch (e.g. [\"A\", \"AAAA\"]).\n\nOutputs:\n  - DnsPrefetchConfig instance with normalized field types.",
-          "properties": {
-            "interval_seconds": {
-              "default": 60.0,
-              "description": "Type: number. Default: 60.0.",
-              "minimum": 1.0,
-              "title": "Interval Seconds",
-              "type": "number"
-            },
-            "max_consecutive_misses": {
-              "default": 5,
-              "description": "Type: integer. Default: 5.",
-              "minimum": 1,
-              "title": "Max Consecutive Misses",
-              "type": "integer"
-            },
-            "prefetch_top_n": {
-              "default": 100,
-              "description": "Type: integer. Default: 100.",
-              "minimum": 1,
-              "title": "Prefetch Top N",
-              "type": "integer"
-            },
-            "qtypes": {
-              "description": "Type: array.",
-              "items": {
-                "description": "Type: string.",
-                "type": "string"
-              },
-              "title": "Qtypes",
-              "type": "array"
-            }
-          },
-          "title": "DnsPrefetchConfig",
-          "type": "object"
-        },
-        "module": "foghorn.plugins.resolve.examples.dns_prefetch.DnsPrefetch"
-      },
       "dns_rebinding": {
         "aliases": [
           "dns_rebinding",
@@ -1800,8 +2090,23 @@
         "config_schema": {
           "$defs": {
             "DockerEndpointConfig": {
-              "description": "Brief: Per-endpoint configuration for DockerHosts.\n\nIn addition to full container names and IDs, DockerHosts also exposes a\nshort container ID alias (the first 12 hex characters) for convenience.\n\nInputs:\n  - url: Docker endpoint URL (e.g. \"unix:///var/run/docker.sock\",\n    \"tcp://127.0.0.1:2375\").\n  - reload_interval_second: Interval in seconds between background refreshes\n    for this endpoint. When set to 0, the endpoint is only refreshed at\n    startup (or when other endpoints cause a global refresh).\n  - use_ipv4: Optional IPv4 address to use in answers instead of\n    per-container IPv4 addresses discovered from this endpoint.\n  - use_ipv6: Optional IPv6 address to use in answers instead of\n    per-container IPv6 addresses discovered from this endpoint.\n  - ttl: Optional TTL override for answers derived from this endpoint; when\n    omitted, the plugin-level ttl is used.\n  - suffix: Optional DNS suffix override for names sourced from this\n    endpoint. When omitted, the plugin-level suffix is used.\n  - tls_verify: When true, verify Docker daemon TLS certs for tcp://\n    endpoints. Requires tls_ca (fail closed; never skip verification).\n  - tls_cert: Optional client TLS certificate path.\n  - tls_key: Optional client TLS private-key path.\n  - tls_ca: CA bundle path used to verify the daemon cert when tls_verify\n    is true (required in that case).\n\nOutputs:\n  - DockerEndpointConfig instance with normalized field types.",
+              "description": "Brief: Per-endpoint configuration for DockerHosts.\n\nIn addition to full container names and IDs, DockerHosts also exposes a\nshort container ID alias (the first 12 hex characters) for convenience.\n\nInputs:\n  - id: Optional identifier for the endpoint.\n  - url: Docker endpoint URL (e.g. \"unix:///var/run/docker.sock\",\n    \"tcp://127.0.0.1:2375\").\n  - reload_interval_second: Interval in seconds between background refreshes\n    for this endpoint. When set to 0, the endpoint is only refreshed at\n    startup (or when other endpoints cause a global refresh).\n  - use_ipv4: Optional IPv4 address to use in answers instead of\n    per-container IPv4 addresses discovered from this endpoint.\n  - use_ipv6: Optional IPv6 address to use in answers instead of\n    per-container IPv6 addresses discovered from this endpoint.\n  - ttl: Optional TTL override for answers derived from this endpoint; when\n    omitted, the plugin-level ttl is used.\n  - suffix: Optional DNS suffix override for names sourced from this\n    endpoint. When omitted, the plugin-level suffix is used.\n  - tls_verify: When true, verify Docker daemon TLS certs for tcp://\n    endpoints. Requires tls_ca (fail closed; never skip verification).\n  - tls_cert: Optional client TLS certificate path.\n  - tls_key: Optional client TLS private-key path.\n  - tls_ca: CA bundle path used to verify the daemon cert when tls_verify\n    is true (required in that case).\n\nOutputs:\n  - DockerEndpointConfig instance with normalized field types.",
               "properties": {
+                "id": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Types: string, null.",
+                  "title": "Id"
+                },
                 "reload_interval_second": {
                   "default": 60.0,
                   "description": "Type: number. Default: 60.0.",
@@ -1992,13 +2297,6 @@
         "config_schema": null,
         "module": "foghorn.plugins.resolve.hosts_common.DynamicHostsPlugin"
       },
-      "echo": {
-        "aliases": [
-          "echo"
-        ],
-        "config_schema": null,
-        "module": "foghorn.plugins.resolve.examples.echo.Echo"
-      },
       "etc_hosts": {
         "aliases": [
           "/etc/hosts",
@@ -2071,60 +2369,6 @@
           "type": "object"
         },
         "module": "foghorn.plugins.resolve.etc_hosts.EtcHosts"
-      },
-      "examples": {
-        "aliases": [
-          "examples"
-        ],
-        "config_schema": {
-          "additionalProperties": true,
-          "description": "Brief: Typed configuration model for Examples.\n\nInputs:\n  - max_subdomains: Maximum allowed subdomain depth.\n  - max_length_no_dots: Maximum label length excluding dots.\n  - base_labels: Rightmost labels comprising the base domain.\n  - apply_to_qtypes: Qtypes this plugin applies to.\n  - rewrite_first_ipv4: List of rewrite rules.\n\nOutputs:\n  - ExamplesConfig instance with normalized field types.",
-          "properties": {
-            "apply_to_qtypes": {
-              "description": "Type: array.",
-              "items": {
-                "description": "Type: string.",
-                "type": "string"
-              },
-              "title": "Apply To Qtypes",
-              "type": "array"
-            },
-            "base_labels": {
-              "default": 2,
-              "description": "Type: integer. Default: 2.",
-              "minimum": 0,
-              "title": "Base Labels",
-              "type": "integer"
-            },
-            "max_length_no_dots": {
-              "default": 50,
-              "description": "Type: integer. Default: 50.",
-              "minimum": 0,
-              "title": "Max Length No Dots",
-              "type": "integer"
-            },
-            "max_subdomains": {
-              "default": 5,
-              "description": "Type: integer. Default: 5.",
-              "minimum": 0,
-              "title": "Max Subdomains",
-              "type": "integer"
-            },
-            "rewrite_first_ipv4": {
-              "description": "Type: array.",
-              "items": {
-                "additionalProperties": true,
-                "description": "Type: object.",
-                "type": "object"
-              },
-              "title": "Rewrite First Ipv4",
-              "type": "array"
-            }
-          },
-          "title": "ExamplesConfig",
-          "type": "object"
-        },
-        "module": "foghorn.plugins.resolve.examples.examples.Examples"
       },
       "file_downloader": {
         "aliases": [
@@ -2245,76 +2489,6 @@
           "type": "object"
         },
         "module": "foghorn.plugins.resolve.file_downloader.FileDownloader"
-      },
-      "file_over_dns": {
-        "aliases": [
-          "file_over_dns"
-        ],
-        "config_schema": {
-          "$defs": {
-            "FileOverDnsConfigEntry": {
-              "description": "Brief: Single file/name entry for FileOverDns configuration.\n\nInputs:\n  - file_path: Path to the file whose contents will be exposed over DNS.\n  - name: Short identifier used in qnames (e.g. \"crazy_file\").\n\nOutputs:\n  - FileOverDnsConfigEntry instance.",
-              "properties": {
-                "file_path": {
-                  "description": "Type: string.",
-                  "title": "File Path",
-                  "type": "string"
-                },
-                "name": {
-                  "description": "Type: string.",
-                  "title": "Name",
-                  "type": "string"
-                }
-              },
-              "required": [
-                "file_path",
-                "name"
-              ],
-              "title": "FileOverDnsConfigEntry",
-              "type": "object"
-            }
-          },
-          "additionalProperties": true,
-          "description": "Brief: Typed configuration model for FileOverDns.\n\nInputs:\n  - files: List of objects each containing:\n      * file_path (str): Path to a readable file.\n      * name (str): Short identifier used in DNS labels.\n  - ttl: TTL in seconds for TXT responses (default 300, >= 0).\n  - max_chunk_bytes: Maximum raw byte span (Y - X) to serve per query\n    before encoding, clamped to [1, 4096].\n  - format: Output format for TXT records; \"base64\" (default) or \"raw\".\n\nOutputs:\n  - FileOverDnsConfig instance with normalized field types.",
-          "properties": {
-            "files": {
-              "description": "Type: array.",
-              "items": {
-                "$ref": "#/$defs/FileOverDnsConfigEntry"
-              },
-              "title": "Files",
-              "type": "array"
-            },
-            "format": {
-              "default": "base64",
-              "description": "Type: string. Valid values: \"base64\", \"raw\". Default: \"base64\".",
-              "enum": [
-                "base64",
-                "raw"
-              ],
-              "title": "Format",
-              "type": "string"
-            },
-            "max_chunk_bytes": {
-              "default": 4096,
-              "description": "Type: integer. Default: 4096.",
-              "maximum": 4096,
-              "minimum": 1,
-              "title": "Max Chunk Bytes",
-              "type": "integer"
-            },
-            "ttl": {
-              "default": 300,
-              "description": "Type: integer. Default: 300.",
-              "minimum": 0,
-              "title": "Ttl",
-              "type": "integer"
-            }
-          },
-          "title": "FileOverDnsConfig",
-          "type": "object"
-        },
-        "module": "foghorn.plugins.resolve.examples.file_over_dns.FileOverDns"
       },
       "filter": {
         "aliases": [
@@ -2630,75 +2804,6 @@
         },
         "module": "foghorn.plugins.resolve.filter.Filter"
       },
-      "finger": {
-        "aliases": [
-          "finger"
-        ],
-        "config_schema": {
-          "additionalProperties": true,
-          "description": "Brief: Typed configuration model for the Finger resolve plugin.\n\nInputs:\n  - domain: DNS suffix under which to expose finger answers. A query name of\n    the form ``<user>.<domain>`` will be handled when qtype=TXT.\n  - max_size: Maximum number of bytes to read from ``$HOME/.finger``; any\n    extra content is silently truncated.\n  - location: Optional filesystem template for finger files. When set, this\n    string should contain a ``\"%u\"`` placeholder which will be replaced with\n    the queried username (for example, ``\"/home/%u/.finger\"`` or\n    ``\"/data/finger/%u\"``) and that path will be used instead of\n    ``$HOME/.finger``.\n  - policy: Default policy when a user is not mentioned in allow/deny lists.\n    Accepted values (case-insensitive): \"allow\" (default) or \"deny\".\n  - allow_users: Optional list of usernames that should always be allowed.\n  - deny_users: Optional list of usernames that should always be denied.\n\nOutputs:\n  - FingerConfig instance with normalized field types.",
-          "properties": {
-            "allow_users": {
-              "description": "Type: array.",
-              "items": {
-                "description": "Type: string.",
-                "type": "string"
-              },
-              "title": "Allow Users",
-              "type": "array"
-            },
-            "deny_users": {
-              "description": "Type: array.",
-              "items": {
-                "description": "Type: string.",
-                "type": "string"
-              },
-              "title": "Deny Users",
-              "type": "array"
-            },
-            "domain": {
-              "description": "Type: string.",
-              "title": "Domain",
-              "type": "string"
-            },
-            "location": {
-              "anyOf": [
-                {
-                  "description": "Type: string.",
-                  "type": "string"
-                },
-                {
-                  "description": "Type: null.",
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Types: string, null.",
-              "title": "Location"
-            },
-            "max_size": {
-              "default": 1024,
-              "description": "Type: integer. Default: 1024.",
-              "maximum": 65536,
-              "minimum": 1,
-              "title": "Max Size",
-              "type": "integer"
-            },
-            "policy": {
-              "default": "allow",
-              "description": "Type: string. Default: \"allow\".",
-              "title": "Policy",
-              "type": "string"
-            }
-          },
-          "required": [
-            "domain"
-          ],
-          "title": "FingerConfig",
-          "type": "object"
-        },
-        "module": "foghorn.plugins.resolve.examples.finger.Finger"
-      },
       "flaky_server": {
         "aliases": [
           "buggy",
@@ -2843,63 +2948,6 @@
           "type": "object"
         },
         "module": "foghorn.plugins.resolve.flaky_server.FlakyServer"
-      },
-      "greylist_example": {
-        "aliases": [
-          "greylist_example"
-        ],
-        "config_schema": {
-          "additionalProperties": true,
-          "description": "Brief: Typed configuration model for GreylistExample.\n\nInputs:\n  - duration_seconds: Greylist window in seconds.\n  - duration_hours: Legacy hours-based window.\n  - db_path: Path to sqlite DB.\n  - cache_ttl_seconds: TTL for in-memory cache.\n  - cache_max_entries: Max entries in cache.\n\nOutputs:\n  - GreylistConfig instance with normalized field types.",
-          "properties": {
-            "cache_max_entries": {
-              "default": 100000,
-              "description": "Type: integer. Default: 100000.",
-              "minimum": 0,
-              "title": "Cache Max Entries",
-              "type": "integer"
-            },
-            "cache_ttl_seconds": {
-              "default": 300,
-              "description": "Type: integer. Default: 300.",
-              "minimum": 0,
-              "title": "Cache Ttl Seconds",
-              "type": "integer"
-            },
-            "db_path": {
-              "default": "./config/var/greylist.db",
-              "description": "Type: string. Default: \"./config/var/greylist.db\".",
-              "title": "Db Path",
-              "type": "string"
-            },
-            "duration_hours": {
-              "default": 24,
-              "description": "Type: integer. Default: 24.",
-              "minimum": 0,
-              "title": "Duration Hours",
-              "type": "integer"
-            },
-            "duration_seconds": {
-              "anyOf": [
-                {
-                  "description": "Type: integer.",
-                  "minimum": 0,
-                  "type": "integer"
-                },
-                {
-                  "description": "Type: null.",
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Types: integer, null.",
-              "title": "Duration Seconds"
-            }
-          },
-          "title": "GreylistConfig",
-          "type": "object"
-        },
-        "module": "foghorn.plugins.resolve.examples.greylist.GreylistExample"
       },
       "kubernetes_hosts": {
         "aliases": [
@@ -3630,50 +3678,6 @@
           "type": "object"
         },
         "module": "foghorn.plugins.resolve.mdns.MdnsBridge"
-      },
-      "new_domain_filter_example": {
-        "aliases": [
-          "ndf",
-          "new_domain",
-          "new_domain_filter",
-          "new_domain_filter_example"
-        ],
-        "config_schema": {
-          "additionalProperties": true,
-          "description": "Brief: Typed configuration model for NewDomainFilterExample.\n\nInputs:\n  - threshold_days: Minimum allowed domain age in days.\n  - whois_db_path: Path to WHOIS cache DB.\n  - whois_cache_ttl_seconds: In-memory cache TTL.\n  - whois_refresh_seconds: Max age of DB entries before refresh.\n\nOutputs:\n  - NewDomainFilterExampleConfig instance with normalized field types.",
-          "properties": {
-            "threshold_days": {
-              "default": 7,
-              "description": "Type: integer. Default: 7.",
-              "minimum": 0,
-              "title": "Threshold Days",
-              "type": "integer"
-            },
-            "whois_cache_ttl_seconds": {
-              "default": 3600,
-              "description": "Type: integer. Default: 3600.",
-              "minimum": 0,
-              "title": "Whois Cache Ttl Seconds",
-              "type": "integer"
-            },
-            "whois_db_path": {
-              "default": "./config/var/whois_cache.db",
-              "description": "Type: string. Default: \"./config/var/whois_cache.db\".",
-              "title": "Whois Db Path",
-              "type": "string"
-            },
-            "whois_refresh_seconds": {
-              "default": 86400,
-              "description": "Type: integer. Default: 86400.",
-              "minimum": 0,
-              "title": "Whois Refresh Seconds",
-              "type": "integer"
-            }
-          },
-          "title": "NewDomainFilterExampleConfig",
-          "type": "object"
-        },
-        "module": "foghorn.plugins.resolve.examples.new_domain_filter.NewDomainFilterExample"
       },
       "proxmox_hosts": {
         "aliases": [
@@ -5908,7 +5912,7 @@
       }
     },
     "PluginHookNode": {
-      "additionalProperties": true,
+      "additionalProperties": false,
       "description": "Brief: Mapping form of a single plugin hook priority.\n\nInputs:\n  - priority: Optional integer priority for this hook.\n\nOutputs:\n  - Object accepted as hooks.pre_resolve / post_resolve / setup.",
       "properties": {
         "comment": {
@@ -5963,8 +5967,8 @@
       "type": "object"
     },
     "PluginHooksConfig": {
-      "additionalProperties": true,
-      "description": "Brief: Per-hook enablement and priorities for a plugin instance.\n\nInputs:\n  - priority: Shorthand integer applied to setup/pre_resolve/post_resolve.\n  - setup / pre_resolve / post_resolve: Integer priority or {priority: int}.\n\nOutputs:\n  - Hooks object (strict key checks remain in config_schema.py).",
+      "additionalProperties": false,
+      "description": "Brief: Per-hook enablement and priorities for a plugin instance.\n\nInputs:\n  - priority: Shorthand integer applied to setup/pre_resolve/post_resolve.\n  - setup / pre_resolve / post_resolve: Integer priority or {priority: int}.\n\nOutputs:\n  - Hooks object with known keys only.",
       "properties": {
         "comment": {
           "anyOf": [
@@ -6181,8 +6185,8 @@
       "type": "object"
     },
     "PluginLoggingConfig": {
-      "additionalProperties": true,
-      "description": "Brief: Per-plugin logging overrides.\n\nInputs:\n  - Arbitrary logging override mapping.\n\nOutputs:\n  - Permissive logging object.",
+      "additionalProperties": false,
+      "description": "Brief: Per-plugin logging overrides.\n\nInputs:\n  - level / logger name style overrides used by plugin loaders.\n\nOutputs:\n  - Logging object with known keys only.",
       "properties": {
         "comment": {
           "anyOf": [
@@ -6215,15 +6219,90 @@
           "default": null,
           "description": "Optional human metadata string (max 254 characters).",
           "title": "Id"
+        },
+        "level": {
+          "anyOf": [
+            {
+              "description": "Type: string.",
+              "type": "string"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Types: string, null.",
+          "title": "Level"
+        },
+        "logger": {
+          "anyOf": [
+            {
+              "description": "Type: string.",
+              "type": "string"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Types: string, null.",
+          "title": "Logger"
+        },
+        "name": {
+          "anyOf": [
+            {
+              "description": "Type: string.",
+              "type": "string"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Types: string, null.",
+          "title": "Name"
         }
       },
       "title": "PluginLoggingConfig",
       "type": "object"
     },
     "PluginSetupConfig": {
-      "additionalProperties": true,
-      "description": "Brief: Setup-phase behaviour for a plugin instance.\n\nInputs:\n  - enabled / priority / abort_on_failure and related keys.\n\nOutputs:\n  - Permissive setup object.",
+      "additionalProperties": false,
+      "description": "Brief: Setup-phase behaviour for a plugin instance.\n\nInputs:\n  - enabled / priority / abort_on_failure (and abort_on_fail alias).\n\nOutputs:\n  - Setup object with known keys only.",
       "properties": {
+        "abort_on_fail": {
+          "anyOf": [
+            {
+              "description": "Type: boolean.",
+              "type": "boolean"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Types: boolean, null.",
+          "title": "Abort On Fail"
+        },
+        "abort_on_failure": {
+          "anyOf": [
+            {
+              "description": "Type: boolean.",
+              "type": "boolean"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Types: boolean, null.",
+          "title": "Abort On Failure"
+        },
         "comment": {
           "anyOf": [
             {
@@ -6240,6 +6319,21 @@
           "description": "Optional human metadata string (max 254 characters).",
           "title": "Comment"
         },
+        "enabled": {
+          "anyOf": [
+            {
+              "description": "Type: boolean.",
+              "type": "boolean"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Types: boolean, null.",
+          "title": "Enabled"
+        },
         "id": {
           "anyOf": [
             {
@@ -6255,13 +6349,28 @@
           "default": null,
           "description": "Optional human metadata string (max 254 characters).",
           "title": "Id"
+        },
+        "priority": {
+          "anyOf": [
+            {
+              "description": "Type: integer.",
+              "type": "integer"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Types: integer, null.",
+          "title": "Priority"
         }
       },
       "title": "PluginSetupConfig",
       "type": "object"
     },
     "PythonLoggingConfig": {
-      "additionalProperties": true,
+      "additionalProperties": false,
       "description": "Brief: Python stdlib logging settings under logging.python.\n\nInputs:\n  - file / level / stderr / color / syslog.\n\nOutputs:\n  - PythonLoggingConfig model.",
       "properties": {
         "color": {
@@ -6616,8 +6725,89 @@
       "title": "QueryLogSamplingConfig",
       "type": "object"
     },
+    "ResolverSearchConfig": {
+      "additionalProperties": false,
+      "description": "Brief: server.resolver.search domain qualification settings.\n\nInputs:\n  - domain: Search/qualification suffix (e.g. lan domain).\n  - qualify_single_label: Append domain to single-label queries.\n  - qualify_non_proper_tld: Bool or list of non-proper TLD suffixes to qualify.\n  - non_proper_tld_mode: Match mode for list entries (suffix|exact).\n\nOutputs:\n  - ResolverSearchConfig nested under server.resolver.search.",
+      "properties": {
+        "comment": {
+          "anyOf": [
+            {
+              "description": "Type: string.",
+              "maxLength": 254,
+              "type": "string"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional human metadata string (max 254 characters).",
+          "title": "Comment"
+        },
+        "domain": {
+          "default": "",
+          "description": "Search domain suffix without trailing dot. Default: \"\".",
+          "title": "Domain",
+          "type": "string"
+        },
+        "id": {
+          "anyOf": [
+            {
+              "description": "Type: string.",
+              "maxLength": 254,
+              "type": "string"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional human metadata string (max 254 characters).",
+          "title": "Id"
+        },
+        "non_proper_tld_mode": {
+          "default": "suffix",
+          "description": "How list entries in qualify_non_proper_tld are matched. Default: \"suffix\".",
+          "enum": [
+            "suffix",
+            "exact"
+          ],
+          "title": "Non Proper Tld Mode",
+          "type": "string"
+        },
+        "qualify_non_proper_tld": {
+          "anyOf": [
+            {
+              "description": "Type: boolean.",
+              "type": "boolean"
+            },
+            {
+              "description": "Type: array.",
+              "items": {
+                "description": "Type: string.",
+                "type": "string"
+              },
+              "type": "array"
+            }
+          ],
+          "default": false,
+          "description": "When true, qualify names under non-proper TLDs; when a list, only those suffixes/names are qualified. Default: false.",
+          "title": "Qualify Non Proper Tld"
+        },
+        "qualify_single_label": {
+          "default": true,
+          "description": "When true, append search domain to single-label queries. Default: true.",
+          "title": "Qualify Single Label",
+          "type": "boolean"
+        }
+      },
+      "title": "ResolverSearchConfig",
+      "type": "object"
+    },
     "ServerAxfrConfig": {
-      "additionalProperties": true,
+      "additionalProperties": false,
       "description": "Brief: server.axfr zone-transfer controls.",
       "properties": {
         "allow_clients": {
@@ -6760,7 +6950,7 @@
       "type": "object"
     },
     "ServerCacheConfig": {
-      "additionalProperties": true,
+      "additionalProperties": false,
       "description": "Brief: server.cache DNS cache selection and decorated overrides.",
       "properties": {
         "comment": {
@@ -6792,7 +6982,7 @@
             }
           ],
           "default": null,
-          "description": "Types: object, null.",
+          "description": "Opaque cache-backend configuration mapping.",
           "title": "Config"
         },
         "decorated_overrides": {
@@ -6810,8 +7000,26 @@
             }
           ],
           "default": null,
-          "description": "Types: array, null.",
+          "description": "Deprecated alias for func_caches.",
           "title": "Decorated Overrides"
+        },
+        "func_caches": {
+          "anyOf": [
+            {
+              "description": "Type: array.",
+              "items": {
+                "$ref": "#/$defs/DecoratedCacheOverride"
+              },
+              "type": "array"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Decorated helper cache overrides (preferred key).",
+          "title": "Func Caches"
         },
         "id": {
           "anyOf": [
@@ -6844,7 +7052,7 @@
             }
           ],
           "default": null,
-          "description": "Types: array, null.",
+          "description": "Deprecated alias for func_caches.",
           "title": "Modify"
         },
         "module": {
@@ -7061,8 +7269,8 @@
       "type": "object"
     },
     "ServerDnssecConfig": {
-      "additionalProperties": true,
-      "description": "Brief: server.dnssec configuration.\n\nInputs:\n  - Open mapping for DNSSEC knobs (validation/signing/payload size, etc.).\n  - Common keys include mode, validation, udp_payload_size, and for RFC 5011\n    trust-anchor management: trust_anchor_mode, trust_anchor_store_path.\n\nOutputs:\n  - Permissive dnssec object; detailed constraints live in runtime code.",
+      "additionalProperties": false,
+      "description": "Brief: server.dnssec configuration.\n\nInputs:\n  - mode / validation / udp_payload_size for EDNS and validation strategy.\n  - trust_anchor_mode / trust_anchor_store_path / hold-downs for RFC 5011.\n  - trust_anchors: optional static DNSKEY/DS anchors (root or islands).\n\nOutputs:\n  - Permissive dnssec object; runtime applies knobs via dnssec_validate.",
       "properties": {
         "comment": {
           "anyOf": [
@@ -7080,6 +7288,38 @@
           "description": "Optional human metadata string (max 254 characters).",
           "title": "Comment"
         },
+        "hold_down_add_days": {
+          "anyOf": [
+            {
+              "description": "Type: integer.",
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": 2,
+          "description": "RFC 5011: days a new KSK must remain present before promotion from pending_add to trusted. Default: 2.",
+          "title": "Hold Down Add Days"
+        },
+        "hold_down_remove_days": {
+          "anyOf": [
+            {
+              "description": "Type: integer.",
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": 2,
+          "description": "RFC 5011: days a missing/revoked KSK must remain absent before removal from the trusted set. Default: 2.",
+          "title": "Hold Down Remove Days"
+        },
         "id": {
           "anyOf": [
             {
@@ -7096,6 +7336,33 @@
           "description": "Optional human metadata string (max 254 characters).",
           "title": "Id"
         },
+        "mode": {
+          "default": "ignore",
+          "description": "DNSSEC mode: ignore | passthrough | validate. Default: \"ignore\".",
+          "enum": [
+            "ignore",
+            "passthrough",
+            "validate"
+          ],
+          "title": "Mode",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "trust_anchor_mode": {
+          "default": "static",
+          "description": "static uses baked-in root KSK (+ trust_anchors); rfc5011 enables automated root trust-anchor management (requires store path). Default: \"static\".",
+          "enum": [
+            "static",
+            "rfc5011"
+          ],
+          "title": "Trust Anchor Mode",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "trust_anchor_store_path": {
           "anyOf": [
             {
@@ -7110,6 +7377,55 @@
           "default": null,
           "description": "Filesystem path for the RFC 5011 trust-anchor JSON store. When server.data_root is set, must resolve under that directory.",
           "title": "Trust Anchor Store Path"
+        },
+        "trust_anchors": {
+          "anyOf": [
+            {
+              "description": "Type: array.",
+              "items": {
+                "$ref": "#/$defs/TrustAnchorEntry"
+              },
+              "type": "array"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional static DNSKEY and/or DS trust anchors. DNSKEY entries for '.' supplement the root anchors; non-root DNSKEY/DS entries create islands of trust for local validation.",
+          "title": "Trust Anchors"
+        },
+        "udp_payload_size": {
+          "anyOf": [
+            {
+              "description": "Type: integer.",
+              "maximum": 65535,
+              "minimum": 512,
+              "type": "integer"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": 1232,
+          "description": "Default EDNS UDP payload size. Default: 1232.",
+          "title": "Udp Payload Size"
+        },
+        "validation": {
+          "default": "upstream_ad",
+          "description": "When mode=validate: upstream_ad trusts upstream AD bit; local/local_extended perform local chain validation. Default: \"upstream_ad\".",
+          "enum": [
+            "upstream_ad",
+            "local",
+            "local_extended"
+          ],
+          "title": "Validation",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "title": "ServerDnssecConfig",
@@ -7213,14 +7529,40 @@
       "type": "object"
     },
     "ServerHttpConfig": {
-      "additionalProperties": true,
+      "additionalProperties": false,
       "description": "Brief: Admin HTTP server configuration under server.http.",
       "properties": {
+        "admin_rate_limit": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HttpAdminRateLimitConfig"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Type: null."
+        },
         "allow_threaded_fallback": {
           "default": true,
           "description": "Type: boolean. Default: true.",
           "title": "Allow Threaded Fallback",
           "type": "boolean"
+        },
+        "api_request_audit": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HttpApiRequestAuditConfig"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Type: null."
         },
         "auth": {
           "anyOf": [
@@ -7266,6 +7608,41 @@
           "description": "Optional human metadata string (max 254 characters).",
           "title": "Comment"
         },
+        "config_cache_ttl_seconds": {
+          "anyOf": [
+            {
+              "description": "Type: number.",
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Types: number, null.",
+          "title": "Config Cache Ttl Seconds"
+        },
+        "cors": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HttpCorsConfig"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Type: null."
+        },
+        "debug_timings": {
+          "default": false,
+          "description": "Type: boolean. Default: false.",
+          "title": "Debug Timings",
+          "type": "boolean"
+        },
         "enable_admin": {
           "default": false,
           "description": "Type: boolean. Default: false.",
@@ -7290,6 +7667,21 @@
           "title": "Enable Schema",
           "type": "boolean"
         },
+        "enabled": {
+          "anyOf": [
+            {
+              "description": "Type: boolean.",
+              "type": "boolean"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "When unset, presence of the http block enables the admin server.",
+          "title": "Enabled"
+        },
         "generate": {
           "anyOf": [
             {
@@ -7310,8 +7702,8 @@
           "title": "Generate"
         },
         "host": {
-          "default": "127.0.0.1",
-          "description": "Type: string. Default: \"127.0.0.1\".",
+          "default": "*********",
+          "description": "Type: string. Default: \"*********\".",
           "title": "Host",
           "type": "string"
         },
@@ -7330,6 +7722,12 @@
           "default": null,
           "description": "Optional human metadata string (max 254 characters).",
           "title": "Id"
+        },
+        "index": {
+          "default": true,
+          "description": "Serve / and /index.html when true. Default: true.",
+          "title": "Index",
+          "type": "boolean"
         },
         "key_file": {
           "anyOf": [
@@ -7361,6 +7759,35 @@
           "description": "Types: string, null.",
           "title": "Keys Dir"
         },
+        "limit_concurrency": {
+          "anyOf": [
+            {
+              "description": "Type: integer.",
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional uvicorn concurrency cap override for admin HTTP.",
+          "title": "Limit Concurrency"
+        },
+        "logs": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HttpLogsConfig"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Type: null."
+        },
         "port": {
           "default": 5380,
           "description": "Type: integer. Default: 5380.",
@@ -7369,21 +7796,106 @@
           "title": "Port",
           "type": "integer"
         },
+        "redact_keys": {
+          "anyOf": [
+            {
+              "description": "Type: array.",
+              "items": {
+                "description": "Type: string.",
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Extra secret key names redacted in /config responses.",
+          "title": "Redact Keys"
+        },
+        "stats_snapshot_ttl_seconds": {
+          "anyOf": [
+            {
+              "description": "Type: number.",
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Types: number, null.",
+          "title": "Stats Snapshot Ttl Seconds"
+        },
+        "system_info_ttl_seconds": {
+          "anyOf": [
+            {
+              "description": "Type: number.",
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Types: number, null.",
+          "title": "System Info Ttl Seconds"
+        },
+        "system_metrics_detail": {
+          "default": null,
+          "description": "Types: string, null. Valid values: \"basic\", \"full\".",
+          "enum": [
+            "basic",
+            "full"
+          ],
+          "title": "System Metrics Detail",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "tls_days": {
           "default": 3650,
           "description": "Type: integer. Default: 3650.",
           "minimum": 1,
           "title": "Tls Days",
           "type": "integer"
+        },
+        "www_root": {
+          "anyOf": [
+            {
+              "description": "Type: string.",
+              "type": "string"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Static admin UI root directory override.",
+          "title": "Www Root"
         }
       },
       "title": "ServerHttpConfig",
       "type": "object"
     },
     "ServerLimitsConfig": {
-      "additionalProperties": true,
+      "additionalProperties": false,
       "description": "Brief: server.limits hardening knobs.",
       "properties": {
+        "allow_unsafe_threaded_listeners": {
+          "default": false,
+          "description": "When true, allow threaded UDP/TCP listeners on non-loopback binds (DoS-exposed; asyncio is preferred). Default: false.",
+          "title": "Allow Unsafe Threaded Listeners",
+          "type": "boolean"
+        },
         "bg_executor_max_pending": {
           "anyOf": [
             {
@@ -7585,8 +8097,8 @@
       "type": "object"
     },
     "ServerResolverConfig": {
-      "additionalProperties": true,
-      "description": "Brief: server.resolver configuration.\n\nInputs:\n  - mode / timeouts / recursion controls.\n\nOutputs:\n  - ServerResolverConfig model.",
+      "additionalProperties": false,
+      "description": "Brief: server.resolver configuration.\n\nInputs:\n  - mode / timeouts / recursion controls.\n  - search: Optional search-domain qualification block.\n\nOutputs:\n  - ServerResolverConfig model.",
       "properties": {
         "allow_private_destinations": {
           "default": true,
@@ -7662,6 +8174,19 @@
           "title": "Per Try Timeout Ms",
           "type": "integer"
         },
+        "search": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ResolverSearchConfig"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional search-domain qualification for short names."
+        },
         "timeout_ms": {
           "default": 2000,
           "description": "Type: integer. Default: 2000.",
@@ -7680,8 +8205,8 @@
       "type": "object"
     },
     "StatsConfig": {
-      "additionalProperties": true,
-      "description": "Brief: Runtime statistics collection configuration.\n\nInputs:\n  - enabled: Master on/off switch.\n  - source_backend: Primary backend id for reads.\n  - max_unique_* / max_store_*: Cardinality caps.\n\nOutputs:\n  - StatsConfig model for FoghornConfig.stats.",
+      "additionalProperties": false,
+      "description": "Brief: Runtime statistics collection configuration.\n\nInputs:\n  - enabled: Master on/off switch.\n  - source_backend: Primary backend id for reads.\n  - max_unique_* / max_store_*: Cardinality caps.\n  - Reporter/UI toggles (interval, top-N, ignore lists).\n\nOutputs:\n  - StatsConfig model for FoghornConfig.stats.",
       "properties": {
         "comment": {
           "anyOf": [
@@ -7705,6 +8230,12 @@
           "title": "Enabled",
           "type": "boolean"
         },
+        "force_rebuild": {
+          "default": false,
+          "description": "Type: boolean. Default: false.",
+          "title": "Force Rebuild",
+          "type": "boolean"
+        },
         "id": {
           "anyOf": [
             {
@@ -7720,6 +8251,53 @@
           "default": null,
           "description": "Optional human metadata string (max 254 characters).",
           "title": "Id"
+        },
+        "ignore": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/StatsIgnoreConfig"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Type: null."
+        },
+        "include_qtype_breakdown": {
+          "default": true,
+          "description": "Type: boolean. Default: true.",
+          "title": "Include Qtype Breakdown",
+          "type": "boolean"
+        },
+        "include_top_clients": {
+          "default": true,
+          "description": "Type: boolean. Default: true.",
+          "title": "Include Top Clients",
+          "type": "boolean"
+        },
+        "include_top_domains": {
+          "default": true,
+          "description": "Type: boolean. Default: true.",
+          "title": "Include Top Domains",
+          "type": "boolean"
+        },
+        "interval_seconds": {
+          "anyOf": [
+            {
+              "description": "Type: number.",
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional stats reporter interval override (seconds).",
+          "title": "Interval Seconds"
         },
         "max_store_clients": {
           "default": 50000,
@@ -7763,6 +8341,12 @@
           "title": "Max Unique Domains",
           "type": "integer"
         },
+        "reset_on_log": {
+          "default": false,
+          "description": "Type: boolean. Default: false.",
+          "title": "Reset On Log",
+          "type": "boolean"
+        },
         "source_backend": {
           "anyOf": [
             {
@@ -7777,9 +8361,308 @@
           "default": null,
           "description": "Identifier of the primary statistics/query-log backend to read from. When logging.backends is configured, this typically matches one of the backends[].id values.",
           "title": "Source Backend"
+        },
+        "top_n": {
+          "default": 10,
+          "description": "Type: integer. Default: 10.",
+          "minimum": 0,
+          "title": "Top N",
+          "type": "integer"
+        },
+        "track_latency": {
+          "default": true,
+          "description": "Type: boolean. Default: true.",
+          "title": "Track Latency",
+          "type": "boolean"
         }
       },
       "title": "StatsConfig",
+      "type": "object"
+    },
+    "StatsIgnoreConfig": {
+      "additionalProperties": false,
+      "description": "Brief: Optional ignore lists for top-N stats views.\n\nInputs:\n  - top_* lists and match modes used by the stats reporter/UI.\n\nOutputs:\n  - StatsIgnoreConfig model nested under stats.ignore.",
+      "properties": {
+        "comment": {
+          "anyOf": [
+            {
+              "description": "Type: string.",
+              "maxLength": 254,
+              "type": "string"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional human metadata string (max 254 characters).",
+          "title": "Comment"
+        },
+        "id": {
+          "anyOf": [
+            {
+              "description": "Type: string.",
+              "maxLength": 254,
+              "type": "string"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional human metadata string (max 254 characters).",
+          "title": "Id"
+        },
+        "ignore_single_host": {
+          "default": false,
+          "description": "Type: boolean. Default: false.",
+          "title": "Ignore Single Host",
+          "type": "boolean"
+        },
+        "include_in_stats": {
+          "default": true,
+          "description": "When true, ignored top-N entries still count toward aggregate stats; when false they are excluded from aggregates too. Default: true.",
+          "title": "Include In Stats",
+          "type": "boolean"
+        },
+        "top_clients": {
+          "description": "Type: array.",
+          "items": {
+            "description": "Type: string.",
+            "type": "string"
+          },
+          "title": "Top Clients",
+          "type": "array"
+        },
+        "top_domains": {
+          "description": "Type: array.",
+          "items": {
+            "description": "Type: string.",
+            "type": "string"
+          },
+          "title": "Top Domains",
+          "type": "array"
+        },
+        "top_domains_mode": {
+          "default": "exact",
+          "description": "Type: string. Default: \"exact\".",
+          "title": "Top Domains Mode",
+          "type": "string"
+        },
+        "top_subdomains": {
+          "description": "Type: array.",
+          "items": {
+            "description": "Type: string.",
+            "type": "string"
+          },
+          "title": "Top Subdomains",
+          "type": "array"
+        },
+        "top_subdomains_mode": {
+          "default": "exact",
+          "description": "Type: string. Default: \"exact\".",
+          "title": "Top Subdomains Mode",
+          "type": "string"
+        }
+      },
+      "title": "StatsIgnoreConfig",
+      "type": "object"
+    },
+    "TrustAnchorEntry": {
+      "additionalProperties": false,
+      "description": "Brief: One operator trust anchor under server.dnssec.trust_anchors.\n\nInputs:\n  - zone: Zone apex (default '.').\n  - type: Optional 'dnskey' | 'ds' (inferred from fields when omitted).\n  - DNSKEY form: algorithm + public_key (flags/protocol optional).\n  - DS form: key_tag + algorithm + digest_type + digest.\n\nOutputs:\n  - TrustAnchorEntry model used by schema generation.",
+      "properties": {
+        "algorithm": {
+          "anyOf": [
+            {
+              "description": "Type: integer.",
+              "type": "integer"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "DNSKEY/DS algorithm number.",
+          "title": "Algorithm"
+        },
+        "comment": {
+          "anyOf": [
+            {
+              "description": "Type: string.",
+              "maxLength": 254,
+              "type": "string"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional human metadata string (max 254 characters).",
+          "title": "Comment"
+        },
+        "digest": {
+          "anyOf": [
+            {
+              "description": "Type: string.",
+              "type": "string"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "DS digest hex string.",
+          "title": "Digest"
+        },
+        "digest_alg": {
+          "anyOf": [
+            {
+              "description": "Type: integer.",
+              "type": "integer"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Alias for digest_type.",
+          "title": "Digest Alg"
+        },
+        "digest_type": {
+          "anyOf": [
+            {
+              "description": "Type: integer.",
+              "type": "integer"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "DS digest type (2=SHA-256).",
+          "title": "Digest Type"
+        },
+        "flags": {
+          "anyOf": [
+            {
+              "description": "Type: integer.",
+              "type": "integer"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": 257,
+          "description": "DNSKEY flags (default 257 KSK). Default: 257.",
+          "title": "Flags"
+        },
+        "id": {
+          "anyOf": [
+            {
+              "description": "Type: string.",
+              "maxLength": 254,
+              "type": "string"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional human metadata string (max 254 characters).",
+          "title": "Id"
+        },
+        "key_tag": {
+          "anyOf": [
+            {
+              "description": "Type: integer.",
+              "type": "integer"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "DS key tag.",
+          "title": "Key Tag"
+        },
+        "protocol": {
+          "anyOf": [
+            {
+              "description": "Type: integer.",
+              "type": "integer"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": 3,
+          "description": "DNSKEY protocol (always 3). Default: 3.",
+          "title": "Protocol"
+        },
+        "public_key": {
+          "anyOf": [
+            {
+              "description": "Type: string.",
+              "type": "string"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Base64 DNSKEY public key material.",
+          "title": "Public Key"
+        },
+        "public_key_b64": {
+          "anyOf": [
+            {
+              "description": "Type: string.",
+              "type": "string"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Alias for public_key.",
+          "title": "Public Key B64"
+        },
+        "type": {
+          "default": null,
+          "description": "Anchor kind; inferred from public_key vs digest when omitted.",
+          "enum": [
+            "dnskey",
+            "ds",
+            "key"
+          ],
+          "title": "Type",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "zone": {
+          "default": ".",
+          "description": "Zone apex for this trust anchor. Default: \".\".",
+          "title": "Zone",
+          "type": "string"
+        }
+      },
+      "title": "TrustAnchorEntry",
       "type": "object"
     },
     "TsigFeatureConfig": {
@@ -7949,7 +8832,7 @@
       "type": "object"
     },
     "TsigFeatureKeySource": {
-      "additionalProperties": true,
+      "additionalProperties": false,
       "description": "Brief: External key source under server.features.tsig.key_sources.\n\nInputs:\n  - type: Source type (required), e.g. file.\n  - path: Optional filesystem path for file sources.\n\nOutputs:\n  - TsigFeatureKeySource model.",
       "properties": {
         "comment": {
@@ -8067,7 +8950,7 @@
       "type": "object"
     },
     "UpstreamDoh": {
-      "additionalProperties": true,
+      "additionalProperties": false,
       "description": "Brief: DoH upstream endpoint.\n\nInputs:\n  - url: HTTPS DoH URL (required).\n  - method / headers / transport / shared fields.\n\nOutputs:\n  - UpstreamDoh model ($defs.upstream_doh).",
       "properties": {
         "abort_on_fail": {
@@ -8138,7 +9021,6 @@
           "anyOf": [
             {
               "description": "Type: string.",
-              "maxLength": 254,
               "type": "string"
             },
             {
@@ -8147,7 +9029,7 @@
             }
           ],
           "default": null,
-          "description": "Optional human metadata string (max 254 characters).",
+          "description": "Optional endpoint identifier for logs and health views.",
           "title": "Id"
         },
         "method": {
@@ -8222,7 +9104,7 @@
       "type": "object"
     },
     "UpstreamHost": {
-      "additionalProperties": true,
+      "additionalProperties": false,
       "description": "Brief: Host/port upstream endpoint (UDP/TCP/DoT-style).\n\nInputs:\n  - host: Upstream hostname or IP (required).\n  - port / transport / shared endpoint fields.\n\nOutputs:\n  - UpstreamHost model ($defs.upstream_host).",
       "properties": {
         "abort_on_fail": {
@@ -8280,7 +9162,6 @@
           "anyOf": [
             {
               "description": "Type: string.",
-              "maxLength": 254,
               "type": "string"
             },
             {
@@ -8289,7 +9170,7 @@
             }
           ],
           "default": null,
-          "description": "Optional human metadata string (max 254 characters).",
+          "description": "Optional endpoint identifier for logs and health views.",
           "title": "Id"
         },
         "notify": {
@@ -8624,7 +9505,7 @@
       "type": "object"
     },
     "UpstreamUrl": {
-      "additionalProperties": true,
+      "additionalProperties": false,
       "description": "Brief: URL-form upstream endpoint (udp/tcp/dot schemes).\n\nInputs:\n  - url: Endpoint URL with scheme (required).\n  - transport / shared endpoint fields.\n\nOutputs:\n  - UpstreamUrl model ($defs.upstream_url).",
       "properties": {
         "abort_on_fail": {
@@ -8677,7 +9558,6 @@
           "anyOf": [
             {
               "description": "Type: string.",
-              "maxLength": 254,
               "type": "string"
             },
             {
@@ -8686,7 +9566,7 @@
             }
           ],
           "default": null,
-          "description": "Optional human metadata string (max 254 characters).",
+          "description": "Optional endpoint identifier for logs and health views.",
           "title": "Id"
         },
         "notify": {
@@ -8756,7 +9636,7 @@
       "type": "object"
     },
     "UpstreamsBackup": {
-      "additionalProperties": true,
+      "additionalProperties": false,
       "description": "Brief: Backup upstream pool.\n\nInputs:\n  - endpoints: Backup endpoint list.\n  - Optional strategy overrides.\n\nOutputs:\n  - UpstreamsBackup model.",
       "properties": {
         "comment": {
@@ -9140,51 +10020,6 @@
         },
         "module": "foghorn.plugins.resolve.access_control.AccessControl"
       },
-      "dns_prefetch": {
-        "aliases": [
-          "dns_prefetch",
-          "prefetch"
-        ],
-        "config_schema": {
-          "additionalProperties": true,
-          "description": "Brief: Typed configuration model for DnsPrefetch.\n\nInputs:\n  - interval_seconds: How often to sample statistics and perform prefetch cycles.\n  - prefetch_top_n: Maximum number of domains considered per cycle based on\n    cache_hit_domains/top_domains statistics.\n  - max_consecutive_misses: Per-domain cap on consecutive prefetch cycles\n    without any observed cache hit; once exceeded, prefetching for that\n    domain is paused until a new cache hit is seen.\n  - qtypes: List of DNS qtype names to prefetch (e.g. [\"A\", \"AAAA\"]).\n\nOutputs:\n  - DnsPrefetchConfig instance with normalized field types.",
-          "properties": {
-            "interval_seconds": {
-              "default": 60.0,
-              "description": "Type: number. Default: 60.0.",
-              "minimum": 1.0,
-              "title": "Interval Seconds",
-              "type": "number"
-            },
-            "max_consecutive_misses": {
-              "default": 5,
-              "description": "Type: integer. Default: 5.",
-              "minimum": 1,
-              "title": "Max Consecutive Misses",
-              "type": "integer"
-            },
-            "prefetch_top_n": {
-              "default": 100,
-              "description": "Type: integer. Default: 100.",
-              "minimum": 1,
-              "title": "Prefetch Top N",
-              "type": "integer"
-            },
-            "qtypes": {
-              "description": "Type: array.",
-              "items": {
-                "description": "Type: string.",
-                "type": "string"
-              },
-              "title": "Qtypes",
-              "type": "array"
-            }
-          },
-          "title": "DnsPrefetchConfig",
-          "type": "object"
-        },
-        "module": "foghorn.plugins.resolve.examples.dns_prefetch.DnsPrefetch"
-      },
       "dns_rebinding": {
         "aliases": [
           "dns_rebinding",
@@ -9237,8 +10072,23 @@
         "config_schema": {
           "$defs": {
             "DockerEndpointConfig": {
-              "description": "Brief: Per-endpoint configuration for DockerHosts.\n\nIn addition to full container names and IDs, DockerHosts also exposes a\nshort container ID alias (the first 12 hex characters) for convenience.\n\nInputs:\n  - url: Docker endpoint URL (e.g. \"unix:///var/run/docker.sock\",\n    \"tcp://127.0.0.1:2375\").\n  - reload_interval_second: Interval in seconds between background refreshes\n    for this endpoint. When set to 0, the endpoint is only refreshed at\n    startup (or when other endpoints cause a global refresh).\n  - use_ipv4: Optional IPv4 address to use in answers instead of\n    per-container IPv4 addresses discovered from this endpoint.\n  - use_ipv6: Optional IPv6 address to use in answers instead of\n    per-container IPv6 addresses discovered from this endpoint.\n  - ttl: Optional TTL override for answers derived from this endpoint; when\n    omitted, the plugin-level ttl is used.\n  - suffix: Optional DNS suffix override for names sourced from this\n    endpoint. When omitted, the plugin-level suffix is used.\n  - tls_verify: When true, verify Docker daemon TLS certs for tcp://\n    endpoints. Requires tls_ca (fail closed; never skip verification).\n  - tls_cert: Optional client TLS certificate path.\n  - tls_key: Optional client TLS private-key path.\n  - tls_ca: CA bundle path used to verify the daemon cert when tls_verify\n    is true (required in that case).\n\nOutputs:\n  - DockerEndpointConfig instance with normalized field types.",
+              "description": "Brief: Per-endpoint configuration for DockerHosts.\n\nIn addition to full container names and IDs, DockerHosts also exposes a\nshort container ID alias (the first 12 hex characters) for convenience.\n\nInputs:\n  - id: Optional identifier for the endpoint.\n  - url: Docker endpoint URL (e.g. \"unix:///var/run/docker.sock\",\n    \"tcp://127.0.0.1:2375\").\n  - reload_interval_second: Interval in seconds between background refreshes\n    for this endpoint. When set to 0, the endpoint is only refreshed at\n    startup (or when other endpoints cause a global refresh).\n  - use_ipv4: Optional IPv4 address to use in answers instead of\n    per-container IPv4 addresses discovered from this endpoint.\n  - use_ipv6: Optional IPv6 address to use in answers instead of\n    per-container IPv6 addresses discovered from this endpoint.\n  - ttl: Optional TTL override for answers derived from this endpoint; when\n    omitted, the plugin-level ttl is used.\n  - suffix: Optional DNS suffix override for names sourced from this\n    endpoint. When omitted, the plugin-level suffix is used.\n  - tls_verify: When true, verify Docker daemon TLS certs for tcp://\n    endpoints. Requires tls_ca (fail closed; never skip verification).\n  - tls_cert: Optional client TLS certificate path.\n  - tls_key: Optional client TLS private-key path.\n  - tls_ca: CA bundle path used to verify the daemon cert when tls_verify\n    is true (required in that case).\n\nOutputs:\n  - DockerEndpointConfig instance with normalized field types.",
               "properties": {
+                "id": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Types: string, null.",
+                  "title": "Id"
+                },
                 "reload_interval_second": {
                   "default": 60.0,
                   "description": "Type: number. Default: 60.0.",
@@ -9429,13 +10279,6 @@
         "config_schema": null,
         "module": "foghorn.plugins.resolve.hosts_common.DynamicHostsPlugin"
       },
-      "echo": {
-        "aliases": [
-          "echo"
-        ],
-        "config_schema": null,
-        "module": "foghorn.plugins.resolve.examples.echo.Echo"
-      },
       "etc_hosts": {
         "aliases": [
           "/etc/hosts",
@@ -9508,60 +10351,6 @@
           "type": "object"
         },
         "module": "foghorn.plugins.resolve.etc_hosts.EtcHosts"
-      },
-      "examples": {
-        "aliases": [
-          "examples"
-        ],
-        "config_schema": {
-          "additionalProperties": true,
-          "description": "Brief: Typed configuration model for Examples.\n\nInputs:\n  - max_subdomains: Maximum allowed subdomain depth.\n  - max_length_no_dots: Maximum label length excluding dots.\n  - base_labels: Rightmost labels comprising the base domain.\n  - apply_to_qtypes: Qtypes this plugin applies to.\n  - rewrite_first_ipv4: List of rewrite rules.\n\nOutputs:\n  - ExamplesConfig instance with normalized field types.",
-          "properties": {
-            "apply_to_qtypes": {
-              "description": "Type: array.",
-              "items": {
-                "description": "Type: string.",
-                "type": "string"
-              },
-              "title": "Apply To Qtypes",
-              "type": "array"
-            },
-            "base_labels": {
-              "default": 2,
-              "description": "Type: integer. Default: 2.",
-              "minimum": 0,
-              "title": "Base Labels",
-              "type": "integer"
-            },
-            "max_length_no_dots": {
-              "default": 50,
-              "description": "Type: integer. Default: 50.",
-              "minimum": 0,
-              "title": "Max Length No Dots",
-              "type": "integer"
-            },
-            "max_subdomains": {
-              "default": 5,
-              "description": "Type: integer. Default: 5.",
-              "minimum": 0,
-              "title": "Max Subdomains",
-              "type": "integer"
-            },
-            "rewrite_first_ipv4": {
-              "description": "Type: array.",
-              "items": {
-                "additionalProperties": true,
-                "description": "Type: object.",
-                "type": "object"
-              },
-              "title": "Rewrite First Ipv4",
-              "type": "array"
-            }
-          },
-          "title": "ExamplesConfig",
-          "type": "object"
-        },
-        "module": "foghorn.plugins.resolve.examples.examples.Examples"
       },
       "file_downloader": {
         "aliases": [
@@ -9682,76 +10471,6 @@
           "type": "object"
         },
         "module": "foghorn.plugins.resolve.file_downloader.FileDownloader"
-      },
-      "file_over_dns": {
-        "aliases": [
-          "file_over_dns"
-        ],
-        "config_schema": {
-          "$defs": {
-            "FileOverDnsConfigEntry": {
-              "description": "Brief: Single file/name entry for FileOverDns configuration.\n\nInputs:\n  - file_path: Path to the file whose contents will be exposed over DNS.\n  - name: Short identifier used in qnames (e.g. \"crazy_file\").\n\nOutputs:\n  - FileOverDnsConfigEntry instance.",
-              "properties": {
-                "file_path": {
-                  "description": "Type: string.",
-                  "title": "File Path",
-                  "type": "string"
-                },
-                "name": {
-                  "description": "Type: string.",
-                  "title": "Name",
-                  "type": "string"
-                }
-              },
-              "required": [
-                "file_path",
-                "name"
-              ],
-              "title": "FileOverDnsConfigEntry",
-              "type": "object"
-            }
-          },
-          "additionalProperties": true,
-          "description": "Brief: Typed configuration model for FileOverDns.\n\nInputs:\n  - files: List of objects each containing:\n      * file_path (str): Path to a readable file.\n      * name (str): Short identifier used in DNS labels.\n  - ttl: TTL in seconds for TXT responses (default 300, >= 0).\n  - max_chunk_bytes: Maximum raw byte span (Y - X) to serve per query\n    before encoding, clamped to [1, 4096].\n  - format: Output format for TXT records; \"base64\" (default) or \"raw\".\n\nOutputs:\n  - FileOverDnsConfig instance with normalized field types.",
-          "properties": {
-            "files": {
-              "description": "Type: array.",
-              "items": {
-                "$ref": "#/$defs/FileOverDnsConfigEntry"
-              },
-              "title": "Files",
-              "type": "array"
-            },
-            "format": {
-              "default": "base64",
-              "description": "Type: string. Valid values: \"base64\", \"raw\". Default: \"base64\".",
-              "enum": [
-                "base64",
-                "raw"
-              ],
-              "title": "Format",
-              "type": "string"
-            },
-            "max_chunk_bytes": {
-              "default": 4096,
-              "description": "Type: integer. Default: 4096.",
-              "maximum": 4096,
-              "minimum": 1,
-              "title": "Max Chunk Bytes",
-              "type": "integer"
-            },
-            "ttl": {
-              "default": 300,
-              "description": "Type: integer. Default: 300.",
-              "minimum": 0,
-              "title": "Ttl",
-              "type": "integer"
-            }
-          },
-          "title": "FileOverDnsConfig",
-          "type": "object"
-        },
-        "module": "foghorn.plugins.resolve.examples.file_over_dns.FileOverDns"
       },
       "filter": {
         "aliases": [
@@ -10067,75 +10786,6 @@
         },
         "module": "foghorn.plugins.resolve.filter.Filter"
       },
-      "finger": {
-        "aliases": [
-          "finger"
-        ],
-        "config_schema": {
-          "additionalProperties": true,
-          "description": "Brief: Typed configuration model for the Finger resolve plugin.\n\nInputs:\n  - domain: DNS suffix under which to expose finger answers. A query name of\n    the form ``<user>.<domain>`` will be handled when qtype=TXT.\n  - max_size: Maximum number of bytes to read from ``$HOME/.finger``; any\n    extra content is silently truncated.\n  - location: Optional filesystem template for finger files. When set, this\n    string should contain a ``\"%u\"`` placeholder which will be replaced with\n    the queried username (for example, ``\"/home/%u/.finger\"`` or\n    ``\"/data/finger/%u\"``) and that path will be used instead of\n    ``$HOME/.finger``.\n  - policy: Default policy when a user is not mentioned in allow/deny lists.\n    Accepted values (case-insensitive): \"allow\" (default) or \"deny\".\n  - allow_users: Optional list of usernames that should always be allowed.\n  - deny_users: Optional list of usernames that should always be denied.\n\nOutputs:\n  - FingerConfig instance with normalized field types.",
-          "properties": {
-            "allow_users": {
-              "description": "Type: array.",
-              "items": {
-                "description": "Type: string.",
-                "type": "string"
-              },
-              "title": "Allow Users",
-              "type": "array"
-            },
-            "deny_users": {
-              "description": "Type: array.",
-              "items": {
-                "description": "Type: string.",
-                "type": "string"
-              },
-              "title": "Deny Users",
-              "type": "array"
-            },
-            "domain": {
-              "description": "Type: string.",
-              "title": "Domain",
-              "type": "string"
-            },
-            "location": {
-              "anyOf": [
-                {
-                  "description": "Type: string.",
-                  "type": "string"
-                },
-                {
-                  "description": "Type: null.",
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Types: string, null.",
-              "title": "Location"
-            },
-            "max_size": {
-              "default": 1024,
-              "description": "Type: integer. Default: 1024.",
-              "maximum": 65536,
-              "minimum": 1,
-              "title": "Max Size",
-              "type": "integer"
-            },
-            "policy": {
-              "default": "allow",
-              "description": "Type: string. Default: \"allow\".",
-              "title": "Policy",
-              "type": "string"
-            }
-          },
-          "required": [
-            "domain"
-          ],
-          "title": "FingerConfig",
-          "type": "object"
-        },
-        "module": "foghorn.plugins.resolve.examples.finger.Finger"
-      },
       "flaky_server": {
         "aliases": [
           "buggy",
@@ -10280,63 +10930,6 @@
           "type": "object"
         },
         "module": "foghorn.plugins.resolve.flaky_server.FlakyServer"
-      },
-      "greylist_example": {
-        "aliases": [
-          "greylist_example"
-        ],
-        "config_schema": {
-          "additionalProperties": true,
-          "description": "Brief: Typed configuration model for GreylistExample.\n\nInputs:\n  - duration_seconds: Greylist window in seconds.\n  - duration_hours: Legacy hours-based window.\n  - db_path: Path to sqlite DB.\n  - cache_ttl_seconds: TTL for in-memory cache.\n  - cache_max_entries: Max entries in cache.\n\nOutputs:\n  - GreylistConfig instance with normalized field types.",
-          "properties": {
-            "cache_max_entries": {
-              "default": 100000,
-              "description": "Type: integer. Default: 100000.",
-              "minimum": 0,
-              "title": "Cache Max Entries",
-              "type": "integer"
-            },
-            "cache_ttl_seconds": {
-              "default": 300,
-              "description": "Type: integer. Default: 300.",
-              "minimum": 0,
-              "title": "Cache Ttl Seconds",
-              "type": "integer"
-            },
-            "db_path": {
-              "default": "./config/var/greylist.db",
-              "description": "Type: string. Default: \"./config/var/greylist.db\".",
-              "title": "Db Path",
-              "type": "string"
-            },
-            "duration_hours": {
-              "default": 24,
-              "description": "Type: integer. Default: 24.",
-              "minimum": 0,
-              "title": "Duration Hours",
-              "type": "integer"
-            },
-            "duration_seconds": {
-              "anyOf": [
-                {
-                  "description": "Type: integer.",
-                  "minimum": 0,
-                  "type": "integer"
-                },
-                {
-                  "description": "Type: null.",
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Types: integer, null.",
-              "title": "Duration Seconds"
-            }
-          },
-          "title": "GreylistConfig",
-          "type": "object"
-        },
-        "module": "foghorn.plugins.resolve.examples.greylist.GreylistExample"
       },
       "kubernetes_hosts": {
         "aliases": [
@@ -11067,50 +11660,6 @@
           "type": "object"
         },
         "module": "foghorn.plugins.resolve.mdns.MdnsBridge"
-      },
-      "new_domain_filter_example": {
-        "aliases": [
-          "ndf",
-          "new_domain",
-          "new_domain_filter",
-          "new_domain_filter_example"
-        ],
-        "config_schema": {
-          "additionalProperties": true,
-          "description": "Brief: Typed configuration model for NewDomainFilterExample.\n\nInputs:\n  - threshold_days: Minimum allowed domain age in days.\n  - whois_db_path: Path to WHOIS cache DB.\n  - whois_cache_ttl_seconds: In-memory cache TTL.\n  - whois_refresh_seconds: Max age of DB entries before refresh.\n\nOutputs:\n  - NewDomainFilterExampleConfig instance with normalized field types.",
-          "properties": {
-            "threshold_days": {
-              "default": 7,
-              "description": "Type: integer. Default: 7.",
-              "minimum": 0,
-              "title": "Threshold Days",
-              "type": "integer"
-            },
-            "whois_cache_ttl_seconds": {
-              "default": 3600,
-              "description": "Type: integer. Default: 3600.",
-              "minimum": 0,
-              "title": "Whois Cache Ttl Seconds",
-              "type": "integer"
-            },
-            "whois_db_path": {
-              "default": "./config/var/whois_cache.db",
-              "description": "Type: string. Default: \"./config/var/whois_cache.db\".",
-              "title": "Whois Db Path",
-              "type": "string"
-            },
-            "whois_refresh_seconds": {
-              "default": 86400,
-              "description": "Type: integer. Default: 86400.",
-              "minimum": 0,
-              "title": "Whois Refresh Seconds",
-              "type": "integer"
-            }
-          },
-          "title": "NewDomainFilterExampleConfig",
-          "type": "object"
-        },
-        "module": "foghorn.plugins.resolve.examples.new_domain_filter.NewDomainFilterExample"
       },
       "proxmox_hosts": {
         "aliases": [
@@ -13345,7 +13894,7 @@
       }
     },
     "upstream_doh": {
-      "additionalProperties": true,
+      "additionalProperties": false,
       "description": "Brief: DoH upstream endpoint.\n\nInputs:\n  - url: HTTPS DoH URL (required).\n  - method / headers / transport / shared fields.\n\nOutputs:\n  - UpstreamDoh model ($defs.upstream_doh).",
       "properties": {
         "abort_on_fail": {
@@ -13416,7 +13965,6 @@
           "anyOf": [
             {
               "description": "Type: string.",
-              "maxLength": 254,
               "type": "string"
             },
             {
@@ -13425,7 +13973,7 @@
             }
           ],
           "default": null,
-          "description": "Optional human metadata string (max 254 characters).",
+          "description": "Optional endpoint identifier for logs and health views.",
           "title": "Id"
         },
         "method": {
@@ -13500,7 +14048,7 @@
       "type": "object"
     },
     "upstream_host": {
-      "additionalProperties": true,
+      "additionalProperties": false,
       "description": "Brief: Host/port upstream endpoint (UDP/TCP/DoT-style).\n\nInputs:\n  - host: Upstream hostname or IP (required).\n  - port / transport / shared endpoint fields.\n\nOutputs:\n  - UpstreamHost model ($defs.upstream_host).",
       "properties": {
         "abort_on_fail": {
@@ -13558,7 +14106,6 @@
           "anyOf": [
             {
               "description": "Type: string.",
-              "maxLength": 254,
               "type": "string"
             },
             {
@@ -13567,7 +14114,7 @@
             }
           ],
           "default": null,
-          "description": "Optional human metadata string (max 254 characters).",
+          "description": "Optional endpoint identifier for logs and health views.",
           "title": "Id"
         },
         "notify": {
@@ -13648,7 +14195,7 @@
       "type": "object"
     },
     "upstream_url": {
-      "additionalProperties": true,
+      "additionalProperties": false,
       "description": "Brief: URL-form upstream endpoint (udp/tcp/dot schemes).\n\nInputs:\n  - url: Endpoint URL with scheme (required).\n  - transport / shared endpoint fields.\n\nOutputs:\n  - UpstreamUrl model ($defs.upstream_url).",
       "properties": {
         "abort_on_fail": {
@@ -13701,7 +14248,6 @@
           "anyOf": [
             {
               "description": "Type: string.",
-              "maxLength": 254,
               "type": "string"
             },
             {
@@ -13710,7 +14256,7 @@
             }
           ],
           "default": null,
-          "description": "Optional human metadata string (max 254 characters).",
+          "description": "Optional endpoint identifier for logs and health views.",
           "title": "Id"
         },
         "notify": {
@@ -14017,7 +14563,7 @@
           "title": "Max Logging Queue"
         },
         "python": {
-          "additionalProperties": true,
+          "additionalProperties": false,
           "default": null,
           "description": "Python logging configuration (file/level/stderr/syslog).",
           "properties": {
@@ -14572,7 +15118,7 @@
                 "type": "boolean"
               },
               "hooks": {
-                "additionalProperties": true,
+                "additionalProperties": false,
                 "default": null,
                 "description": "Per-hook enablement/priorities (pre_resolve/post_resolve).",
                 "properties": {
@@ -14615,7 +15161,7 @@
                         "type": "integer"
                       },
                       {
-                        "additionalProperties": true,
+                        "additionalProperties": false,
                         "description": "Brief: Mapping form of a single plugin hook priority.\n\nInputs:\n  - priority: Optional integer priority for this hook.\n\nOutputs:\n  - Object accepted as hooks.pre_resolve / post_resolve / setup.",
                         "properties": {
                           "comment": {
@@ -14685,7 +15231,7 @@
                         "type": "integer"
                       },
                       {
-                        "additionalProperties": true,
+                        "additionalProperties": false,
                         "description": "Brief: Mapping form of a single plugin hook priority.\n\nInputs:\n  - priority: Optional integer priority for this hook.\n\nOutputs:\n  - Object accepted as hooks.pre_resolve / post_resolve / setup.",
                         "properties": {
                           "comment": {
@@ -14770,7 +15316,7 @@
                         "type": "integer"
                       },
                       {
-                        "additionalProperties": true,
+                        "additionalProperties": false,
                         "description": "Brief: Mapping form of a single plugin hook priority.\n\nInputs:\n  - priority: Optional integer priority for this hook.\n\nOutputs:\n  - Object accepted as hooks.pre_resolve / post_resolve / setup.",
                         "properties": {
                           "comment": {
@@ -14856,7 +15402,7 @@
                 "title": "Id"
               },
               "logging": {
-                "additionalProperties": true,
+                "additionalProperties": false,
                 "default": null,
                 "description": "Per-plugin logging overrides.",
                 "properties": {
@@ -14891,6 +15437,51 @@
                     "default": null,
                     "description": "Optional human metadata string (max 254 characters).",
                     "title": "Id"
+                  },
+                  "level": {
+                    "anyOf": [
+                      {
+                        "description": "Type: string.",
+                        "type": "string"
+                      },
+                      {
+                        "description": "Type: null.",
+                        "type": "null"
+                      }
+                    ],
+                    "default": null,
+                    "description": "Types: string, null.",
+                    "title": "Level"
+                  },
+                  "logger": {
+                    "anyOf": [
+                      {
+                        "description": "Type: string.",
+                        "type": "string"
+                      },
+                      {
+                        "description": "Type: null.",
+                        "type": "null"
+                      }
+                    ],
+                    "default": null,
+                    "description": "Types: string, null.",
+                    "title": "Logger"
+                  },
+                  "name": {
+                    "anyOf": [
+                      {
+                        "description": "Type: string.",
+                        "type": "string"
+                      },
+                      {
+                        "description": "Type: null.",
+                        "type": "null"
+                      }
+                    ],
+                    "default": null,
+                    "description": "Types: string, null.",
+                    "title": "Name"
                   }
                 },
                 "type": [
@@ -14899,10 +15490,40 @@
                 ]
               },
               "setup": {
-                "additionalProperties": true,
+                "additionalProperties": false,
                 "default": null,
                 "description": "Setup-phase behaviour (enabled/priority/abort_on_failure).",
                 "properties": {
+                  "abort_on_fail": {
+                    "anyOf": [
+                      {
+                        "description": "Type: boolean.",
+                        "type": "boolean"
+                      },
+                      {
+                        "description": "Type: null.",
+                        "type": "null"
+                      }
+                    ],
+                    "default": null,
+                    "description": "Types: boolean, null.",
+                    "title": "Abort On Fail"
+                  },
+                  "abort_on_failure": {
+                    "anyOf": [
+                      {
+                        "description": "Type: boolean.",
+                        "type": "boolean"
+                      },
+                      {
+                        "description": "Type: null.",
+                        "type": "null"
+                      }
+                    ],
+                    "default": null,
+                    "description": "Types: boolean, null.",
+                    "title": "Abort On Failure"
+                  },
                   "comment": {
                     "anyOf": [
                       {
@@ -14919,6 +15540,21 @@
                     "description": "Optional human metadata string (max 254 characters).",
                     "title": "Comment"
                   },
+                  "enabled": {
+                    "anyOf": [
+                      {
+                        "description": "Type: boolean.",
+                        "type": "boolean"
+                      },
+                      {
+                        "description": "Type: null.",
+                        "type": "null"
+                      }
+                    ],
+                    "default": null,
+                    "description": "Types: boolean, null.",
+                    "title": "Enabled"
+                  },
                   "id": {
                     "anyOf": [
                       {
@@ -14934,6 +15570,21 @@
                     "default": null,
                     "description": "Optional human metadata string (max 254 characters).",
                     "title": "Id"
+                  },
+                  "priority": {
+                    "anyOf": [
+                      {
+                        "description": "Type: integer.",
+                        "type": "integer"
+                      },
+                      {
+                        "description": "Type: null.",
+                        "type": "null"
+                      }
+                    ],
+                    "default": null,
+                    "description": "Types: integer, null.",
+                    "title": "Priority"
                   }
                 },
                 "type": [
@@ -15005,7 +15656,7 @@
             "type": "boolean"
           },
           "hooks": {
-            "additionalProperties": true,
+            "additionalProperties": false,
             "default": null,
             "description": "Per-hook enablement/priorities (pre_resolve/post_resolve).",
             "properties": {
@@ -15048,7 +15699,7 @@
                     "type": "integer"
                   },
                   {
-                    "additionalProperties": true,
+                    "additionalProperties": false,
                     "description": "Brief: Mapping form of a single plugin hook priority.\n\nInputs:\n  - priority: Optional integer priority for this hook.\n\nOutputs:\n  - Object accepted as hooks.pre_resolve / post_resolve / setup.",
                     "properties": {
                       "comment": {
@@ -15118,7 +15769,7 @@
                     "type": "integer"
                   },
                   {
-                    "additionalProperties": true,
+                    "additionalProperties": false,
                     "description": "Brief: Mapping form of a single plugin hook priority.\n\nInputs:\n  - priority: Optional integer priority for this hook.\n\nOutputs:\n  - Object accepted as hooks.pre_resolve / post_resolve / setup.",
                     "properties": {
                       "comment": {
@@ -15203,7 +15854,7 @@
                     "type": "integer"
                   },
                   {
-                    "additionalProperties": true,
+                    "additionalProperties": false,
                     "description": "Brief: Mapping form of a single plugin hook priority.\n\nInputs:\n  - priority: Optional integer priority for this hook.\n\nOutputs:\n  - Object accepted as hooks.pre_resolve / post_resolve / setup.",
                     "properties": {
                       "comment": {
@@ -15289,7 +15940,7 @@
             "title": "Id"
           },
           "logging": {
-            "additionalProperties": true,
+            "additionalProperties": false,
             "default": null,
             "description": "Per-plugin logging overrides.",
             "properties": {
@@ -15324,6 +15975,51 @@
                 "default": null,
                 "description": "Optional human metadata string (max 254 characters).",
                 "title": "Id"
+              },
+              "level": {
+                "anyOf": [
+                  {
+                    "description": "Type: string.",
+                    "type": "string"
+                  },
+                  {
+                    "description": "Type: null.",
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Types: string, null.",
+                "title": "Level"
+              },
+              "logger": {
+                "anyOf": [
+                  {
+                    "description": "Type: string.",
+                    "type": "string"
+                  },
+                  {
+                    "description": "Type: null.",
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Types: string, null.",
+                "title": "Logger"
+              },
+              "name": {
+                "anyOf": [
+                  {
+                    "description": "Type: string.",
+                    "type": "string"
+                  },
+                  {
+                    "description": "Type: null.",
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Types: string, null.",
+                "title": "Name"
               }
             },
             "type": [
@@ -15332,10 +16028,40 @@
             ]
           },
           "setup": {
-            "additionalProperties": true,
+            "additionalProperties": false,
             "default": null,
             "description": "Setup-phase behaviour (enabled/priority/abort_on_failure).",
             "properties": {
+              "abort_on_fail": {
+                "anyOf": [
+                  {
+                    "description": "Type: boolean.",
+                    "type": "boolean"
+                  },
+                  {
+                    "description": "Type: null.",
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Types: boolean, null.",
+                "title": "Abort On Fail"
+              },
+              "abort_on_failure": {
+                "anyOf": [
+                  {
+                    "description": "Type: boolean.",
+                    "type": "boolean"
+                  },
+                  {
+                    "description": "Type: null.",
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Types: boolean, null.",
+                "title": "Abort On Failure"
+              },
               "comment": {
                 "anyOf": [
                   {
@@ -15352,6 +16078,21 @@
                 "description": "Optional human metadata string (max 254 characters).",
                 "title": "Comment"
               },
+              "enabled": {
+                "anyOf": [
+                  {
+                    "description": "Type: boolean.",
+                    "type": "boolean"
+                  },
+                  {
+                    "description": "Type: null.",
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Types: boolean, null.",
+                "title": "Enabled"
+              },
               "id": {
                 "anyOf": [
                   {
@@ -15367,6 +16108,21 @@
                 "default": null,
                 "description": "Optional human metadata string (max 254 characters).",
                 "title": "Id"
+              },
+              "priority": {
+                "anyOf": [
+                  {
+                    "description": "Type: integer.",
+                    "type": "integer"
+                  },
+                  {
+                    "description": "Type: null.",
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Types: integer, null.",
+                "title": "Priority"
               }
             },
             "type": [
@@ -15393,7 +16149,7 @@
       "description": "Core server configuration block.",
       "properties": {
         "axfr": {
-          "additionalProperties": true,
+          "additionalProperties": false,
           "default": null,
           "description": "Brief: server.axfr zone-transfer controls.",
           "properties": {
@@ -15551,8 +16307,8 @@
                 "key_sources": {
                   "description": "Type: array.",
                   "items": {
-                    "additionalProperties": true,
-                    "description": "Brief: External TSIG key source entry under server.axfr.tsig.key_sources.\n\nInputs:\n  - type: Source type (required), e.g. file.\n  - path: Optional filesystem path for file sources.\n  - Additional source-specific keys allowed.\n\nOutputs:\n  - AxfrTsigKeySource model.",
+                    "additionalProperties": false,
+                    "description": "Brief: External TSIG key source entry under server.axfr.tsig.key_sources.\n\nInputs:\n  - type: Source type (required), e.g. file.\n  - path: Optional filesystem path for file sources.\n\nOutputs:\n  - AxfrTsigKeySource model.",
                     "properties": {
                       "comment": {
                         "anyOf": [
@@ -15761,7 +16517,7 @@
         "cache": {
           "anyOf": [
             {
-              "additionalProperties": true,
+              "additionalProperties": false,
               "description": "Brief: server.cache DNS cache selection and decorated overrides.",
               "properties": {
                 "comment": {
@@ -15793,7 +16549,7 @@
                     }
                   ],
                   "default": null,
-                  "description": "Types: object, null.",
+                  "description": "Opaque cache-backend configuration mapping.",
                   "title": "Config"
                 },
                 "decorated_overrides": {
@@ -15917,8 +16673,132 @@
                     }
                   ],
                   "default": null,
-                  "description": "Types: array, null.",
+                  "description": "Deprecated alias for func_caches.",
                   "title": "Decorated Overrides"
+                },
+                "func_caches": {
+                  "anyOf": [
+                    {
+                      "description": "Type: array.",
+                      "items": {
+                        "additionalProperties": false,
+                        "description": "Brief: Runtime override for a decorated helper cache.\n\nInputs:\n  - module / name: Target callable identity (required).\n  - backend / ttl / maxsize / reset_on_ttl_change: Optional overrides.\n\nOutputs:\n  - DecoratedCacheOverride model ($defs.DecoratedCacheOverride).",
+                        "properties": {
+                          "backend": {
+                            "default": null,
+                            "description": "Optional backend filter (ttlcache, lru_cache, foghorn_ttl, sqlite_ttl, lfu_cache, or rr_cache).",
+                            "enum": [
+                              "ttlcache",
+                              "lru_cache",
+                              "foghorn_ttl",
+                              "sqlite_ttl",
+                              "lfu_cache",
+                              "rr_cache"
+                            ],
+                            "title": "Backend",
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "comment": {
+                            "anyOf": [
+                              {
+                                "description": "Type: string.",
+                                "maxLength": 254,
+                                "type": "string"
+                              },
+                              {
+                                "description": "Type: null.",
+                                "type": "null"
+                              }
+                            ],
+                            "default": null,
+                            "description": "Optional human metadata string (max 254 characters).",
+                            "title": "Comment"
+                          },
+                          "id": {
+                            "anyOf": [
+                              {
+                                "description": "Type: string.",
+                                "maxLength": 254,
+                                "type": "string"
+                              },
+                              {
+                                "description": "Type: null.",
+                                "type": "null"
+                              }
+                            ],
+                            "default": null,
+                            "description": "Optional human metadata string (max 254 characters).",
+                            "title": "Id"
+                          },
+                          "maxsize": {
+                            "anyOf": [
+                              {
+                                "description": "Type: integer.",
+                                "minimum": 0,
+                                "type": "integer"
+                              },
+                              {
+                                "description": "Type: null.",
+                                "type": "null"
+                              }
+                            ],
+                            "default": null,
+                            "description": "Types: integer, null.",
+                            "title": "Maxsize"
+                          },
+                          "module": {
+                            "description": "Fully-qualified module name of the decorated function (e.g. 'foghorn.dnssec.dnssec_validate').",
+                            "title": "Module",
+                            "type": "string"
+                          },
+                          "name": {
+                            "description": "Function name / qualified name for the decorated callable (e.g. '_find_zone_apex_cached').",
+                            "title": "Name",
+                            "type": "string"
+                          },
+                          "reset_on_ttl_change": {
+                            "default": false,
+                            "description": "Type: boolean. Default: false.",
+                            "title": "Reset On Ttl Change",
+                            "type": "boolean"
+                          },
+                          "ttl": {
+                            "anyOf": [
+                              {
+                                "description": "Type: integer.",
+                                "minimum": 0,
+                                "type": "integer"
+                              },
+                              {
+                                "description": "Type: null.",
+                                "type": "null"
+                              }
+                            ],
+                            "default": null,
+                            "description": "Types: integer, null.",
+                            "title": "Ttl"
+                          }
+                        },
+                        "required": [
+                          "module",
+                          "name"
+                        ],
+                        "title": "DecoratedCacheOverride",
+                        "type": "object"
+                      },
+                      "type": "array"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Decorated helper cache overrides (preferred key).",
+                  "title": "Func Caches"
                 },
                 "id": {
                   "anyOf": [
@@ -16057,7 +16937,7 @@
                     }
                   ],
                   "default": null,
-                  "description": "Types: array, null.",
+                  "description": "Deprecated alias for func_caches.",
                   "title": "Modify"
                 },
                 "module": {
@@ -16124,9 +17004,9 @@
           "title": "Data Root"
         },
         "dnssec": {
-          "additionalProperties": true,
+          "additionalProperties": false,
           "default": null,
-          "description": "Brief: server.dnssec configuration.\n\nInputs:\n  - Open mapping for DNSSEC knobs (validation/signing/payload size, etc.).\n  - Common keys include mode, validation, udp_payload_size, and for RFC 5011\n    trust-anchor management: trust_anchor_mode, trust_anchor_store_path.\n\nOutputs:\n  - Permissive dnssec object; detailed constraints live in runtime code.",
+          "description": "Brief: server.dnssec configuration.\n\nInputs:\n  - mode / validation / udp_payload_size for EDNS and validation strategy.\n  - trust_anchor_mode / trust_anchor_store_path / hold-downs for RFC 5011.\n  - trust_anchors: optional static DNSKEY/DS anchors (root or islands).\n\nOutputs:\n  - Permissive dnssec object; runtime applies knobs via dnssec_validate.",
           "properties": {
             "comment": {
               "anyOf": [
@@ -16144,6 +17024,38 @@
               "description": "Optional human metadata string (max 254 characters).",
               "title": "Comment"
             },
+            "hold_down_add_days": {
+              "anyOf": [
+                {
+                  "description": "Type: integer.",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "description": "Type: null.",
+                  "type": "null"
+                }
+              ],
+              "default": 2,
+              "description": "RFC 5011: days a new KSK must remain present before promotion from pending_add to trusted. Default: 2.",
+              "title": "Hold Down Add Days"
+            },
+            "hold_down_remove_days": {
+              "anyOf": [
+                {
+                  "description": "Type: integer.",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "description": "Type: null.",
+                  "type": "null"
+                }
+              ],
+              "default": 2,
+              "description": "RFC 5011: days a missing/revoked KSK must remain absent before removal from the trusted set. Default: 2.",
+              "title": "Hold Down Remove Days"
+            },
             "id": {
               "anyOf": [
                 {
@@ -16160,6 +17072,33 @@
               "description": "Optional human metadata string (max 254 characters).",
               "title": "Id"
             },
+            "mode": {
+              "default": "ignore",
+              "description": "DNSSEC mode: ignore | passthrough | validate. Default: \"ignore\".",
+              "enum": [
+                "ignore",
+                "passthrough",
+                "validate"
+              ],
+              "title": "Mode",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "trust_anchor_mode": {
+              "default": "static",
+              "description": "static uses baked-in root KSK (+ trust_anchors); rfc5011 enables automated root trust-anchor management (requires store path). Default: \"static\".",
+              "enum": [
+                "static",
+                "rfc5011"
+              ],
+              "title": "Trust Anchor Mode",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "trust_anchor_store_path": {
               "anyOf": [
                 {
@@ -16174,6 +17113,247 @@
               "default": null,
               "description": "Filesystem path for the RFC 5011 trust-anchor JSON store. When server.data_root is set, must resolve under that directory.",
               "title": "Trust Anchor Store Path"
+            },
+            "trust_anchors": {
+              "anyOf": [
+                {
+                  "description": "Type: array.",
+                  "items": {
+                    "additionalProperties": false,
+                    "description": "Brief: One operator trust anchor under server.dnssec.trust_anchors.\n\nInputs:\n  - zone: Zone apex (default '.').\n  - type: Optional 'dnskey' | 'ds' (inferred from fields when omitted).\n  - DNSKEY form: algorithm + public_key (flags/protocol optional).\n  - DS form: key_tag + algorithm + digest_type + digest.\n\nOutputs:\n  - TrustAnchorEntry model used by schema generation.",
+                    "properties": {
+                      "algorithm": {
+                        "anyOf": [
+                          {
+                            "description": "Type: integer.",
+                            "type": "integer"
+                          },
+                          {
+                            "description": "Type: null.",
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "DNSKEY/DS algorithm number.",
+                        "title": "Algorithm"
+                      },
+                      "comment": {
+                        "anyOf": [
+                          {
+                            "description": "Type: string.",
+                            "maxLength": 254,
+                            "type": "string"
+                          },
+                          {
+                            "description": "Type: null.",
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "Optional human metadata string (max 254 characters).",
+                        "title": "Comment"
+                      },
+                      "digest": {
+                        "anyOf": [
+                          {
+                            "description": "Type: string.",
+                            "type": "string"
+                          },
+                          {
+                            "description": "Type: null.",
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "DS digest hex string.",
+                        "title": "Digest"
+                      },
+                      "digest_alg": {
+                        "anyOf": [
+                          {
+                            "description": "Type: integer.",
+                            "type": "integer"
+                          },
+                          {
+                            "description": "Type: null.",
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "Alias for digest_type.",
+                        "title": "Digest Alg"
+                      },
+                      "digest_type": {
+                        "anyOf": [
+                          {
+                            "description": "Type: integer.",
+                            "type": "integer"
+                          },
+                          {
+                            "description": "Type: null.",
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "DS digest type (2=SHA-256).",
+                        "title": "Digest Type"
+                      },
+                      "flags": {
+                        "anyOf": [
+                          {
+                            "description": "Type: integer.",
+                            "type": "integer"
+                          },
+                          {
+                            "description": "Type: null.",
+                            "type": "null"
+                          }
+                        ],
+                        "default": 257,
+                        "description": "DNSKEY flags (default 257 KSK). Default: 257.",
+                        "title": "Flags"
+                      },
+                      "id": {
+                        "anyOf": [
+                          {
+                            "description": "Type: string.",
+                            "maxLength": 254,
+                            "type": "string"
+                          },
+                          {
+                            "description": "Type: null.",
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "Optional human metadata string (max 254 characters).",
+                        "title": "Id"
+                      },
+                      "key_tag": {
+                        "anyOf": [
+                          {
+                            "description": "Type: integer.",
+                            "type": "integer"
+                          },
+                          {
+                            "description": "Type: null.",
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "DS key tag.",
+                        "title": "Key Tag"
+                      },
+                      "protocol": {
+                        "anyOf": [
+                          {
+                            "description": "Type: integer.",
+                            "type": "integer"
+                          },
+                          {
+                            "description": "Type: null.",
+                            "type": "null"
+                          }
+                        ],
+                        "default": 3,
+                        "description": "DNSKEY protocol (always 3). Default: 3.",
+                        "title": "Protocol"
+                      },
+                      "public_key": {
+                        "anyOf": [
+                          {
+                            "description": "Type: string.",
+                            "type": "string"
+                          },
+                          {
+                            "description": "Type: null.",
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "Base64 DNSKEY public key material.",
+                        "title": "Public Key"
+                      },
+                      "public_key_b64": {
+                        "anyOf": [
+                          {
+                            "description": "Type: string.",
+                            "type": "string"
+                          },
+                          {
+                            "description": "Type: null.",
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "Alias for public_key.",
+                        "title": "Public Key B64"
+                      },
+                      "type": {
+                        "default": null,
+                        "description": "Anchor kind; inferred from public_key vs digest when omitted.",
+                        "enum": [
+                          "dnskey",
+                          "ds",
+                          "key"
+                        ],
+                        "title": "Type",
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "zone": {
+                        "default": ".",
+                        "description": "Zone apex for this trust anchor. Default: \".\".",
+                        "title": "Zone",
+                        "type": "string"
+                      }
+                    },
+                    "title": "TrustAnchorEntry",
+                    "type": "object"
+                  },
+                  "type": "array"
+                },
+                {
+                  "description": "Type: null.",
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional static DNSKEY and/or DS trust anchors. DNSKEY entries for '.' supplement the root anchors; non-root DNSKEY/DS entries create islands of trust for local validation.",
+              "title": "Trust Anchors"
+            },
+            "udp_payload_size": {
+              "anyOf": [
+                {
+                  "description": "Type: integer.",
+                  "maximum": 65535,
+                  "minimum": 512,
+                  "type": "integer"
+                },
+                {
+                  "description": "Type: null.",
+                  "type": "null"
+                }
+              ],
+              "default": 1232,
+              "description": "Default EDNS UDP payload size. Default: 1232.",
+              "title": "Udp Payload Size"
+            },
+            "validation": {
+              "default": "upstream_ad",
+              "description": "When mode=validate: upstream_ad trusts upstream AD bit; local/local_extended perform local chain validation. Default: \"upstream_ad\".",
+              "enum": [
+                "upstream_ad",
+                "local",
+                "local_extended"
+              ],
+              "title": "Validation",
+              "type": [
+                "string",
+                "null"
+              ]
             }
           },
           "type": [
@@ -16528,7 +17708,7 @@
                 "key_sources": {
                   "description": "Type: array.",
                   "items": {
-                    "additionalProperties": true,
+                    "additionalProperties": false,
                     "description": "Brief: External key source under server.features.tsig.key_sources.\n\nInputs:\n  - type: Source type (required), e.g. file.\n  - path: Optional filesystem path for file sources.\n\nOutputs:\n  - TsigFeatureKeySource model.",
                     "properties": {
                       "comment": {
@@ -16721,21 +17901,254 @@
           "title": "Forward Local"
         },
         "http": {
-          "additionalProperties": true,
+          "additionalProperties": false,
           "default": null,
           "description": "Brief: Admin HTTP server configuration under server.http.",
           "properties": {
+            "admin_rate_limit": {
+              "additionalProperties": false,
+              "default": null,
+              "description": "Brief: server.http.admin_rate_limit settings.",
+              "properties": {
+                "backend": {
+                  "default": "plugin",
+                  "description": "Type: string. Valid values: \"plugin\", \"memory\". Default: \"plugin\".",
+                  "enum": [
+                    "plugin",
+                    "memory"
+                  ],
+                  "title": "Backend",
+                  "type": "string"
+                },
+                "burst": {
+                  "default": 0,
+                  "description": "Type: integer. Default: 0.",
+                  "minimum": 0,
+                  "title": "Burst",
+                  "type": "integer"
+                },
+                "comment": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "maxLength": 254,
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Optional human metadata string (max 254 characters).",
+                  "title": "Comment"
+                },
+                "enabled": {
+                  "default": true,
+                  "description": "Type: boolean. Default: true.",
+                  "title": "Enabled",
+                  "type": "boolean"
+                },
+                "excluded_actions": {
+                  "description": "Type: array.",
+                  "items": {
+                    "description": "Type: string.",
+                    "type": "string"
+                  },
+                  "title": "Excluded Actions",
+                  "type": "array"
+                },
+                "id": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "maxLength": 254,
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Optional human metadata string (max 254 characters).",
+                  "title": "Id"
+                },
+                "key_mode": {
+                  "default": "client_action",
+                  "description": "Type: string. Valid values: \"client\", \"client_action\". Default: \"client_action\".",
+                  "enum": [
+                    "client",
+                    "client_action"
+                  ],
+                  "title": "Key Mode",
+                  "type": "string"
+                },
+                "requests_per_window": {
+                  "default": 60,
+                  "description": "Type: integer. Default: 60.",
+                  "minimum": 1,
+                  "title": "Requests Per Window",
+                  "type": "integer"
+                },
+                "window_seconds": {
+                  "default": 60,
+                  "description": "Type: integer. Default: 60.",
+                  "minimum": 1,
+                  "title": "Window Seconds",
+                  "type": "integer"
+                }
+              },
+              "type": [
+                "object",
+                "null"
+              ]
+            },
             "allow_threaded_fallback": {
               "default": true,
               "description": "Type: boolean. Default: true.",
               "title": "Allow Threaded Fallback",
               "type": "boolean"
             },
+            "api_request_audit": {
+              "additionalProperties": false,
+              "default": null,
+              "description": "Brief: server.http.api_request_audit settings.",
+              "properties": {
+                "comment": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "maxLength": 254,
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Optional human metadata string (max 254 characters).",
+                  "title": "Comment"
+                },
+                "db_path": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Types: string, null.",
+                  "title": "Db Path"
+                },
+                "enabled": {
+                  "default": true,
+                  "description": "Type: boolean. Default: true.",
+                  "title": "Enabled",
+                  "type": "boolean"
+                },
+                "id": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "maxLength": 254,
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Optional human metadata string (max 254 characters).",
+                  "title": "Id"
+                },
+                "retention_max_age_seconds": {
+                  "anyOf": [
+                    {
+                      "description": "Type: number.",
+                      "minimum": 0,
+                      "type": "number"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Types: number, null.",
+                  "title": "Retention Max Age Seconds"
+                },
+                "retention_max_db_bytes": {
+                  "anyOf": [
+                    {
+                      "description": "Type: integer.",
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Optional SQLite file size cap for audit log pruning (bytes).",
+                  "title": "Retention Max Db Bytes"
+                },
+                "retention_max_records": {
+                  "anyOf": [
+                    {
+                      "description": "Type: integer.",
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Types: integer, null.",
+                  "title": "Retention Max Records"
+                },
+                "retention_prune_every_n_inserts": {
+                  "anyOf": [
+                    {
+                      "description": "Type: integer.",
+                      "minimum": 1,
+                      "type": "integer"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Run retention prune after this many inserts (default 100 at runtime).",
+                  "title": "Retention Prune Every N Inserts"
+                }
+              },
+              "type": [
+                "object",
+                "null"
+              ]
+            },
             "auth": {
               "additionalProperties": false,
               "default": null,
-              "description": "Brief: server.http.auth configuration.\n\nInputs:\n  - mode: Auth mode (default \"token\"): none | token | basic.\n  - token: Static bearer/API key token for mode=token.\n  - username: HTTP Basic auth user name for mode=basic.\n  - password: HTTP Basic auth password for mode=basic.\n\nOutputs:\n  - HttpAuthConfig instance used by the config schema and runtime checks.",
+              "description": "Brief: server.http.auth configuration.\n\nInputs:\n  - mode: Auth mode (default \"token\"): none | token | basic.\n  - token: Static token for mode=token (Bearer, X-API-Key, and optionally\n    Basic foghorn:<token>). Must not be set when mode=basic.\n  - allow_basic_token: When mode=token, accept Basic foghorn:<token> and\n    advertise Basic on 401 (default true).\n  - username: HTTP Basic auth user name for mode=basic.\n  - password: HTTP Basic auth password for mode=basic.\n\nOutputs:\n  - HttpAuthConfig instance used by the config schema and runtime checks.",
               "properties": {
+                "allow_basic_token": {
+                  "default": true,
+                  "description": "When mode=token, accept Authorization: Basic foghorn:<token> (password is the token) and include Basic in WWW-Authenticate. Set false to require Bearer or X-API-Key only. Default: true.",
+                  "title": "Allow Basic Token",
+                  "type": "boolean"
+                },
                 "comment": {
                   "anyOf": [
                     {
@@ -16861,6 +18274,92 @@
               "description": "Optional human metadata string (max 254 characters).",
               "title": "Comment"
             },
+            "config_cache_ttl_seconds": {
+              "anyOf": [
+                {
+                  "description": "Type: number.",
+                  "minimum": 0,
+                  "type": "number"
+                },
+                {
+                  "description": "Type: null.",
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Types: number, null.",
+              "title": "Config Cache Ttl Seconds"
+            },
+            "cors": {
+              "additionalProperties": false,
+              "default": null,
+              "description": "Brief: server.http.cors settings.",
+              "properties": {
+                "allow_credentials": {
+                  "default": false,
+                  "description": "Type: boolean. Default: false.",
+                  "title": "Allow Credentials",
+                  "type": "boolean"
+                },
+                "allowlist": {
+                  "description": "Type: array.",
+                  "items": {
+                    "description": "Type: string.",
+                    "type": "string"
+                  },
+                  "title": "Allowlist",
+                  "type": "array"
+                },
+                "comment": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "maxLength": 254,
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Optional human metadata string (max 254 characters).",
+                  "title": "Comment"
+                },
+                "enabled": {
+                  "default": false,
+                  "description": "Type: boolean. Default: false.",
+                  "title": "Enabled",
+                  "type": "boolean"
+                },
+                "id": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "maxLength": 254,
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Optional human metadata string (max 254 characters).",
+                  "title": "Id"
+                }
+              },
+              "type": [
+                "object",
+                "null"
+              ]
+            },
+            "debug_timings": {
+              "default": false,
+              "description": "Type: boolean. Default: false.",
+              "title": "Debug Timings",
+              "type": "boolean"
+            },
             "enable_admin": {
               "default": false,
               "description": "Type: boolean. Default: false.",
@@ -16885,6 +18384,21 @@
               "title": "Enable Schema",
               "type": "boolean"
             },
+            "enabled": {
+              "anyOf": [
+                {
+                  "description": "Type: boolean.",
+                  "type": "boolean"
+                },
+                {
+                  "description": "Type: null.",
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "When unset, presence of the http block enables the admin server.",
+              "title": "Enabled"
+            },
             "generate": {
               "anyOf": [
                 {
@@ -16905,8 +18419,8 @@
               "title": "Generate"
             },
             "host": {
-              "default": "127.0.0.1",
-              "description": "Type: string. Default: \"127.0.0.1\".",
+              "default": "*********",
+              "description": "Type: string. Default: \"*********\".",
               "title": "Host",
               "type": "string"
             },
@@ -16925,6 +18439,12 @@
               "default": null,
               "description": "Optional human metadata string (max 254 characters).",
               "title": "Id"
+            },
+            "index": {
+              "default": true,
+              "description": "Serve / and /index.html when true. Default: true.",
+              "title": "Index",
+              "type": "boolean"
             },
             "key_file": {
               "anyOf": [
@@ -16956,6 +18476,72 @@
               "description": "Types: string, null.",
               "title": "Keys Dir"
             },
+            "limit_concurrency": {
+              "anyOf": [
+                {
+                  "description": "Type: integer.",
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "description": "Type: null.",
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional uvicorn concurrency cap override for admin HTTP.",
+              "title": "Limit Concurrency"
+            },
+            "logs": {
+              "additionalProperties": false,
+              "default": null,
+              "description": "Brief: server.http.logs ring-buffer settings.",
+              "properties": {
+                "buffer_size": {
+                  "default": 500,
+                  "description": "Type: integer. Default: 500.",
+                  "minimum": 1,
+                  "title": "Buffer Size",
+                  "type": "integer"
+                },
+                "comment": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "maxLength": 254,
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Optional human metadata string (max 254 characters).",
+                  "title": "Comment"
+                },
+                "id": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "maxLength": 254,
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Optional human metadata string (max 254 characters).",
+                  "title": "Id"
+                }
+              },
+              "type": [
+                "object",
+                "null"
+              ]
+            },
             "port": {
               "default": 5380,
               "description": "Type: integer. Default: 5380.",
@@ -16964,12 +18550,91 @@
               "title": "Port",
               "type": "integer"
             },
+            "redact_keys": {
+              "anyOf": [
+                {
+                  "description": "Type: array.",
+                  "items": {
+                    "description": "Type: string.",
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "description": "Type: null.",
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Extra secret key names redacted in /config responses.",
+              "title": "Redact Keys"
+            },
+            "stats_snapshot_ttl_seconds": {
+              "anyOf": [
+                {
+                  "description": "Type: number.",
+                  "minimum": 0,
+                  "type": "number"
+                },
+                {
+                  "description": "Type: null.",
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Types: number, null.",
+              "title": "Stats Snapshot Ttl Seconds"
+            },
+            "system_info_ttl_seconds": {
+              "anyOf": [
+                {
+                  "description": "Type: number.",
+                  "minimum": 0,
+                  "type": "number"
+                },
+                {
+                  "description": "Type: null.",
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Types: number, null.",
+              "title": "System Info Ttl Seconds"
+            },
+            "system_metrics_detail": {
+              "default": null,
+              "description": "Types: string, null. Valid values: \"basic\", \"full\".",
+              "enum": [
+                "basic",
+                "full"
+              ],
+              "title": "System Metrics Detail",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "tls_days": {
               "default": 3650,
               "description": "Type: integer. Default: 3650.",
               "minimum": 1,
               "title": "Tls Days",
               "type": "integer"
+            },
+            "www_root": {
+              "anyOf": [
+                {
+                  "description": "Type: string.",
+                  "type": "string"
+                },
+                {
+                  "description": "Type: null.",
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Static admin UI root directory override.",
+              "title": "Www Root"
             }
           },
           "type": [
@@ -16994,10 +18659,16 @@
           "title": "Id"
         },
         "limits": {
-          "additionalProperties": true,
+          "additionalProperties": false,
           "default": null,
           "description": "Brief: server.limits hardening knobs.",
           "properties": {
+            "allow_unsafe_threaded_listeners": {
+              "default": false,
+              "description": "When true, allow threaded UDP/TCP listeners on non-loopback binds (DoS-exposed; asyncio is preferred). Default: false.",
+              "title": "Allow Unsafe Threaded Listeners",
+              "type": "boolean"
+            },
             "bg_executor_max_pending": {
               "anyOf": [
                 {
@@ -17181,7 +18852,7 @@
               ]
             },
             "doh": {
-              "additionalProperties": true,
+              "additionalProperties": false,
               "default": null,
               "description": "Brief: DNS-over-HTTPS listener configuration under server.listen.doh.",
               "properties": {
@@ -17321,7 +18992,7 @@
               ]
             },
             "dot": {
-              "additionalProperties": true,
+              "additionalProperties": false,
               "default": null,
               "description": "Brief: DNS-over-TLS listener configuration under server.listen.dot.",
               "properties": {
@@ -17551,7 +19222,7 @@
               "type": "string"
             },
             "tcp": {
-              "additionalProperties": true,
+              "additionalProperties": false,
               "default": null,
               "description": "Brief: TCP listener configuration under server.listen.tcp.",
               "properties": {
@@ -17683,7 +19354,7 @@
               ]
             },
             "udp": {
-              "additionalProperties": true,
+              "additionalProperties": false,
               "default": null,
               "description": "Brief: UDP listener configuration under server.listen.udp.\n\nInputs:\n  - enabled/host/port plus in-flight and size limits.\n\nOutputs:\n  - ListenerUdp model.",
               "properties": {
@@ -17918,9 +19589,9 @@
           ]
         },
         "resolver": {
-          "additionalProperties": true,
+          "additionalProperties": false,
           "default": null,
-          "description": "Brief: server.resolver configuration.\n\nInputs:\n  - mode / timeouts / recursion controls.\n\nOutputs:\n  - ServerResolverConfig model.",
+          "description": "Brief: server.resolver configuration.\n\nInputs:\n  - mode / timeouts / recursion controls.\n  - search: Optional search-domain qualification block.\n\nOutputs:\n  - ServerResolverConfig model.",
           "properties": {
             "allow_private_destinations": {
               "default": true,
@@ -17996,6 +19667,90 @@
               "title": "Per Try Timeout Ms",
               "type": "integer"
             },
+            "search": {
+              "additionalProperties": false,
+              "default": null,
+              "description": "Optional search-domain qualification for short names.",
+              "properties": {
+                "comment": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "maxLength": 254,
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Optional human metadata string (max 254 characters).",
+                  "title": "Comment"
+                },
+                "domain": {
+                  "default": "",
+                  "description": "Search domain suffix without trailing dot. Default: \"\".",
+                  "title": "Domain",
+                  "type": "string"
+                },
+                "id": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "maxLength": 254,
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Optional human metadata string (max 254 characters).",
+                  "title": "Id"
+                },
+                "non_proper_tld_mode": {
+                  "default": "suffix",
+                  "description": "How list entries in qualify_non_proper_tld are matched. Default: \"suffix\".",
+                  "enum": [
+                    "suffix",
+                    "exact"
+                  ],
+                  "title": "Non Proper Tld Mode",
+                  "type": "string"
+                },
+                "qualify_non_proper_tld": {
+                  "anyOf": [
+                    {
+                      "description": "Type: boolean.",
+                      "type": "boolean"
+                    },
+                    {
+                      "description": "Type: array.",
+                      "items": {
+                        "description": "Type: string.",
+                        "type": "string"
+                      },
+                      "type": "array"
+                    }
+                  ],
+                  "default": false,
+                  "description": "When true, qualify names under non-proper TLDs; when a list, only those suffixes/names are qualified. Default: false.",
+                  "title": "Qualify Non Proper Tld"
+                },
+                "qualify_single_label": {
+                  "default": true,
+                  "description": "When true, append search domain to single-label queries. Default: true.",
+                  "title": "Qualify Single Label",
+                  "type": "boolean"
+                }
+              },
+              "type": [
+                "object",
+                "null"
+              ]
+            },
             "timeout_ms": {
               "default": 2000,
               "description": "Type: integer. Default: 2000.",
@@ -18020,9 +19775,9 @@
       "type": "object"
     },
     "stats": {
-      "additionalProperties": true,
+      "additionalProperties": false,
       "default": null,
-      "description": "Brief: Runtime statistics collection configuration.\n\nInputs:\n  - enabled: Master on/off switch.\n  - source_backend: Primary backend id for reads.\n  - max_unique_* / max_store_*: Cardinality caps.\n\nOutputs:\n  - StatsConfig model for FoghornConfig.stats.",
+      "description": "Brief: Runtime statistics collection configuration.\n\nInputs:\n  - enabled: Master on/off switch.\n  - source_backend: Primary backend id for reads.\n  - max_unique_* / max_store_*: Cardinality caps.\n  - Reporter/UI toggles (interval, top-N, ignore lists).\n\nOutputs:\n  - StatsConfig model for FoghornConfig.stats.",
       "properties": {
         "comment": {
           "anyOf": [
@@ -18046,6 +19801,12 @@
           "title": "Enabled",
           "type": "boolean"
         },
+        "force_rebuild": {
+          "default": false,
+          "description": "Type: boolean. Default: false.",
+          "title": "Force Rebuild",
+          "type": "boolean"
+        },
         "id": {
           "anyOf": [
             {
@@ -18061,6 +19822,134 @@
           "default": null,
           "description": "Optional human metadata string (max 254 characters).",
           "title": "Id"
+        },
+        "ignore": {
+          "additionalProperties": false,
+          "default": null,
+          "description": "Brief: Optional ignore lists for top-N stats views.\n\nInputs:\n  - top_* lists and match modes used by the stats reporter/UI.\n\nOutputs:\n  - StatsIgnoreConfig model nested under stats.ignore.",
+          "properties": {
+            "comment": {
+              "anyOf": [
+                {
+                  "description": "Type: string.",
+                  "maxLength": 254,
+                  "type": "string"
+                },
+                {
+                  "description": "Type: null.",
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional human metadata string (max 254 characters).",
+              "title": "Comment"
+            },
+            "id": {
+              "anyOf": [
+                {
+                  "description": "Type: string.",
+                  "maxLength": 254,
+                  "type": "string"
+                },
+                {
+                  "description": "Type: null.",
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional human metadata string (max 254 characters).",
+              "title": "Id"
+            },
+            "ignore_single_host": {
+              "default": false,
+              "description": "Type: boolean. Default: false.",
+              "title": "Ignore Single Host",
+              "type": "boolean"
+            },
+            "include_in_stats": {
+              "default": true,
+              "description": "When true, ignored top-N entries still count toward aggregate stats; when false they are excluded from aggregates too. Default: true.",
+              "title": "Include In Stats",
+              "type": "boolean"
+            },
+            "top_clients": {
+              "description": "Type: array.",
+              "items": {
+                "description": "Type: string.",
+                "type": "string"
+              },
+              "title": "Top Clients",
+              "type": "array"
+            },
+            "top_domains": {
+              "description": "Type: array.",
+              "items": {
+                "description": "Type: string.",
+                "type": "string"
+              },
+              "title": "Top Domains",
+              "type": "array"
+            },
+            "top_domains_mode": {
+              "default": "exact",
+              "description": "Type: string. Default: \"exact\".",
+              "title": "Top Domains Mode",
+              "type": "string"
+            },
+            "top_subdomains": {
+              "description": "Type: array.",
+              "items": {
+                "description": "Type: string.",
+                "type": "string"
+              },
+              "title": "Top Subdomains",
+              "type": "array"
+            },
+            "top_subdomains_mode": {
+              "default": "exact",
+              "description": "Type: string. Default: \"exact\".",
+              "title": "Top Subdomains Mode",
+              "type": "string"
+            }
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "include_qtype_breakdown": {
+          "default": true,
+          "description": "Type: boolean. Default: true.",
+          "title": "Include Qtype Breakdown",
+          "type": "boolean"
+        },
+        "include_top_clients": {
+          "default": true,
+          "description": "Type: boolean. Default: true.",
+          "title": "Include Top Clients",
+          "type": "boolean"
+        },
+        "include_top_domains": {
+          "default": true,
+          "description": "Type: boolean. Default: true.",
+          "title": "Include Top Domains",
+          "type": "boolean"
+        },
+        "interval_seconds": {
+          "anyOf": [
+            {
+              "description": "Type: number.",
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional stats reporter interval override (seconds).",
+          "title": "Interval Seconds"
         },
         "max_store_clients": {
           "default": 50000,
@@ -18104,6 +19993,12 @@
           "title": "Max Unique Domains",
           "type": "integer"
         },
+        "reset_on_log": {
+          "default": false,
+          "description": "Type: boolean. Default: false.",
+          "title": "Reset On Log",
+          "type": "boolean"
+        },
         "source_backend": {
           "anyOf": [
             {
@@ -18118,6 +20013,19 @@
           "default": null,
           "description": "Identifier of the primary statistics/query-log backend to read from. When logging.backends is configured, this typically matches one of the backends[].id values.",
           "title": "Source Backend"
+        },
+        "top_n": {
+          "default": 10,
+          "description": "Type: integer. Default: 10.",
+          "minimum": 0,
+          "title": "Top N",
+          "type": "integer"
+        },
+        "track_latency": {
+          "default": true,
+          "description": "Type: boolean. Default: true.",
+          "title": "Track Latency",
+          "type": "boolean"
         }
       },
       "type": [
@@ -18133,7 +20041,7 @@
         "backup": {
           "allOf": [
             {
-              "additionalProperties": true,
+              "additionalProperties": false,
               "description": "Types: object, null. Object with subkeys: comment, endpoints, id, strategy.",
               "properties": {
                 "comment": {
