@@ -183,3 +183,45 @@ def test_generated_schema_includes_axfr_shared_tsig_fields(tmp_path) -> None:
     assert tsig_props["keys"]["items"]["required"] == ["name", "secret"]
     assert tsig_props["key_sources"]["items"]["required"] == ["type"]
     assert "tsig_keys" in axfr_props
+
+
+def test_collect_plugin_schemas_excludes_examples_package() -> None:
+    """Brief: Example resolve plugins are omitted from the schema plugin catalog.
+
+    Inputs:
+      - None (loads scripts/generate_foghorn_schema.py helpers).
+
+    Outputs:
+      - collect_plugin_schemas() has no modules under ``*.examples.*`` and omits
+        sample aliases such as echo/examples/finger.
+    """
+
+    ns = _load_schema_module()
+    collect = ns.get("collect_plugin_schemas")
+    is_example = ns.get("_is_example_plugin_module")
+    assert callable(collect)
+    assert callable(is_example)
+
+    assert is_example("foghorn.plugins.resolve.examples.echo") is True
+    assert is_example("foghorn.plugins.resolve.filter") is False
+
+    catalog = collect()
+    assert isinstance(catalog, dict)
+    assert catalog, "expected at least one non-example plugin in the catalog"
+
+    for alias, meta in catalog.items():
+        module = str((meta or {}).get("module") or "")
+        assert "examples" not in module.split(
+            "."
+        ), f"example plugin leaked into schema catalog: {alias} -> {module}"
+
+    for sample_alias in (
+        "echo",
+        "examples",
+        "finger",
+        "dns_prefetch",
+        "file_over_dns",
+        "greylist_example",
+        "new_domain_filter_example",
+    ):
+        assert sample_alias not in catalog

@@ -367,8 +367,9 @@ When you introduce new top-level configuration fields or change important struct
 Typical changes include:
 
 - Adding fields to section models such as `ServerConfig`, `LoggingConfig`, `UpstreamsConfig`, or `StatsConfig`.
-- Adjusting `extra="forbid"` vs `extra="allow"` to match how strict a nested object should be.
+- Prefer `extra="forbid"` (emits `additionalProperties: false`) for structured sections so typos fail validation. Reserve `extra="allow"` for opaque free-form maps (`plugins[].config`, cache/backend `config`, `vars`).
 - Ensuring plugin config models expose `get_config_model()` so they appear under `$defs.PluginConfigs`.
+- Example / sample resolve plugins under `src/foghorn/plugins/resolve/examples/` are **not** included in `$defs.PluginConfigs`. To publish one, copy it into the real resolve plugin path (not under `examples/`) and run `make schema`.
 
 Workflow:
 
