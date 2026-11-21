@@ -4,18 +4,14 @@ All notable changes to this project will be documented in this file.
 
 
 ## [Unreleased]
-
-### Changed
-- Moved the Echo resolve plugin to `foghorn.plugins.resolve.examples.echo` (was `foghorn.plugins.resolve.echo`) so it ships with other opt-in example plugins.
-- Example resolve plugins (`dns_prefetch`, `examples`, `new_domain_filter`) now import `foghorn.plugins.resolve.base` directly instead of a relative `.base` shim.
-
-### Documentation
-- Marked Echo as an example/diagnostic plugin in `docs/plugins/resolve/echo.md`.
-
-### Tests
-- Updated Echo and admin-snapshot tests for the examples package path; removed the conftest `examples.base` compatibility shim.
-
 ### Added
+- Full operator DNSSEC trust-anchor wiring: `server.dnssec.trust_anchor_mode` (`static`|`rfc5011`), `trust_anchor_store_path`, hold-down days, and `trust_anchors[]` (DNSKEY/DS) applied at startup and runtime reload (examples under `server.dnssec`).
+- RFC 5011 **live update path**: after an authenticated root DNSKEY RRset validates, Foghorn updates the on-disk trust-anchor store (add/promote/remove hold-downs) and refreshes TA caches.
+- Custom trust anchors: root DNSKEY supplements plus non-root DNSKEY/DS islands of trust for local validation.
+- Shared `apply_dnssec_validation_runtime` / `configure_trust_anchors_from_dnssec_cfg` helpers used by `main` and reload snapshot apply.
+- Admin `auth.mode=token` optionally accepts browser-friendly HTTP Basic `foghorn:<token>` via `server.http.auth.allow_basic_token` (default `true`) in addition to Bearer and `X-API-Key`; when enabled, 401 responses advertise `WWW-Authenticate: Bearer, Basic realm="foghorn"`.
+- MQTT query-log backend configures a Last Will `log_disconnect` event on the meta topic before connect so brokers can signal unexpected client drops.
+- Config models expose structured fields previously only runtime-known: `server.resolver.search`, DNSSEC trust-anchor knobs, `server.http` logs/CORS/audit/admin_rate_limit/www_root/TTLs, `stats` reporter/ignore blocks, upstream endpoint `id`, and `server.cache.func_caches` (preferred over deprecated `modify`/`decorated_overrides`).
 - KubernetesHosts resolve plugin (`foghorn.plugins.resolve.kubernetes_hosts`): indexes Kubernetes Services and Pods via the API (in-cluster service account, kubeconfig, or explicit api_server + token and/or mTLS), builds forward/reverse maps, and answers matching A/AAAA/PTR/TXT queries in `pre_resolve`. Uses `requests` only (no official Kubernetes client). Supports multi-endpoint config, namespace/label selectors, optional DNS suffix, poll interval, and TXT metadata on answers.
 - Admin snapshot routes for KubernetesHosts: `GET /api/v1/plugins/{plugin_name}/k8s_hosts` and `/kubernetes_hosts` (FastAPI and threaded), plus generic `/snapshot` via `get_http_snapshot()`.
 - Example config `example_configs/plugin_kubernetes_hosts.yaml` for in-cluster Service/Pod DNS publishing.
@@ -34,7 +30,27 @@ All notable changes to this project will be documented in this file.
 - Config parser wraps file/YAML failures in actionable `ValueError` messages (undefined aliases include name, path, and anchor hints).
 - Plugin hook priorities accept bare `int` or `{priority: int}` mapping nodes.
 
+### Changed
+- Structured config sections prefer `extra="forbid"` (listeners, plugin hooks/setup/logging, logging/stats/upstreams, server resolver/limits/cache/dnssec/http/axfr/features) so unknown keys fail validation; opaque maps remain open (`plugins[].config`, cache backend `config`, `vars`).
+- Schema generation omits resolve plugins under `foghorn.plugins.resolve.examples` from `$defs.PluginConfigs` (promote out of `examples/` and re-run `make schema` to publish).
+- DockerHosts sticky condition paths call `foghorn.utils.condition_logging` directly (no plugin-local wrappers).
+- DESCRIPTION notes DNSSEC local validation is optional with partial RFC coverage.
+- `start_webserver` warns when `enable_admin=true` while `enable_api=false` (admin routes are not registered without the API surface).
+- Sticky condition logging lives in `foghorn.utils.condition_logging` (`note_condition_failure` / `note_condition_ok`); resolve plugins call it directly (no BasePlugin wrappers).
+- FileDownloader, EtcHosts, hosts plugins, and ZoneRecords (watchdog poll/reload, AXFR poll, NOTIFY send) use `foghorn.utils.condition_logging` for repeated failure paths instead of unbounded WARNING spam.
+- SIGUSR1 reloads configuration from disk (refreshing live config/plugin refs when the snapshot advances) before stats reset and plugin notifications; failures and restart-required reasons are logged.
+- Empty/default config webserver port is `5380` (was `8053`).
+- ZoneRecords AXFR token-bucket/concurrency and DNS UPDATE window counters delegate to `foghorn.utils.rate_limit` instead of plugin-local limiter state.
+- Legacy `foghorn --config …` invocation still works; preferred form is `foghorn serve [config]`.
+- RateLimit periodic stats INFO log drops the redundant "RateLimit stats" prefix (logger name already identifies the source).
+- etc_hosts and mdns resolve plugins call shared `hosts_common` DNS response builders instead of local duplicates.
+- DNSSEC validation tests reshaped around cached DNSKEY/DS and trust-anchor matching paths.
+
 ### Fixed
+- `server.http.auth.mode=basic` combined with a non-empty `auth.token` is rejected as ambiguous (Pydantic model, config parse, and webserver startup/`create_app`).
+- Zone DNSSEC private keys are written atomically (temp file + `os.replace`) with owner-only mode 0o600; fsync/chmod remain best-effort.
+- KubernetesHosts example config uses `server.listen.udp.host` (not invalid `address`).
+- Suppressed query-log drop accounting failures log at DEBUG with traceback instead of being silently ignored.
 - ZoneRecords loader messages distinguish missing records files (`FileNotFoundError`) from other read/OS errors.
 - DockerHosts setup continues when one endpoint client create fails: catch broad client-build errors per endpoint, connect remaining endpoints, log a connected/unavailable summary, and skip endpoints without a live client on the initial reload (retried on later cycles).
 - ProxmoxHosts `_reload_maps()` now calls `_reload_from_proxmox()` so scheduled/forced reloads refresh inventory.
@@ -47,24 +63,21 @@ All notable changes to this project will be documented in this file.
 - Startup prints `Foghorn config error:` lines to stderr on configuration failure.
 - etc_hosts reverse maps include IPv6 as well as IPv4 via shared hosts helpers.
 
-### Changed
-- Sticky condition logging lives in `foghorn.utils.condition_logging` (`note_condition_failure` / `note_condition_ok`); resolve plugins call it directly (no BasePlugin wrappers).
-- FileDownloader, EtcHosts, hosts plugins, and ZoneRecords (watchdog poll/reload, AXFR poll, NOTIFY send) use `foghorn.utils.condition_logging` for repeated failure paths instead of unbounded WARNING spam.
-- SIGUSR1 reloads configuration from disk (refreshing live config/plugin refs when the snapshot advances) before stats reset and plugin notifications; failures and restart-required reasons are logged.
-- Empty/default config webserver port is `5380` (was `8053`).
-- ZoneRecords AXFR token-bucket/concurrency and DNS UPDATE window counters delegate to `foghorn.utils.rate_limit` instead of plugin-local limiter state.
-- Legacy `foghorn --config …` invocation still works; preferred form is `foghorn serve [config]`.
-- RateLimit periodic stats INFO log drops the redundant "RateLimit stats" prefix (logger name already identifies the source).
-- etc_hosts and mdns resolve plugins call shared `hosts_common` DNS response builders instead of local duplicates.
-- DNSSEC validation tests reshaped around cached DNSKEY/DS and trust-anchor matching paths.
-
 ### Documentation
+- Documented operator DNSSEC trust-anchor knobs (mode/store/hold-downs/custom anchors), RFC 5011 live updates, and reload behavior in `docs/RFCs.md` §4.3 and example configs.
+- Documented token-mode Basic `foghorn:<token>` gated by `allow_basic_token`, dual `WWW-Authenticate`, and basic+token rejection in `docs/API.md`.
+- README-DEV prefers `extra="forbid"` for structured sections and notes that example resolve plugins are excluded from the published schema catalog.
 - Documented DockerHosts/KubernetesHosts `dns_name_label` behavior and ProxmoxHosts `tls_server_name` in resolve plugin docs and the Proxmox example config.
 - Added `docs/plugins/resolve/kubernetes_hosts.md` covering auth modes, TLS aliases, name publishing rules, config highlights, and admin snapshot URLs.
 - Documented KubernetesHosts snapshot endpoints in `docs/API.md`.
 - Documented DockerHosts multi-endpoint client-failure continue behavior in `docs/plugins/resolve/docker_hosts.md`.
 
 ### Tests
+- Added `tests/test_trust_anchor_config_wiring.py` for RFC 5011 live store updates, custom anchors, configure-from-config helpers, and reload snapshot TA re-apply.
+- MQTT logging tests assert Last Will topic/payload/QoS/retain for `log_disconnect`.
+- Webserver tests cover token-mode Basic `foghorn:<token>` (default on and `allow_basic_token=false`), wrong Basic username/password, basic+token rejection, and `enable_admin` without `enable_api` warning.
+- Schema generator tests assert example plugin modules/aliases are omitted from the catalog.
+- DockerHosts setup-continue coverage with endpoint `id` in connected log lines.
 - Added `tests/test_condition_logging.py` for `foghorn.utils.condition_logging` helpers; owner-object coverage also in `tests/plugins/test_base_additional.py`.
 - Added `tests/test_cli_actions.py` for init/status/config/service/reload and PID helpers; updated main/config-parser coverage for action CLI and SIGUSR1 reload stubs.
 - Expanded hosts plugin tests for dns_name labels, endpoint ids, Proxmox SNI, shared hosts_common helpers, zone loader errors, and shared rate-limit wiring.
@@ -263,7 +276,7 @@ All notable changes to this project will be documented in this file.
 - RateLimit webserver stats now resolve runtime reader callbacks by `db_path` using exact, absolute, and normalized suffix matching, preventing missed current-window/profile metrics when configured paths and plugin runtime paths differ.
 - Admin plugin/cache paged tables now retain active search text, sort selection, page size, and enabled filters across auto-refresh cycles, preventing view resets while monitoring mDNS and other plugin pages.
 - DNS UPDATE processing honors RFC 2136 class semantics more correctly: prerequisite and update sections use the effective `deleting` class when present, enforce zone-boundary checks, delete specific RDATA for CLASS NONE, delete RRsets/names for CLASS ANY, and merge zone-class additions instead of wholesale RRset replace.
-- Built-in DNSSEC `ROOT_DNSKEY` trust material is the real IANA root KSK-2017 (key id `20326`, RSASHA256) with a regression test; full operator `trust-anchor` config wiring from main is still incomplete and is not claimed here.
+- Built-in DNSSEC `ROOT_DNSKEY` trust material is the real IANA root KSK-2017 (key id `20326`, RSASHA256) with a regression test. (Operator trust-anchor wiring completed later; see Unreleased.)
 - Runtime reload fails closed when a *configured* cache backend cannot be loaded or fails `validate_connection()` (raises rather than continuing with an empty/broken cache).
 
 ### Tests
