@@ -100,19 +100,17 @@ def test_mqtt_logging_publishes_log_start_on_connect(monkeypatch):
     assert decoded["hostname"] == "test-host"
     assert isinstance(decoded["ts"], (int, float))
 
-    # # TODO:  Verify that a Last Will and Testament is
-    # #        configured on the same meta topic.
-    # # client = logger._client  # type: ignore[attr-defined]
-    # # assert isinstance(client.wills, list)
-    # # assert len(client.wills) == 1
+    client = logger._client  # type: ignore[attr-defined]
+    assert isinstance(client.wills, list)
+    assert len(client.wills) == 1
 
-    # # will_topic, will_payload, will_qos, will_retain = client.wills[0]
-    # # assert will_topic == "foghorn/query_log/meta"
-    # # assert will_qos == 1
-    # # assert will_retain is False
+    will_topic, will_payload, will_qos, will_retain = client.wills[0]
+    assert will_topic == "foghorn/query_log/meta"
+    assert will_qos == 1
+    assert will_retain is False
 
-    # # will_decoded = json.loads(will_payload)
-    # # assert will_decoded["event"] == "log_disconnect"
-    # # assert will_decoded["version"] == 1
-    # # assert will_decoded["hostname"] == "test-host"
-    # # assert will_decoded["ts"] == 123.0
+    will_decoded = json.loads(will_payload)
+    assert will_decoded["event"] == "log_disconnect"
+    assert will_decoded["version"] == 1
+    assert will_decoded["hostname"] == "test-host"
+    assert will_decoded["ts"] == 123.0

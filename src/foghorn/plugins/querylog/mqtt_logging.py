@@ -115,6 +115,27 @@ class MqttLogging(BaseStatsStore):
             self._client.username_pw_set(username=username, password=password)
 
         meta_topic = f"{self._topic}/meta"
+        hostname = socket.gethostname()
+        now_ts = float(time.time())
+
+        # Last Will must be configured before connect so the broker can publish
+        # log_disconnect if this client drops unexpectedly.
+        try:
+            will_payload = {
+                "event": "log_disconnect",
+                "ts": now_ts,
+                "version": 1,
+                "hostname": hostname,
+            }
+            will_data = json.dumps(will_payload, separators=(",", ":"))
+            self._client.will_set(
+                meta_topic,
+                will_data,
+                qos=self._qos,
+                retain=False,
+            )
+        except Exception:  # pragma: no cover - defensive
+            logger.exception("Failed to configure MQTT query_log Last Will")
 
         kw = dict(connect_kwargs or {})
 
@@ -128,9 +149,9 @@ class MqttLogging(BaseStatsStore):
         try:
             start_payload = {
                 "event": "log_start",
-                "ts": float(time.time()),
+                "ts": now_ts,
                 "version": 1,
-                "hostname": socket.gethostname(),
+                "hostname": hostname,
             }
             start_data = json.dumps(start_payload, separators=(",", ":"))
             self._client.publish(

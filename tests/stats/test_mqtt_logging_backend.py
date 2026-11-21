@@ -131,16 +131,15 @@ def test_mqtt_logging_backend_constructs_and_marks_healthy(
 
     assert backend.health_check() is True
 
-    # TODO: Once LWT works.
-    ## # Verify that a Last Will and Testament is configured with matching QoS/retain.
-    ## client = backend._client  # type: ignore[attr-defined]
-    ## assert isinstance(client.wills, list)
-    ## assert len(client.wills) == 1
+    # Verify that a Last Will and Testament is configured with matching QoS/retain.
+    client = backend._client  # type: ignore[attr-defined]
+    assert isinstance(client.wills, list)
+    assert len(client.wills) == 1
 
-    ## will_topic, _, will_qos, will_retain = client.wills[0]
-    ## assert will_topic == "foghorn/test/meta"
-    ## assert will_qos == 1
-    ## assert will_retain is False
+    will_topic, _, will_qos, will_retain = client.wills[0]
+    assert will_topic == "foghorn/test/meta"
+    assert will_qos == 1
+    assert will_retain is False
 
     # Close should mark backend unhealthy and stop/disconnect the client.
     backend.close()
