@@ -746,10 +746,14 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
     def _require_auth(
         self,
     ) -> bool:  # pragma: nocover - [behaviour tested via FastAPI auth dependency tests]
-        """Brief: Enforce auth.mode=token semantics for protected endpoints.
+        """Brief: Enforce web auth (token/basic/none) for protected endpoints.
 
         Inputs: none
         Outputs: bool indicating whether the request is authorized.
+
+        Notes:
+          - Token mode accepts Bearer and X-API-Key; Basic foghorn:<token>
+            when auth.allow_basic_token is true (default).
         """
         authorized, status_code, detail, headers = _evaluate_web_auth(
             self._web_cfg(),

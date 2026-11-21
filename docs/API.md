@@ -32,18 +32,37 @@ Authentication is configured via the `server.http.auth` config block.
 
 ### Token mode
 When `server.http.auth.mode: token` is enabled (the default when `auth.mode` is
-unset), protected endpoints require *either*:
+unset), protected endpoints accept *any one* of:
 - `Authorization: Bearer <token>`
 - `X-API-Key: <token>`
+- `Authorization: Basic base64(foghorn:<token>)` when
+  `server.http.auth.allow_basic_token` is true (the default) — username must be
+  exactly `foghorn`; the password is the configured token (browser-friendly).
+  Set `allow_basic_token: false` to require Bearer or `X-API-Key` only.
 
-Example header:
+Examples:
 - `Authorization: Bearer example-token-123`
+- `curl -u 'foghorn:example-token-123' "$BASE_URL/api/v1/stats"`
+
+Unauthorized responses include `WWW-Authenticate: Bearer` always; when
+`allow_basic_token` is true they also advertise `Basic realm="foghorn"` so
+browsers can complete a challenge (username `foghorn`, password `<token>`).
 
 If `mode: token` is set but `server.http.auth.token` is missing/blank, Foghorn
 auto-generates a random 32-character alphanumeric token at admin webserver
 startup, stores it in the in-memory config, and logs it once at WARNING so
 operators can retrieve it. Prefer setting an explicit token in config for
 production deployments.
+
+```yaml
+server:
+  http:
+    enable_api: true
+    auth:
+      mode: token
+      token: example-token-123
+      # allow_basic_token: true   # default; set false to disable Basic foghorn:<token>
+```
 
 #### Browser admin UI
 The built-in web UI (`/` / `index.html`) is **token-oriented**: it stores the
@@ -54,9 +73,11 @@ via a shared `apiFetch` helper. A one-time migration copies any legacy
 HTTP 401 it prompts once for the token (shared across concurrent failures),
 retries the request, and exposes an **API Token** header button to set or clear
 the stored value. Diagram PNGs are loaded through `apiFetch` + blob URLs
-because `<img src>` cannot attach auth headers. Basic-auth deployments should
-use curl/API clients (or a reverse proxy) rather than relying on the shipped UI
-prompt flow.
+because `<img src>` cannot attach auth headers. With `allow_basic_token: true`
+(default), navigating protected API URLs directly in a browser can also use the
+native Basic prompt (`foghorn` / token). Dedicated `mode: basic` deployments
+should use curl/API clients (or a reverse proxy) rather than relying on the
+shipped UI prompt flow.
 
 ### Basic mode
 When `server.http.auth.mode: basic`, protected endpoints require HTTP Basic:
@@ -65,7 +86,9 @@ When `server.http.auth.mode: basic`, protected endpoints require HTTP Basic:
 
 Configure both `server.http.auth.username` and `server.http.auth.password`.
 Missing or blank credentials fail closed (requests are rejected; non-loopback
-binds with `enable_api: true` are refused at startup). Example:
+binds with `enable_api: true` are refused at startup). Do **not** also set
+`server.http.auth.token` under `mode: basic` — that combination is ambiguous and
+Foghorn refuses to start (config load / webserver startup raises). Example:
 
 ```yaml
 server:
