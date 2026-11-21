@@ -13,6 +13,9 @@ Outputs:
 Notes:
   - Core config shape comes from foghorn.config.models.FoghornConfig.
   - Resolve plugins contribute $defs.PluginConfigs via discovery.
+  - Example plugins under ``foghorn.plugins.resolve.examples`` are omitted from
+    the schema catalog; promote a copy into the real plugin path and re-run
+    ``make schema`` to publish them.
   - assets/config-schema.json must not be hand-edited; run this script or
     `make schema` after model changes.
 """
@@ -84,6 +87,20 @@ def _model_to_json_schema(model_cls: type[Any]) -> dict[str, Any]:
     return {}
 
 
+def _is_example_plugin_module(module_name: str) -> bool:
+    """Brief: Return True when a plugin module lives under an examples package.
+
+    Inputs:
+      - module_name: Dotted Python module path (e.g. cls.__module__).
+
+    Outputs:
+      - True for modules under ``*.examples.*`` (opt-in samples, not schema).
+    """
+
+    parts = str(module_name or "").split(".")
+    return "examples" in parts
+
+
 def collect_plugin_schemas() -> dict[str, Any]:
     """Brief: Discover resolve plugins and build per-plugin config schemas.
 
@@ -92,12 +109,24 @@ def collect_plugin_schemas() -> dict[str, Any]:
 
     Outputs:
       - Dict mapping canonical plugin alias -> {module, aliases, config_schema}.
+
+    Notes:
+      - Skips plugins whose module path contains an ``examples`` package segment
+        (``foghorn.plugins.resolve.examples``). Those are samples only; copy into
+        the real plugin tree and regenerate the schema to publish them.
     """
 
     aliases_to_cls: Mapping[str, type[BasePlugin]] = plugin_registry.discover_plugins()
     by_cls: dict[type[BasePlugin], dict[str, Any]] = {}
 
     for alias, cls in aliases_to_cls.items():
+        if _is_example_plugin_module(cls.__module__):
+            logger.debug(
+                "Skipping example plugin %s (%s) for schema catalog",
+                alias,
+                cls.__module__,
+            )
+            continue
         entry = by_cls.setdefault(
             cls,
             {
