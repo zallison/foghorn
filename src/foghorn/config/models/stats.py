@@ -70,12 +70,28 @@ class StatsConfig(StrictModel):
         description="Optional stats reporter interval override (seconds).",
     )
     reset_on_log: bool = Field(default=False)
+    log_level: str = Field(
+        default="info",
+        description="Log level used by the periodic stats reporter.",
+    )
+    track_uniques: bool = Field(
+        default=True,
+        description="Track unique client IPs and domains in the in-memory collector.",
+    )
     include_qtype_breakdown: bool = Field(default=True)
     include_top_clients: bool = Field(default=True)
     include_top_domains: bool = Field(default=True)
     top_n: int = Field(default=10, ge=0)
     track_latency: bool = Field(default=True)
     force_rebuild: bool = Field(default=False)
+    sigusr1_resets_stats: bool = Field(
+        default=False,
+        description="When true, SIGUSR1 resets the in-memory statistics collector.",
+    )
+    sigusr2_resets_stats: bool = Field(
+        default=False,
+        description="When true, SIGUSR2 resets the in-memory statistics collector.",
+    )
     ignore: StatsIgnoreConfig | None = None
     max_unique_clients: int = Field(
         default=50000,

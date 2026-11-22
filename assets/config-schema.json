@@ -8299,6 +8299,12 @@
           "description": "Optional stats reporter interval override (seconds).",
           "title": "Interval Seconds"
         },
+        "log_level": {
+          "default": "info",
+          "description": "Log level used by the periodic stats reporter. Default: \"info\".",
+          "title": "Log Level",
+          "type": "string"
+        },
         "max_store_clients": {
           "default": 50000,
           "description": "Maximum distinct client keys mirrored into the persistent stats store (0 disables the cap). Default: 50000.",
@@ -8347,6 +8353,18 @@
           "title": "Reset On Log",
           "type": "boolean"
         },
+        "sigusr1_resets_stats": {
+          "default": false,
+          "description": "When true, SIGUSR1 resets the in-memory statistics collector. Default: false.",
+          "title": "Sigusr1 Resets Stats",
+          "type": "boolean"
+        },
+        "sigusr2_resets_stats": {
+          "default": false,
+          "description": "When true, SIGUSR2 resets the in-memory statistics collector. Default: false.",
+          "title": "Sigusr2 Resets Stats",
+          "type": "boolean"
+        },
         "source_backend": {
           "anyOf": [
             {
@@ -8373,6 +8391,12 @@
           "default": true,
           "description": "Type: boolean. Default: true.",
           "title": "Track Latency",
+          "type": "boolean"
+        },
+        "track_uniques": {
+          "default": true,
+          "description": "Track unique client IPs and domains in the in-memory collector. Default: true.",
+          "title": "Track Uniques",
           "type": "boolean"
         }
       },
@@ -19951,6 +19975,12 @@
           "description": "Optional stats reporter interval override (seconds).",
           "title": "Interval Seconds"
         },
+        "log_level": {
+          "default": "info",
+          "description": "Log level used by the periodic stats reporter. Default: \"info\".",
+          "title": "Log Level",
+          "type": "string"
+        },
         "max_store_clients": {
           "default": 50000,
           "description": "Maximum distinct client keys mirrored into the persistent stats store (0 disables the cap). Default: 50000.",
@@ -19999,6 +20029,18 @@
           "title": "Reset On Log",
           "type": "boolean"
         },
+        "sigusr1_resets_stats": {
+          "default": false,
+          "description": "When true, SIGUSR1 resets the in-memory statistics collector. Default: false.",
+          "title": "Sigusr1 Resets Stats",
+          "type": "boolean"
+        },
+        "sigusr2_resets_stats": {
+          "default": false,
+          "description": "When true, SIGUSR2 resets the in-memory statistics collector. Default: false.",
+          "title": "Sigusr2 Resets Stats",
+          "type": "boolean"
+        },
         "source_backend": {
           "anyOf": [
             {
@@ -20025,6 +20067,12 @@
           "default": true,
           "description": "Type: boolean. Default: true.",
           "title": "Track Latency",
+          "type": "boolean"
+        },
+        "track_uniques": {
+          "default": true,
+          "description": "Track unique client IPs and domains in the in-memory collector. Default: true.",
+          "title": "Track Uniques",
           "type": "boolean"
         }
       },
