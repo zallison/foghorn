@@ -587,3 +587,173 @@ def test_cache_body_has_no_tsig(monkeypatch, set_runtime_snapshot):
     assert cached_wire is not None
     cached = dns.message.from_wire(cached_wire, continue_on_error=True)
     assert getattr(cached, "had_tsig", False) is False
+
+
+def test_pre_plugin_deny_response_is_tsig_signed(monkeypatch, set_runtime_snapshot):
+    """Brief: Authenticated QUERY that short-circuits on pre-plugin deny is still TSIG-signed.
+
+    Inputs/Outputs: None; asserts NXDOMAIN response carries client TSIG.
+    """
+
+    from foghorn.plugins.resolve.base import PluginDecision
+
+    class _DenyPlugin:
+        """Brief: Pre-plugin that always denies.
+
+        Inputs: constructor none.
+        Outputs: PluginDecision deny on pre_resolve.
+        """
+
+        pre_priority = 10
+        post_priority = 50
+
+        def pre_resolve(self, qname, qtype, data, ctx):  # noqa: ANN001
+            return PluginDecision(action="deny", stat="policy")
+
+        def post_resolve(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            return None
+
+    qname = "tsig-deny-signed.example"
+    keyring, _ = tsig.build_tsig_keyring(_TSIG_KEYS)
+    set_runtime_snapshot(
+        plugins=[_DenyPlugin()],
+        upstream_addrs=[{"host": "*******", "port": 53}],
+        resolver_mode="forward",
+        tsig_enabled=True,
+        tsig_mode="optional",
+        tsig_keys=_TSIG_KEYS,
+        cookies_enabled=False,
+    )
+    wire = srv.resolve_query_bytes(_sign_query(qname), "************", listener="udp")
+    msg = dns.message.from_wire(wire, keyring=keyring)
+    assert getattr(msg, "had_tsig", False) is True
+    assert int(msg.rcode()) == int(dns.rcode.NXDOMAIN)
+
+
+def test_passthrough_mode_forwards_without_local_resign(
+    monkeypatch, set_runtime_snapshot
+):
+    """Brief: passthrough mode skips local verify/re-sign and bypasses cache.
+
+    Inputs/Outputs: None; asserts upstream sees original wire and client gets
+    unsigned local answer when upstream returns unsigned.
+    """
+
+    qname = "tsig-passthrough.example"
+    seen = {"passthrough": False, "wire": None}
+
+    def _forward(
+        req,
+        upstreams,
+        timeout_ms,
+        qname,
+        qtype,
+        max_concurrent=None,
+        on_attempt_result=None,
+        outbound_wire=None,
+        client_tsig_passthrough=False,
+    ):
+        seen["passthrough"] = bool(client_tsig_passthrough)
+        seen["wire"] = outbound_wire
+        r = req.reply()
+        r.add_answer(RR(qname, rdata=A("*******"), ttl=60))
+        return r.pack(), upstreams[0], "ok"
+
+    monkeypatch.setattr(srv, "send_query_with_failover", _forward)
+    set_runtime_snapshot(
+        plugins=[],
+        upstream_addrs=[{"host": "*******", "port": 53}],
+        resolver_mode="forward",
+        tsig_enabled=True,
+        tsig_mode="passthrough",
+        tsig_keys=[],
+        cookies_enabled=False,
+        cache_plugin=plugin_base.DNS_CACHE,
+    )
+    qwire = _sign_query(qname)
+    wire = srv.resolve_query_bytes(qwire, "************", listener="udp")
+    assert seen["passthrough"] is True
+    assert seen["wire"] == qwire
+    # Local keys empty and passthrough: response is not re-signed with features keys.
+    msg = dns.message.from_wire(wire, continue_on_error=True)
+    assert getattr(msg, "had_tsig", False) is False
+    # Cache bypassed for passthrough+TSIG.
+    assert plugin_base.DNS_CACHE.get((qname, QTYPE.A)) is None
+
+
+def test_feature_flags_passthrough_mode():
+    """Brief: resolve_server_feature_flags accepts mode=passthrough.
+
+    Inputs/Outputs: None; asserts tsig_mode normalization.
+    """
+
+    flags = resolve_server_feature_flags(
+        {"features": {"tsig": {"enabled": True, "mode": "pass_through"}}}
+    )
+    assert flags["tsig_enabled"] is True
+    assert flags["tsig_mode"] == "passthrough"
+
+
+def test_upstream_endpoint_tsig_signs_and_verifies(monkeypatch):
+    """Brief: Endpoint tsig signs outbound query and rejects bad response MAC.
+
+    Inputs/Outputs: None; asserts sign_query_wire_tsig + verify path.
+    """
+
+    from foghorn.servers.server_failover import _send_query_with_failover_impl
+
+    keyring, _ = tsig.build_tsig_keyring(_TSIG_KEYS)
+    q = DNSRecord.question("up-tsig.example", "A")
+    upstream = {
+        "host": "*******",
+        "port": 53,
+        "transport": "udp",
+        "tsig": dict(_TSIG_KEYS[0]),
+    }
+    captured = {"wire": None}
+
+    def _udp(host, port, wire, timeout_ms=2000):  # noqa: ANN001
+        captured["wire"] = wire
+        # Return an unsigned NOERROR so endpoint TSIG verify fails (missing TSIG).
+        r = q.reply()
+        r.add_answer(RR("up-tsig.example", rdata=A("*******"), ttl=60))
+        return r.pack()
+
+    monkeypatch.setattr("foghorn.servers.transports.udp.udp_query", _udp)
+    resp, used, reason = _send_query_with_failover_impl(
+        q, [upstream], 500, "up-tsig.example", QTYPE.A, max_concurrent=1
+    )
+    assert reason == "all_failed"
+    assert resp is None
+    assert captured["wire"] is not None
+    msg = dns.message.from_wire(captured["wire"], keyring=keyring)
+    assert getattr(msg, "had_tsig", False) is True
+
+
+def test_normalize_upstream_preserves_tsig():
+    """Brief: Endpoint tsig survives normalize_upstream_config.
+
+    Inputs/Outputs: None; asserts tsig fields on normalized endpoint.
+    """
+
+    from foghorn.config.config_parser import normalize_upstream_config
+
+    cfg = {
+        "upstreams": {
+            "endpoints": [
+                {
+                    "host": "*******",
+                    "port": 53,
+                    "tsig": {
+                        "name": "k.example.",
+                        "secret": "c2VjcmV0",
+                        "algorithm": "hmac-sha256",
+                    },
+                }
+            ]
+        },
+        "server": {"resolver": {"timeout_ms": 1000}},
+    }
+    ups, _ = normalize_upstream_config(cfg)
+    assert ups[0]["tsig"]["name"] == "k.example."
+    assert ups[0]["tsig"]["secret"] == "c2VjcmV0"
