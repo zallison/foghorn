@@ -235,39 +235,6 @@ def _start_asyncio_server(
     return t
 
 
-def _listener_thread_is_dead(t: threading.Thread, *, logger: logging.Logger) -> bool:
-    """Best-effort liveness check for background listener threads.
-
-    Inputs:
-      - t: Thread instance (or test stub) representing a listener.
-      - logger: Logger for defensive failure diagnostics.
-
-    Outputs:
-      - bool: True when the thread is known to have exited.
-
-    Notes:
-      - Test stubs may not implement is_alive(); in that case we
-        treat the thread as already exited so tests can terminate the
-        keepalive loop promptly.
-    """
-
-    try:
-        return not t.is_alive()
-    except AttributeError:
-        # Test doubles used in unit tests may not implement is_alive();
-        # treat them as already exited so the keepalive loop can
-        # terminate promptly.
-        return True
-    except (
-        Exception
-    ):  # pragma: nocover - defensive: mocked thread objects may raise unexpectedly in liveness probes
-        logger.debug(
-            "Failed to check listener thread liveness; treating thread as dead",
-            exc_info=True,
-        )
-        return True
-
-
 def _run_keepalive_loop(
     *,
     logger: logging.Logger,
@@ -356,9 +323,7 @@ def _run_keepalive_loop(
             # returned—break out of the loop so coordinated shutdown can
             # proceed. This avoids treating the UDP listener as a special case
             # for keepalive behaviour.
-            if loop_threads and all(
-                _listener_thread_is_dead(t, logger=logger) for t in loop_threads
-            ):
+            if loop_threads and all(not t.is_alive() for t in loop_threads):
                 break
 
             _time.sleep(1.0)
@@ -443,20 +408,6 @@ def _teardown_main_process(
                     server.server_close()  # type: ignore[union-attr]
                 except Exception:
                     logger.exception("Error while closing UDP server socket")
-            else:
-                # Backwards-compatible path for legacy server stubs that
-                # expose a .server attribute with shutdown/server_close
-                # methods (used in tests and older call sites).
-                inner = getattr(server, "server", None)
-                if inner is not None:
-                    try:
-                        inner.shutdown()
-                    except Exception:
-                        logger.exception("Error while shutting down UDP server")
-                    try:
-                        inner.server_close()
-                    except Exception:
-                        logger.exception("Error while closing UDP server socket")
         except Exception:
             logger.exception("Unexpected error during UDP server teardown")
 

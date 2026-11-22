@@ -1635,6 +1635,9 @@ def test_tcp_permission_error_falls_back_to_threaded(monkeypatch, caplog):
             if self._target is not None:
                 self._target()
 
+        def is_alive(self) -> bool:
+            return False
+
     import asyncio as _asyncio
 
     monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
@@ -1715,6 +1718,9 @@ def test_dot_permission_error_logs_without_fallback(monkeypatch, caplog):
             if self._target is not None:
                 self._target()
 
+        def is_alive(self) -> bool:
+            return False
+
     import asyncio as _asyncio
 
     monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
@@ -1790,6 +1796,9 @@ def test_dot_startup_exception_logs_unhandled_listener_error(monkeypatch, caplog
         def start(self) -> None:
             if self._target is not None:
                 self._target()
+
+        def is_alive(self) -> bool:
+            return False
 
     monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
     monkeypatch.setattr(
@@ -1868,6 +1877,9 @@ def test_dot_start_logs_info(monkeypatch, caplog):
 
         def start(self) -> None:
             return None
+
+        def is_alive(self) -> bool:
+            return False
 
     monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
     monkeypatch.setattr(
@@ -1972,6 +1984,9 @@ def test_asyncio_server_happy_path_runs_and_closes_loop(monkeypatch):
         def start(self) -> None:
             if self._target is not None:
                 self._target()
+
+        def is_alive(self) -> bool:
+            return False
 
     monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
     monkeypatch.setattr(

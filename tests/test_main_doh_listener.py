@@ -64,6 +64,9 @@ def test_main_doh_listener_starts(monkeypatch):
             if self.name == "foghorn-doh":
                 called["doh_start"] += 1
 
+        def is_alive(self) -> bool:
+            return False
+
         def join(self, timeout=None):
             return
 

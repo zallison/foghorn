@@ -71,6 +71,9 @@ def test_main_tcp_listener_uses_default_bind_host_and_starts(monkeypatch):
                 called["tcp_start"] += 1
             # Do not actually run the target
 
+        def is_alive(self) -> bool:
+            return False
+
         def join(self, timeout=None):
             return
 
