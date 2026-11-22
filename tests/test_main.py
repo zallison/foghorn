@@ -180,7 +180,7 @@ def test_main_starts_server_and_handles_keyboardinterrupt(monkeypatch):
         "    timeout_ms: 777\n"
         "    use_asyncio: false\n"
         "  cache:\n"
-        "    backend: in_memory_ttl\n"
+        "    module: in_memory_ttl\n"
         "    config:\n"
         "      min_cache_ttl: 33\n"
         "upstreams:\n"
