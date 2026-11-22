@@ -1596,7 +1596,7 @@ def _log_startup_security_warnings(
       - axfr_enabled: Whether AXFR/IXFR serving is enabled.
       - axfr_allow_clients: Configured AXFR client allowlist entries.
       - tsig_enabled: Whether downstream QUERY TSIG is enabled.
-      - tsig_mode: TSIG enforcement mode (optional|require).
+      - tsig_mode: TSIG enforcement mode (optional|require|passthrough).
       - tsig_keys: Resolved TSIG key configs (empty when none).
       - tsig_allow_clients: TSIG client CIDR allowlist entries.
       - udp_cfg: Normalized UDP listener configuration.
@@ -1633,7 +1633,8 @@ def _log_startup_security_warnings(
             )
 
     if tsig_enabled:
-        if not (tsig_keys or []):
+        mode_l = str(tsig_mode or "").lower()
+        if not (tsig_keys or []) and mode_l != "passthrough":
             logger.warning(
                 "server.features.tsig is enabled but no TSIG keys resolved; "
                 "TSIG-signed clients are rejected and mode=require fails closed"

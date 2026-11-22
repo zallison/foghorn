@@ -554,6 +554,8 @@ def _normalize_url_form_upstream_entry(
             rec["headers"] = endpoint["headers"]
         if "tls" in endpoint and isinstance(endpoint["tls"], dict):
             rec["tls"] = endpoint["tls"]
+        if "tsig" in endpoint and isinstance(endpoint["tsig"], dict):
+            rec["tsig"] = endpoint["tsig"]
         return rec
 
     for disallowed_key in ("host", "port"):
@@ -586,6 +588,8 @@ def _normalize_url_form_upstream_entry(
         rec2["tls"] = endpoint["tls"]
     if "pool" in endpoint and isinstance(endpoint["pool"], dict):
         rec2["pool"] = endpoint["pool"]
+    if "tsig" in endpoint and isinstance(endpoint["tsig"], dict):
+        rec2["tsig"] = endpoint["tsig"]
     return rec2
 
 
@@ -634,6 +638,8 @@ def _normalize_upstream_endpoints_list(
                 rec["headers"] = u["headers"]
             if "tls" in u and isinstance(u["tls"], dict):
                 rec["tls"] = u["tls"]
+            if "tsig" in u and isinstance(u["tsig"], dict):
+                rec["tsig"] = u["tsig"]
             upstreams.append(rec)
             continue
 
@@ -656,6 +662,8 @@ def _normalize_upstream_endpoints_list(
             rec2["tls"] = u["tls"]
         if "pool" in u and isinstance(u["pool"], dict):
             rec2["pool"] = u["pool"]
+        if "tsig" in u and isinstance(u["tsig"], dict):
+            rec2["tsig"] = u["tsig"]
         upstreams.append(rec2)
 
     return upstreams

@@ -438,6 +438,8 @@ def resolve_server_feature_flags(server_cfg: dict[str, Any]) -> dict[str, Any]:
     tsig_mode_raw = str(tsig_cfg.get("mode", "optional") or "optional").strip().lower()
     if tsig_mode_raw in {"require", "required", "mandatory"}:
         tsig_mode = "require"
+    elif tsig_mode_raw in {"passthrough", "pass-through", "pass_through"}:
+        tsig_mode = "passthrough"
     else:
         tsig_mode = "optional"
     from foghorn.servers.tsig_utils import resolve_features_tsig_keys

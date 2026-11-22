@@ -568,6 +568,8 @@ def _expand_server_feature_flags(server_cfg: dict[str, Any]) -> None:
     mode_raw = str(tsig_cfg.get("mode", "optional") or "optional").strip().lower()
     if mode_raw in {"require", "required", "mandatory"}:
         tsig_cfg["mode"] = "require"
+    elif mode_raw in {"passthrough", "pass-through", "pass_through"}:
+        tsig_cfg["mode"] = "passthrough"
     else:
         tsig_cfg["mode"] = "optional"
     keys = tsig_cfg.get("keys")
@@ -698,10 +700,42 @@ def _expand_server_feature_flags(server_cfg: dict[str, Any]) -> None:
         legacy_tsig_keys = []
     if not tsig_keys and legacy_tsig_keys:
         tsig_keys = legacy_tsig_keys
-    tsig_cfg["keys"] = tsig_keys
+    redacted_axfr_keys = []
+    for item in tsig_keys:
+        if isinstance(item, dict):
+            entry = dict(item)
+            if entry.get("secret"):
+                entry["secret"] = "***"
+            redacted_axfr_keys.append(entry)
+        else:
+            redacted_axfr_keys.append(item)
+    tsig_cfg["keys"] = redacted_axfr_keys
     tsig_cfg["key_sources"] = key_sources
     axfr_cfg["tsig"] = tsig_cfg
-    axfr_cfg["tsig_keys"] = legacy_tsig_keys if legacy_tsig_keys else tsig_keys
+    # Dump both nested and legacy surfaces with secrets redacted.
+    axfr_cfg["tsig_keys"] = list(redacted_axfr_keys)
+
+
+def _redact_upstream_tsig_secrets(endpoints: list) -> None:
+    """Brief: Redact endpoint.tsig.secret values in-place for config dumps.
+
+    Inputs:
+      - endpoints: List of upstream endpoint mappings.
+
+    Outputs:
+      - None; mutates nested tsig.secret to '***' when present.
+    """
+
+    if not isinstance(endpoints, list):
+        return
+    for ep in endpoints:
+        if not isinstance(ep, dict):
+            continue
+        tsig = ep.get("tsig")
+        if isinstance(tsig, dict) and tsig.get("secret"):
+            tsig = dict(tsig)
+            tsig["secret"] = "***"
+            ep["tsig"] = tsig
 
 
 def _expand_upstreams_defaults(out: dict[str, Any]) -> None:
@@ -779,6 +813,7 @@ def _expand_upstreams_defaults(out: dict[str, Any]) -> None:
     # Preserve the v2 layout when present.
     if "endpoints" in upstream_cfg and isinstance(upstream_cfg.get("endpoints"), list):
         upstream_cfg["endpoints"] = normalized
+        _redact_upstream_tsig_secrets(upstream_cfg["endpoints"])
 
     # Normalize backup endpoints when present.
     if isinstance(upstream_cfg.get("backup"), dict) and isinstance(
@@ -787,6 +822,7 @@ def _expand_upstreams_defaults(out: dict[str, Any]) -> None:
         try:
             backup_normalized = normalize_upstream_backup_config(out)
             upstream_cfg["backup"]["endpoints"] = backup_normalized
+            _redact_upstream_tsig_secrets(upstream_cfg["backup"]["endpoints"])
         except Exception:
             # Best-effort: keep original backup endpoints on errors.
             return

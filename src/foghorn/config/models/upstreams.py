@@ -69,11 +69,29 @@ class UpstreamNotifyConfig(StrictModel):
     block_hosts: list[str] | None = None
 
 
+class UpstreamTsigConfig(StrictModel):
+    """Brief: Optional TSIG key for Foghorn-as-client on an upstream endpoint.
+
+    Inputs:
+      - name/secret/algorithm for RFC 2845 outbound query signing.
+
+    Outputs:
+      - UpstreamTsigConfig model attached to upstream endpoints.
+    """
+
+    name: str = Field(description="TSIG key name (DNS name).")
+    secret: str = Field(description="Base64-encoded TSIG shared secret.")
+    algorithm: str = Field(
+        default="hmac-sha256",
+        description="TSIG algorithm (hmac-sha256, hmac-sha512, ...).",
+    )
+
+
 class UpstreamEndpointBase(StrictModel):
     """Brief: Shared optional fields on host/DoH/URL upstream endpoints.
 
     Inputs:
-      - abort_on_fail aliases, tls/pool/notify, metadata.
+      - abort_on_fail aliases, tls/pool/notify, tsig, metadata.
 
     Outputs:
       - Base fields mixed into concrete endpoint models.
@@ -88,6 +106,13 @@ class UpstreamEndpointBase(StrictModel):
     tls: UpstreamTlsConfig | None = None
     pool: UpstreamPoolConfig | None = None
     notify: UpstreamNotifyConfig | None = None
+    tsig: UpstreamTsigConfig | None = Field(
+        default=None,
+        description=(
+            "Optional TSIG key used to sign forward QUERY traffic to this "
+            "upstream and verify its responses (Foghorn as TSIG client)."
+        ),
+    )
 
     model_config = ConfigDict(extra="forbid")
 

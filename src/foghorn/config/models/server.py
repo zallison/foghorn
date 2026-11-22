@@ -677,11 +677,12 @@ class TsigFeatureConfig(StrictModel):
         default=False,
         description="Enable downstream QUERY TSIG verification and response signing.",
     )
-    mode: Literal["optional", "require"] = Field(
+    mode: Literal["optional", "require", "passthrough"] = Field(
         default="optional",
         description=(
             "optional accepts unsigned queries; require rejects missing TSIG "
-            "with NOTAUTH."
+            "with NOTAUTH; passthrough forwards client TSIG without local "
+            "verify/re-sign."
         ),
     )
     keys: list[TsigFeatureKey] = Field(default_factory=list)

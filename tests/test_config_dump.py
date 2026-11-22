@@ -269,10 +269,10 @@ def test_expand_server_feature_flags_axfr_legacy_tsig_keys_populates_tsig_block(
     config_dump._expand_server_feature_flags(server_cfg)
 
     assert server_cfg["axfr"]["tsig"]["keys"] == [
-        {"name": "legacy.example.", "secret": "legacy-secret"}
+        {"name": "legacy.example.", "secret": "***"}
     ]
     assert server_cfg["axfr"]["tsig_keys"] == [
-        {"name": "legacy.example.", "secret": "legacy-secret"}
+        {"name": "legacy.example.", "secret": "***"}
     ]
 
 
