@@ -156,6 +156,7 @@ def _handle_tsig(
         "algorithm": None,
         "had_tsig": False,
         "request_msg": None,
+        "passthrough": False,
     }
     try:
         tsig_enabled = bool(getattr(handler, "tsig_enabled", False))
@@ -166,7 +167,9 @@ def _handle_tsig(
         tsig_mode = str(getattr(handler, "tsig_mode", "optional") or "optional").lower()
     except Exception:
         tsig_mode = "optional"
-    if tsig_mode not in {"optional", "require"}:
+    if tsig_mode in {"passthrough", "pass-through", "pass_through"}:
+        tsig_mode = "passthrough"
+    elif tsig_mode not in {"optional", "require"}:
         tsig_mode = "optional"
     try:
         tsig_max_fudge = int(getattr(handler, "tsig_max_fudge_seconds", 300) or 300)
@@ -197,6 +200,23 @@ def _handle_tsig(
                 need_check = False
                 tsig_enabled = False
     if not need_check:
+        return tsig_ctx, None
+
+    # Passthrough: no local verify/re-sign. When TSIG may be present, mark
+    # context so cache is bypassed and the original wire is forwarded upstream.
+    if tsig_mode == "passthrough":
+        if may_tsig:
+            # Confirm TSIG presence best-effort without requiring keys.
+            had = False
+            try:
+                had = bool(_tsig._detect_tsig_without_keyring(bytes(data_bytes)))
+            except Exception:
+                had = bool(may_tsig)
+            if had:
+                tsig_ctx["had_tsig"] = True
+                tsig_ctx["passthrough"] = True
+                request_result_meta["tsig_passthrough"] = True
+                request_result_meta["tsig_had"] = True
         return tsig_ctx, None
 
     def _tsig_fail(

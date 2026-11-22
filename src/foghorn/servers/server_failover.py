@@ -618,6 +618,8 @@ def _send_query_with_failover_impl(
     qtype: int,
     max_concurrent: int = 1,
     *,
+    outbound_wire: bytes | None = None,
+    client_tsig_passthrough: bool = False,
     get_dot_pool_fn=get_dot_pool,
     get_tcp_pool_fn=get_tcp_pool,
     tcp_query_fn=tcp_query,
@@ -633,6 +635,8 @@ def _send_query_with_failover_impl(
       - qname: Query name (logging/validation fallback).
       - qtype: Query type (logging/validation fallback).
       - max_concurrent: Max upstreams to query in parallel for this request.
+      - outbound_wire: Optional prebuilt wire (client TSIG passthrough).
+      - client_tsig_passthrough: Forward outbound_wire as-is; skip endpoint TSIG.
 
     Outputs:
       - (response_wire_bytes, used_upstream, reason)
@@ -644,6 +648,8 @@ def _send_query_with_failover_impl(
     Notes:
       - When max_concurrent > 1, attempts are capped to max_concurrent in-flight
         futures and the first successful response wins.
+      - Endpoint ``tsig`` signs Foghorn-originated queries and verifies responses
+        unless client_tsig_passthrough is set.
     """
     if not upstreams:
         return None, None, "no_upstreams"
@@ -797,11 +803,88 @@ def _send_query_with_failover_impl(
             tls_ca_file_hint = None
         return host, port, transport, upstream_key, tls_ca_file_hint, upstream_label
 
+    def _build_outbound_wire(
+        upstream: dict, *, base_wire: bytes | None = None
+    ) -> bytes:
+        """Brief: Build outbound query wire with optional endpoint TSIG.
+
+        Inputs:
+          - upstream: Endpoint mapping that may include tsig.
+          - base_wire: Optional override of the unsigned/passthrough base wire.
+
+        Outputs:
+          - bytes: Wire to send on the wire (possibly TSIG-signed).
+        """
+
+        if client_tsig_passthrough and outbound_wire:
+            return bytes(outbound_wire)
+        if base_wire is not None:
+            wire = bytes(base_wire)
+        elif outbound_wire is not None and not client_tsig_passthrough:
+            # Prefer explicit wire only when not already a client-signed payload.
+            wire = bytes(outbound_wire)
+        else:
+            try:
+                wire = query.pack()
+            except Exception:
+                wire = b""
+        if client_tsig_passthrough:
+            return wire
+        tsig_raw = upstream.get("tsig") if isinstance(upstream, dict) else None
+        if not tsig_raw:
+            return wire
+        try:
+            from foghorn.servers.tsig_utils import (
+                normalize_upstream_tsig_config,
+                sign_query_wire_tsig,
+                strip_tsig_from_wire,
+            )
+
+            cfg = normalize_upstream_tsig_config(tsig_raw)
+            if cfg is None:
+                return wire
+            return sign_query_wire_tsig(strip_tsig_from_wire(wire), tsig=cfg)
+        except Exception:
+            return wire
+
+    def _verify_upstream_tsig_response(upstream: dict, response_wire: bytes) -> None:
+        """Brief: Verify endpoint TSIG on an upstream response or raise.
+
+        Inputs:
+          - upstream: Endpoint mapping that may include tsig.
+          - response_wire: Response bytes from the transport.
+
+        Outputs:
+          - None on success.
+
+        Raises:
+          - Exception when configured endpoint TSIG fails verification.
+        """
+
+        if client_tsig_passthrough:
+            return
+        tsig_raw = upstream.get("tsig") if isinstance(upstream, dict) else None
+        if not tsig_raw:
+            return
+        from foghorn.servers.tsig_utils import (
+            normalize_upstream_tsig_config,
+            verify_response_tsig_wire,
+        )
+
+        cfg = normalize_upstream_tsig_config(tsig_raw)
+        if cfg is None:
+            return
+        ok, err = verify_response_tsig_wire(response_wire, tsig=cfg, require_tsig=True)
+        if not ok:
+            raise Exception(err or "upstream TSIG verification failed")
+
     def _send_transport_query(
         upstream: dict,
         host: str,
         port: int,
         transport: str,
+        *,
+        wire: bytes | None = None,
     ) -> bytes:
         """Brief: Send a DNS query through the selected transport.
 
@@ -810,6 +893,7 @@ def _send_query_with_failover_impl(
           - host: Upstream host used by UDP/TCP/DoT transports.
           - port: Upstream port used by UDP/TCP/DoT transports.
           - transport: One of udp/tcp/dot/doh.
+          - wire: Optional prebuilt outbound wire (defaults to endpoint-aware build).
 
         Outputs:
           - bytes: Wire-format DNS response payload from the selected upstream.
@@ -819,6 +903,7 @@ def _send_query_with_failover_impl(
           - Preserves the legacy UDP fallback path used by tests/mocks where
             query.pack is absent and query.send is available.
         """
+        payload = wire if wire is not None else _build_outbound_wire(upstream)
         if transport == "dot":
             tls = (
                 upstream.get("tls", {}) if isinstance(upstream.get("tls"), dict) else {}
@@ -846,7 +931,7 @@ def _send_query_with_failover_impl(
                     "best-effort operation failed in servers/server_failover.py:_send_query_with_failover_impl._send_transport_query",
                     logger=logger,
                 )
-            return pool.send(query.pack(), timeout_ms, timeout_ms)
+            return pool.send(payload, timeout_ms, timeout_ms)
 
         if transport == "tcp":
             pool_cfg = (
@@ -869,7 +954,7 @@ def _send_query_with_failover_impl(
                     "best-effort operation failed in servers/server_failover.py:_send_query_with_failover_impl._send_transport_query",
                     logger=logger,
                 )
-            return pool.send(query.pack(), timeout_ms, timeout_ms)
+            return pool.send(payload, timeout_ms, timeout_ms)
 
         if transport == "doh":
             doh_url = str(upstream.get("url") or upstream.get("endpoint") or "").strip()
@@ -894,7 +979,7 @@ def _send_query_with_failover_impl(
 
             body, _ = doh_query(
                 doh_url,
-                query.pack(),
+                payload,
                 method=doh_method,
                 headers=doh_headers,
                 timeout_ms=timeout_ms,
@@ -905,7 +990,12 @@ def _send_query_with_failover_impl(
             return body
 
         # udp (default)
-        # Use transport impl for consistency, but preserve legacy path for tests/mocks
+        # Prefer explicit payload (supports TSIG). Fall back to query.send for
+        # legacy tests/mocks where pack is absent.
+        if payload:
+            from foghorn.servers.transports.udp import udp_query
+
+            return udp_query(host, int(port), payload, timeout_ms=timeout_ms)
         try:
             pack = query.pack
         except Exception:
@@ -945,6 +1035,47 @@ def _send_query_with_failover_impl(
         upstream_health = _upstream_health_context(upstream)
         fail_count = _upstream_fail_count(upstream)
         should_warn = _should_show_in_log(fail_count)
+
+        def _ok_after_tsig(
+            wire: bytes, used: dict
+        ) -> tuple[bytes | None, dict | None, str]:
+            """Brief: Verify endpoint TSIG then return success or all_failed.
+
+            Inputs:
+              - wire: Candidate response bytes.
+              - used: Upstream mapping (possibly transport-adjusted).
+
+            Outputs:
+              - (wire, used, 'ok') or (None, None, 'all_failed').
+            """
+
+            try:
+                _verify_upstream_tsig_response(upstream, wire)
+            except Exception as tsig_exc:
+                if should_warn:
+                    _warn_upstream_skip_once_with_health(
+                        upstream_key,
+                        upstream_health,
+                        "Skipping upstream %s (%s:%d via %s) (TSIG verify failed): %s",
+                        upstream_label,
+                        host,
+                        port,
+                        transport,
+                        tsig_exc,
+                    )
+                else:
+                    logger.debug(
+                        "Skipping upstream %s (%s:%d via %s) (TSIG verify failed): %s",
+                        upstream_label,
+                        host,
+                        port,
+                        transport,
+                        tsig_exc,
+                    )
+                _set_last_exception(tsig_exc)
+                return None, None, "all_failed"
+            _reset_upstream_skip_warning(upstream_key)
+            return wire, used, "ok"
 
         # Check for SERVFAIL, EDNS compatibility issues, or truncation to
         # trigger appropriate fallbacks.
@@ -1067,8 +1198,7 @@ def _send_query_with_failover_impl(
                     return None, None, "all_failed"
 
                 # Successful non-SERVFAIL response after EDNS fallback.
-                _reset_upstream_skip_warning(upstream_key)
-                return response_wire, upstream, "ok"
+                return _ok_after_tsig(response_wire, upstream)
 
             if parsed_response.header.rcode == RCODE.SERVFAIL:
                 if should_warn:
@@ -1101,7 +1231,7 @@ def _send_query_with_failover_impl(
                     response_wire = tcp_query_fn(
                         host,
                         int(port),
-                        query.pack(),
+                        _build_outbound_wire(upstream),
                         connect_timeout_ms=timeout_ms,
                         read_timeout_ms=timeout_ms,
                     )
@@ -1122,8 +1252,9 @@ def _send_query_with_failover_impl(
                         _set_last_exception(e3)
                         return None, None, "all_failed"
 
-                    _reset_upstream_skip_warning(upstream_key)
-                    return response_wire, {**upstream, "transport": "tcp"}, "ok"
+                    return _ok_after_tsig(
+                        response_wire, {**upstream, "transport": "tcp"}
+                    )
                 except Exception as e2:  # pragma: no cover - defensive
                     _warn_upstream_skip_once_with_health(
                         upstream_key,
@@ -1153,8 +1284,7 @@ def _send_query_with_failover_impl(
             return None, None, "all_failed"
 
         # Success (NOERROR, NXDOMAIN, etc.)
-        _reset_upstream_skip_warning(upstream_key)
-        return response_wire, upstream, "ok"
+        return _ok_after_tsig(response_wire, upstream)
 
     def _format_transport_error_file_info(
         exc: Exception, tls_ca_file_hint: str | None

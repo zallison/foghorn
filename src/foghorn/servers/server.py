@@ -585,6 +585,9 @@ def send_query_with_failover(
     qname: str,
     qtype: int,
     max_concurrent: int = 1,
+    *,
+    outbound_wire: bytes | None = None,
+    client_tsig_passthrough: bool = False,
 ) -> tuple[bytes | None, dict | None, str]:
     """Compatibility wrapper preserving server-module patch points for transports.
 
@@ -595,6 +598,9 @@ def send_query_with_failover(
       - qname: Query owner name (for logging context).
       - qtype: Query type code (for logging context).
       - max_concurrent: Maximum number of parallel upstream attempts.
+      - outbound_wire: Optional prebuilt query wire (e.g. client TSIG passthrough).
+      - client_tsig_passthrough: When True, forward outbound_wire as-is and skip
+        endpoint TSIG client signing/verification.
 
     Outputs:
       - (response_wire, used_upstream, reason) tuple from failover logic.
@@ -606,6 +612,8 @@ def send_query_with_failover(
         qname,
         qtype,
         max_concurrent=max_concurrent,
+        outbound_wire=outbound_wire,
+        client_tsig_passthrough=client_tsig_passthrough,
         get_dot_pool_fn=get_dot_pool,
         get_tcp_pool_fn=get_tcp_pool,
         tcp_query_fn=tcp_query,
@@ -989,12 +997,19 @@ def _stage_gate(ctx: ResolutionContext) -> _ResolveCoreResult | None:
     ctx.trusted_inbound_ecs = trusted_inbound_ecs
     ctx.outbound_ecs = outbound_ecs
     ctx.effective_target_ip = effective_target_ip
+    # TSIG passthrough with a client TSIG forces cache bypass so signed
+    # upstream answers are not mixed into the shared unsigned cache.
+    if tsig_ctx.get("passthrough") and tsig_ctx.get("had_tsig"):
+        ecs_cache_bypass = True
     ctx.ecs_cache_bypass = ecs_cache_bypass
     # Preserve TSIG metadata set by the earlier gate when present.
     if tsig_ctx.get("ok"):
         request_result_meta["tsig_ok"] = True
         if tsig_ctx.get("keyname") is not None:
             request_result_meta["tsig_key_name"] = tsig_ctx.get("keyname")
+    if tsig_ctx.get("passthrough") and tsig_ctx.get("had_tsig"):
+        request_result_meta["tsig_passthrough"] = True
+        request_result_meta["tsig_had"] = True
     ctx.request_result_meta = request_result_meta
 
     # Record query stats (mirrors DNSUDPHandler.handle)
@@ -1392,27 +1407,62 @@ def _resolve_core(
         request_result_meta=request_result_meta,
     )
 
+    def _finish_with_client_tsig(
+        result: _ResolveCoreResult,
+        *,
+        gate_ran: bool,
+    ) -> _ResolveCoreResult:
+        """Brief: Apply client TSIG signing once at the resolve exit choke point.
+
+        Inputs:
+          - result: Stage result to finish.
+          - gate_ran: True when the QUERY TSIG gate has populated ctx.tsig_ctx.
+
+        Outputs:
+          - _ResolveCoreResult with wire optionally TSIG-signed.
+        """
+
+        if not gate_ran or not result.wire:
+            return result
+        try:
+            from foghorn.servers.tsig_utils import apply_client_tsig_to_response
+
+            signed = apply_client_tsig_to_response(
+                result.wire,
+                tsig_ctx=ctx.tsig_ctx,
+                key_configs=list(getattr(ctx.handler, "tsig_keys", []) or []),
+                mode=getattr(ctx.handler, "tsig_mode", "optional"),
+            )
+            if signed == result.wire:
+                return result
+            return result._replace(wire=signed)
+        except Exception:
+            return result
+
     try:
         # Parse -> Gate -> CacheLookup -> Resolve -> Pack
         early = _stage_parse(ctx)
         if early is not None:
+            # Non-QUERY / FORMERR: gate never ran; opcode path handles TSIG.
             return early
 
         early = _stage_gate(ctx)
         if early is not None:
-            return early
+            # Gate failures (cookies/TSIG/refuse/pre-plugin) may already be signed
+            # (TSIG error path); still run finish helper (no-op when not ok).
+            return _finish_with_client_tsig(early, gate_ran=True)
 
         early = _stage_cache_lookup(ctx)
         if early is not None:
-            return early
+            return _finish_with_client_tsig(early, gate_ran=True)
 
         early = _stage_resolve(ctx)
         if early is not None:
-            return early
+            return _finish_with_client_tsig(early, gate_ran=True)
 
-        return _stage_pack(ctx)
+        return _finish_with_client_tsig(_stage_pack(ctx), gate_ran=True)
     except Exception as e:
-        return _handle_resolve_exception(
+        fail = _handle_resolve_exception(
             exc=e,
             data=data,
             client_ip=client_ip,
@@ -1423,6 +1473,7 @@ def _resolve_core(
             request_result_meta=ctx.request_result_meta,
             time_mod=_time,
         )
+        return _finish_with_client_tsig(fail, gate_ran=bool(ctx.tsig_ctx))
 
 
 def resolve_query_bytes(

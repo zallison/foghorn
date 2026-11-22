@@ -20,6 +20,7 @@ _SENSITIVE_CONFIG_KEYS = frozenset(
         "cert_file",
     }
 )
+# Nested endpoint.tsig.secret is covered by the "secret" key above.
 
 
 def _redact_upstream_config(upstream: Dict) -> Dict:

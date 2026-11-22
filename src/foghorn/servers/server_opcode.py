@@ -296,6 +296,17 @@ def _handle_non_query_opcode(
         qtype = 0
 
     # Best-effort TSIG verification before plugin dispatch.
+    # When verification succeeds against features/snapshot keys, responses may
+    # be re-signed via apply_client_tsig_to_response (UPDATE plugins often sign
+    # themselves; strip-then-sign avoids double TSIG).
+    tsig_sign_ctx: dict = {
+        "ok": False,
+        "keyname": None,
+        "algorithm": None,
+        "request_msg": None,
+        "passthrough": False,
+    }
+    tsig_sign_keys: list[dict] = []
     if msg is not None and getattr(msg, "had_tsig", False):
         from foghorn.plugins.resolve.zone_records import (
             update_helpers,
@@ -382,7 +393,7 @@ def _handle_non_query_opcode(
                 rcode_name="REFUSED",
             )
 
-        ok, err, _cfg = update_processor.verify_tsig_auth(
+        ok, err, cfg = update_processor.verify_tsig_auth(
             data_bytes, key_configs=key_configs
         )
         if not ok:
@@ -414,6 +425,60 @@ def _handle_non_query_opcode(
                 upstream_id=None,
                 rcode_name="REFUSED",
             )
+        tsig_sign_keys = list(key_configs)
+        try:
+            from foghorn.servers import tsig_utils as _tsig
+
+            vr = _tsig.verify_request_tsig(data_bytes, key_configs)
+            if vr.ok:
+                tsig_sign_ctx = {
+                    "ok": True,
+                    "keyname": vr.keyname,
+                    "algorithm": vr.algorithm,
+                    "request_msg": vr.request_msg,
+                    "passthrough": False,
+                }
+            elif isinstance(cfg, dict) and cfg.get("name"):
+                tsig_sign_ctx = {
+                    "ok": True,
+                    "keyname": cfg.get("name"),
+                    "algorithm": cfg.get("algorithm"),
+                    "request_msg": msg,
+                    "passthrough": False,
+                }
+        except Exception:
+            if isinstance(cfg, dict) and cfg.get("name"):
+                tsig_sign_ctx = {
+                    "ok": True,
+                    "keyname": cfg.get("name"),
+                    "algorithm": cfg.get("algorithm"),
+                    "request_msg": msg,
+                    "passthrough": False,
+                }
+
+    def _sign_opcode_wire(wire: bytes) -> bytes:
+        """Brief: Best-effort TSIG re-sign for non-QUERY opcode replies.
+
+        Inputs:
+          - wire: Response bytes from plugin or synthetic path.
+
+        Outputs:
+          - bytes: Possibly TSIG-signed response wire.
+        """
+
+        if not tsig_sign_ctx.get("ok") or not wire:
+            return wire
+        try:
+            from foghorn.servers.tsig_utils import apply_client_tsig_to_response
+
+            return apply_client_tsig_to_response(
+                wire,
+                tsig_ctx=tsig_sign_ctx,
+                key_configs=tsig_sign_keys,
+                mode="optional",
+            )
+        except Exception:
+            return wire
 
     ctx = PluginContext(client_ip=client_ip, listener=listener, secure=secure)
     try:
@@ -483,6 +548,7 @@ def _handle_non_query_opcode(
                     "best-effort operation failed in servers/server_opcode.py:_looks_like_dns_name",
                     logger=logger,
                 )
+            wire = _sign_opcode_wire(wire)
             try:
                 # dnslib expects at least a full DNS header (12 bytes). For
                 # shorter payloads, keep a synthetic label rather than deriving
@@ -524,7 +590,7 @@ def _handle_non_query_opcode(
                         logger=logger,
                     )
             return _ResolveCoreResult(
-                wire=wire,
+                wire=_sign_opcode_wire(wire),
                 dnssec_status=None,
                 upstream_id=None,
                 rcode_name="REFUSED",
@@ -552,7 +618,7 @@ def _handle_non_query_opcode(
                 logger=logger,
             )
     return _ResolveCoreResult(
-        wire=wire,
+        wire=_sign_opcode_wire(wire),
         dnssec_status=None,
         upstream_id=None,
         rcode_name="NOTIMP",

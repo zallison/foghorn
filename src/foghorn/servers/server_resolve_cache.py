@@ -190,21 +190,12 @@ def _try_cache_hit(
         ):  # pragma: no cover - defensive/metrics path excluded from coverage
             _schedule_cache_refresh(data, client_ip)
 
+        # Client TSIG re-sign happens once in _resolve_core finish choke point.
+        # Keep cache payloads TSIG-free; strip residual TSIG defensively.
         try:
-            from foghorn.servers.tsig_utils import (
-                sign_response_tsig,
-                strip_tsig_from_wire,
-            )
+            from foghorn.servers.tsig_utils import strip_tsig_from_wire
 
             cached = strip_tsig_from_wire(cached)
-            if tsig_ctx.get("ok") and tsig_ctx.get("keyname"):
-                cached = sign_response_tsig(
-                    cached,
-                    key_configs=list(getattr(handler, "tsig_keys", []) or []),
-                    keyname=tsig_ctx.get("keyname"),
-                    algorithm=tsig_ctx.get("algorithm"),
-                    request_msg=tsig_ctx.get("request_msg"),
-                )
         except Exception:
             warn_suppressed_exception(
                 "best-effort operation failed in servers/server_resolve_cache.py:_try_cache_hit",

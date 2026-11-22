@@ -368,13 +368,27 @@ def _resolve_upstream(
             max_concurrent < 1
         ):  # pragma: no cover - defensive/metrics path excluded from coverage
             max_concurrent = 1
+        client_tsig_passthrough = bool(
+            request_result_meta.get("tsig_passthrough")
+            and request_result_meta.get("tsig_had")
+        )
+        outbound_wire = None
+        if client_tsig_passthrough and isinstance(data, (bytes, bytearray)):
+            outbound_wire = bytes(data)
+        # Only pass new TSIG kwargs when used so legacy monkeypatches that omit
+        # them keep working in unit tests.
+        failover_kwargs: dict[str, object] = {"max_concurrent": max_concurrent}
+        if outbound_wire is not None:
+            failover_kwargs["outbound_wire"] = outbound_wire
+        if client_tsig_passthrough:
+            failover_kwargs["client_tsig_passthrough"] = True
         reply, used_upstream, reason = send_query_with_failover(
             req,
             upstreams,
             timeout_ms,
             qname,
             qtype,
-            max_concurrent=max_concurrent,
+            **failover_kwargs,
         )
         upstream_url = ""
         if isinstance(used_upstream, dict):

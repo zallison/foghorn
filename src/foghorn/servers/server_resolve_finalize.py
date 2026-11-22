@@ -179,26 +179,19 @@ def _finalize_resolved_response(
             logger_name="foghorn.servers.server_resolve_finalize",
         )
 
-    try:
-        from foghorn.servers.tsig_utils import (
-            sign_response_tsig,
-            strip_tsig_from_wire,
-        )
+    # Client TSIG re-sign is applied once in _resolve_core finish choke point.
+    # Strip residual upstream TSIG before cookie bind so the shared finish path
+    # can re-sign cleanly (except passthrough, which keeps upstream TSIG).
+    if not (tsig_ctx.get("passthrough") and tsig_ctx.get("had_tsig")):
+        try:
+            from foghorn.servers.tsig_utils import strip_tsig_from_wire
 
-        out = strip_tsig_from_wire(out)
-        if tsig_ctx.get("ok") and tsig_ctx.get("keyname"):
-            out = sign_response_tsig(
-                out,
-                key_configs=list(getattr(handler, "tsig_keys", []) or []),
-                keyname=tsig_ctx.get("keyname"),
-                algorithm=tsig_ctx.get("algorithm"),
-                request_msg=tsig_ctx.get("request_msg"),
+            out = strip_tsig_from_wire(out)
+        except Exception:
+            warn_suppressed_exception(
+                "best-effort operation failed in servers/server_resolve_finalize.py:_finalize_resolved_response",
+                logger_name="foghorn.servers.server_resolve_finalize",
             )
-    except Exception:
-        warn_suppressed_exception(
-            "best-effort operation failed in servers/server_resolve_finalize.py:_finalize_resolved_response",
-            logger_name="foghorn.servers.server_resolve_finalize",
-        )
     out = _bind_response_cookie_to_request(
         req,
         out,
