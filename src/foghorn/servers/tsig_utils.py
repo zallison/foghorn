@@ -587,3 +587,170 @@ def resolve_features_tsig_keys(tsig_cfg: dict | None) -> List[dict]:
         )
     except Exception:
         return []
+
+
+def apply_client_tsig_to_response(
+    wire: bytes | bytearray | memoryview | None,
+    *,
+    tsig_ctx: dict | None,
+    key_configs: Sequence[dict] | None = None,
+    mode: object | None = None,
+) -> bytes:
+    """Brief: Optionally strip/re-sign a client response based on TSIG context.
+
+    Inputs:
+      - wire: Response wire bytes (may be empty for DROP).
+      - tsig_ctx: Per-query TSIG context from the gate (ok/keyname/passthrough).
+      - key_configs: Local TSIG keys used when re-signing.
+      - mode: optional | require | passthrough (passthrough never re-signs).
+
+    Outputs:
+      - bytes: Original wire, or TSIG-signed wire when verification succeeded.
+
+    Notes:
+      - drop (empty wire) is a no-op.
+      - passthrough leaves upstream/client TSIG alone.
+      - verify/sign modes strip residual TSIG then re-sign when tsig_ctx.ok.
+    """
+
+    if not isinstance(wire, (bytes, bytearray, memoryview)):
+        return b""
+    raw = bytes(wire)
+    if not raw:
+        return raw
+
+    ctx = tsig_ctx if isinstance(tsig_ctx, dict) else {}
+    mode_l = str(mode or "optional").strip().lower()
+    if mode_l in {"passthrough", "pass-through", "pass_through"}:
+        return raw
+    if ctx.get("passthrough"):
+        return raw
+    if not (ctx.get("ok") and ctx.get("keyname")):
+        return raw
+
+    stripped = strip_tsig_from_wire(raw)
+    return sign_response_tsig(
+        stripped,
+        key_configs=key_configs,
+        keyname=ctx.get("keyname"),
+        algorithm=ctx.get("algorithm"),
+        request_msg=ctx.get("request_msg"),
+    )
+
+
+def normalize_upstream_tsig_config(tsig_raw: object) -> Optional[dict]:
+    """Brief: Normalize an upstream endpoint TSIG mapping.
+
+    Inputs:
+      - tsig_raw: Mapping with name/secret[/algorithm], or None.
+
+    Outputs:
+      - dict with name/secret/algorithm, or None when incomplete.
+    """
+
+    if not isinstance(tsig_raw, dict):
+        return None
+    name = str(tsig_raw.get("name") or "").strip()
+    secret = str(tsig_raw.get("secret") or "").strip()
+    if not name or not secret:
+        return None
+    algorithm = normalize_tsig_algorithm(tsig_raw.get("algorithm", "hmac-sha256"))
+    return {"name": name, "secret": secret, "algorithm": algorithm}
+
+
+def sign_query_wire_tsig(
+    query_wire: bytes | bytearray | memoryview | None,
+    *,
+    tsig: dict | None,
+) -> bytes:
+    """Brief: Strip any existing TSIG and sign a DNS query wire for upstream.
+
+    Inputs:
+      - query_wire: Unsigned or previously signed query bytes.
+      - tsig: Normalized key mapping (name/secret/algorithm).
+
+    Outputs:
+      - bytes: TSIG-signed query wire, or original bytes on failure/missing key.
+    """
+
+    raw = bytes(query_wire or b"")
+    cfg = normalize_upstream_tsig_config(tsig)
+    if not raw or cfg is None:
+        return raw
+    keyring, _by = build_tsig_keyring([cfg])
+    if keyring is None:
+        return raw
+    try:
+        msg = dns.message.from_wire(strip_tsig_from_wire(raw), ignore_trailing=True)
+    except Exception:
+        try:
+            msg = dns.message.from_wire(raw, ignore_trailing=True)
+        except Exception:
+            return raw
+    try:
+        msg.tsig = []
+    except Exception:
+        warn_suppressed_exception(
+            "best-effort operation failed in servers/tsig_utils.py:sign_query_wire_tsig",
+            logger=logger,
+        )
+    kn = str(cfg["name"])
+    if not kn.endswith("."):
+        kn = kn + "."
+    try:
+        msg.use_tsig(
+            keyring=keyring,
+            keyname=kn,
+            algorithm=cfg["algorithm"],
+        )
+        return msg.to_wire()
+    except Exception as exc:
+        logger.debug("TSIG query signing failed: %s", exc)
+        return raw
+
+
+def verify_response_tsig_wire(
+    response_wire: bytes | bytearray | memoryview | None,
+    *,
+    tsig: dict | None,
+    require_tsig: bool = True,
+) -> Tuple[bool, Optional[str]]:
+    """Brief: Verify an upstream response TSIG against an endpoint key.
+
+    Inputs:
+      - response_wire: Response bytes from upstream.
+      - tsig: Normalized key mapping used to sign the outbound query.
+      - require_tsig: When True, missing TSIG is a failure.
+
+    Outputs:
+      - (ok, error_text): True/None on success; False and reason on failure.
+    """
+
+    raw = bytes(response_wire or b"")
+    cfg = normalize_upstream_tsig_config(tsig)
+    if cfg is None:
+        return True, None
+    if not raw:
+        return False, "empty upstream response"
+    keyring, _by = build_tsig_keyring([cfg])
+    if keyring is None:
+        return False, "failed to build upstream TSIG keyring"
+    try:
+        msg = dns.message.from_wire(raw, keyring=keyring)
+    except dns.tsig.PeerBadKey as exc:
+        return False, f"unknown upstream TSIG key: {exc}"
+    except dns.tsig.BadSignature:
+        return False, "upstream TSIG signature verification failed"
+    except dns.tsig.PeerBadTime:
+        return False, "upstream TSIG time verification failed"
+    except dns.message.UnknownTSIGKey as exc:
+        return False, f"unknown upstream TSIG key: {exc}"
+    except dns.exception.DNSException as exc:
+        return False, f"upstream TSIG verification error: {exc}"
+    except Exception as exc:
+        return False, f"upstream TSIG verification error: {exc}"
+    if not getattr(msg, "had_tsig", False):
+        if require_tsig:
+            return False, "upstream TSIG required but missing on response"
+        return True, None
+    return True, None
