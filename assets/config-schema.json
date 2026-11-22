@@ -8783,10 +8783,11 @@
         },
         "mode": {
           "default": "optional",
-          "description": "optional accepts unsigned queries; require rejects missing TSIG with NOTAUTH. Default: \"optional\".",
+          "description": "optional accepts unsigned queries; require rejects missing TSIG with NOTAUTH; passthrough forwards client TSIG without local verify/re-sign. Default: \"optional\".",
           "enum": [
             "optional",
-            "require"
+            "require",
+            "passthrough"
           ],
           "title": "Mode",
           "type": "string"
@@ -9115,6 +9116,19 @@
           "title": "Transport",
           "type": "string"
         },
+        "tsig": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UpstreamTsigConfig"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional TSIG key used to sign forward QUERY traffic to this upstream and verify its responses (Foghorn as TSIG client)."
+        },
         "url": {
           "description": "DoH URL (https://...).",
           "title": "Url",
@@ -9266,6 +9280,19 @@
             "string",
             "null"
           ]
+        },
+        "tsig": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UpstreamTsigConfig"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional TSIG key used to sign forward QUERY traffic to this upstream and verify its responses (Foghorn as TSIG client)."
         }
       },
       "required": [
@@ -9528,6 +9555,66 @@
       "title": "UpstreamTlsConfig",
       "type": "object"
     },
+    "UpstreamTsigConfig": {
+      "additionalProperties": false,
+      "description": "Brief: Optional TSIG key for Foghorn-as-client on an upstream endpoint.\n\nInputs:\n  - name/secret/algorithm for RFC 2845 outbound query signing.\n\nOutputs:\n  - UpstreamTsigConfig model attached to upstream endpoints.",
+      "properties": {
+        "algorithm": {
+          "default": "hmac-sha256",
+          "description": "TSIG algorithm (hmac-sha256, hmac-sha512, ...). Default: \"hmac-sha256\".",
+          "title": "Algorithm",
+          "type": "string"
+        },
+        "comment": {
+          "anyOf": [
+            {
+              "description": "Type: string.",
+              "maxLength": 254,
+              "type": "string"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional human metadata string (max 254 characters).",
+          "title": "Comment"
+        },
+        "id": {
+          "anyOf": [
+            {
+              "description": "Type: string.",
+              "maxLength": 254,
+              "type": "string"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional human metadata string (max 254 characters).",
+          "title": "Id"
+        },
+        "name": {
+          "description": "TSIG key name (DNS name).",
+          "title": "Name",
+          "type": "string"
+        },
+        "secret": {
+          "description": "Base64-encoded TSIG shared secret.",
+          "title": "Secret",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "secret"
+      ],
+      "title": "UpstreamTsigConfig",
+      "type": "object"
+    },
     "UpstreamUrl": {
       "additionalProperties": false,
       "description": "Brief: URL-form upstream endpoint (udp/tcp/dot schemes).\n\nInputs:\n  - url: Endpoint URL with scheme (required).\n  - transport / shared endpoint fields.\n\nOutputs:\n  - UpstreamUrl model ($defs.upstream_url).",
@@ -9645,6 +9732,19 @@
             "string",
             "null"
           ]
+        },
+        "tsig": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UpstreamTsigConfig"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional TSIG key used to sign forward QUERY traffic to this upstream and verify its responses (Foghorn as TSIG client)."
         },
         "url": {
           "description": "Upstream URL (udp://, tcp://, or dot://). DoH uses upstream_doh or https DoH endpoints.",
@@ -14059,6 +14159,19 @@
           "title": "Transport",
           "type": "string"
         },
+        "tsig": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UpstreamTsigConfig"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional TSIG key used to sign forward QUERY traffic to this upstream and verify its responses (Foghorn as TSIG client)."
+        },
         "url": {
           "description": "DoH URL (https://...).",
           "title": "Url",
@@ -14210,6 +14323,19 @@
             "string",
             "null"
           ]
+        },
+        "tsig": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UpstreamTsigConfig"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional TSIG key used to sign forward QUERY traffic to this upstream and verify its responses (Foghorn as TSIG client)."
         }
       },
       "required": [
@@ -14335,6 +14461,19 @@
             "string",
             "null"
           ]
+        },
+        "tsig": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UpstreamTsigConfig"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional TSIG key used to sign forward QUERY traffic to this upstream and verify its responses (Foghorn as TSIG client)."
         },
         "url": {
           "description": "Upstream URL (udp://, tcp://, or dot://). DoH uses upstream_doh or https DoH endpoints.",
@@ -17889,10 +18028,11 @@
                 },
                 "mode": {
                   "default": "optional",
-                  "description": "optional accepts unsigned queries; require rejects missing TSIG with NOTAUTH. Default: \"optional\".",
+                  "description": "optional accepts unsigned queries; require rejects missing TSIG with NOTAUTH; passthrough forwards client TSIG without local verify/re-sign. Default: \"optional\".",
                   "enum": [
                     "optional",
-                    "require"
+                    "require",
+                    "passthrough"
                   ],
                   "title": "Mode",
                   "type": "string"
