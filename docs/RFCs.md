@@ -300,29 +300,46 @@ See `docs/plugins/resolve/zone_update.md` and
 
 ### 5.4 TSIG – RFC 2845 (Partial)
 
-TSIG is implemented for zone-management paths and optional downstream QUERY auth:
+TSIG is implemented for zone-management paths, downstream QUERY auth, and optional upstream forward-client TSIG:
 
 - Downstream QUERY via `server.features.tsig` (default **off**):
   - `mode: optional` verifies TSIG when present; unsigned queries still work.
   - `mode: require` rejects missing/invalid TSIG with NOTAUTH before cache/plugins/upstream.
-  - Valid TSIG requests get signed responses; cache payloads stay TSIG-free and are re-signed per request.
+  - `mode: passthrough` does **not** verify or re-sign locally; when a client TSIG is present, Foghorn bypasses cache and forwards the original signed wire upstream, returning the upstream response TSIG as-is.
+  - Valid TSIG requests (optional/require) get signed responses on **all** QUERY exits (cache hit, pack, pre-plugin deny/override, refuse_any, local_blocked, SERVFAIL); cache payloads stay TSIG-free and are re-signed per request.
   - Shared helpers live in `src/foghorn/servers/tsig_utils.py`.
   - Optional `allow_clients` / `listeners` scope enforcement.
+- Upstream forward QUERY client TSIG: per-endpoint `upstreams.endpoints[].tsig` / backup endpoints (`name`/`secret`/`algorithm`). Foghorn signs outbound queries and verifies responses unless client passthrough is active for that request.
 - Upstream AXFR client transfers (`axfr_zones[*].upstreams[*].tsig`).
 - Downstream AXFR/IXFR serving (`server.axfr.require_tsig` + nested `server.axfr.tsig` keys/sources; legacy `tsig_keys` alias retained). When the AXFR block defines no keys, it auto-inherits `server.features.tsig.keys` / `key_sources`; AXFR-level keys always win when present.
 - DNS UPDATE authentication and best-effort signed error responses.
-- Best-effort MAC verification for signed non-QUERY opcodes before plugin dispatch; prefers `server.features.tsig` / snapshot keys, then ZoneRecords UPDATE keys; signed messages are refused when no keys are configured.
+- Best-effort MAC verification for signed non-QUERY opcodes before plugin dispatch; prefers `server.features.tsig` / snapshot keys, then ZoneRecords UPDATE keys; signed messages are refused when no keys are configured. Successful non-QUERY replies are best-effort re-signed when features keys verified the request.
 
 Operational notes for `server.features.tsig`:
 
 - Start with `mode: optional` to identify signed clients via `tsig_key_name` in logs, then move internal clients to `require`.
-- `require` fails closed: missing/invalid TSIG gets NOTAUTH before cache/plugins/upstream. With an empty keyring, TSIG-present queries are rejected in both modes and `mode: require` refuses everything; a startup warning is emitted.
+- `require` fails closed: missing/invalid TSIG gets NOTAUTH before cache/plugins/upstream. With an empty keyring, TSIG-present queries are rejected in both modes and `mode: require` refuses everything; a startup warning is emitted (not for `passthrough`).
+- `passthrough` authenticates nothing locally; use only when an upstream or path will handle TSIG end-to-end.
 - `allow_clients` (CIDR) and `listeners` (`udp|tcp|dot|doh|secure|insecure`) scope where verification/enforcement applies; clients outside the scope bypass TSIG entirely.
 - Share key material across AXFR/UPDATE/QUERY by pointing `key_sources: [{type: file, path: ...}]` at the same file; rotate by listing old and new keys together. AXFR/IXFR serving auto-inherits `server.features.tsig` keys when its own `tsig` block defines none (AXFR-level keys always win when present).
+- Endpoint `tsig` applies to Foghorn-originated forward queries only; it is skipped when client passthrough is active for a signed request.
 - TSIG authenticates but does not encrypt; prefer DoT/DoH for confidentiality, and keep clients NTP-synchronized (`max_fudge_seconds` bounds skew, default 300).
 - Clients using both TSIG and DNS COOKIEs must satisfy both gates; cookie `require_udp` is evaluated before the TSIG gate.
 
-**Still missing:** upstream/client TSIG on ordinary forward QUERY traffic to resolvers/authoritatives.
+**Cache implications (DNS response cache under `server.cache`):**
+
+- Cache keys remain `(qname, qtype)` only. They are **not** partitioned by TSIG key name, client IP, or whether the request was signed.
+- **optional / require (verify+re-sign modes):**
+  - On store, Foghorn strips TSIG (and COOKIE options) from the payload so the shared cache never retains a client- or upstream-specific MAC.
+  - On hit (and on every successful exit after the gate), Foghorn re-signs the cached body with the **current request's** verified key when `tsig_ctx.ok`.
+  - Signed and unsigned clients therefore share the same answer body; only the outbound MAC differs. That is intentional and usually desirable for hit rate.
+  - Consequence: if two principals must receive **different** answers for the same name/type, do not rely on TSIG alone—use plugins, views, or separate caches/instances.
+- **passthrough + client TSIG present:**
+  - Cache is **fully bypassed** (no read, no write) for that query so Foghorn never mixes a client-signed upstream path with the unsigned shared cache.
+  - Expect higher upstream load and no local negative/positive caching for those signed passthrough queries.
+  - Passthrough requests **without** TSIG use the normal cache path.
+- **Upstream endpoint `tsig` (Foghorn as client):** does not change the cache key. After a successful upstream MAC check, the response is still stripped before store and may be re-signed for a downstream client key on the way out (unless passthrough kept the upstream TSIG).
+- Cookies follow the same hygiene pattern (stripped on store, rebound on the way out); TSIG and COOKIE are independent gates but both keep cache payloads free of per-client crypto material.
 
 ---
 
@@ -354,9 +371,9 @@ The following RFCs (and related features) are not implemented directly in Foghor
 - **True incremental IXFR client/server deltas (RFC 1995/5936 IXFR)**
   - IXFR queries are answered with full-zone AXFR-style transfers; no IXFR pull client.
 
-- **Upstream DNS TSIG (Foghorn as TSIG client on forward QUERY)**
-  - Downstream QUERY TSIG is implemented under `server.features.tsig`; Foghorn does not yet
-    sign ordinary forward queries toward upstream resolvers/authoritatives.
+- **Recursive per-authority TSIG**
+  - Forward-mode endpoint TSIG is supported via `upstreams.endpoints[].tsig`; recursive
+    mode does not yet attach per-authority TSIG keys while walking the hierarchy.
 
 Other newer or specialized DNS-related RFCs not listed above should be assumed
 **not implemented** unless clearly documented in the code or configuration.
@@ -370,7 +387,8 @@ Other newer or specialized DNS-related RFCs not listed above should be assumed
 - DNSSEC is best used in **passthrough/upstream-validated** mode for production comfort; local validation exists but remains experimental.
 - EDE is on by default for clearer policy/upstream diagnostics; full DNSSEC EDE coverage is still limited.
 - ECS is trust-gated in forward mode and bypasses shared cache when it affects answers.
-- Downstream QUERY TSIG is available under `server.features.tsig` (default off; optional/require). Upstream client TSIG is not implemented.
+- Downstream QUERY TSIG is available under `server.features.tsig` (default off; optional/require/passthrough). Forward upstream client TSIG is available per endpoint via `upstreams.endpoints[].tsig`.
+- DNS cache stores TSIG-free bodies and re-signs per authenticated client request; `mode: passthrough` with a client TSIG bypasses the cache entirely (see §5.4).
 - Downstream DNS COOKIEs default on in learn mode; use `require_udp` plus a shared secret for public UDP resolvers. Cache payloads remain cookie-free.
 - ZoneRecords can act as a limited authoritative edge: static/BIND sources, AXFR hydrate/refresh (startup + poll + NOTIFY-driven), optional DNS UPDATE with journals, outbound NOTIFY, and AXFR/IXFR serving over TCP/DoT with TSIG and allowlists.
 - IXFR remains full-zone transfer style; there is no incremental IXFR client.

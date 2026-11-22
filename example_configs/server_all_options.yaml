@@ -180,7 +180,11 @@ server:
       lifetime_seconds: 86400
     tsig:
       enabled: false      # Downstream QUERY TSIG (RFC 2845); default off
-      mode: optional      # optional | require
+      mode: optional      # optional | require | passthrough
+      # Cache notes (see docs/RFCs.md §5.4):
+      # - optional/require: cache stores TSIG-free bodies; re-sign per client key on hit.
+      #   Cache key is still (qname, qtype) only — not partitioned by TSIG key.
+      # - passthrough + client TSIG: full cache bypass (no read/write) for that query.
       keys: []            # [{name, secret, algorithm}]
       key_sources: []     # [{type: file, path: ...}]
       max_fudge_seconds: 300
@@ -277,6 +281,11 @@ upstreams:
     - host: 1.1.1.1
       port: 53
       transport: udp
+      # Optional Foghorn-as-client TSIG toward this upstream:
+      # tsig:
+      #   name: fwd-key.example.
+      #   secret: BASE64==
+      #   algorithm: hmac-sha256
 
 logging:
   python:

@@ -399,7 +399,8 @@ Without `trust-ad`, glibc clears the AD flag before handing answers to applicati
   - When ECS influences upstream selection/targeting, cache reads/writes are bypassed to avoid cross-subnet contamination.
   - Legacy `server.enable_ede` and `server.forward_local` keys are still accepted as compatibility aliases.
   - Downstream DNS COOKIE (RFC 7873) lives under `server.features.cookies` (`enabled` default `true`, `mode: learn|require_udp`, optional shared `secret` / `secret_old`). See `docs/RFCs.md` and `example_configs/server_all_options.yaml`.
-  - Downstream QUERY TSIG (RFC 2845) lives under `server.features.tsig` (`enabled` default `false`, `mode: optional|require`, `keys` / `key_sources`). Separate from AXFR TSIG under `server.axfr.tsig`. See `docs/RFCs.md`.
+  - Downstream QUERY TSIG (RFC 2845) lives under `server.features.tsig` (`enabled` default `false`, `mode: optional|require|passthrough`, `keys` / `key_sources`). Forward upstream client TSIG is per-endpoint `upstreams.endpoints[].tsig`. Separate from AXFR TSIG under `server.axfr.tsig`. See `docs/RFCs.md`.
+  - **TSIG and the DNS cache:** cache keys stay `(qname, qtype)` only. In `optional`/`require`, stored answers are TSIG-free and re-signed per verified client key on the way out (signed and unsigned clients share the same body). In `passthrough`, a request that carries client TSIG **bypasses cache** (no read/write) so per-client MACs never enter the shared store—expect more upstream traffic for those queries. Endpoint `tsig` does not change cache keys. Details in `docs/RFCs.md` §5.4.
 - `server.resolver`
   - Timeouts, recursion depth, and resolver mode:
 	- `forward` (default): forward to configured `upstreams`.
