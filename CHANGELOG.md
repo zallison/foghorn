@@ -5,6 +5,7 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 ### Added
+- Stats config model fields previously runtime-only: `stats.log_level` (default `info`), `stats.track_uniques` (default `true`), `stats.sigusr1_resets_stats` / `stats.sigusr2_resets_stats` (default `false`); schema regenerated.
 - Full operator DNSSEC trust-anchor wiring: `server.dnssec.trust_anchor_mode` (`static`|`rfc5011`), `trust_anchor_store_path`, hold-down days, and `trust_anchors[]` (DNSKEY/DS) applied at startup and runtime reload (examples under `server.dnssec`).
 - RFC 5011 **live update path**: after an authenticated root DNSKEY RRset validates, Foghorn updates the on-disk trust-anchor store (add/promote/remove hold-downs) and refreshes TA caches.
 - Custom trust anchors: root DNSKEY supplements plus non-root DNSKEY/DS islands of trust for local validation.
@@ -31,6 +32,8 @@ All notable changes to this project will be documented in this file.
 - Plugin hook priorities accept bare `int` or `{priority: int}` mapping nodes.
 
 ### Changed
+- Main keepalive loop checks listener thread liveness via `Thread.is_alive()` only (removed `_listener_thread_is_dead` AttributeError/broad-exception fallbacks); UDP teardown no longer walks a nested `.server` stub path.
+- Expected DoT/TCP idle-timeout and transport-disconnect paths, and DNS_CACHE snapshot-assign failures, log via `warn_suppressed_exception` instead of silent `pass`.
 - Structured config sections prefer `extra="forbid"` (listeners, plugin hooks/setup/logging, logging/stats/upstreams, server resolver/limits/cache/dnssec/http/axfr/features) so unknown keys fail validation; opaque maps remain open (`plugins[].config`, cache backend `config`, `vars`).
 - Schema generation omits resolve plugins under `foghorn.plugins.resolve.examples` from `$defs.PluginConfigs` (promote out of `examples/` and re-run `make schema` to publish).
 - DockerHosts sticky condition paths call `foghorn.utils.condition_logging` directly (no plugin-local wrappers).
@@ -73,6 +76,7 @@ All notable changes to this project will be documented in this file.
 - Documented DockerHosts multi-endpoint client-failure continue behavior in `docs/plugins/resolve/docker_hosts.md`.
 
 ### Tests
+- Main listener/thread stubs implement `is_alive()` so keepalive exit matches production threads; main startup fixture uses `cache.module` instead of `backend`.
 - Added `tests/test_trust_anchor_config_wiring.py` for RFC 5011 live store updates, custom anchors, configure-from-config helpers, and reload snapshot TA re-apply.
 - MQTT logging tests assert Last Will topic/payload/QoS/retain for `log_disconnect`.
 - Webserver tests cover token-mode Basic `foghorn:<token>` (default on and `allow_basic_token=false`), wrong Basic username/password, basic+token rejection, and `enable_admin` without `enable_api` warning.
