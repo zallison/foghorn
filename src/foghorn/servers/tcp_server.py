@@ -585,10 +585,23 @@ async def _handle_conn(
                 writer, response, client_ip=client_ip, log=logger
             ):
                 break
-    except asyncio.TimeoutError:
-        pass  # pragma: no cover - defensive: idle timeout closes connection
-    except (ConnectionError, OSError):
-        pass  # pragma: no cover - defensive: expected network disconnect path
+    except (
+        asyncio.TimeoutError
+    ):  # pragma: no cover - defensive: idle timeout closes connection
+        warn_suppressed_exception(
+            "TCP asyncio: idle timeout for client_ip=%s",
+            client_ip,
+            logger=logger,
+        )
+    except (
+        ConnectionError,
+        OSError,
+    ):  # pragma: no cover - defensive: expected network disconnect path
+        warn_suppressed_exception(
+            "TCP asyncio: transport disconnect for client_ip=%s",
+            client_ip,
+            logger=logger,
+        )
     except Exception:  # pragma: no cover - defensive: unexpected transport failure
         logger.exception(
             "Unhandled error in asyncio TCP handler for client %s",

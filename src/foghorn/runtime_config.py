@@ -48,6 +48,7 @@ from .config.config_parser import (
     parse_config_file,
 )
 from .plugins.setup import run_setup_plugins
+from .utils.exception_logging import warn_suppressed_exception
 
 logger = logging.getLogger("foghorn.runtime_config")
 
@@ -1547,8 +1548,13 @@ def _apply_snapshot_to_runtime_globals(snapshot: RuntimeSnapshot) -> None:
         from foghorn.plugins.resolve import base as plugin_base
 
         plugin_base.DNS_CACHE = snapshot.cache_plugin  # type: ignore[assignment]
-    except Exception:
-        pass  # pragma: no cover - defensive: import/assign failures are unlikely
+    except (
+        Exception
+    ):  # pragma: no cover - defensive: import/assign failures are unlikely
+        warn_suppressed_exception(
+            "Failed to assign DNS_CACHE during snapshot apply",
+            logger=logger,
+        )
 
     try:
         from foghorn.dnssec.dnssec_validate import apply_dnssec_validation_runtime

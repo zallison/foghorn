@@ -263,10 +263,22 @@ async def _handle_conn(
                 writer, response, client_ip=client_ip, log=logger
             ):
                 break
-    except TimeoutError:
-        pass  # pragma: no cover - defensive: idle timeout closes connection
-    except (ConnectionError, OSError, ssl.SSLError):
-        pass  # pragma: no cover - defensive: expected transport disconnect path
+    except TimeoutError:  # pragma: no cover - defensive: idle timeout closes connection
+        warn_suppressed_exception(
+            "DoT handler idle timeout for client %s",
+            client_ip,
+            logger=logger,
+        )
+    except (
+        ConnectionError,
+        OSError,
+        ssl.SSLError,
+    ):  # pragma: no cover - defensive: expected transport disconnect path
+        warn_suppressed_exception(
+            "DoT handler transport disconnect for client %s",
+            client_ip,
+            logger=logger,
+        )
     except Exception:  # pragma: no cover - defensive: unexpected transport failure
         logger.exception(
             "Unhandled DoT handler exception for client %s",
