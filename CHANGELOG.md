@@ -5,6 +5,9 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 ### Added
+- Downstream QUERY TSIG `server.features.tsig.mode: passthrough`: skip local verify/re-sign; when client TSIG is present, bypass cache and forward the original signed wire upstream, returning upstream TSIG as-is.
+- Forward-mode upstream client TSIG via per-endpoint `upstreams.endpoints[].tsig` / backup endpoints (`name`/`secret`/`algorithm`): Foghorn signs outbound QUERY and verifies responses (skipped during client passthrough).
+- Shared TSIG helpers: `apply_client_tsig_to_response`, `normalize_upstream_tsig_config`, `sign_query_wire_tsig`, `verify_response_tsig_wire`.
 - Stats config model fields previously runtime-only: `stats.log_level` (default `info`), `stats.track_uniques` (default `true`), `stats.sigusr1_resets_stats` / `stats.sigusr2_resets_stats` (default `false`); schema regenerated.
 - Full operator DNSSEC trust-anchor wiring: `server.dnssec.trust_anchor_mode` (`static`|`rfc5011`), `trust_anchor_store_path`, hold-down days, and `trust_anchors[]` (DNSKEY/DS) applied at startup and runtime reload (examples under `server.dnssec`).
 - RFC 5011 **live update path**: after an authenticated root DNSKEY RRset validates, Foghorn updates the on-disk trust-anchor store (add/promote/remove hold-downs) and refreshes TA caches.
@@ -32,6 +35,9 @@ All notable changes to this project will be documented in this file.
 - Plugin hook priorities accept bare `int` or `{priority: int}` mapping nodes.
 
 ### Changed
+- QUERY client TSIG re-sign is applied once at the `_resolve_core` exit choke point (cache hit, pack, pre-plugin deny/override, refuse/local_blocked, SERVFAIL) so optional/require signed clients get MACs on all successful exits; cache/finalize only strip residual TSIG.
+- Non-QUERY opcode replies are best-effort TSIG re-signed when features/snapshot keys verified the request.
+- Config dumps redact AXFR nested/`tsig_keys` and upstream endpoint `tsig.secret` values as `***`.
 - Main keepalive loop checks listener thread liveness via `Thread.is_alive()` only (removed `_listener_thread_is_dead` AttributeError/broad-exception fallbacks); UDP teardown no longer walks a nested `.server` stub path.
 - Expected DoT/TCP idle-timeout and transport-disconnect paths, and DNS_CACHE snapshot-assign failures, log via `warn_suppressed_exception` instead of silent `pass`.
 - Structured config sections prefer `extra="forbid"` (listeners, plugin hooks/setup/logging, logging/stats/upstreams, server resolver/limits/cache/dnssec/http/axfr/features) so unknown keys fail validation; opaque maps remain open (`plugins[].config`, cache backend `config`, `vars`).
@@ -67,6 +73,7 @@ All notable changes to this project will be documented in this file.
 - etc_hosts reverse maps include IPv6 as well as IPv4 via shared hosts helpers.
 
 ### Documentation
+- Documented TSIG passthrough mode, shared-cache re-sign vs passthrough cache bypass, and per-endpoint upstream client TSIG in `docs/RFCs.md` §5.4, README features notes, and `example_configs/server_all_options.yaml`.
 - Documented operator DNSSEC trust-anchor knobs (mode/store/hold-downs/custom anchors), RFC 5011 live updates, and reload behavior in `docs/RFCs.md` §4.3 and example configs.
 - Documented token-mode Basic `foghorn:<token>` gated by `allow_basic_token`, dual `WWW-Authenticate`, and basic+token rejection in `docs/API.md`.
 - README-DEV prefers `extra="forbid"` for structured sections and notes that example resolve plugins are excluded from the published schema catalog.
@@ -76,6 +83,7 @@ All notable changes to this project will be documented in this file.
 - Documented DockerHosts multi-endpoint client-failure continue behavior in `docs/plugins/resolve/docker_hosts.md`.
 
 ### Tests
+- TSIG coverage for pre-plugin deny re-sign, passthrough forward/cache bypass, feature-flag `passthrough` normalization, endpoint tsig sign/verify failure, and upstream config preserving `tsig`.
 - Main listener/thread stubs implement `is_alive()` so keepalive exit matches production threads; main startup fixture uses `cache.module` instead of `backend`.
 - Added `tests/test_trust_anchor_config_wiring.py` for RFC 5011 live store updates, custom anchors, configure-from-config helpers, and reload snapshot TA re-apply.
 - MQTT logging tests assert Last Will topic/payload/QoS/retain for `log_disconnect`.
