@@ -120,6 +120,7 @@ def ensure_web_auth_token(
     Notes:
       - Acts when auth.mode is 'token' (the default when unset) and token is
         missing/blank.
+      - Resolves auth.token_secret via secrets backends when present.
       - Logs the generated token at WARNING so operators can retrieve it once.
     """
 
@@ -134,6 +135,20 @@ def ensure_web_auth_token(
     mode = str(auth_cfg.get("mode", "token") or "token").strip().lower()
     if mode != "token":
         return None
+
+    # Prefer secrets-backed token when configured and inline token is blank.
+    existing = str(auth_cfg.get("token") or "").strip()
+    if not existing and auth_cfg.get("token_secret") is not None:
+        try:
+            from foghorn.plugins.secrets.resolve import resolve_token_value
+
+            resolved = resolve_token_value(auth_cfg)
+        except Exception:
+            resolved = None
+        if resolved:
+            auth_cfg["token"] = str(resolved)
+            web_cfg["auth"] = auth_cfg
+            return None
 
     existing = str(auth_cfg.get("token") or "").strip()
     if existing:
@@ -333,7 +348,29 @@ def _evaluate_web_auth(
 
     if mode == "basic":
         username = str(auth_cfg.get("username") or "")
-        password = str(auth_cfg.get("password") or "")
+        password_raw = auth_cfg.get("password")
+        if (not isinstance(password_raw, str) or not str(password_raw).strip()) and (
+            auth_cfg.get("password_secret") is not None
+        ):
+            try:
+                from foghorn.plugins.secrets.resolve import resolve_secret_string
+
+                password_raw = resolve_secret_string(
+                    auth_cfg.get("password_secret"),
+                    prefer=("token", "secret"),
+                )
+            except Exception:
+                password_raw = None
+        elif isinstance(password_raw, dict):
+            try:
+                from foghorn.plugins.secrets.resolve import resolve_secret_string
+
+                password_raw = resolve_secret_string(
+                    password_raw, prefer=("token", "secret")
+                )
+            except Exception:
+                password_raw = None
+        password = str(password_raw or "")
         if not username.strip() or not password:
             return (
                 False,
@@ -359,6 +396,13 @@ def _evaluate_web_auth(
         return True, None, None, None
 
     token = auth_cfg.get("token")
+    if not token and auth_cfg.get("token_secret") is not None:
+        try:
+            from foghorn.plugins.secrets.resolve import resolve_token_value
+
+            token = resolve_token_value(auth_cfg)
+        except Exception:
+            token = None
     if not token:
         return False, 500, "webserver.auth.token not configured", None
 

@@ -560,6 +560,19 @@ def ensure_admin_tls_files(
     if not isinstance(web_cfg, dict):
         return None, None
 
+    # Expand cert_secret/key_secret refs from secrets backends into temp paths
+    # when explicit cert_file/key_file are unset.
+    try:
+        from foghorn.plugins.secrets.resolve import materialize_tls_paths
+
+        expanded = materialize_tls_paths(web_cfg, config_path=config_path)
+        if isinstance(expanded, dict):
+            for key in ("cert_file", "key_file", "ca_file"):
+                if expanded.get(key) and not web_cfg.get(key):
+                    web_cfg[key] = expanded[key]
+    except Exception:
+        logger.debug("TLS secrets materialization skipped", exc_info=True)
+
     policy = normalize_generate_policy(web_cfg.get("generate", "no"))
     cert_file, key_file = resolve_admin_tls_files(web_cfg, location=location)
     keys_dir = _normalize_optional_path(web_cfg.get("keys_dir"))
