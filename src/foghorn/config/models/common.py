@@ -11,12 +11,24 @@ from __future__ import annotations
 
 from typing import Annotated, Any
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, StringConstraints
+
+from foghorn.utils.human_units import (
+    parse_bytes,
+    parse_duration_seconds,
+    parse_duration_seconds_int,
+)
 
 # Identifier-style names for vars keys and similar.
 IdentifierName = Annotated[str, StringConstraints(pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")]
 
 PortInt = Annotated[int, Field(ge=1, le=65535)]
+
+# Human-readable size/duration input → canonical int/float at validation time.
+# SI: MB=1000**2; IEC: MiB=1024**2. Durations only (not wall-clock).
+BytesInt = Annotated[int, BeforeValidator(parse_bytes)]
+SecondsFloat = Annotated[float, BeforeValidator(parse_duration_seconds)]
+SecondsInt = Annotated[int, BeforeValidator(parse_duration_seconds_int)]
 
 
 class MetaFields(BaseModel):

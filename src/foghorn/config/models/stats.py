@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from pydantic import ConfigDict, Field
 
-from foghorn.config.models.common import StrictModel
+from foghorn.config.models.common import SecondsFloat, StrictModel
 
 
 class StatsIgnoreConfig(StrictModel):
@@ -64,7 +64,7 @@ class StatsConfig(StrictModel):
             "the backends[].id values."
         ),
     )
-    interval_seconds: float | None = Field(
+    interval_seconds: SecondsFloat | None = Field(
         default=None,
         ge=0,
         description="Optional stats reporter interval override (seconds).",

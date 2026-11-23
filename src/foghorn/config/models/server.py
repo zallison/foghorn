@@ -13,7 +13,13 @@ from typing import Any, Literal, Self
 
 from pydantic import Field, model_validator
 
-from foghorn.config.models.common import PortInt, StrictModel
+from foghorn.config.models.common import (
+    BytesInt,
+    PortInt,
+    SecondsFloat,
+    SecondsInt,
+    StrictModel,
+)
 
 OverloadResponse = Literal["servfail", "refused", "drop"]
 TrustedListener = Literal["udp", "tcp", "dot", "doh", "secure", "insecure"]
@@ -115,7 +121,7 @@ class ListenerConnLimits(StrictModel):
     max_connections: int = Field(default=1024, ge=1)
     max_connections_per_ip: int = Field(default=64, ge=1)
     max_queries_per_connection: int = Field(default=100, ge=1)
-    idle_timeout_seconds: float = Field(default=15.0, ge=0)
+    idle_timeout_seconds: SecondsFloat = Field(default=15.0, ge=0)
     overload_response: OverloadResponse | None = Field(
         default=None,
         description="Per-listener overload response policy for connection-limit rejections.",
@@ -140,8 +146,8 @@ class ListenerUdp(StrictModel):
     exit_on_asyncio_failure: bool = Field(default=False)
     max_inflight: int = Field(default=1024, ge=1)
     max_inflight_per_ip: int = Field(default=64, ge=1)
-    max_query_bytes: int = Field(default=4096, ge=12)
-    max_response_bytes: int | None = Field(default=None, ge=0)
+    max_query_bytes: BytesInt = Field(default=4096, ge=12)
+    max_response_bytes: BytesInt | None = Field(default=None, ge=0)
     overload_response: OverloadResponse | None = None
     max_inflight_by_cidr: list[UdpCidrInflightLimit] | None = Field(
         default=None,
@@ -501,8 +507,8 @@ class HttpApiRequestAuditConfig(StrictModel):
     enabled: bool = Field(default=True)
     db_path: str | None = None
     retention_max_records: int | None = Field(default=None, ge=0)
-    retention_max_age_seconds: float | None = Field(default=None, ge=0)
-    retention_max_db_bytes: int | None = Field(
+    retention_max_age_seconds: SecondsFloat | None = Field(default=None, ge=0)
+    retention_max_db_bytes: BytesInt | None = Field(
         default=None,
         ge=0,
         description="Optional SQLite file size cap for audit log pruning (bytes).",
@@ -520,7 +526,7 @@ class HttpAdminRateLimitConfig(StrictModel):
     enabled: bool = Field(default=True)
     backend: Literal["plugin", "memory"] = Field(default="plugin")
     requests_per_window: int = Field(default=60, ge=1)
-    window_seconds: int = Field(default=60, ge=1)
+    window_seconds: SecondsInt = Field(default=60, ge=1)
     burst: int = Field(default=0, ge=0)
     key_mode: Literal["client", "client_action"] = Field(default="client_action")
     excluded_actions: list[str] = Field(default_factory=list)
@@ -557,9 +563,9 @@ class ServerHttpConfig(StrictModel):
     )
     index: bool = Field(default=True, description="Serve / and /index.html when true.")
     logs: HttpLogsConfig | None = None
-    system_info_ttl_seconds: float | None = Field(default=None, ge=0)
-    stats_snapshot_ttl_seconds: float | None = Field(default=None, ge=0)
-    config_cache_ttl_seconds: float | None = Field(default=None, ge=0)
+    system_info_ttl_seconds: SecondsFloat | None = Field(default=None, ge=0)
+    stats_snapshot_ttl_seconds: SecondsFloat | None = Field(default=None, ge=0)
+    config_cache_ttl_seconds: SecondsFloat | None = Field(default=None, ge=0)
     system_metrics_detail: Literal["basic", "full"] | None = Field(default=None)
     debug_timings: bool = Field(default=False)
     limit_concurrency: int | None = Field(
@@ -618,8 +624,8 @@ class ServerAxfrConfig(StrictModel):
     max_concurrent_transfers: int = Field(default=4, ge=1)
     rate_limit_per_client_per_second: float = Field(default=0.0, ge=0)
     rate_limit_burst: float = Field(default=2.0, ge=1)
-    max_transfer_rate_bytes_per_second: int | None = Field(default=None, ge=1)
-    message_max_bytes: int = Field(default=64000, ge=512, le=65535)
+    max_transfer_rate_bytes_per_second: BytesInt | None = Field(default=None, ge=1)
+    message_max_bytes: BytesInt = Field(default=64000, ge=512, le=65535)
     require_tsig: bool = Field(default=False)
     tsig: AxfrTsigConfig | None = None
     tsig_keys: list[AxfrTsigKey] = Field(
@@ -635,7 +641,7 @@ class CookiesFeatureConfig(StrictModel):
     mode: Literal["learn", "require_udp"] = Field(default="learn")
     secret: str | None = None
     secret_old: str | None = None
-    lifetime_seconds: int = Field(default=86400, ge=1, le=604800)
+    lifetime_seconds: SecondsInt = Field(default=86400, ge=1, le=604800)
 
 
 class TsigFeatureKey(StrictModel):
@@ -687,7 +693,7 @@ class TsigFeatureConfig(StrictModel):
     )
     keys: list[TsigFeatureKey] = Field(default_factory=list)
     key_sources: list[TsigFeatureKeySource] = Field(default_factory=list)
-    max_fudge_seconds: int = Field(default=300, ge=0, le=86400)
+    max_fudge_seconds: SecondsInt = Field(default=300, ge=0, le=86400)
     allow_clients: list[str] = Field(default_factory=list)
     listeners: list[TrustedListener] = Field(default_factory=list)
 

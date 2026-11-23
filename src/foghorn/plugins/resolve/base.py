@@ -543,7 +543,12 @@ class BasePlugin:
         raw_ttl = config.get("targets_cache_ttl_seconds")
         ttl_seconds: float | None
         try:
-            ttl_seconds = float(raw_ttl) if raw_ttl is not None else None
+            if raw_ttl is None:
+                ttl_seconds = None
+            else:
+                from foghorn.utils.human_units import parse_duration_seconds
+
+                ttl_seconds = float(parse_duration_seconds(raw_ttl))
         except Exception:
             ttl_seconds = None
 
@@ -915,8 +920,8 @@ class BasePlugin:
             no qname-like attribute, the query is rejected (returns False).
 
         Example use:
-            >>> ctx = PluginContext(client_ip="*********")
-            >>> p = BasePlugin(targets=["*********/24"])
+            >>> ctx = PluginContext(client_ip="127.0.0.1")
+            >>> p = BasePlugin(targets=["192.0.2.1/24"])
             >>> p.targets(ctx)
             True
         """

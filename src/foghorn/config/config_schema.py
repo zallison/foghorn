@@ -14,6 +14,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
+from foghorn.utils.human_units import coerce_config_human_units
+
 try:
     from jsonschema import Draft202012Validator, ValidationError
     from jsonschema.exceptions import SchemaError
@@ -814,6 +816,8 @@ def validate_config(
             cfg,
             whole_node_injection_allowlist=config_var_keys,
         )
+        # After ${VAR} expansion: normalize human sizes/durations for plugins too.
+        coerce_config_human_units(cfg)
         _normalize_upstream_urls_for_validation(cfg)
         _normalize_cache_config_for_validation(cfg)
         _normalize_dnssec_config_for_validation(cfg)
@@ -829,6 +833,9 @@ def validate_config(
         cfg,
         whole_node_injection_allowlist=config_var_keys,
     )
+    # After ${VAR} expansion: normalize human sizes/durations tree-wide so
+    # plugin config blobs and JSON Schema both see canonical numbers.
+    coerce_config_human_units(cfg)
     _normalize_upstream_urls_for_validation(cfg)
     _normalize_cache_config_for_validation(cfg)
     _normalize_dnssec_config_for_validation(cfg)

@@ -17,7 +17,7 @@ from typing import Any
 
 from pydantic import ConfigDict, Field
 
-from foghorn.config.models.common import StrictModel
+from foghorn.config.models.common import BytesInt, SecondsFloat, StrictModel
 
 
 class PythonLoggingConfig(StrictModel):
@@ -100,8 +100,8 @@ class QueryLogRetentionConfig(StrictModel):
 
     max_records: int | None = Field(default=None, ge=1)
     days: float | None = Field(default=None, gt=0)
-    max_bytes: int | None = Field(default=None, ge=1)
-    prune_interval_seconds: float | None = Field(default=None, gt=0)
+    max_bytes: BytesInt | None = Field(default=None, ge=1)
+    prune_interval_seconds: SecondsFloat | None = Field(default=None, gt=0)
     prune_every_n_inserts: int | None = Field(default=None, ge=1)
 
 
@@ -130,7 +130,7 @@ class QueryLogDedupeConfig(StrictModel):
       - QueryLogDedupeConfig model.
     """
 
-    window_seconds: float = Field(default=0.0, ge=0.0)
+    window_seconds: SecondsFloat = Field(default=0.0, ge=0.0)
     max_entries: int = Field(default=50000, ge=1)
 
 
@@ -176,13 +176,15 @@ class LoggingConfig(StrictModel):
     query_log_retention: QueryLogRetentionConfig | None = None
     query_log_retention_max_records: int | None = Field(default=None, ge=1)
     query_log_retention_days: float | None = Field(default=None, gt=0)
-    query_log_retention_max_bytes: int | None = Field(default=None, ge=1)
-    query_log_retention_prune_interval_seconds: float | None = Field(default=None, gt=0)
+    query_log_retention_max_bytes: BytesInt | None = Field(default=None, ge=1)
+    query_log_retention_prune_interval_seconds: SecondsFloat | None = Field(
+        default=None, gt=0
+    )
     query_log_retention_prune_every_n_inserts: int | None = Field(default=None, ge=1)
     query_log_sampling: QueryLogSamplingConfig | None = None
     query_log_sample_rate: float | None = Field(default=None, ge=0.0, le=1.0)
     query_log_dedupe: QueryLogDedupeConfig | None = None
-    query_log_dedupe_window_seconds: float | None = Field(default=None, ge=0.0)
+    query_log_dedupe_window_seconds: SecondsFloat | None = Field(default=None, ge=0.0)
     query_log_dedupe_max_entries: int | None = Field(default=None, ge=1)
     backends: list[LoggingBackendConfig] | None = Field(
         default=None,
