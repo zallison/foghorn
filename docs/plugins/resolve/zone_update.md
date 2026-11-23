@@ -51,9 +51,14 @@ This document lists every `dns_update` key and default from the current config m
 - `block_update_ips_files` (list[str], default: `null`)
 
 ### `dns_update.zones[].tsig.key_sources[]`
-- `type` (str, required by loader; built-in type: `file`)
+- `type` (str, required by loader; built-in types: `file`, `secrets` / `store`)
 - For `type: file`:
   - `path` (str, required)
+- For `type: secrets` (alias `store`):
+  - `id` or `backend` (str, required): secrets backend instance id
+  - `key` / `keys` (str/list): secret lookup key(s) within that backend
+  - When `key`/`keys` omitted, lists all `kind: tsig` entries in the backend
+  - Requires top-level `secrets.backends[]` (see `docs/plugins/secrets.md`)
 
 ### `dns_update.zones[].psk` (unsupported)
 Do not configure PSK. Historical token schema fields are not accepted; use TSIG.

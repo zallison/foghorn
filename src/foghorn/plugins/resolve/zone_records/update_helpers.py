@@ -300,6 +300,33 @@ def load_tsig_keys_from_source_file(source: dict) -> List[dict]:
     return load_tsig_keys_from_file(str(path))
 
 
+def load_tsig_keys_from_secrets_source(source: dict) -> List[dict]:
+    """Brief: Load TSIG keys from the process-wide secrets router.
+
+    Inputs:
+      - source: Source mapping with type secrets and optional backend/id/ids/kind.
+
+    Outputs:
+      - List of TSIG key dicts from secrets backends.
+    """
+    try:
+        from foghorn.plugins.secrets.router import get_active_secrets_router
+    except Exception as exc:
+        logger.warning("Secrets router unavailable for TSIG key source: %s", exc)
+        return []
+    router = get_active_secrets_router()
+    if router is None:
+        logger.warning(
+            "TSIG key source type=secrets requires secrets.backends configuration"
+        )
+        return []
+    try:
+        return list(router.get_tsig_keys_from_source(source) or [])
+    except Exception as exc:
+        logger.warning("TSIG secrets key source failed: %s", exc, exc_info=True)
+        return []
+
+
 def get_default_tsig_key_source_loaders() -> Dict[str, TsigKeySourceLoader]:
     """Brief: Return default TSIG key-source loader registry.
 
@@ -309,7 +336,11 @@ def get_default_tsig_key_source_loaders() -> Dict[str, TsigKeySourceLoader]:
     Outputs:
       - Mapping of source type -> loader callable.
     """
-    return {"file": load_tsig_keys_from_source_file}
+    return {
+        "file": load_tsig_keys_from_source_file,
+        "secrets": load_tsig_keys_from_secrets_source,
+        "store": load_tsig_keys_from_secrets_source,
+    }
 
 
 def resolve_tsig_key_configs(

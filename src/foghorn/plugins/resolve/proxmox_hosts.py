@@ -72,9 +72,9 @@ class ProxmoxEndpointConfig(BaseModel):
 
     url: str
     token_id: str | None = None
-    token_secret: str | None = None
+    token_secret: str | dict[str, object] | None = None
     user: str | None = None
-    password: str | None = None
+    password: str | dict[str, object] | None = None
     verify_tls: bool = True
     tls_ca: str | None = None
     tls_server_name: str | None = None
@@ -460,10 +460,34 @@ class ProxmoxHosts(DynamicHostsPlugin):
                 url_raw = "https://" + url_raw
 
             token_id = str(item.get("token_id") or "").strip() or None
-            token_secret = str(item.get("token_secret") or "").strip() or None
+            token_secret_raw = item.get("token_secret")
+            if isinstance(token_secret_raw, dict):
+                try:
+                    from foghorn.plugins.secrets.resolve import resolve_secret_string
+
+                    token_secret = resolve_secret_string(
+                        token_secret_raw, prefer=("token", "secret")
+                    )
+                except Exception:
+                    token_secret = None
+            else:
+                token_secret = (
+                    str(token_secret_raw).strip()
+                    if token_secret_raw is not None
+                    else None
+                ) or None
             user = str(item.get("user") or "").strip() or None
             password = item.get("password")
-            if password is not None:
+            if isinstance(password, dict):
+                try:
+                    from foghorn.plugins.secrets.resolve import resolve_secret_string
+
+                    password = resolve_secret_string(
+                        password, prefer=("token", "secret")
+                    )
+                except Exception:
+                    password = None
+            elif password is not None:
                 password = str(password)
             if not ((token_id and token_secret) or (user and password is not None)):
                 logger.warning(
