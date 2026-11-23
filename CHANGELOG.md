@@ -5,6 +5,7 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 ### Added
+- Secrets backend family (`secrets.backends[]`): pluggable multi-backend store for TLS PEMs, TSIG keys, API tokens, and DNSSEC KSK/ZSK material (`file` and `mysql`/`mariadb` modules) with a process-wide router, startup/reload/shutdown lifecycle, and consumer refs (`token_secret`, `cert_secret`/`key_secret`/`ca_secret`, TSIG `key_sources type: secrets`, zone `dnssec_signing.secrets`).
 - Downstream QUERY TSIG `server.features.tsig.mode: passthrough`: skip local verify/re-sign; when client TSIG is present, bypass cache and forward the original signed wire upstream, returning upstream TSIG as-is.
 - Forward-mode upstream client TSIG via per-endpoint `upstreams.endpoints[].tsig` / backup endpoints (`name`/`secret`/`algorithm`): Foghorn signs outbound QUERY and verifies responses (skipped during client passthrough).
 - Shared TSIG helpers: `apply_client_tsig_to_response`, `normalize_upstream_tsig_config`, `sign_query_wire_tsig`, `verify_response_tsig_wire`.
@@ -73,6 +74,7 @@ All notable changes to this project will be documented in this file.
 - etc_hosts reverse maps include IPv6 as well as IPv4 via shared hosts helpers.
 
 ### Documentation
+- Documented multi-backend secrets stores in `docs/plugins/secrets.md` with examples `example_configs/secrets_file.yaml` and `example_configs/secrets_mysql_mariadb.yaml`.
 - Documented TSIG passthrough mode, shared-cache re-sign vs passthrough cache bypass, and per-endpoint upstream client TSIG in `docs/RFCs.md` §5.4, README features notes, and `example_configs/server_all_options.yaml`.
 - Documented operator DNSSEC trust-anchor knobs (mode/store/hold-downs/custom anchors), RFC 5011 live updates, and reload behavior in `docs/RFCs.md` §4.3 and example configs.
 - Documented token-mode Basic `foghorn:<token>` gated by `allow_basic_token`, dual `WWW-Authenticate`, and basic+token rejection in `docs/API.md`.
@@ -83,6 +85,7 @@ All notable changes to this project will be documented in this file.
 - Documented DockerHosts multi-endpoint client-failure continue behavior in `docs/plugins/resolve/docker_hosts.md`.
 
 ### Tests
+- Secrets core coverage (`tests/secrets/test_secrets_core.py`): registry aliases, file backend kinds, multi-backend router ambiguity, TSIG `key_sources type: secrets`, token/TLS helpers, DNSSEC keys_dir index and put.
 - TSIG coverage for pre-plugin deny re-sign, passthrough forward/cache bypass, feature-flag `passthrough` normalization, endpoint tsig sign/verify failure, and upstream config preserving `tsig`.
 - Main listener/thread stubs implement `is_alive()` so keepalive exit matches production threads; main startup fixture uses `cache.module` instead of `backend`.
 - Added `tests/test_trust_anchor_config_wiring.py` for RFC 5011 live store updates, custom anchors, configure-from-config helpers, and reload snapshot TA re-apply.

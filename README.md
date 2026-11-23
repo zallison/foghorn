@@ -1335,7 +1335,8 @@ plugins:
   and reuse them throughout the config.
 - **Safer secrets**: Keep API tokens, passwords, and other sensitive data out of
   the main config by passing them via environment variables or command-line
-  overrides.
+  overrides, or load them from named secrets backends (`secrets.backends[]`;
+  see `docs/plugins/secrets.md`) for TLS, TSIG, tokens, and DNSSEC keys.
 - **Environment-specific overrides**: In CI/CD or container setups you can keep
   a single base config file and override only the variables per environment.
   - In local dev, you might rely on the `vars:` section.
