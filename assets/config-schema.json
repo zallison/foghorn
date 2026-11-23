@@ -118,8 +118,23 @@
     },
     "AxfrTsigKeySource": {
       "additionalProperties": false,
-      "description": "Brief: External TSIG key source entry under server.axfr.tsig.key_sources.\n\nInputs:\n  - type: Source type (required), e.g. file.\n  - path: Optional filesystem path for file sources.\n\nOutputs:\n  - AxfrTsigKeySource model.",
+      "description": "Brief: External TSIG key source entry under server.axfr.tsig.key_sources.\n\nInputs:\n  - type: Source type (required): file | secrets | store.\n  - path: Filesystem path for type=file.\n  - backend / id / ids: Secrets router selectors for type=secrets.\n\nOutputs:\n  - AxfrTsigKeySource model.",
       "properties": {
+        "backend": {
+          "anyOf": [
+            {
+              "description": "Type: string.",
+              "type": "string"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Secrets backend id when type=secrets.",
+          "title": "Backend"
+        },
         "comment": {
           "anyOf": [
             {
@@ -140,7 +155,6 @@
           "anyOf": [
             {
               "description": "Type: string.",
-              "maxLength": 254,
               "type": "string"
             },
             {
@@ -149,8 +163,61 @@
             }
           ],
           "default": null,
-          "description": "Optional human metadata string (max 254 characters).",
+          "description": "Secret id when type=secrets.",
           "title": "Id"
+        },
+        "ids": {
+          "anyOf": [
+            {
+              "description": "Type: array.",
+              "items": {
+                "description": "Type: string.",
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Legacy secret keys when type=secrets without key=.",
+          "title": "Ids"
+        },
+        "key": {
+          "anyOf": [
+            {
+              "description": "Type: string.",
+              "type": "string"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Secret lookup key when type=secrets.",
+          "title": "Key"
+        },
+        "keys": {
+          "anyOf": [
+            {
+              "description": "Type: array.",
+              "items": {
+                "description": "Type: string.",
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Secret lookup keys when type=secrets.",
+          "title": "Keys"
         },
         "path": {
           "anyOf": [
@@ -168,7 +235,7 @@
           "title": "Path"
         },
         "type": {
-          "description": "Key source type (for example 'file').",
+          "description": "Key source type (file, secrets, or store).",
           "title": "Type",
           "type": "string"
         }
@@ -661,7 +728,7 @@
           "anyOf": [
             {
               "description": "Type: number.",
-              "minimum": 0,
+              "ge": 0,
               "type": "number"
             },
             {
@@ -677,7 +744,7 @@
           "anyOf": [
             {
               "description": "Type: integer.",
-              "minimum": 0,
+              "ge": 0,
               "type": "integer"
             },
             {
@@ -727,7 +794,7 @@
     },
     "HttpAuthConfig": {
       "additionalProperties": false,
-      "description": "Brief: server.http.auth configuration.\n\nInputs:\n  - mode: Auth mode (default \"token\"): none | token | basic.\n  - token: Static token for mode=token (Bearer, X-API-Key, and optionally\n    Basic foghorn:<token>). Must not be set when mode=basic.\n  - allow_basic_token: When mode=token, accept Basic foghorn:<token> and\n    advertise Basic on 401 (default true).\n  - username: HTTP Basic auth user name for mode=basic.\n  - password: HTTP Basic auth password for mode=basic.\n\nOutputs:\n  - HttpAuthConfig instance used by the config schema and runtime checks.",
+      "description": "Brief: server.http.auth configuration.\n\nInputs:\n  - mode: Auth mode (default \"token\"): none | token | basic.\n  - token: Static token for mode=token (Bearer, X-API-Key, and optionally\n    Basic foghorn:<token>). Must not be set when mode=basic.\n  - token_secret: Optional secrets-backend ref ({backend,id} or id string)\n    used when token is blank.\n  - allow_basic_token: When mode=token, accept Basic foghorn:<token> and\n    advertise Basic on 401 (default true).\n  - username: HTTP Basic auth user name for mode=basic.\n  - password: HTTP Basic auth password for mode=basic.\n\nOutputs:\n  - HttpAuthConfig instance used by the config schema and runtime checks.",
       "properties": {
         "allow_basic_token": {
           "default": true,
@@ -785,13 +852,34 @@
               "type": "string"
             },
             {
+              "additionalProperties": true,
+              "description": "Type: object.",
+              "type": "object"
+            },
+            {
               "description": "Type: null.",
               "type": "null"
             }
           ],
           "default": null,
-          "description": "Types: string, null.",
+          "description": "Types: string, object, null.",
           "title": "Password"
+        },
+        "password_secret": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "description": "Type: object.",
+              "type": "object"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional secrets ref for mode=basic when password is unset: {id|backend: <backend-id>, key: <secret-key>}.",
+          "title": "Password Secret"
         },
         "token": {
           "anyOf": [
@@ -807,6 +895,22 @@
           "default": null,
           "description": "Types: string, null.",
           "title": "Token"
+        },
+        "token_secret": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "description": "Type: object.",
+              "type": "object"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional secrets backend reference for mode=token when token is unset: {id|backend: <backend-id>, key: <secret-key>}.",
+          "title": "Token Secret"
         },
         "username": {
           "anyOf": [
@@ -1032,6 +1136,22 @@
           "description": "Types: string, null.",
           "title": "Cert File"
         },
+        "cert_secret": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "description": "Type: object.",
+              "type": "object"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Secrets ref for TLS certificate: {id|backend: <backend-id>, key: <secret-key>}.",
+          "title": "Cert Secret"
+        },
         "comment": {
           "anyOf": [
             {
@@ -1109,6 +1229,22 @@
           "description": "Types: string, null.",
           "title": "Key File"
         },
+        "key_secret": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "description": "Type: object.",
+              "type": "object"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Secrets ref for TLS private key: {id|backend: <backend-id>, key: <secret-key>}.",
+          "title": "Key Secret"
+        },
         "overload_response": {
           "default": null,
           "description": "Types: string, null. Valid values: \"servfail\", \"refused\", \"drop\".",
@@ -1162,6 +1298,22 @@
           "default": null,
           "description": "Types: string, null.",
           "title": "Cert File"
+        },
+        "cert_secret": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "description": "Type: object.",
+              "type": "object"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Secrets ref for TLS certificate: {id|backend: <backend-id>, key: <secret-key>}.",
+          "title": "Cert Secret"
         },
         "comment": {
           "anyOf": [
@@ -1265,6 +1417,22 @@
           "default": null,
           "description": "Types: string, null.",
           "title": "Key File"
+        },
+        "key_secret": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "description": "Type: object.",
+              "type": "object"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Secrets ref for TLS private key: {id|backend: <backend-id>, key: <secret-key>}.",
+          "title": "Key Secret"
         },
         "keys_dir": {
           "anyOf": [
@@ -1594,7 +1762,7 @@
           "anyOf": [
             {
               "description": "Type: integer.",
-              "minimum": 0,
+              "ge": 0,
               "type": "integer"
             },
             {
@@ -1841,7 +2009,7 @@
           "anyOf": [
             {
               "description": "Type: number.",
-              "minimum": 0.0,
+              "ge": 0.0,
               "type": "number"
             },
             {
@@ -1892,7 +2060,7 @@
           "anyOf": [
             {
               "description": "Type: integer.",
-              "minimum": 1,
+              "ge": 1,
               "type": "integer"
             },
             {
@@ -1940,7 +2108,7 @@
           "anyOf": [
             {
               "description": "Type: number.",
-              "exclusiveMinimum": 0,
+              "gt": 0,
               "type": "number"
             },
             {
@@ -3697,12 +3865,17 @@
                       "type": "string"
                     },
                     {
+                      "additionalProperties": true,
+                      "description": "Type: object.",
+                      "type": "object"
+                    },
+                    {
                       "description": "Type: null.",
                       "type": "null"
                     }
                   ],
                   "default": null,
-                  "description": "Types: string, null.",
+                  "description": "Types: string, object, null.",
                   "title": "Password"
                 },
                 "reload_interval_second": {
@@ -3788,12 +3961,17 @@
                       "type": "string"
                     },
                     {
+                      "additionalProperties": true,
+                      "description": "Type: object.",
+                      "type": "object"
+                    },
+                    {
                       "description": "Type: null.",
                       "type": "null"
                     }
                   ],
                   "default": null,
-                  "description": "Types: string, null.",
+                  "description": "Types: string, object, null.",
                   "title": "Token Secret"
                 },
                 "ttl": {
@@ -5443,9 +5621,77 @@
               "title": "ZoneDnssecNsec3Config",
               "type": "object"
             },
+            "ZoneDnssecSecretsConfig": {
+              "additionalProperties": false,
+              "description": "Brief: Secrets-backend selector for DNSSEC KSK/ZSK material.\n\nInputs:\n  - backend / id: Secrets backend instance id (either field accepted).\n  - ksk_id / zsk_id: Optional explicit secret keys within that backend.\n\nOutputs:\n  - ZoneDnssecSecretsConfig used under dnssec_signing.secrets.\n\nExample:\n  secrets: { backend: dnssec-keys }\n  secrets: { id: dnssec-keys, ksk_id: example.com-ksk, zsk_id: example.com-zsk }",
+              "properties": {
+                "backend": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Secrets backend instance id (alias of id).",
+                  "title": "Backend"
+                },
+                "id": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Secrets backend instance id (alias of backend).",
+                  "title": "Id"
+                },
+                "ksk_id": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Optional secret key id for the zone KSK within the backend.",
+                  "title": "Ksk Id"
+                },
+                "zsk_id": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Optional secret key id for the zone ZSK within the backend.",
+                  "title": "Zsk Id"
+                }
+              },
+              "title": "ZoneDnssecSecretsConfig",
+              "type": "object"
+            },
             "ZoneDnssecSigningConfig": {
               "additionalProperties": false,
-              "description": "Brief: DNSSEC auto-signing configuration for ZoneRecords.\n\nInputs:\n  - enabled: Enable automatic DNSSEC signing for authoritative zones.\n  - keys_dir: Optional base directory for per-zone key files.\n  - algorithm: DNSSEC algorithm name (e.g. \"ECDSAP256SHA256\").\n  - generate: Key generation policy (\"yes\", \"no\", or \"maybe\").\n  - validity_days: Signature validity window in days.\n  - nsec3: Optional NSEC3 parameters (salt/iterations) used for signed\n    NXDOMAIN/NODATA proofs.\n  - use_tld: Optional single-label TLD (e.g. \"zaa\", \"corp\") to treat as\n    an inferred apex for SSHFP-only zones when synthesizing SOA records.\n\nOutputs:\n  - Parsed ZoneDnssecSigningConfig instance used by the config schema.",
+              "description": "Brief: DNSSEC auto-signing configuration for ZoneRecords.\n\nInputs:\n  - enabled: Enable automatic DNSSEC signing for authoritative zones.\n  - keys_dir: Optional base directory for per-zone key files.\n  - secrets: Optional secrets-backend selector for KSK/ZSK material.\n  - algorithm: DNSSEC algorithm name (e.g. \"ECDSAP256SHA256\").\n  - generate: Key generation policy (\"yes\", \"no\", or \"maybe\").\n  - validity_days: Signature validity window in days.\n  - nsec3: Optional NSEC3 parameters (salt/iterations) used for signed\n    NXDOMAIN/NODATA proofs.\n  - use_tld: Optional single-label TLD (e.g. \"zaa\", \"corp\") to treat as\n    an inferred apex for SSHFP-only zones when synthesizing SOA records.\n\nOutputs:\n  - Parsed ZoneDnssecSigningConfig instance used by the config schema.",
               "properties": {
                 "algorithm": {
                   "default": "ECDSAP256SHA256",
@@ -5492,6 +5738,19 @@
                   ],
                   "default": null,
                   "description": "Optional NSEC3 parameters used for negative-answer proofs."
+                },
+                "secrets": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/ZoneDnssecSecretsConfig"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Optional secrets backend selector for KSK/ZSK private keys. When set, ZoneRecords prefers secrets material and falls back to keys_dir. See docs/plugins/secrets.md."
                 },
                 "use_tld": {
                   "anyOf": [
@@ -6590,7 +6849,7 @@
           "anyOf": [
             {
               "description": "Type: integer.",
-              "minimum": 1,
+              "ge": 1,
               "type": "integer"
             },
             {
@@ -6638,7 +6897,7 @@
           "anyOf": [
             {
               "description": "Type: number.",
-              "exclusiveMinimum": 0,
+              "gt": 0,
               "type": "number"
             },
             {
@@ -6806,6 +7065,247 @@
       "title": "ResolverSearchConfig",
       "type": "object"
     },
+    "SecretsBackendInstance": {
+      "additionalProperties": false,
+      "description": "Brief: One secrets backend under secrets.backends[].\n\nInputs:\n  - id / name: Logical backend instance id.\n  - module: Backend alias (file, mysql, ...) or dotted import path.\n  - config: Backend-specific mapping.\n  - abort_on_failure: When true (default), init/probe failures abort startup.\n\nOutputs:\n  - SecretsBackendInstance model.",
+      "properties": {
+        "abort_on_fail": {
+          "anyOf": [
+            {
+              "description": "Type: boolean.",
+              "type": "boolean"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Alias for abort_on_failure.",
+          "title": "Abort On Fail"
+        },
+        "abort_on_failure": {
+          "anyOf": [
+            {
+              "description": "Type: boolean.",
+              "type": "boolean"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": true,
+          "description": "When true, backend init/probe failure aborts startup. Default: true.",
+          "title": "Abort On Failure"
+        },
+        "comment": {
+          "anyOf": [
+            {
+              "description": "Type: string.",
+              "maxLength": 254,
+              "type": "string"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional human metadata string (max 254 characters).",
+          "title": "Comment"
+        },
+        "config": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "description": "Type: object.",
+              "type": "object"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Backend-specific configuration mapping.",
+          "title": "Config"
+        },
+        "enabled": {
+          "anyOf": [
+            {
+              "description": "Type: boolean.",
+              "type": "boolean"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": true,
+          "description": "When false, skip loading this backend. Default: true.",
+          "title": "Enabled"
+        },
+        "id": {
+          "anyOf": [
+            {
+              "description": "Type: string.",
+              "type": "string"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Logical backend identifier used in secret refs.",
+          "title": "Id"
+        },
+        "module": {
+          "description": "Secrets backend alias or dotted import path (for example 'file', 'mysql', 'mariadb').",
+          "title": "Module",
+          "type": "string"
+        },
+        "name": {
+          "anyOf": [
+            {
+              "description": "Type: string.",
+              "type": "string"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional alias for id (logging.backends-compatible).",
+          "title": "Name"
+        }
+      },
+      "required": [
+        "module"
+      ],
+      "title": "SecretsBackendInstance",
+      "type": "object"
+    },
+    "SecretsConfig": {
+      "additionalProperties": false,
+      "description": "Brief: Top-level secrets configuration.\n\nInputs:\n  - backends: Preferred multi-backend list.\n  - module/config: Optional single-backend shorthand.\n  - id/name: Optional id for single-backend shorthand.\n\nOutputs:\n  - SecretsConfig model for FoghornConfig.secrets.",
+      "properties": {
+        "abort_on_failure": {
+          "anyOf": [
+            {
+              "description": "Type: boolean.",
+              "type": "boolean"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": true,
+          "description": "Default abort policy for single-backend shorthand. Default: true.",
+          "title": "Abort On Failure"
+        },
+        "backends": {
+          "anyOf": [
+            {
+              "description": "Type: array.",
+              "items": {
+                "$ref": "#/$defs/SecretsBackendInstance"
+              },
+              "type": "array"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Named secrets backends (file, mysql, ...).",
+          "title": "Backends"
+        },
+        "comment": {
+          "anyOf": [
+            {
+              "description": "Type: string.",
+              "maxLength": 254,
+              "type": "string"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional human metadata string (max 254 characters).",
+          "title": "Comment"
+        },
+        "config": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "description": "Type: object.",
+              "type": "object"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Single-backend config when backends is omitted.",
+          "title": "Config"
+        },
+        "id": {
+          "anyOf": [
+            {
+              "description": "Type: string.",
+              "type": "string"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional id for single-backend shorthand.",
+          "title": "Id"
+        },
+        "module": {
+          "anyOf": [
+            {
+              "description": "Type: string.",
+              "type": "string"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Single-backend module alias when backends is omitted.",
+          "title": "Module"
+        },
+        "name": {
+          "anyOf": [
+            {
+              "description": "Type: string.",
+              "type": "string"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional name alias for single-backend shorthand.",
+          "title": "Name"
+        }
+      },
+      "title": "SecretsConfig",
+      "type": "object"
+    },
     "ServerAxfrConfig": {
       "additionalProperties": false,
       "description": "Brief: server.axfr zone-transfer controls.",
@@ -6868,7 +7368,7 @@
           "anyOf": [
             {
               "description": "Type: integer.",
-              "minimum": 1,
+              "ge": 1,
               "type": "integer"
             },
             {
@@ -7592,6 +8092,22 @@
           "description": "Types: string, null.",
           "title": "Cert File"
         },
+        "cert_secret": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "description": "Type: object.",
+              "type": "object"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Secrets ref for TLS certificate: {id|backend: <backend-id>, key: <secret-key>}.",
+          "title": "Cert Secret"
+        },
         "comment": {
           "anyOf": [
             {
@@ -7612,7 +8128,7 @@
           "anyOf": [
             {
               "description": "Type: number.",
-              "minimum": 0,
+              "ge": 0,
               "type": "number"
             },
             {
@@ -7702,8 +8218,8 @@
           "title": "Generate"
         },
         "host": {
-          "default": "*********",
-          "description": "Type: string. Default: \"*********\".",
+          "default": "127.0.0.1",
+          "description": "Type: string. Default: \"127.0.0.1\".",
           "title": "Host",
           "type": "string"
         },
@@ -7743,6 +8259,22 @@
           "default": null,
           "description": "Types: string, null.",
           "title": "Key File"
+        },
+        "key_secret": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "description": "Type: object.",
+              "type": "object"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Secrets ref for TLS private key: {id|backend: <backend-id>, key: <secret-key>}.",
+          "title": "Key Secret"
         },
         "keys_dir": {
           "anyOf": [
@@ -7819,7 +8351,7 @@
           "anyOf": [
             {
               "description": "Type: number.",
-              "minimum": 0,
+              "ge": 0,
               "type": "number"
             },
             {
@@ -7835,7 +8367,7 @@
           "anyOf": [
             {
               "description": "Type: number.",
-              "minimum": 0,
+              "ge": 0,
               "type": "number"
             },
             {
@@ -8287,7 +8819,7 @@
           "anyOf": [
             {
               "description": "Type: number.",
-              "minimum": 0,
+              "ge": 0,
               "type": "number"
             },
             {
@@ -8858,8 +9390,23 @@
     },
     "TsigFeatureKeySource": {
       "additionalProperties": false,
-      "description": "Brief: External key source under server.features.tsig.key_sources.\n\nInputs:\n  - type: Source type (required), e.g. file.\n  - path: Optional filesystem path for file sources.\n\nOutputs:\n  - TsigFeatureKeySource model.",
+      "description": "Brief: External key source under server.features.tsig.key_sources.\n\nInputs:\n  - type: Source type (required): file | secrets | store.\n  - path: Filesystem path for type=file.\n  - backend / id / ids: Secrets router selectors for type=secrets.\n\nOutputs:\n  - TsigFeatureKeySource model.",
       "properties": {
+        "backend": {
+          "anyOf": [
+            {
+              "description": "Type: string.",
+              "type": "string"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Secrets backend id when type=secrets.",
+          "title": "Backend"
+        },
         "comment": {
           "anyOf": [
             {
@@ -8880,7 +9427,6 @@
           "anyOf": [
             {
               "description": "Type: string.",
-              "maxLength": 254,
               "type": "string"
             },
             {
@@ -8889,8 +9435,61 @@
             }
           ],
           "default": null,
-          "description": "Optional human metadata string (max 254 characters).",
+          "description": "Secret id when type=secrets.",
           "title": "Id"
+        },
+        "ids": {
+          "anyOf": [
+            {
+              "description": "Type: array.",
+              "items": {
+                "description": "Type: string.",
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Legacy secret keys when type=secrets without key=.",
+          "title": "Ids"
+        },
+        "key": {
+          "anyOf": [
+            {
+              "description": "Type: string.",
+              "type": "string"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Secret lookup key when type=secrets.",
+          "title": "Key"
+        },
+        "keys": {
+          "anyOf": [
+            {
+              "description": "Type: array.",
+              "items": {
+                "description": "Type: string.",
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Secret lookup keys when type=secrets.",
+          "title": "Keys"
         },
         "path": {
           "anyOf": [
@@ -8908,7 +9507,7 @@
           "title": "Path"
         },
         "type": {
-          "description": "Key source type (for example 'file').",
+          "description": "Key source type (file, secrets, or store).",
           "title": "Type",
           "type": "string"
         }
@@ -9472,7 +10071,7 @@
     },
     "UpstreamTlsConfig": {
       "additionalProperties": false,
-      "description": "Brief: TLS settings for an upstream endpoint.\n\nInputs:\n  - verify / ca_file / server_name.\n\nOutputs:\n  - UpstreamTlsConfig model.",
+      "description": "Brief: TLS settings for an upstream endpoint.\n\nInputs:\n  - verify / ca_file / ca_secret / server_name.\n\nOutputs:\n  - UpstreamTlsConfig model.",
       "properties": {
         "ca_file": {
           "anyOf": [
@@ -9488,6 +10087,22 @@
           "default": null,
           "description": "Optional CA bundle path used to verify the upstream cert.",
           "title": "Ca File"
+        },
+        "ca_secret": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "description": "Type: object.",
+              "type": "object"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Secrets ref for CA bundle when ca_file is unset: {id|backend: <backend-id>, key: <secret-key>}.",
+          "title": "Ca Secret"
         },
         "comment": {
           "anyOf": [
@@ -11803,12 +12418,17 @@
                       "type": "string"
                     },
                     {
+                      "additionalProperties": true,
+                      "description": "Type: object.",
+                      "type": "object"
+                    },
+                    {
                       "description": "Type: null.",
                       "type": "null"
                     }
                   ],
                   "default": null,
-                  "description": "Types: string, null.",
+                  "description": "Types: string, object, null.",
                   "title": "Password"
                 },
                 "reload_interval_second": {
@@ -11894,12 +12514,17 @@
                       "type": "string"
                     },
                     {
+                      "additionalProperties": true,
+                      "description": "Type: object.",
+                      "type": "object"
+                    },
+                    {
                       "description": "Type: null.",
                       "type": "null"
                     }
                   ],
                   "default": null,
-                  "description": "Types: string, null.",
+                  "description": "Types: string, object, null.",
                   "title": "Token Secret"
                 },
                 "ttl": {
@@ -13549,9 +14174,77 @@
               "title": "ZoneDnssecNsec3Config",
               "type": "object"
             },
+            "ZoneDnssecSecretsConfig": {
+              "additionalProperties": false,
+              "description": "Brief: Secrets-backend selector for DNSSEC KSK/ZSK material.\n\nInputs:\n  - backend / id: Secrets backend instance id (either field accepted).\n  - ksk_id / zsk_id: Optional explicit secret keys within that backend.\n\nOutputs:\n  - ZoneDnssecSecretsConfig used under dnssec_signing.secrets.\n\nExample:\n  secrets: { backend: dnssec-keys }\n  secrets: { id: dnssec-keys, ksk_id: example.com-ksk, zsk_id: example.com-zsk }",
+              "properties": {
+                "backend": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Secrets backend instance id (alias of id).",
+                  "title": "Backend"
+                },
+                "id": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Secrets backend instance id (alias of backend).",
+                  "title": "Id"
+                },
+                "ksk_id": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Optional secret key id for the zone KSK within the backend.",
+                  "title": "Ksk Id"
+                },
+                "zsk_id": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Optional secret key id for the zone ZSK within the backend.",
+                  "title": "Zsk Id"
+                }
+              },
+              "title": "ZoneDnssecSecretsConfig",
+              "type": "object"
+            },
             "ZoneDnssecSigningConfig": {
               "additionalProperties": false,
-              "description": "Brief: DNSSEC auto-signing configuration for ZoneRecords.\n\nInputs:\n  - enabled: Enable automatic DNSSEC signing for authoritative zones.\n  - keys_dir: Optional base directory for per-zone key files.\n  - algorithm: DNSSEC algorithm name (e.g. \"ECDSAP256SHA256\").\n  - generate: Key generation policy (\"yes\", \"no\", or \"maybe\").\n  - validity_days: Signature validity window in days.\n  - nsec3: Optional NSEC3 parameters (salt/iterations) used for signed\n    NXDOMAIN/NODATA proofs.\n  - use_tld: Optional single-label TLD (e.g. \"zaa\", \"corp\") to treat as\n    an inferred apex for SSHFP-only zones when synthesizing SOA records.\n\nOutputs:\n  - Parsed ZoneDnssecSigningConfig instance used by the config schema.",
+              "description": "Brief: DNSSEC auto-signing configuration for ZoneRecords.\n\nInputs:\n  - enabled: Enable automatic DNSSEC signing for authoritative zones.\n  - keys_dir: Optional base directory for per-zone key files.\n  - secrets: Optional secrets-backend selector for KSK/ZSK material.\n  - algorithm: DNSSEC algorithm name (e.g. \"ECDSAP256SHA256\").\n  - generate: Key generation policy (\"yes\", \"no\", or \"maybe\").\n  - validity_days: Signature validity window in days.\n  - nsec3: Optional NSEC3 parameters (salt/iterations) used for signed\n    NXDOMAIN/NODATA proofs.\n  - use_tld: Optional single-label TLD (e.g. \"zaa\", \"corp\") to treat as\n    an inferred apex for SSHFP-only zones when synthesizing SOA records.\n\nOutputs:\n  - Parsed ZoneDnssecSigningConfig instance used by the config schema.",
               "properties": {
                 "algorithm": {
                   "default": "ECDSAP256SHA256",
@@ -13598,6 +14291,19 @@
                   ],
                   "default": null,
                   "description": "Optional NSEC3 parameters used for negative-answer proofs."
+                },
+                "secrets": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/ZoneDnssecSecretsConfig"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Optional secrets backend selector for KSK/ZSK private keys. When set, ZoneRecords prefers secrets material and falls back to keys_dir. See docs/plugins/secrets.md."
                 },
                 "use_tld": {
                   "anyOf": [
@@ -14530,7 +15236,7 @@
       "then": {}
     }
   ],
-  "description": "Brief: Root configuration document for Foghorn.\n\nInputs:\n  - server: Required server block.\n  - vars / upstreams / logging / stats / plugins: Optional top-level sections.\n  - $schema: Optional schema URI for editor tooling.\n\nOutputs:\n  - FoghornConfig instance; primary input to model_json_schema().\n\nExample:\n  >>> FoghornConfig(server={})  # doctest: +SKIP",
+  "description": "Brief: Root configuration document for Foghorn.\n\nInputs:\n  - server: Required server block.\n  - vars / upstreams / logging / stats / secrets / plugins: Optional sections.\n  - $schema: Optional schema URI for editor tooling.\n\nOutputs:\n  - FoghornConfig instance; primary input to model_json_schema().\n\nExample:\n  >>> FoghornConfig(server={})  # doctest: +SKIP",
   "properties": {
     "$schema": {
       "anyOf": [
@@ -14916,7 +15622,7 @@
           "anyOf": [
             {
               "description": "Type: number.",
-              "minimum": 0.0,
+              "ge": 0.0,
               "type": "number"
             },
             {
@@ -14991,7 +15697,7 @@
               "anyOf": [
                 {
                   "description": "Type: integer.",
-                  "minimum": 1,
+                  "ge": 1,
                   "type": "integer"
                 },
                 {
@@ -15039,7 +15745,7 @@
               "anyOf": [
                 {
                   "description": "Type: number.",
-                  "exclusiveMinimum": 0,
+                  "gt": 0,
                   "type": "number"
                 },
                 {
@@ -15077,7 +15783,7 @@
           "anyOf": [
             {
               "description": "Type: integer.",
-              "minimum": 1,
+              "ge": 1,
               "type": "integer"
             },
             {
@@ -15125,7 +15831,7 @@
           "anyOf": [
             {
               "description": "Type: number.",
-              "exclusiveMinimum": 0,
+              "gt": 0,
               "type": "number"
             },
             {
@@ -16307,6 +17013,247 @@
       },
       "title": "Plugins"
     },
+    "secrets": {
+      "additionalProperties": false,
+      "default": null,
+      "description": "Named secrets backends (TLS, TSIG, tokens, DNSSEC keys). Use secrets.backends[] for multi-backend setups.",
+      "properties": {
+        "abort_on_failure": {
+          "anyOf": [
+            {
+              "description": "Type: boolean.",
+              "type": "boolean"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": true,
+          "description": "Default abort policy for single-backend shorthand. Default: true.",
+          "title": "Abort On Failure"
+        },
+        "backends": {
+          "anyOf": [
+            {
+              "description": "Type: array.",
+              "items": {
+                "additionalProperties": false,
+                "description": "Brief: One secrets backend under secrets.backends[].\n\nInputs:\n  - id / name: Logical backend instance id.\n  - module: Backend alias (file, mysql, ...) or dotted import path.\n  - config: Backend-specific mapping.\n  - abort_on_failure: When true (default), init/probe failures abort startup.\n\nOutputs:\n  - SecretsBackendInstance model.",
+                "properties": {
+                  "abort_on_fail": {
+                    "anyOf": [
+                      {
+                        "description": "Type: boolean.",
+                        "type": "boolean"
+                      },
+                      {
+                        "description": "Type: null.",
+                        "type": "null"
+                      }
+                    ],
+                    "default": null,
+                    "description": "Alias for abort_on_failure.",
+                    "title": "Abort On Fail"
+                  },
+                  "abort_on_failure": {
+                    "anyOf": [
+                      {
+                        "description": "Type: boolean.",
+                        "type": "boolean"
+                      },
+                      {
+                        "description": "Type: null.",
+                        "type": "null"
+                      }
+                    ],
+                    "default": true,
+                    "description": "When true, backend init/probe failure aborts startup. Default: true.",
+                    "title": "Abort On Failure"
+                  },
+                  "comment": {
+                    "anyOf": [
+                      {
+                        "description": "Type: string.",
+                        "maxLength": 254,
+                        "type": "string"
+                      },
+                      {
+                        "description": "Type: null.",
+                        "type": "null"
+                      }
+                    ],
+                    "default": null,
+                    "description": "Optional human metadata string (max 254 characters).",
+                    "title": "Comment"
+                  },
+                  "config": {
+                    "anyOf": [
+                      {
+                        "additionalProperties": true,
+                        "description": "Type: object.",
+                        "type": "object"
+                      },
+                      {
+                        "description": "Type: null.",
+                        "type": "null"
+                      }
+                    ],
+                    "default": null,
+                    "description": "Backend-specific configuration mapping.",
+                    "title": "Config"
+                  },
+                  "enabled": {
+                    "anyOf": [
+                      {
+                        "description": "Type: boolean.",
+                        "type": "boolean"
+                      },
+                      {
+                        "description": "Type: null.",
+                        "type": "null"
+                      }
+                    ],
+                    "default": true,
+                    "description": "When false, skip loading this backend. Default: true.",
+                    "title": "Enabled"
+                  },
+                  "id": {
+                    "anyOf": [
+                      {
+                        "description": "Type: string.",
+                        "type": "string"
+                      },
+                      {
+                        "description": "Type: null.",
+                        "type": "null"
+                      }
+                    ],
+                    "default": null,
+                    "description": "Logical backend identifier used in secret refs.",
+                    "title": "Id"
+                  },
+                  "module": {
+                    "description": "Secrets backend alias or dotted import path (for example 'file', 'mysql', 'mariadb').",
+                    "title": "Module",
+                    "type": "string"
+                  },
+                  "name": {
+                    "anyOf": [
+                      {
+                        "description": "Type: string.",
+                        "type": "string"
+                      },
+                      {
+                        "description": "Type: null.",
+                        "type": "null"
+                      }
+                    ],
+                    "default": null,
+                    "description": "Optional alias for id (logging.backends-compatible).",
+                    "title": "Name"
+                  }
+                },
+                "required": [
+                  "module"
+                ],
+                "title": "SecretsBackendInstance",
+                "type": "object"
+              },
+              "type": "array"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Named secrets backends (file, mysql, ...).",
+          "title": "Backends"
+        },
+        "comment": {
+          "anyOf": [
+            {
+              "description": "Type: string.",
+              "maxLength": 254,
+              "type": "string"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional human metadata string (max 254 characters).",
+          "title": "Comment"
+        },
+        "config": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "description": "Type: object.",
+              "type": "object"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Single-backend config when backends is omitted.",
+          "title": "Config"
+        },
+        "id": {
+          "anyOf": [
+            {
+              "description": "Type: string.",
+              "type": "string"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional id for single-backend shorthand.",
+          "title": "Id"
+        },
+        "module": {
+          "anyOf": [
+            {
+              "description": "Type: string.",
+              "type": "string"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Single-backend module alias when backends is omitted.",
+          "title": "Module"
+        },
+        "name": {
+          "anyOf": [
+            {
+              "description": "Type: string.",
+              "type": "string"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional name alias for single-backend shorthand.",
+          "title": "Name"
+        }
+      },
+      "type": [
+        "object",
+        "null"
+      ]
+    },
     "server": {
       "additionalProperties": false,
       "description": "Core server configuration block.",
@@ -16374,7 +17321,7 @@
               "anyOf": [
                 {
                   "description": "Type: integer.",
-                  "minimum": 1,
+                  "ge": 1,
                   "type": "integer"
                 },
                 {
@@ -16471,8 +17418,23 @@
                   "description": "Type: array.",
                   "items": {
                     "additionalProperties": false,
-                    "description": "Brief: External TSIG key source entry under server.axfr.tsig.key_sources.\n\nInputs:\n  - type: Source type (required), e.g. file.\n  - path: Optional filesystem path for file sources.\n\nOutputs:\n  - AxfrTsigKeySource model.",
+                    "description": "Brief: External TSIG key source entry under server.axfr.tsig.key_sources.\n\nInputs:\n  - type: Source type (required): file | secrets | store.\n  - path: Filesystem path for type=file.\n  - backend / id / ids: Secrets router selectors for type=secrets.\n\nOutputs:\n  - AxfrTsigKeySource model.",
                     "properties": {
+                      "backend": {
+                        "anyOf": [
+                          {
+                            "description": "Type: string.",
+                            "type": "string"
+                          },
+                          {
+                            "description": "Type: null.",
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "Secrets backend id when type=secrets.",
+                        "title": "Backend"
+                      },
                       "comment": {
                         "anyOf": [
                           {
@@ -16493,7 +17455,6 @@
                         "anyOf": [
                           {
                             "description": "Type: string.",
-                            "maxLength": 254,
                             "type": "string"
                           },
                           {
@@ -16502,8 +17463,61 @@
                           }
                         ],
                         "default": null,
-                        "description": "Optional human metadata string (max 254 characters).",
+                        "description": "Secret id when type=secrets.",
                         "title": "Id"
+                      },
+                      "ids": {
+                        "anyOf": [
+                          {
+                            "description": "Type: array.",
+                            "items": {
+                              "description": "Type: string.",
+                              "type": "string"
+                            },
+                            "type": "array"
+                          },
+                          {
+                            "description": "Type: null.",
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "Legacy secret keys when type=secrets without key=.",
+                        "title": "Ids"
+                      },
+                      "key": {
+                        "anyOf": [
+                          {
+                            "description": "Type: string.",
+                            "type": "string"
+                          },
+                          {
+                            "description": "Type: null.",
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "Secret lookup key when type=secrets.",
+                        "title": "Key"
+                      },
+                      "keys": {
+                        "anyOf": [
+                          {
+                            "description": "Type: array.",
+                            "items": {
+                              "description": "Type: string.",
+                              "type": "string"
+                            },
+                            "type": "array"
+                          },
+                          {
+                            "description": "Type: null.",
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "Secret lookup keys when type=secrets.",
+                        "title": "Keys"
                       },
                       "path": {
                         "anyOf": [
@@ -16521,7 +17535,7 @@
                         "title": "Path"
                       },
                       "type": {
-                        "description": "Key source type (for example 'file').",
+                        "description": "Key source type (file, secrets, or store).",
                         "title": "Type",
                         "type": "string"
                       }
@@ -17872,8 +18886,23 @@
                   "description": "Type: array.",
                   "items": {
                     "additionalProperties": false,
-                    "description": "Brief: External key source under server.features.tsig.key_sources.\n\nInputs:\n  - type: Source type (required), e.g. file.\n  - path: Optional filesystem path for file sources.\n\nOutputs:\n  - TsigFeatureKeySource model.",
+                    "description": "Brief: External key source under server.features.tsig.key_sources.\n\nInputs:\n  - type: Source type (required): file | secrets | store.\n  - path: Filesystem path for type=file.\n  - backend / id / ids: Secrets router selectors for type=secrets.\n\nOutputs:\n  - TsigFeatureKeySource model.",
                     "properties": {
+                      "backend": {
+                        "anyOf": [
+                          {
+                            "description": "Type: string.",
+                            "type": "string"
+                          },
+                          {
+                            "description": "Type: null.",
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "Secrets backend id when type=secrets.",
+                        "title": "Backend"
+                      },
                       "comment": {
                         "anyOf": [
                           {
@@ -17894,7 +18923,6 @@
                         "anyOf": [
                           {
                             "description": "Type: string.",
-                            "maxLength": 254,
                             "type": "string"
                           },
                           {
@@ -17903,8 +18931,61 @@
                           }
                         ],
                         "default": null,
-                        "description": "Optional human metadata string (max 254 characters).",
+                        "description": "Secret id when type=secrets.",
                         "title": "Id"
+                      },
+                      "ids": {
+                        "anyOf": [
+                          {
+                            "description": "Type: array.",
+                            "items": {
+                              "description": "Type: string.",
+                              "type": "string"
+                            },
+                            "type": "array"
+                          },
+                          {
+                            "description": "Type: null.",
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "Legacy secret keys when type=secrets without key=.",
+                        "title": "Ids"
+                      },
+                      "key": {
+                        "anyOf": [
+                          {
+                            "description": "Type: string.",
+                            "type": "string"
+                          },
+                          {
+                            "description": "Type: null.",
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "Secret lookup key when type=secrets.",
+                        "title": "Key"
+                      },
+                      "keys": {
+                        "anyOf": [
+                          {
+                            "description": "Type: array.",
+                            "items": {
+                              "description": "Type: string.",
+                              "type": "string"
+                            },
+                            "type": "array"
+                          },
+                          {
+                            "description": "Type: null.",
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "Secret lookup keys when type=secrets.",
+                        "title": "Keys"
                       },
                       "path": {
                         "anyOf": [
@@ -17922,7 +19003,7 @@
                         "title": "Path"
                       },
                       "type": {
-                        "description": "Key source type (for example 'file').",
+                        "description": "Key source type (file, secrets, or store).",
                         "title": "Type",
                         "type": "string"
                       }
@@ -18236,7 +19317,7 @@
                   "anyOf": [
                     {
                       "description": "Type: number.",
-                      "minimum": 0,
+                      "ge": 0,
                       "type": "number"
                     },
                     {
@@ -18252,7 +19333,7 @@
                   "anyOf": [
                     {
                       "description": "Type: integer.",
-                      "minimum": 0,
+                      "ge": 0,
                       "type": "integer"
                     },
                     {
@@ -18305,7 +19386,7 @@
             "auth": {
               "additionalProperties": false,
               "default": null,
-              "description": "Brief: server.http.auth configuration.\n\nInputs:\n  - mode: Auth mode (default \"token\"): none | token | basic.\n  - token: Static token for mode=token (Bearer, X-API-Key, and optionally\n    Basic foghorn:<token>). Must not be set when mode=basic.\n  - allow_basic_token: When mode=token, accept Basic foghorn:<token> and\n    advertise Basic on 401 (default true).\n  - username: HTTP Basic auth user name for mode=basic.\n  - password: HTTP Basic auth password for mode=basic.\n\nOutputs:\n  - HttpAuthConfig instance used by the config schema and runtime checks.",
+              "description": "Brief: server.http.auth configuration.\n\nInputs:\n  - mode: Auth mode (default \"token\"): none | token | basic.\n  - token: Static token for mode=token (Bearer, X-API-Key, and optionally\n    Basic foghorn:<token>). Must not be set when mode=basic.\n  - token_secret: Optional secrets-backend ref ({backend,id} or id string)\n    used when token is blank.\n  - allow_basic_token: When mode=token, accept Basic foghorn:<token> and\n    advertise Basic on 401 (default true).\n  - username: HTTP Basic auth user name for mode=basic.\n  - password: HTTP Basic auth password for mode=basic.\n\nOutputs:\n  - HttpAuthConfig instance used by the config schema and runtime checks.",
               "properties": {
                 "allow_basic_token": {
                   "default": true,
@@ -18363,13 +19444,34 @@
                       "type": "string"
                     },
                     {
+                      "additionalProperties": true,
+                      "description": "Type: object.",
+                      "type": "object"
+                    },
+                    {
                       "description": "Type: null.",
                       "type": "null"
                     }
                   ],
                   "default": null,
-                  "description": "Types: string, null.",
+                  "description": "Types: string, object, null.",
                   "title": "Password"
+                },
+                "password_secret": {
+                  "anyOf": [
+                    {
+                      "additionalProperties": true,
+                      "description": "Type: object.",
+                      "type": "object"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Optional secrets ref for mode=basic when password is unset: {id|backend: <backend-id>, key: <secret-key>}.",
+                  "title": "Password Secret"
                 },
                 "token": {
                   "anyOf": [
@@ -18385,6 +19487,22 @@
                   "default": null,
                   "description": "Types: string, null.",
                   "title": "Token"
+                },
+                "token_secret": {
+                  "anyOf": [
+                    {
+                      "additionalProperties": true,
+                      "description": "Type: object.",
+                      "type": "object"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Optional secrets backend reference for mode=token when token is unset: {id|backend: <backend-id>, key: <secret-key>}.",
+                  "title": "Token Secret"
                 },
                 "username": {
                   "anyOf": [
@@ -18422,6 +19540,22 @@
               "description": "Types: string, null.",
               "title": "Cert File"
             },
+            "cert_secret": {
+              "anyOf": [
+                {
+                  "additionalProperties": true,
+                  "description": "Type: object.",
+                  "type": "object"
+                },
+                {
+                  "description": "Type: null.",
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Secrets ref for TLS certificate: {id|backend: <backend-id>, key: <secret-key>}.",
+              "title": "Cert Secret"
+            },
             "comment": {
               "anyOf": [
                 {
@@ -18442,7 +19576,7 @@
               "anyOf": [
                 {
                   "description": "Type: number.",
-                  "minimum": 0,
+                  "ge": 0,
                   "type": "number"
                 },
                 {
@@ -18583,8 +19717,8 @@
               "title": "Generate"
             },
             "host": {
-              "default": "*********",
-              "description": "Type: string. Default: \"*********\".",
+              "default": "127.0.0.1",
+              "description": "Type: string. Default: \"127.0.0.1\".",
               "title": "Host",
               "type": "string"
             },
@@ -18624,6 +19758,22 @@
               "default": null,
               "description": "Types: string, null.",
               "title": "Key File"
+            },
+            "key_secret": {
+              "anyOf": [
+                {
+                  "additionalProperties": true,
+                  "description": "Type: object.",
+                  "type": "object"
+                },
+                {
+                  "description": "Type: null.",
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Secrets ref for TLS private key: {id|backend: <backend-id>, key: <secret-key>}.",
+              "title": "Key Secret"
             },
             "keys_dir": {
               "anyOf": [
@@ -18737,7 +19887,7 @@
               "anyOf": [
                 {
                   "description": "Type: number.",
-                  "minimum": 0,
+                  "ge": 0,
                   "type": "number"
                 },
                 {
@@ -18753,7 +19903,7 @@
               "anyOf": [
                 {
                   "description": "Type: number.",
-                  "minimum": 0,
+                  "ge": 0,
                   "type": "number"
                 },
                 {
@@ -19041,6 +20191,22 @@
                   "description": "Types: string, null.",
                   "title": "Cert File"
                 },
+                "cert_secret": {
+                  "anyOf": [
+                    {
+                      "additionalProperties": true,
+                      "description": "Type: object.",
+                      "type": "object"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Secrets ref for TLS certificate: {id|backend: <backend-id>, key: <secret-key>}.",
+                  "title": "Cert Secret"
+                },
                 "comment": {
                   "anyOf": [
                     {
@@ -19118,6 +20284,22 @@
                   "description": "Types: string, null.",
                   "title": "Key File"
                 },
+                "key_secret": {
+                  "anyOf": [
+                    {
+                      "additionalProperties": true,
+                      "description": "Type: object.",
+                      "type": "object"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Secrets ref for TLS private key: {id|backend: <backend-id>, key: <secret-key>}.",
+                  "title": "Key Secret"
+                },
                 "overload_response": {
                   "default": null,
                   "description": "Types: string, null. Valid values: \"servfail\", \"refused\", \"drop\".",
@@ -19174,6 +20356,22 @@
                   "default": null,
                   "description": "Types: string, null.",
                   "title": "Cert File"
+                },
+                "cert_secret": {
+                  "anyOf": [
+                    {
+                      "additionalProperties": true,
+                      "description": "Type: object.",
+                      "type": "object"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Secrets ref for TLS certificate: {id|backend: <backend-id>, key: <secret-key>}.",
+                  "title": "Cert Secret"
                 },
                 "comment": {
                   "anyOf": [
@@ -19277,6 +20475,22 @@
                   "default": null,
                   "description": "Types: string, null.",
                   "title": "Key File"
+                },
+                "key_secret": {
+                  "anyOf": [
+                    {
+                      "additionalProperties": true,
+                      "description": "Type: object.",
+                      "type": "object"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Secrets ref for TLS private key: {id|backend: <backend-id>, key: <secret-key>}.",
+                  "title": "Key Secret"
                 },
                 "keys_dir": {
                   "anyOf": [
@@ -19691,7 +20905,7 @@
                   "anyOf": [
                     {
                       "description": "Type: integer.",
-                      "minimum": 0,
+                      "ge": 0,
                       "type": "integer"
                     },
                     {
@@ -20103,7 +21317,7 @@
           "anyOf": [
             {
               "description": "Type: number.",
-              "minimum": 0,
+              "ge": 0,
               "type": "number"
             },
             {
