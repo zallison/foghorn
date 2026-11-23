@@ -448,6 +448,21 @@ def _teardown_main_process(
     _shutdown = shutdown_plugins or run_shutdown_plugins
     _shutdown([cache_plugin, stats_persistence_store, *plugins])
 
+    # Close secrets backends after plugins so consumers finish first.
+    try:
+        from foghorn.plugins.secrets import (
+            get_active_secrets_router,
+            set_active_secrets_router,
+        )
+
+        router = get_active_secrets_router()
+        if router is not None:
+            logger.info("Closing secrets backends")
+            router.close_all()
+        set_active_secrets_router(None)
+    except Exception:
+        logger.exception("Unexpected error while closing secrets backends")
+
     # Clear in-process runtime snapshot state. This is mostly relevant for
     # unit tests that call main() multiple times in one Python process.
     try:

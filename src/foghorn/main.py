@@ -101,10 +101,10 @@ def main(argv: list[str] | None = None) -> int:
         >>> import time
         >>> with patch('builtins.open', mock_open(read_data='''
         ... listen:
-        ...   host: *********
+        ...   host: 127.0.0.1
         ...   port: 5354
         ... upstreams:
-        ...   - host: *******
+        ...   - host: 1.1.1.1
         ...     port: 53
         ... foghorn:
         ...   timeout_ms: 2000
@@ -160,7 +160,7 @@ def main(argv: list[str] | None = None) -> int:
     pid_file_path = resolve_pid_file_path(cfg_path)
     try:
         write_pid_file(pid_file_path)
-        logger.info("PID file: %s", pid_file_path)
+        logger.info("  pid_file=%s", pid_file_path)
 
         def _cleanup_pid_file() -> None:
             """Brief: Best-effort PID file removal for any serve exit path."""
@@ -216,6 +216,9 @@ def main(argv: list[str] | None = None) -> int:
         runtime_state.set_listener_error(name, exc)
         if fatal:
             listener_failures[str(name)] = str(exc)
+
+    # End of inline helpers
+    # main() continues below
 
     # Normalize listen configuration.
     (
@@ -284,6 +287,24 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     _install_cache_plugin_global(cache_plugin=cache_plugin, logger=logger)
     min_cache_ttl = _get_min_cache_ttl(cache_plugin)
+
+    # Secrets backends (TLS/TSIG/token/DNSSEC material) before plugins/listeners.
+    try:
+        from foghorn.plugins.secrets import (
+            load_secrets_router,
+            set_active_secrets_router,
+        )
+
+        secrets_router = load_secrets_router(cfg.get("secrets"))
+        set_active_secrets_router(secrets_router)
+        if secrets_router is not None:
+            logger.info(
+                "Loaded secrets backends: %s",
+                secrets_router.backend_ids,
+            )
+    except Exception as exc:
+        logger.critical("Startup aborted: secrets backends failed: %s", exc)
+        return 1
 
     plugins = load_plugins(cfg.get("plugins", []))
     logger.info(
@@ -1157,6 +1178,17 @@ def main(argv: list[str] | None = None) -> int:
     if bool(doh_cfg.get("enabled", False)):
         h = str(doh_cfg.get("host", default_host))
         p = int(doh_cfg.get("port", 8153))
+        if isinstance(doh_cfg, dict):
+            try:
+                from foghorn.plugins.secrets.resolve import materialize_tls_paths
+
+                expanded = materialize_tls_paths(doh_cfg)
+                if isinstance(expanded, dict):
+                    for key in ("cert_file", "key_file"):
+                        if expanded.get(key) and not doh_cfg.get(key):
+                            doh_cfg[key] = expanded[key]
+            except Exception:
+                logger.debug("DoH TLS secrets materialization skipped", exc_info=True)
         cert_file = doh_cfg.get("cert_file")
         key_file = doh_cfg.get("key_file")
         logger.info("Starting DoH listener on %s:%d", h, p)

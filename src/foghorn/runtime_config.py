@@ -1217,6 +1217,29 @@ def _build_snapshot(
             min_cache_ttl = 0
     min_cache_ttl = max(0, int(min_cache_ttl))
 
+    # Secrets backends (must be active before plugins that resolve key_sources).
+    try:
+        from foghorn.plugins.secrets import (
+            get_active_secrets_router,
+            load_secrets_router,
+            set_active_secrets_router,
+        )
+
+        old_router = get_active_secrets_router()
+        new_router = load_secrets_router(
+            cfg.get("secrets") if isinstance(cfg, dict) else None
+        )
+        set_active_secrets_router(new_router)
+        if old_router is not None and old_router is not new_router:
+            try:
+                old_router.close_all()
+            except Exception:
+                logger.debug("Failed closing previous secrets router", exc_info=True)
+    except Exception as exc:
+        raise RuntimeError(
+            f"secrets backends unavailable during reload: {exc}"
+        ) from exc
+
     # Plugins
     plugins = load_plugins(cfg.get("plugins", []))
     # Warn if exposed listeners lack rate limiting
