@@ -174,6 +174,20 @@ class ListenerDot(ListenerConnLimits):
     port: PortInt | None = None
     cert_file: str | None = None
     key_file: str | None = None
+    cert_secret: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Secrets ref for TLS certificate: "
+            "{id|backend: <backend-id>, key: <secret-key>}."
+        ),
+    )
+    key_secret: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Secrets ref for TLS private key: "
+            "{id|backend: <backend-id>, key: <secret-key>}."
+        ),
+    )
     generate: str | bool | None = Field(
         default="no",
         description=(
@@ -193,6 +207,20 @@ class ListenerDoh(StrictModel):
     port: PortInt | None = None
     cert_file: str | None = None
     key_file: str | None = None
+    cert_secret: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Secrets ref for TLS certificate: "
+            "{id|backend: <backend-id>, key: <secret-key>}."
+        ),
+    )
+    key_secret: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Secrets ref for TLS private key: "
+            "{id|backend: <backend-id>, key: <secret-key>}."
+        ),
+    )
     allow_threaded_fallback: bool = Field(default=True)
     overload_response: OverloadResponse | None = None
 
@@ -441,6 +469,8 @@ class HttpAuthConfig(StrictModel):
       - mode: Auth mode (default "token"): none | token | basic.
       - token: Static token for mode=token (Bearer, X-API-Key, and optionally
         Basic foghorn:<token>). Must not be set when mode=basic.
+      - token_secret: Optional secrets-backend ref ({backend,id} or id string)
+        used when token is blank.
       - allow_basic_token: When mode=token, accept Basic foghorn:<token> and
         advertise Basic on 401 (default true).
       - username: HTTP Basic auth user name for mode=basic.
@@ -452,6 +482,14 @@ class HttpAuthConfig(StrictModel):
 
     mode: Literal["none", "token", "basic"] = Field(default="token")
     token: str | None = None
+    token_secret: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Optional secrets backend reference for mode=token when token is "
+            "unset: {id|backend: <backend-id>, key: <secret-key>}."
+        ),
+    )
+    # password_secret is declared below with password.
     allow_basic_token: bool = Field(
         default=True,
         description=(
@@ -461,7 +499,14 @@ class HttpAuthConfig(StrictModel):
         ),
     )
     username: str | None = None
-    password: str | None = None
+    password: str | dict[str, Any] | None = None
+    password_secret: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Optional secrets ref for mode=basic when password is unset: "
+            "{id|backend: <backend-id>, key: <secret-key>}."
+        ),
+    )
 
     @model_validator(mode="after")
     def _reject_basic_mode_with_token(self) -> Self:
@@ -539,11 +584,25 @@ class ServerHttpConfig(StrictModel):
         default=None,
         description="When unset, presence of the http block enables the admin server.",
     )
-    host: str = Field(default="*********")
+    host: str = Field(default="127.0.0.1")
     port: PortInt = Field(default=5380)
     allow_threaded_fallback: bool = Field(default=True)
     cert_file: str | None = None
     key_file: str | None = None
+    cert_secret: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Secrets ref for TLS certificate: "
+            "{id|backend: <backend-id>, key: <secret-key>}."
+        ),
+    )
+    key_secret: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Secrets ref for TLS private key: "
+            "{id|backend: <backend-id>, key: <secret-key>}."
+        ),
+    )
     generate: str | bool | None = Field(
         default="no",
         description=(
@@ -595,16 +654,33 @@ class AxfrTsigKeySource(StrictModel):
     """Brief: External TSIG key source entry under server.axfr.tsig.key_sources.
 
     Inputs:
-      - type: Source type (required), e.g. file.
-      - path: Optional filesystem path for file sources.
+      - type: Source type (required): file | secrets | store.
+      - path: Filesystem path for type=file.
+      - backend / id / ids: Secrets router selectors for type=secrets.
 
     Outputs:
       - AxfrTsigKeySource model.
     """
 
-    type: str = Field(description="Key source type (for example 'file').")
+    type: str = Field(
+        description="Key source type (file, secrets, or store).",
+    )
     path: str | None = Field(
         default=None, description="Filesystem path for file sources."
+    )
+    backend: str | None = Field(
+        default=None, description="Secrets backend id when type=secrets."
+    )
+    id: str | None = Field(default=None, description="Secret id when type=secrets.")
+    ids: list[str] | None = Field(
+        default=None,
+        description="Legacy secret keys when type=secrets without key=.",
+    )
+    key: str | None = Field(
+        default=None, description="Secret lookup key when type=secrets."
+    )
+    keys: list[str] | None = Field(
+        default=None, description="Secret lookup keys when type=secrets."
     )
 
 
@@ -656,16 +732,33 @@ class TsigFeatureKeySource(StrictModel):
     """Brief: External key source under server.features.tsig.key_sources.
 
     Inputs:
-      - type: Source type (required), e.g. file.
-      - path: Optional filesystem path for file sources.
+      - type: Source type (required): file | secrets | store.
+      - path: Filesystem path for type=file.
+      - backend / id / ids: Secrets router selectors for type=secrets.
 
     Outputs:
       - TsigFeatureKeySource model.
     """
 
-    type: str = Field(description="Key source type (for example 'file').")
+    type: str = Field(
+        description="Key source type (file, secrets, or store).",
+    )
     path: str | None = Field(
         default=None, description="Filesystem path for file sources."
+    )
+    backend: str | None = Field(
+        default=None, description="Secrets backend id when type=secrets."
+    )
+    id: str | None = Field(default=None, description="Secret id when type=secrets.")
+    ids: list[str] | None = Field(
+        default=None,
+        description="Legacy secret keys when type=secrets without key=.",
+    )
+    key: str | None = Field(
+        default=None, description="Secret lookup key when type=secrets."
+    )
+    keys: list[str] | None = Field(
+        default=None, description="Secret lookup keys when type=secrets."
     )
 
 

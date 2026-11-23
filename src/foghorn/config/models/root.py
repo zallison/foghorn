@@ -14,6 +14,7 @@ from pydantic import ConfigDict, Field
 from foghorn.config.models.common import StrictModel
 from foghorn.config.models.logging_section import LoggingConfig
 from foghorn.config.models.plugins import PluginInstance
+from foghorn.config.models.secrets import SecretsConfig
 from foghorn.config.models.server import ServerConfig
 from foghorn.config.models.stats import StatsConfig
 from foghorn.config.models.upstreams import UpstreamsConfig
@@ -25,7 +26,7 @@ class FoghornConfig(StrictModel):
 
     Inputs:
       - server: Required server block.
-      - vars / upstreams / logging / stats / plugins: Optional top-level sections.
+      - vars / upstreams / logging / stats / secrets / plugins: Optional sections.
       - $schema: Optional schema URI for editor tooling.
 
     Outputs:
@@ -53,6 +54,13 @@ class FoghornConfig(StrictModel):
     )
     logging: LoggingConfig | None = None
     stats: StatsConfig | None = None
+    secrets: SecretsConfig | None = Field(
+        default=None,
+        description=(
+            "Named secrets backends (TLS, TSIG, tokens, DNSSEC keys). "
+            "Use secrets.backends[] for multi-backend setups."
+        ),
+    )
     plugins: list[PluginInstance] | None = Field(
         default=None,
         description="Ordered list of resolve plugin instances.",

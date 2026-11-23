@@ -20,7 +20,7 @@ class UpstreamTlsConfig(StrictModel):
     """Brief: TLS settings for an upstream endpoint.
 
     Inputs:
-      - verify / ca_file / server_name.
+      - verify / ca_file / ca_secret / server_name.
 
     Outputs:
       - UpstreamTlsConfig model.
@@ -33,6 +33,13 @@ class UpstreamTlsConfig(StrictModel):
     ca_file: str | None = Field(
         default=None,
         description="Optional CA bundle path used to verify the upstream cert.",
+    )
+    ca_secret: dict[str, object] | None = Field(
+        default=None,
+        description=(
+            "Secrets ref for CA bundle when ca_file is unset: "
+            "{id|backend: <backend-id>, key: <secret-key>}."
+        ),
     )
     server_name: str | None = Field(
         default=None,

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from foghorn.config.models.plugins import PluginInstance
 from foghorn.config.models.root import FoghornConfig
+from foghorn.config.models.secrets import SecretsBackendInstance, SecretsConfig
 from foghorn.config.models.server import (
     DecoratedCacheOverride,
     ServerConfig,
@@ -26,6 +27,8 @@ __all__ = [
     "DecoratedCacheOverride",
     "FoghornConfig",
     "PluginInstance",
+    "SecretsBackendInstance",
+    "SecretsConfig",
     "ServerConfig",
     "UpstreamDoh",
     "UpstreamHost",
