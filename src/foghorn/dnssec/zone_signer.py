@@ -462,12 +462,170 @@ def generate_ds_records(
     return ds_records
 
 
+def _private_key_from_pem(pem: bytes | bytearray | memoryview | None) -> object | None:
+    """Brief: Load a cryptography private key from PEM bytes.
+
+    Inputs:
+      - pem: PEM-encoded private key bytes.
+
+    Outputs:
+      - Private key object or None on failure/missing input.
+    """
+
+    if not isinstance(pem, (bytes, bytearray, memoryview)):
+        return None
+    raw = bytes(pem)
+    if not raw:
+        return None
+    try:
+        return serialization.load_pem_private_key(raw, password=None)
+    except Exception as exc:
+        logger.error("Failed to load DNSSEC private key PEM: %s", exc)
+        return None
+
+
+def _try_load_dnssec_from_secrets(
+    zone_name_str: str,
+    *,
+    secrets_cfg: dict | None,
+) -> tuple[object | None, object | None]:
+    """Brief: Attempt KSK/ZSK load from the active secrets router.
+
+    Inputs:
+      - zone_name_str: Zone apex with trailing dot preferred.
+      - secrets_cfg: Optional dnssec_signing.secrets mapping
+        (backend / ksk_id / zsk_id).
+
+    Outputs:
+      - (ksk_private_or_None, zsk_private_or_None).
+    """
+
+    try:
+        from foghorn.plugins.secrets.router import get_active_secrets_router
+    except Exception:
+        return None, None
+
+    router = get_active_secrets_router()
+    if router is None:
+        return None, None
+
+    backend = None
+    ksk_id = None
+    zsk_id = None
+    if isinstance(secrets_cfg, dict):
+        backend = (
+            secrets_cfg.get("backend")
+            or secrets_cfg.get("store")
+            or secrets_cfg.get("id")
+        )
+        ksk_id = secrets_cfg.get("ksk_id")
+        zsk_id = secrets_cfg.get("zsk_id")
+
+    try:
+        ksk_rec, zsk_rec = router.get_dnssec_keys(
+            zone_name_str,
+            backend=str(backend).strip() if backend else None,
+            ksk_id=str(ksk_id).strip() if ksk_id else None,
+            zsk_id=str(zsk_id).strip() if zsk_id else None,
+        )
+    except Exception as exc:
+        logger.warning("DNSSEC secrets lookup failed for %s: %s", zone_name_str, exc)
+        return None, None
+
+    ksk_private = _private_key_from_pem(
+        getattr(ksk_rec, "private_key_pem", None) if ksk_rec else None
+    )
+    zsk_private = _private_key_from_pem(
+        getattr(zsk_rec, "private_key_pem", None) if zsk_rec else None
+    )
+    return ksk_private, zsk_private
+
+
+def _persist_dnssec_to_secrets(
+    *,
+    zone_name_str: str,
+    key_type: str,
+    algorithm: str,
+    private_key: object,
+    secrets_cfg: dict | None,
+) -> None:
+    """Brief: Best-effort persist a generated DNSSEC key into secrets backends.
+
+    Inputs:
+      - zone_name_str: Zone apex.
+      - key_type: ksk or zsk.
+      - algorithm: Algorithm name.
+      - private_key: Cryptography private key.
+      - secrets_cfg: Optional dnssec_signing.secrets mapping.
+
+    Outputs:
+      - None.
+    """
+
+    try:
+        from foghorn.plugins.secrets.base import SecretRecord
+        from foghorn.plugins.secrets.router import get_active_secrets_router
+        from foghorn.utils import dns_names
+    except Exception:
+        return
+
+    router = get_active_secrets_router()
+    if router is None:
+        return
+
+    backend = None
+    explicit_id = None
+    if isinstance(secrets_cfg, dict):
+        backend = (
+            secrets_cfg.get("backend")
+            or secrets_cfg.get("store")
+            or secrets_cfg.get("id")
+        )
+        if key_type == "ksk":
+            explicit_id = secrets_cfg.get("ksk_id")
+        elif key_type == "zsk":
+            explicit_id = secrets_cfg.get("zsk_id")
+
+    zone_n = dns_names.normalize_name(zone_name_str)
+    sid = str(explicit_id).strip() if explicit_id else f"{zone_n}-{key_type}"
+    try:
+        pem = private_key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption(),
+        )
+    except Exception as exc:
+        logger.warning(
+            "Failed serializing DNSSEC %s for secrets put: %s", key_type, exc
+        )
+        return
+
+    rec = SecretRecord(
+        id=sid,
+        kind="dnssec",
+        zone=zone_n,
+        key_type=key_type,
+        algorithm=algorithm,
+        private_key_pem=pem,
+    )
+    try:
+        router.put(rec, backend=str(backend).strip() if backend else None)
+    except Exception as exc:
+        logger.debug(
+            "DNSSEC secrets put skipped for %s %s: %s",
+            zone_n,
+            key_type,
+            exc,
+        )
+
+
 def ensure_zone_keys(
     zone_name: str,
     keys_dir: Path,
     *,
     algorithm: str,
     generate_policy: str,
+    secrets_cfg: dict | None = None,
 ) -> tuple[object, object, dns.rdata.Rdata, dns.rdata.Rdata]:
     """Brief: Ensure KSK/ZSK and DNSKEY rdata for a zone under a policy.
 
@@ -476,6 +634,7 @@ def ensure_zone_keys(
       - keys_dir: Directory for key files.
       - algorithm: Algorithm name for ALGORITHM_MAP.
       - generate_policy: 'yes', 'no', or 'maybe'.
+      - secrets_cfg: Optional dnssec_signing.secrets mapping for store lookup.
 
     Outputs:
       - (ksk_private, zsk_private, ksk_dnskey, zsk_dnskey).
@@ -494,6 +653,14 @@ def ensure_zone_keys(
 
     ksk_private = None
     zsk_private = None
+
+    # Prefer secrets backends when configured/available.
+    if generate_policy in {"no", "maybe"} or secrets_cfg is not None:
+        sk_ksk, sk_zsk = _try_load_dnssec_from_secrets(
+            zone_name_str, secrets_cfg=secrets_cfg
+        )
+        ksk_private = sk_ksk
+        zsk_private = sk_zsk
 
     if generate_policy in {"no", "maybe"}:
         for lookup_dir in lookup_dirs:
@@ -514,10 +681,24 @@ def ensure_zone_keys(
             logger.warning("Generating new KSK with algorithm %s", algorithm)
             ksk_private, _ = generate_keypair(algorithm, "ksk")
             save_key(ksk_private, keys_dir, zone_name_str, "ksk", algorithm)
+            _persist_dnssec_to_secrets(
+                zone_name_str=zone_name_str,
+                key_type="ksk",
+                algorithm=algorithm,
+                private_key=ksk_private,
+                secrets_cfg=secrets_cfg,
+            )
         if zsk_private is None:
             logger.warning("Generating new ZSK with algorithm %s", algorithm)
             zsk_private, _ = generate_keypair(algorithm, "zsk")
             save_key(zsk_private, keys_dir, zone_name_str, "zsk", algorithm)
+            _persist_dnssec_to_secrets(
+                zone_name_str=zone_name_str,
+                key_type="zsk",
+                algorithm=algorithm,
+                private_key=zsk_private,
+                secrets_cfg=secrets_cfg,
+            )
 
     ksk_dnskey = make_dnskey_rdata(ksk_private, alg_enum, flags=257)
     zsk_dnskey = make_dnskey_rdata(zsk_private, alg_enum, flags=256)

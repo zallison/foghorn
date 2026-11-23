@@ -642,12 +642,48 @@ class ZoneDnssecNsec3Config(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class ZoneDnssecSecretsConfig(BaseModel):
+    """Brief: Secrets-backend selector for DNSSEC KSK/ZSK material.
+
+    Inputs:
+      - backend / id: Secrets backend instance id (either field accepted).
+      - ksk_id / zsk_id: Optional explicit secret keys within that backend.
+
+    Outputs:
+      - ZoneDnssecSecretsConfig used under dnssec_signing.secrets.
+
+    Example:
+      secrets: { backend: dnssec-keys }
+      secrets: { id: dnssec-keys, ksk_id: example.com-ksk, zsk_id: example.com-zsk }
+    """
+
+    backend: str | None = Field(
+        default=None,
+        description="Secrets backend instance id (alias of id).",
+    )
+    id: str | None = Field(
+        default=None,
+        description="Secrets backend instance id (alias of backend).",
+    )
+    ksk_id: str | None = Field(
+        default=None,
+        description="Optional secret key id for the zone KSK within the backend.",
+    )
+    zsk_id: str | None = Field(
+        default=None,
+        description="Optional secret key id for the zone ZSK within the backend.",
+    )
+
+    model_config = ConfigDict(extra="forbid")
+
+
 class ZoneDnssecSigningConfig(BaseModel):
     """Brief: DNSSEC auto-signing configuration for ZoneRecords.
 
     Inputs:
       - enabled: Enable automatic DNSSEC signing for authoritative zones.
       - keys_dir: Optional base directory for per-zone key files.
+      - secrets: Optional secrets-backend selector for KSK/ZSK material.
       - algorithm: DNSSEC algorithm name (e.g. "ECDSAP256SHA256").
       - generate: Key generation policy ("yes", "no", or "maybe").
       - validity_days: Signature validity window in days.
@@ -671,6 +707,14 @@ class ZoneDnssecSigningConfig(BaseModel):
     keys_dir: str | None = Field(
         default=None,
         description="Directory to read/write DNSSEC keys; defaults to the working directory when omitted.",
+    )
+    secrets: ZoneDnssecSecretsConfig | None = Field(
+        default=None,
+        description=(
+            "Optional secrets backend selector for KSK/ZSK private keys. "
+            "When set, ZoneRecords prefers secrets material and falls back "
+            "to keys_dir. See docs/plugins/secrets.md."
+        ),
     )
     algorithm: str = Field(
         default="ECDSAP256SHA256",

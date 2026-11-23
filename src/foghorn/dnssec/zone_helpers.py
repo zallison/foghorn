@@ -449,6 +449,12 @@ def auto_sign_zones(
             else:
                 keys_dir_path = pathlib.Path(".")
 
+            secrets_cfg = None
+            if isinstance(dnssec_cfg_raw, dict):
+                raw_secrets = dnssec_cfg_raw.get("secrets")
+                if isinstance(raw_secrets, dict):
+                    secrets_cfg = raw_secrets
+
             try:
                 (
                     ksk_private,
@@ -460,6 +466,7 @@ def auto_sign_zones(
                     keys_dir_path,
                     algorithm=algorithm,
                     generate_policy=generate_policy,
+                    secrets_cfg=secrets_cfg,
                 )
             except Exception as exc:  # pragma: no cover - defensive
                 # Keep the existing log message used by ZoneRecords so callers
