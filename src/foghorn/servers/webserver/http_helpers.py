@@ -171,6 +171,64 @@ def ensure_web_auth_token(
     return generated
 
 
+def ensure_web_auth_basic_password(web_cfg: dict[str, Any] | None) -> str | None:
+    """Brief: Materialize server.http.auth.password from password_secret when needed.
+
+    Inputs:
+      - web_cfg: server.http mapping (mutated when a secret resolves).
+
+    Outputs:
+      - Resolved password string when loaded from secrets; otherwise None.
+
+    Notes:
+      - Only runs for auth.mode=basic with blank/missing inline password.
+      - Supports auth.password_secret refs and mapping-form auth.password.
+      - Leaves inline non-empty password unchanged.
+    """
+
+    if not isinstance(web_cfg, dict):
+        return None
+
+    auth_cfg = web_cfg.get("auth")
+    if not isinstance(auth_cfg, dict):
+        return None
+
+    mode = str(auth_cfg.get("mode", "token") or "token").strip().lower()
+    if mode != "basic":
+        return None
+
+    existing = auth_cfg.get("password")
+    if isinstance(existing, str) and existing.strip():
+        return None
+
+    try:
+        from foghorn.plugins.secrets.resolve import resolve_secret_string
+    except Exception:
+        return None
+
+    resolved: str | None = None
+    if auth_cfg.get("password_secret") is not None:
+        try:
+            resolved = resolve_secret_string(
+                auth_cfg.get("password_secret"),
+                prefer=("token", "secret"),
+            )
+        except Exception:
+            resolved = None
+    elif isinstance(existing, dict):
+        try:
+            resolved = resolve_secret_string(existing, prefer=("token", "secret"))
+        except Exception:
+            resolved = None
+
+    if not resolved:
+        return None
+
+    auth_cfg["password"] = str(resolved)
+    web_cfg["auth"] = auth_cfg
+    return str(resolved)
+
+
 # Fixed Basic username accepted in auth.mode=token when allow_basic_token
 # (password must be the token).
 _TOKEN_MODE_BASIC_USERNAME = "foghorn"

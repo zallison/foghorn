@@ -26,7 +26,11 @@ from ...stats import StatsCollector
 from .admin_state import AdminRuntimeState
 from .api_request_audit import ApiRequestAuditLogger
 from .config_helpers import _get_web_cfg
-from .http_helpers import ensure_web_auth_token, validate_web_auth_config
+from .http_helpers import (
+    ensure_web_auth_basic_password,
+    ensure_web_auth_token,
+    validate_web_auth_config,
+)
 from .logging_utils import RingBuffer
 from .runtime import RuntimeState
 from .threaded_handlers import _ThreadedAdminRequestHandler
@@ -462,6 +466,8 @@ def start_webserver(
     # When auth.mode=token and token is missing, generate a temporary token and
     # log it so operators can still access the admin API.
     ensure_web_auth_token(web_cfg)
+    # mode=basic: materialize password from password_secret before auth gates.
+    ensure_web_auth_basic_password(web_cfg)
 
     # Warn when the API is enabled without effective authentication.
     auth_cfg = web_cfg.get("auth") or {}
@@ -472,11 +478,15 @@ def start_webserver(
     api_enabled = bool(web_cfg.get("enable_api", False))
     admin_enabled = bool(web_cfg.get("enable_admin", False))
     basic_username = str(auth_cfg.get("username") or "").strip()
-    basic_password = str(auth_cfg.get("password") or "")
+    basic_password = str(auth_cfg.get("password") or "").strip()
+    has_password_secret = auth_cfg.get("password_secret") is not None
     api_auth_missing = (
         auth_mode in {"", "none"}
         or (auth_mode == "token" and not str(auth_token or "").strip())
-        or (auth_mode == "basic" and (not basic_username or not basic_password))
+        or (
+            auth_mode == "basic"
+            and (not basic_username or (not basic_password and not has_password_secret))
+        )
     )
     bind_is_loopback = _is_loopback_bind_host(host)
     schema_enabled = bool(web_cfg.get("enable_schema", False))
