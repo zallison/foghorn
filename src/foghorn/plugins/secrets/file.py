@@ -1,11 +1,13 @@
 """Filesystem-backed secrets store.
 
 Brief:
-  Loads named secrets from YAML catalog entries and/or a DNSSEC keys_dir
-  layout compatible with zone_signer (domainkey_<apex>.{ksk,zsk}.key).
+  Loads named secrets from YAML catalog path fields and/or a DNSSEC
+  keys_dir layout compatible with zone_signer
+  (domainkey_<apex>.{ksk,zsk}.key). Inline PEMs/tokens/secrets are not
+  accepted; use the ``inline`` backend for in-config material.
 
 Inputs:
-  - config.entries: list of secret entry mappings
+  - config.entries: list of secret entry mappings (path fields only)
   - config.keys_dir: optional DNSSEC key directory to index
   - config.root / base_dir: optional path prefix for relative files
 
@@ -35,6 +37,43 @@ _TSIG_EXTRA_KEYS = (
     "allow_clients",
     "allow_clients_files",
 )
+
+_INLINE_FIELD_KEYS = frozenset(
+    {
+        "cert_pem",
+        "key_pem",
+        "ca_pem",
+        "token",
+        "value",
+        "secret",
+        "private_key_pem",
+    }
+)
+
+
+def _reject_inline_fields(entry: dict[str, Any], *, sid: str) -> None:
+    """Brief: Raise when inline secret material appears on a file entry.
+
+    Inputs:
+      - entry: Catalog entry mapping.
+      - sid: Secret id for error text.
+
+    Outputs:
+      - None.
+
+    Raises:
+      - ValueError when any inline value field is present.
+    """
+
+    bad = sorted(
+        k for k in _INLINE_FIELD_KEYS if k in entry and entry.get(k) is not None
+    )
+    if bad:
+        raise ValueError(
+            f"file secrets entry {sid!r} has inline fields {bad}; "
+            "use module 'inline' for in-config secrets or path fields "
+            "(value_file/secret_file/cert_file/...) on module 'file'"
+        )
 
 
 def _read_bytes(path: Path) -> bytes:
@@ -104,7 +143,7 @@ class FileSecrets(SecretsStore):
     """Brief: Local filesystem secrets backend.
 
     Inputs (**config):
-      - entries: Optional list of secret entry dicts.
+      - entries: Optional list of secret entry dicts (path fields only).
       - keys_dir: Optional DNSSEC key directory (domainkey_ layout).
       - root / base_dir: Optional base path for relative file fields.
       - zones: Optional list of zone apexes to index under keys_dir
@@ -151,21 +190,26 @@ class FileSecrets(SecretsStore):
             self._index_keys_dir(self._keys_dir, zones=zone_list)
 
     def _ingest_entry(self, entry: dict[str, Any]) -> None:
-        """Brief: Parse one catalog entry into a SecretRecord.
+        """Brief: Parse one path-backed catalog entry into a SecretRecord.
 
         Inputs:
-          - entry: Mapping with id/kind and kind-specific fields.
+          - entry: Mapping with id/kind and kind-specific path fields.
 
         Outputs:
           - None; stores into self._records.
+
+        Raises:
+          - ValueError when inline value fields are present or required
+            path material is missing/unreadable.
         """
 
         sid = str(entry.get("id") or entry.get("name") or "").strip()
-        kind = str(entry.get("kind") or "").strip().lower()
+        kind = str(entry.get("kind") or entry.get("type") or "").strip().lower()
         if not sid or not kind:
             logger.warning("Ignoring secrets entry missing id/kind: %r", entry)
             return
 
+        _reject_inline_fields(entry, sid=sid)
         rec = SecretRecord(id=sid, kind=kind, backend_id=self.backend_id)
 
         if kind == "tls":
@@ -187,22 +231,33 @@ class FileSecrets(SecretsStore):
             if ca_path and ca_path.is_file():
                 rec.ca_pem = _read_bytes(ca_path)
                 rec.ca_path = str(ca_path)
-            # Inline PEM strings
-            if entry.get("cert_pem"):
-                rec.cert_pem = str(entry.get("cert_pem")).encode("utf-8")
-            if entry.get("key_pem"):
-                rec.key_pem = str(entry.get("key_pem")).encode("utf-8")
-            if entry.get("ca_pem"):
-                rec.ca_pem = str(entry.get("ca_pem")).encode("utf-8")
+            if rec.cert_pem is None and rec.key_pem is None and rec.ca_pem is None:
+                tried = []
+                if cert_path is not None:
+                    tried.append(f"cert_file={cert_path}")
+                if key_path is not None:
+                    tried.append(f"key_file={key_path}")
+                if ca_path is not None:
+                    tried.append(f"ca_file={ca_path}")
+                detail = (
+                    ", ".join(tried) if tried else "no cert_file/key_file/ca_file set"
+                )
+                raise ValueError(
+                    f"file secrets entry {sid!r} kind=tls requires readable "
+                    f"cert_file and/or key_file and/or ca_file ({detail}; "
+                    f"cwd={Path.cwd()})"
+                )
 
         elif kind == "tsig":
             rec.name = str(entry.get("name") or sid).strip() or None
             rec.algorithm = str(entry.get("algorithm") or "hmac-sha256").strip()
             secret_file = _resolve_path(entry.get("secret_file"), base=self._base)
-            if secret_file and secret_file.is_file():
-                rec.secret = _read_text(secret_file)
-            elif entry.get("secret") is not None:
-                rec.secret = str(entry.get("secret"))
+            if not secret_file or not secret_file.is_file():
+                raise ValueError(
+                    f"file secrets entry {sid!r} kind=tsig requires readable "
+                    f"secret_file (path={secret_file}; cwd={Path.cwd()})"
+                )
+            rec.secret = _read_text(secret_file)
             extra: dict[str, Any] = {}
             for k in _TSIG_EXTRA_KEYS:
                 if k in entry:
@@ -216,14 +271,12 @@ class FileSecrets(SecretsStore):
                 or entry.get("secret_file"),
                 base=self._base,
             )
-            if value_file and value_file.is_file():
-                rec.token = _read_text(value_file)
-            elif entry.get("token") is not None:
-                rec.token = str(entry.get("token"))
-            elif entry.get("value") is not None:
-                rec.token = str(entry.get("value"))
-            elif entry.get("secret") is not None:
-                rec.token = str(entry.get("secret"))
+            if not value_file or not value_file.is_file():
+                raise ValueError(
+                    f"file secrets entry {sid!r} kind=token requires readable "
+                    f"value_file (path={value_file}; cwd={Path.cwd()})"
+                )
+            rec.token = _read_text(value_file)
 
         elif kind == "dnssec":
             from foghorn.utils import dns_names
@@ -235,22 +288,19 @@ class FileSecrets(SecretsStore):
                 entry.get("key_file") or entry.get("private_key_file"),
                 base=self._base,
             )
-            if key_file and key_file.is_file():
-                rec.private_key_pem = _read_bytes(key_file)
-            elif entry.get("private_key_pem"):
-                raw = entry.get("private_key_pem")
-                rec.private_key_pem = (
-                    raw
-                    if isinstance(raw, (bytes, bytearray))
-                    else str(raw).encode("utf-8")
+            if not key_file or not key_file.is_file():
+                raise ValueError(
+                    f"file secrets entry {sid!r} kind=dnssec requires readable "
+                    f"key_file (path={key_file}; cwd={Path.cwd()})"
                 )
+            rec.private_key_pem = _read_bytes(key_file)
 
         elif kind == "gnupg":
-            # Reserved: accept and store opaque meta only.
+            # Reserved: accept and store opaque meta only (no secret blobs).
             rec.meta = {
                 k: v
                 for k, v in entry.items()
-                if k not in {"id", "name", "kind", "comment"}
+                if k not in {"id", "name", "kind", "type", "comment"}
             }
         else:
             logger.warning(

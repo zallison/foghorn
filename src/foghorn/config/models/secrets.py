@@ -40,7 +40,7 @@ class SecretsBackendInstance(StrictModel):
     module: str = Field(
         description=(
             "Secrets backend alias or dotted import path "
-            "(for example 'file', 'mysql', 'mariadb')."
+            "(for example 'file', 'inline', 'mysql', 'mariadb')."
         ),
     )
     config: dict[str, Any] | None = Field(

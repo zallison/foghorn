@@ -16,14 +16,15 @@ from foghorn.plugins.secrets import (
     set_active_secrets_router,
 )
 from foghorn.plugins.secrets.file import FileSecrets
+from foghorn.plugins.secrets.inline import InlineSecrets
 from foghorn.plugins.secrets.resolve import (
     materialize_tls_paths,
     resolve_token_value,
 )
 
 
-def test_discover_file_and_mysql_aliases() -> None:
-    """Brief: Registry exposes file/mysql aliases.
+def test_discover_file_inline_and_mysql_aliases() -> None:
+    """Brief: Registry exposes file/inline/mysql aliases.
 
     Inputs:
       - None.
@@ -34,12 +35,14 @@ def test_discover_file_and_mysql_aliases() -> None:
 
     reg = discover_secrets_backends()
     assert "file" in reg
+    assert "inline" in reg
     assert "mysql" in reg or "mariadb" in reg
     assert get_secrets_backend_class("file") is FileSecrets
+    assert get_secrets_backend_class("inline") is InlineSecrets
 
 
 def test_file_backend_tsig_token_tls(tmp_path: Path) -> None:
-    """Brief: File backend loads tsig/token/tls entries from paths and inline.
+    """Brief: File backend loads tsig/token/tls entries from path fields only.
 
     Inputs:
       - tmp_path: Pytest temp directory.
@@ -90,6 +93,57 @@ def test_file_backend_tsig_token_tls(tmp_path: Path) -> None:
     assert tls is not None and tls.cert_pem == b"CERT\n" and tls.key_pem == b"KEY\n"
     assert len(store.list(kind="tsig")) == 1
 
+    with pytest.raises(ValueError, match="inline fields"):
+        FileSecrets(entries=[{"id": "bad", "kind": "token", "token": "nope"}])
+
+
+def test_inline_backend_tsig_token_tls() -> None:
+    """Brief: Inline backend loads embedded PEMs/tokens/secrets only.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - Asserts get returns inline material and rejects path fields.
+    """
+
+    store = InlineSecrets(
+        entries=[
+            {
+                "id": "k1",
+                "kind": "tsig",
+                "name": "key.example.com.",
+                "algorithm": "hmac-sha256",
+                "secret": "dGVzdC1zZWNyZXQ=",
+            },
+            {"id": "admin-api", "kind": "token", "token": "super-token"},
+            {
+                "id": "admin-tls",
+                "kind": "tls",
+                "cert_pem": "CERT\n",
+                "key_pem": "KEY\n",
+            },
+        ]
+    )
+    assert store.validate_connection() is True
+    tsig = store.get("k1")
+    assert tsig is not None and tsig.secret == "dGVzdC1zZWNyZXQ="
+    tok = store.get("admin-api")
+    assert tok is not None and tok.token == "super-token"
+    tls = store.get("admin-tls")
+    assert tls is not None and tls.cert_pem == b"CERT\n" and tls.key_pem == b"KEY\n"
+
+    with pytest.raises(ValueError, match="file fields"):
+        InlineSecrets(
+            entries=[
+                {
+                    "id": "bad",
+                    "kind": "token",
+                    "value_file": "/tmp/nope",
+                }
+            ]
+        )
+
 
 def test_router_requires_backend_and_key(tmp_path: Path) -> None:
     """Brief: Consumer refs require backend/id plus lookup key.
@@ -101,14 +155,14 @@ def test_router_requires_backend_and_key(tmp_path: Path) -> None:
       - Asserts preferred {id,key} shape and rejects bare strings.
     """
 
-    a = FileSecrets(
+    a = InlineSecrets(
         entries=[
             {"id": "shared", "kind": "token", "token": "from-a"},
             {"id": "server1-tls-cert-secret", "kind": "tls", "cert_pem": "CERT"},
             {"id": "server1-tls-secret", "kind": "tls", "key_pem": "KEY"},
         ]
     )
-    b = FileSecrets(
+    b = InlineSecrets(
         entries=[
             {"id": "shared", "kind": "token", "token": "from-b"},
             {"id": "only-b", "kind": "token", "token": "unique"},
@@ -189,7 +243,7 @@ def test_tsig_key_sources_secrets_loader(tmp_path: Path) -> None:
       - Asserts resolve_tsig_key_configs includes store keys.
     """
 
-    store = FileSecrets(
+    store = InlineSecrets(
         entries=[
             {
                 "id": "dyn",
@@ -229,11 +283,17 @@ def test_token_and_tls_resolve_helpers(tmp_path: Path) -> None:
 
     cert = tmp_path / "c.pem"
     key = tmp_path / "k.pem"
+    tok_file = tmp_path / "tok.txt"
     cert.write_bytes(b"CERTDATA")
     key.write_bytes(b"KEYDATA")
+    tok_file.write_text("tok-value\n", encoding="utf-8")
     store = FileSecrets(
         entries=[
-            {"id": "tok", "kind": "token", "token": "tok-value"},
+            {
+                "id": "tok",
+                "kind": "token",
+                "value_file": str(tok_file),
+            },
             {
                 "id": "server1-tls-cert-secret",
                 "kind": "tls",

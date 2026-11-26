@@ -108,7 +108,7 @@ def discover_secrets_backends(
 
     for modname in _iter_secrets_modules(package_name):
         # Avoid importing router/base as backends.
-        if modname.rsplit(".", 1)[-1] in {"base", "registry", "router"}:
+        if modname.rsplit(".", 1)[-1] in {"base", "registry", "router", "resolve"}:
             continue
         module = importlib.import_module(modname)
 

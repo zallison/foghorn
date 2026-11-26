@@ -2,8 +2,8 @@
 
 Brief:
   Defines SecretRecord kinds and the SecretsStore interface used by file,
-  MySQL, and future secret backends. Concrete stores are discovered via
-  registry aliases (same pattern as cache/querylog plugins).
+  inline, MySQL, and future secret backends. Concrete stores are discovered
+  via registry aliases (same pattern as cache/querylog plugins).
 
 Inputs:
   - Backend constructors take free-form config mappings from secrets.backends[].
