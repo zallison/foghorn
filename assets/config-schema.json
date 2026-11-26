@@ -1168,6 +1168,25 @@
           "description": "Optional human metadata string (max 254 characters).",
           "title": "Comment"
         },
+        "enable_tls": {
+          "anyOf": [
+            {
+              "description": "Type: boolean.",
+              "type": "boolean"
+            },
+            {
+              "description": "Type: string.",
+              "type": "string"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Explicit TLS enable flag: enabled/true/yes or disabled/false/no. When unset, cert material enables TLS. When explicitly disabled while certs/secrets are set, startup fails.",
+          "title": "Enable Tls"
+        },
         "enabled": {
           "anyOf": [
             {
@@ -1330,6 +1349,25 @@
           "default": null,
           "description": "Optional human metadata string (max 254 characters).",
           "title": "Comment"
+        },
+        "enable_tls": {
+          "anyOf": [
+            {
+              "description": "Type: boolean.",
+              "type": "boolean"
+            },
+            {
+              "description": "Type: string.",
+              "type": "string"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Explicit TLS enable flag: enabled/true/yes or disabled/false/no. When unset, cert material enables TLS. When explicitly disabled while certs/secrets/generate are set, startup fails.",
+          "title": "Enable Tls"
         },
         "enabled": {
           "anyOf": [
@@ -3127,7 +3165,7 @@
           "$defs": {
             "KubernetesEndpointConfig": {
               "additionalProperties": true,
-              "description": "Per-endpoint (or cluster) connection and scope settings.\n\nInputs (fields):\n  - api_server: Explicit API base URL (https://...).\n  - kubeconfig: Path to kubeconfig file.\n  - in_cluster: Use in-cluster service account files when True.\n  - token / token_file: Bearer token material.\n  - client_cert / client_key (aliases tls_cert / tls_key): mTLS client PEM paths.\n  - ca_cert (alias tls_ca) / tls_verify: TLS trust settings.\n  - tls_server_name (alias tls_name): SNI / expected certificate hostname.\n  - namespaces: Namespace allowlist (empty = all / cluster scope).\n  - label_selector / field_selector: List filter query params.\n  - include_services / include_pods: Resource kinds to index.\n  - suffix / use_ipv4 / use_ipv6 / ttl / reload_interval_seconds: DNS overrides.\n\nOutputs:\n  - Validated endpoint config (extra keys allowed).",
+              "description": "Per-endpoint (or cluster) connection and scope settings.\n\nInputs (fields):\n  - id: Optional short label preferred in logs (falls back to api_server).\n  - api_server: Explicit API base URL (https://...).\n  - kubeconfig: Path to kubeconfig file.\n  - in_cluster: Use in-cluster service account files when True.\n  - token / token_file: Bearer token material.\n  - client_cert / client_key (aliases tls_cert / tls_key): mTLS client PEM paths.\n  - ca_cert (alias tls_ca) / tls_verify: TLS trust settings.\n  - tls_server_name (alias tls_name): SNI / expected certificate hostname.\n  - namespaces: Namespace allowlist (empty = all / cluster scope).\n  - label_selector / field_selector: List filter query params.\n  - include_services / include_pods: Resource kinds to index.\n  - suffix / use_ipv4 / use_ipv6 / ttl / reload_interval_seconds: DNS overrides.\n\nOutputs:\n  - Validated endpoint config (extra keys allowed).",
               "properties": {
                 "api_server": {
                   "anyOf": [
@@ -3203,6 +3241,21 @@
                   "default": null,
                   "description": "Types: string, null.",
                   "title": "Field Selector"
+                },
+                "id": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Types: string, null.",
+                  "title": "Id"
                 },
                 "in_cluster": {
                   "default": false,
@@ -4670,6 +4723,507 @@
           "type": "object"
         },
         "module": "foghorn.plugins.resolve.ssh_keys.SshKeys"
+      },
+      "unifi_hosts": {
+        "aliases": [
+          "ubiquiti",
+          "unifi",
+          "unifi_hosts"
+        ],
+        "config_schema": {
+          "$defs": {
+            "UnifiEndpointConfig": {
+              "description": "Brief: Per-endpoint UniFi Network Integration API settings.\n\nInputs:\n  - url: Console origin (https://udm.lan) or full integration base URL.\n  - api_key: Integration / Site Manager API key (string or secret ref).\n  - console_id: Optional; when set with a bare api.ui.com host, builds the\n    cloud connector path.\n  - verify_tls: Verify HTTPS certificates (default True).\n  - tls_ca: Optional CA bundle path.\n  - tls_server_name: SNI / expected cert hostname (aliases: tls_name, server_name).\n  - use_ipv4 / use_ipv6: Optional host IP overrides for all published names.\n  - ttl / suffix / reload_interval_second: Per-endpoint overrides.\n  - site_ids: Optional site UUID allowlist for this endpoint.\n\nOutputs:\n  - UnifiEndpointConfig instance.",
+              "properties": {
+                "api_key": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "type": "string"
+                    },
+                    {
+                      "additionalProperties": true,
+                      "description": "Type: object.",
+                      "type": "object"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Types: string, object, null.",
+                  "title": "Api Key"
+                },
+                "console_id": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Types: string, null.",
+                  "title": "Console Id"
+                },
+                "id": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Types: string, null.",
+                  "title": "Id"
+                },
+                "reload_interval_second": {
+                  "anyOf": [
+                    {
+                      "description": "Type: number.",
+                      "minimum": 0,
+                      "type": "number"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Types: number, null.",
+                  "title": "Reload Interval Second"
+                },
+                "site_ids": {
+                  "description": "Type: array.",
+                  "items": {
+                    "description": "Type: string.",
+                    "type": "string"
+                  },
+                  "title": "Site Ids",
+                  "type": "array"
+                },
+                "suffix": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Types: string, null.",
+                  "title": "Suffix"
+                },
+                "tls_ca": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Types: string, null.",
+                  "title": "Tls Ca"
+                },
+                "tls_server_name": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Types: string, null.",
+                  "title": "Tls Server Name"
+                },
+                "ttl": {
+                  "anyOf": [
+                    {
+                      "description": "Type: integer.",
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Types: integer, null.",
+                  "title": "Ttl"
+                },
+                "url": {
+                  "description": "Type: string.",
+                  "title": "Url",
+                  "type": "string"
+                },
+                "use_ipv4": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Types: string, null.",
+                  "title": "Use Ipv4"
+                },
+                "use_ipv6": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Types: string, null.",
+                  "title": "Use Ipv6"
+                },
+                "verify_tls": {
+                  "default": true,
+                  "description": "Type: boolean. Default: true.",
+                  "title": "Verify Tls",
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "url"
+              ],
+              "title": "UnifiEndpointConfig",
+              "type": "object"
+            }
+          },
+          "additionalProperties": true,
+          "description": "Brief: Typed configuration for UnifiHosts.\n\nInputs:\n  - endpoints: UniFi API endpoints (failover order).\n  - ttl / reload_interval_second: Defaults for answers and polling.\n  - include_clients / include_devices: Resource kinds to publish (bool shortcuts).\n  - include_kinds / exclude_kinds: client/device kind filters (overrides bools when set).\n  - include_types / exclude_types: Client connection types (wired, wireless, vpn, \u2026).\n  - device_states / include_states / exclude_states: Device (and optional client) state filters.\n  - site_ids / site_names / exclude_site_*: Site filters after listing sites.\n  - include_names / exclude_names: DHCP/display name globs (case-insensitive).\n  - include_macs / exclude_macs: MAC allow/block (colon-insensitive).\n  - include_networks / exclude_networks: Network name or id filters.\n  - include_vlans / exclude_vlans: VLAN id filters (matched via networks inventory).\n  - filter: Optional server-side Integration filter DSL string.\n  - publish_mac: Publish host-<mac> aliases when true.\n  - include_cidrs / exclude_cidrs / address_limit: Address filters.\n  - discovery / expose_txt_in_additional / suffix: Shared DynamicHosts options.\n\nOutputs:\n  - UnifiHostsConfig instance.",
+          "properties": {
+            "address_limit": {
+              "default": 0,
+              "description": "Type: integer. Default: 0.",
+              "minimum": 0,
+              "title": "Address Limit",
+              "type": "integer"
+            },
+            "device_states": {
+              "description": "Type: array.",
+              "items": {
+                "description": "Type: string.",
+                "type": "string"
+              },
+              "title": "Device States",
+              "type": "array"
+            },
+            "discovery": {
+              "default": false,
+              "description": "Type: boolean. Default: false.",
+              "title": "Discovery",
+              "type": "boolean"
+            },
+            "endpoints": {
+              "description": "Type: array.",
+              "items": {
+                "$ref": "#/$defs/UnifiEndpointConfig"
+              },
+              "title": "Endpoints",
+              "type": "array"
+            },
+            "exclude_cidrs": {
+              "description": "Type: array.",
+              "items": {
+                "description": "Type: string.",
+                "type": "string"
+              },
+              "title": "Exclude Cidrs",
+              "type": "array"
+            },
+            "exclude_kinds": {
+              "description": "Type: array.",
+              "items": {
+                "description": "Type: string.",
+                "type": "string"
+              },
+              "title": "Exclude Kinds",
+              "type": "array"
+            },
+            "exclude_macs": {
+              "description": "Type: array.",
+              "items": {
+                "description": "Type: string.",
+                "type": "string"
+              },
+              "title": "Exclude Macs",
+              "type": "array"
+            },
+            "exclude_names": {
+              "description": "Type: array.",
+              "items": {
+                "description": "Type: string.",
+                "type": "string"
+              },
+              "title": "Exclude Names",
+              "type": "array"
+            },
+            "exclude_networks": {
+              "description": "Type: array.",
+              "items": {
+                "description": "Type: string.",
+                "type": "string"
+              },
+              "title": "Exclude Networks",
+              "type": "array"
+            },
+            "exclude_site_ids": {
+              "description": "Type: array.",
+              "items": {
+                "description": "Type: string.",
+                "type": "string"
+              },
+              "title": "Exclude Site Ids",
+              "type": "array"
+            },
+            "exclude_site_names": {
+              "description": "Type: array.",
+              "items": {
+                "description": "Type: string.",
+                "type": "string"
+              },
+              "title": "Exclude Site Names",
+              "type": "array"
+            },
+            "exclude_states": {
+              "description": "Type: array.",
+              "items": {
+                "description": "Type: string.",
+                "type": "string"
+              },
+              "title": "Exclude States",
+              "type": "array"
+            },
+            "exclude_types": {
+              "description": "Type: array.",
+              "items": {
+                "description": "Type: string.",
+                "type": "string"
+              },
+              "title": "Exclude Types",
+              "type": "array"
+            },
+            "exclude_vlans": {
+              "description": "Type: array.",
+              "items": {
+                "anyOf": [
+                  {
+                    "description": "Type: string.",
+                    "type": "string"
+                  },
+                  {
+                    "description": "Type: integer.",
+                    "type": "integer"
+                  }
+                ],
+                "description": "Types: string, integer."
+              },
+              "title": "Exclude Vlans",
+              "type": "array"
+            },
+            "expose_txt_in_additional": {
+              "default": false,
+              "description": "Type: boolean. Default: false.",
+              "title": "Expose Txt In Additional",
+              "type": "boolean"
+            },
+            "filter": {
+              "anyOf": [
+                {
+                  "description": "Type: string.",
+                  "type": "string"
+                },
+                {
+                  "description": "Type: null.",
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Types: string, null.",
+              "title": "Filter"
+            },
+            "include_cidrs": {
+              "description": "Type: array.",
+              "items": {
+                "description": "Type: string.",
+                "type": "string"
+              },
+              "title": "Include Cidrs",
+              "type": "array"
+            },
+            "include_clients": {
+              "default": true,
+              "description": "Type: boolean. Default: true.",
+              "title": "Include Clients",
+              "type": "boolean"
+            },
+            "include_devices": {
+              "default": true,
+              "description": "Type: boolean. Default: true.",
+              "title": "Include Devices",
+              "type": "boolean"
+            },
+            "include_kinds": {
+              "description": "Type: array.",
+              "items": {
+                "description": "Type: string.",
+                "type": "string"
+              },
+              "title": "Include Kinds",
+              "type": "array"
+            },
+            "include_macs": {
+              "description": "Type: array.",
+              "items": {
+                "description": "Type: string.",
+                "type": "string"
+              },
+              "title": "Include Macs",
+              "type": "array"
+            },
+            "include_names": {
+              "description": "Type: array.",
+              "items": {
+                "description": "Type: string.",
+                "type": "string"
+              },
+              "title": "Include Names",
+              "type": "array"
+            },
+            "include_networks": {
+              "description": "Type: array.",
+              "items": {
+                "description": "Type: string.",
+                "type": "string"
+              },
+              "title": "Include Networks",
+              "type": "array"
+            },
+            "include_states": {
+              "description": "Type: array.",
+              "items": {
+                "description": "Type: string.",
+                "type": "string"
+              },
+              "title": "Include States",
+              "type": "array"
+            },
+            "include_types": {
+              "description": "Type: array.",
+              "items": {
+                "description": "Type: string.",
+                "type": "string"
+              },
+              "title": "Include Types",
+              "type": "array"
+            },
+            "include_vlans": {
+              "description": "Type: array.",
+              "items": {
+                "anyOf": [
+                  {
+                    "description": "Type: string.",
+                    "type": "string"
+                  },
+                  {
+                    "description": "Type: integer.",
+                    "type": "integer"
+                  }
+                ],
+                "description": "Types: string, integer."
+              },
+              "title": "Include Vlans",
+              "type": "array"
+            },
+            "publish_mac": {
+              "default": false,
+              "description": "Type: boolean. Default: false.",
+              "title": "Publish Mac",
+              "type": "boolean"
+            },
+            "reload_interval_second": {
+              "default": 120.0,
+              "description": "Type: number. Default: 120.0.",
+              "minimum": 0,
+              "title": "Reload Interval Second",
+              "type": "number"
+            },
+            "site_ids": {
+              "description": "Type: array.",
+              "items": {
+                "description": "Type: string.",
+                "type": "string"
+              },
+              "title": "Site Ids",
+              "type": "array"
+            },
+            "site_names": {
+              "description": "Type: array.",
+              "items": {
+                "description": "Type: string.",
+                "type": "string"
+              },
+              "title": "Site Names",
+              "type": "array"
+            },
+            "suffix": {
+              "anyOf": [
+                {
+                  "description": "Type: string.",
+                  "type": "string"
+                },
+                {
+                  "description": "Type: null.",
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Types: string, null.",
+              "title": "Suffix"
+            },
+            "ttl": {
+              "default": 60,
+              "description": "Type: integer. Default: 60.",
+              "minimum": 0,
+              "title": "Ttl",
+              "type": "integer"
+            }
+          },
+          "title": "UnifiHostsConfig",
+          "type": "object"
+        },
+        "module": "foghorn.plugins.resolve.unifi_hosts.UnifiHosts"
       },
       "upstream_router": {
         "aliases": [
@@ -7162,7 +7716,7 @@
           "title": "Id"
         },
         "module": {
-          "description": "Secrets backend alias or dotted import path (for example 'file', 'mysql', 'mariadb').",
+          "description": "Secrets backend alias or dotted import path (for example 'file', 'inline', 'mysql', 'mariadb').",
           "title": "Module",
           "type": "string"
         },
@@ -8182,6 +8736,25 @@
           "description": "Type: boolean. Default: false.",
           "title": "Enable Schema",
           "type": "boolean"
+        },
+        "enable_tls": {
+          "anyOf": [
+            {
+              "description": "Type: boolean.",
+              "type": "boolean"
+            },
+            {
+              "description": "Type: string.",
+              "type": "string"
+            },
+            {
+              "description": "Type: null.",
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Explicit TLS enable flag: enabled/true/yes or disabled/false/no. When unset, cert material enables HTTPS. When explicitly disabled while certs/secrets/generate are set, startup fails.",
+          "title": "Enable Tls"
         },
         "enabled": {
           "anyOf": [
@@ -11680,7 +12253,7 @@
           "$defs": {
             "KubernetesEndpointConfig": {
               "additionalProperties": true,
-              "description": "Per-endpoint (or cluster) connection and scope settings.\n\nInputs (fields):\n  - api_server: Explicit API base URL (https://...).\n  - kubeconfig: Path to kubeconfig file.\n  - in_cluster: Use in-cluster service account files when True.\n  - token / token_file: Bearer token material.\n  - client_cert / client_key (aliases tls_cert / tls_key): mTLS client PEM paths.\n  - ca_cert (alias tls_ca) / tls_verify: TLS trust settings.\n  - tls_server_name (alias tls_name): SNI / expected certificate hostname.\n  - namespaces: Namespace allowlist (empty = all / cluster scope).\n  - label_selector / field_selector: List filter query params.\n  - include_services / include_pods: Resource kinds to index.\n  - suffix / use_ipv4 / use_ipv6 / ttl / reload_interval_seconds: DNS overrides.\n\nOutputs:\n  - Validated endpoint config (extra keys allowed).",
+              "description": "Per-endpoint (or cluster) connection and scope settings.\n\nInputs (fields):\n  - id: Optional short label preferred in logs (falls back to api_server).\n  - api_server: Explicit API base URL (https://...).\n  - kubeconfig: Path to kubeconfig file.\n  - in_cluster: Use in-cluster service account files when True.\n  - token / token_file: Bearer token material.\n  - client_cert / client_key (aliases tls_cert / tls_key): mTLS client PEM paths.\n  - ca_cert (alias tls_ca) / tls_verify: TLS trust settings.\n  - tls_server_name (alias tls_name): SNI / expected certificate hostname.\n  - namespaces: Namespace allowlist (empty = all / cluster scope).\n  - label_selector / field_selector: List filter query params.\n  - include_services / include_pods: Resource kinds to index.\n  - suffix / use_ipv4 / use_ipv6 / ttl / reload_interval_seconds: DNS overrides.\n\nOutputs:\n  - Validated endpoint config (extra keys allowed).",
               "properties": {
                 "api_server": {
                   "anyOf": [
@@ -11756,6 +12329,21 @@
                   "default": null,
                   "description": "Types: string, null.",
                   "title": "Field Selector"
+                },
+                "id": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Types: string, null.",
+                  "title": "Id"
                 },
                 "in_cluster": {
                   "default": false,
@@ -13223,6 +13811,507 @@
           "type": "object"
         },
         "module": "foghorn.plugins.resolve.ssh_keys.SshKeys"
+      },
+      "unifi_hosts": {
+        "aliases": [
+          "ubiquiti",
+          "unifi",
+          "unifi_hosts"
+        ],
+        "config_schema": {
+          "$defs": {
+            "UnifiEndpointConfig": {
+              "description": "Brief: Per-endpoint UniFi Network Integration API settings.\n\nInputs:\n  - url: Console origin (https://udm.lan) or full integration base URL.\n  - api_key: Integration / Site Manager API key (string or secret ref).\n  - console_id: Optional; when set with a bare api.ui.com host, builds the\n    cloud connector path.\n  - verify_tls: Verify HTTPS certificates (default True).\n  - tls_ca: Optional CA bundle path.\n  - tls_server_name: SNI / expected cert hostname (aliases: tls_name, server_name).\n  - use_ipv4 / use_ipv6: Optional host IP overrides for all published names.\n  - ttl / suffix / reload_interval_second: Per-endpoint overrides.\n  - site_ids: Optional site UUID allowlist for this endpoint.\n\nOutputs:\n  - UnifiEndpointConfig instance.",
+              "properties": {
+                "api_key": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "type": "string"
+                    },
+                    {
+                      "additionalProperties": true,
+                      "description": "Type: object.",
+                      "type": "object"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Types: string, object, null.",
+                  "title": "Api Key"
+                },
+                "console_id": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Types: string, null.",
+                  "title": "Console Id"
+                },
+                "id": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Types: string, null.",
+                  "title": "Id"
+                },
+                "reload_interval_second": {
+                  "anyOf": [
+                    {
+                      "description": "Type: number.",
+                      "minimum": 0,
+                      "type": "number"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Types: number, null.",
+                  "title": "Reload Interval Second"
+                },
+                "site_ids": {
+                  "description": "Type: array.",
+                  "items": {
+                    "description": "Type: string.",
+                    "type": "string"
+                  },
+                  "title": "Site Ids",
+                  "type": "array"
+                },
+                "suffix": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Types: string, null.",
+                  "title": "Suffix"
+                },
+                "tls_ca": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Types: string, null.",
+                  "title": "Tls Ca"
+                },
+                "tls_server_name": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Types: string, null.",
+                  "title": "Tls Server Name"
+                },
+                "ttl": {
+                  "anyOf": [
+                    {
+                      "description": "Type: integer.",
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Types: integer, null.",
+                  "title": "Ttl"
+                },
+                "url": {
+                  "description": "Type: string.",
+                  "title": "Url",
+                  "type": "string"
+                },
+                "use_ipv4": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Types: string, null.",
+                  "title": "Use Ipv4"
+                },
+                "use_ipv6": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Types: string, null.",
+                  "title": "Use Ipv6"
+                },
+                "verify_tls": {
+                  "default": true,
+                  "description": "Type: boolean. Default: true.",
+                  "title": "Verify Tls",
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "url"
+              ],
+              "title": "UnifiEndpointConfig",
+              "type": "object"
+            }
+          },
+          "additionalProperties": true,
+          "description": "Brief: Typed configuration for UnifiHosts.\n\nInputs:\n  - endpoints: UniFi API endpoints (failover order).\n  - ttl / reload_interval_second: Defaults for answers and polling.\n  - include_clients / include_devices: Resource kinds to publish (bool shortcuts).\n  - include_kinds / exclude_kinds: client/device kind filters (overrides bools when set).\n  - include_types / exclude_types: Client connection types (wired, wireless, vpn, \u2026).\n  - device_states / include_states / exclude_states: Device (and optional client) state filters.\n  - site_ids / site_names / exclude_site_*: Site filters after listing sites.\n  - include_names / exclude_names: DHCP/display name globs (case-insensitive).\n  - include_macs / exclude_macs: MAC allow/block (colon-insensitive).\n  - include_networks / exclude_networks: Network name or id filters.\n  - include_vlans / exclude_vlans: VLAN id filters (matched via networks inventory).\n  - filter: Optional server-side Integration filter DSL string.\n  - publish_mac: Publish host-<mac> aliases when true.\n  - include_cidrs / exclude_cidrs / address_limit: Address filters.\n  - discovery / expose_txt_in_additional / suffix: Shared DynamicHosts options.\n\nOutputs:\n  - UnifiHostsConfig instance.",
+          "properties": {
+            "address_limit": {
+              "default": 0,
+              "description": "Type: integer. Default: 0.",
+              "minimum": 0,
+              "title": "Address Limit",
+              "type": "integer"
+            },
+            "device_states": {
+              "description": "Type: array.",
+              "items": {
+                "description": "Type: string.",
+                "type": "string"
+              },
+              "title": "Device States",
+              "type": "array"
+            },
+            "discovery": {
+              "default": false,
+              "description": "Type: boolean. Default: false.",
+              "title": "Discovery",
+              "type": "boolean"
+            },
+            "endpoints": {
+              "description": "Type: array.",
+              "items": {
+                "$ref": "#/$defs/UnifiEndpointConfig"
+              },
+              "title": "Endpoints",
+              "type": "array"
+            },
+            "exclude_cidrs": {
+              "description": "Type: array.",
+              "items": {
+                "description": "Type: string.",
+                "type": "string"
+              },
+              "title": "Exclude Cidrs",
+              "type": "array"
+            },
+            "exclude_kinds": {
+              "description": "Type: array.",
+              "items": {
+                "description": "Type: string.",
+                "type": "string"
+              },
+              "title": "Exclude Kinds",
+              "type": "array"
+            },
+            "exclude_macs": {
+              "description": "Type: array.",
+              "items": {
+                "description": "Type: string.",
+                "type": "string"
+              },
+              "title": "Exclude Macs",
+              "type": "array"
+            },
+            "exclude_names": {
+              "description": "Type: array.",
+              "items": {
+                "description": "Type: string.",
+                "type": "string"
+              },
+              "title": "Exclude Names",
+              "type": "array"
+            },
+            "exclude_networks": {
+              "description": "Type: array.",
+              "items": {
+                "description": "Type: string.",
+                "type": "string"
+              },
+              "title": "Exclude Networks",
+              "type": "array"
+            },
+            "exclude_site_ids": {
+              "description": "Type: array.",
+              "items": {
+                "description": "Type: string.",
+                "type": "string"
+              },
+              "title": "Exclude Site Ids",
+              "type": "array"
+            },
+            "exclude_site_names": {
+              "description": "Type: array.",
+              "items": {
+                "description": "Type: string.",
+                "type": "string"
+              },
+              "title": "Exclude Site Names",
+              "type": "array"
+            },
+            "exclude_states": {
+              "description": "Type: array.",
+              "items": {
+                "description": "Type: string.",
+                "type": "string"
+              },
+              "title": "Exclude States",
+              "type": "array"
+            },
+            "exclude_types": {
+              "description": "Type: array.",
+              "items": {
+                "description": "Type: string.",
+                "type": "string"
+              },
+              "title": "Exclude Types",
+              "type": "array"
+            },
+            "exclude_vlans": {
+              "description": "Type: array.",
+              "items": {
+                "anyOf": [
+                  {
+                    "description": "Type: string.",
+                    "type": "string"
+                  },
+                  {
+                    "description": "Type: integer.",
+                    "type": "integer"
+                  }
+                ],
+                "description": "Types: string, integer."
+              },
+              "title": "Exclude Vlans",
+              "type": "array"
+            },
+            "expose_txt_in_additional": {
+              "default": false,
+              "description": "Type: boolean. Default: false.",
+              "title": "Expose Txt In Additional",
+              "type": "boolean"
+            },
+            "filter": {
+              "anyOf": [
+                {
+                  "description": "Type: string.",
+                  "type": "string"
+                },
+                {
+                  "description": "Type: null.",
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Types: string, null.",
+              "title": "Filter"
+            },
+            "include_cidrs": {
+              "description": "Type: array.",
+              "items": {
+                "description": "Type: string.",
+                "type": "string"
+              },
+              "title": "Include Cidrs",
+              "type": "array"
+            },
+            "include_clients": {
+              "default": true,
+              "description": "Type: boolean. Default: true.",
+              "title": "Include Clients",
+              "type": "boolean"
+            },
+            "include_devices": {
+              "default": true,
+              "description": "Type: boolean. Default: true.",
+              "title": "Include Devices",
+              "type": "boolean"
+            },
+            "include_kinds": {
+              "description": "Type: array.",
+              "items": {
+                "description": "Type: string.",
+                "type": "string"
+              },
+              "title": "Include Kinds",
+              "type": "array"
+            },
+            "include_macs": {
+              "description": "Type: array.",
+              "items": {
+                "description": "Type: string.",
+                "type": "string"
+              },
+              "title": "Include Macs",
+              "type": "array"
+            },
+            "include_names": {
+              "description": "Type: array.",
+              "items": {
+                "description": "Type: string.",
+                "type": "string"
+              },
+              "title": "Include Names",
+              "type": "array"
+            },
+            "include_networks": {
+              "description": "Type: array.",
+              "items": {
+                "description": "Type: string.",
+                "type": "string"
+              },
+              "title": "Include Networks",
+              "type": "array"
+            },
+            "include_states": {
+              "description": "Type: array.",
+              "items": {
+                "description": "Type: string.",
+                "type": "string"
+              },
+              "title": "Include States",
+              "type": "array"
+            },
+            "include_types": {
+              "description": "Type: array.",
+              "items": {
+                "description": "Type: string.",
+                "type": "string"
+              },
+              "title": "Include Types",
+              "type": "array"
+            },
+            "include_vlans": {
+              "description": "Type: array.",
+              "items": {
+                "anyOf": [
+                  {
+                    "description": "Type: string.",
+                    "type": "string"
+                  },
+                  {
+                    "description": "Type: integer.",
+                    "type": "integer"
+                  }
+                ],
+                "description": "Types: string, integer."
+              },
+              "title": "Include Vlans",
+              "type": "array"
+            },
+            "publish_mac": {
+              "default": false,
+              "description": "Type: boolean. Default: false.",
+              "title": "Publish Mac",
+              "type": "boolean"
+            },
+            "reload_interval_second": {
+              "default": 120.0,
+              "description": "Type: number. Default: 120.0.",
+              "minimum": 0,
+              "title": "Reload Interval Second",
+              "type": "number"
+            },
+            "site_ids": {
+              "description": "Type: array.",
+              "items": {
+                "description": "Type: string.",
+                "type": "string"
+              },
+              "title": "Site Ids",
+              "type": "array"
+            },
+            "site_names": {
+              "description": "Type: array.",
+              "items": {
+                "description": "Type: string.",
+                "type": "string"
+              },
+              "title": "Site Names",
+              "type": "array"
+            },
+            "suffix": {
+              "anyOf": [
+                {
+                  "description": "Type: string.",
+                  "type": "string"
+                },
+                {
+                  "description": "Type: null.",
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Types: string, null.",
+              "title": "Suffix"
+            },
+            "ttl": {
+              "default": 60,
+              "description": "Type: integer. Default: 60.",
+              "minimum": 0,
+              "title": "Ttl",
+              "type": "integer"
+            }
+          },
+          "title": "UnifiHostsConfig",
+          "type": "object"
+        },
+        "module": "foghorn.plugins.resolve.unifi_hosts.UnifiHosts"
       },
       "upstream_router": {
         "aliases": [
@@ -17134,7 +18223,7 @@
                     "title": "Id"
                   },
                   "module": {
-                    "description": "Secrets backend alias or dotted import path (for example 'file', 'mysql', 'mariadb').",
+                    "description": "Secrets backend alias or dotted import path (for example 'file', 'inline', 'mysql', 'mariadb').",
                     "title": "Module",
                     "type": "string"
                   },
@@ -19682,6 +20771,25 @@
               "title": "Enable Schema",
               "type": "boolean"
             },
+            "enable_tls": {
+              "anyOf": [
+                {
+                  "description": "Type: boolean.",
+                  "type": "boolean"
+                },
+                {
+                  "description": "Type: string.",
+                  "type": "string"
+                },
+                {
+                  "description": "Type: null.",
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Explicit TLS enable flag: enabled/true/yes or disabled/false/no. When unset, cert material enables HTTPS. When explicitly disabled while certs/secrets/generate are set, startup fails.",
+              "title": "Enable Tls"
+            },
             "enabled": {
               "anyOf": [
                 {
@@ -20223,6 +21331,25 @@
                   "description": "Optional human metadata string (max 254 characters).",
                   "title": "Comment"
                 },
+                "enable_tls": {
+                  "anyOf": [
+                    {
+                      "description": "Type: boolean.",
+                      "type": "boolean"
+                    },
+                    {
+                      "description": "Type: string.",
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Explicit TLS enable flag: enabled/true/yes or disabled/false/no. When unset, cert material enables TLS. When explicitly disabled while certs/secrets are set, startup fails.",
+                  "title": "Enable Tls"
+                },
                 "enabled": {
                   "anyOf": [
                     {
@@ -20388,6 +21515,25 @@
                   "default": null,
                   "description": "Optional human metadata string (max 254 characters).",
                   "title": "Comment"
+                },
+                "enable_tls": {
+                  "anyOf": [
+                    {
+                      "description": "Type: boolean.",
+                      "type": "boolean"
+                    },
+                    {
+                      "description": "Type: string.",
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Explicit TLS enable flag: enabled/true/yes or disabled/false/no. When unset, cert material enables TLS. When explicitly disabled while certs/secrets/generate are set, startup fails.",
+                  "title": "Enable Tls"
                 },
                 "enabled": {
                   "anyOf": [
