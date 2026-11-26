@@ -639,7 +639,9 @@ def cmd_status(args: Any) -> int:
     host = str(http_cfg.get("host") or "localhost")
     # Default matches server.http.port schema default (5380), not legacy 8053.
     port = int(http_cfg.get("port") or 5380)
-    scheme = "https" if http_cfg.get("tls") or http_cfg.get("cert_file") else "http"
+    scheme = (
+        "https" if http_cfg.get("enable_tls") or http_cfg.get("cert_file") else "http"
+    )
     url = f"{scheme}://{host}:{port}/health"
     try:
         import ssl

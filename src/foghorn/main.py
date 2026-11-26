@@ -1180,9 +1180,21 @@ def main(argv: list[str] | None = None) -> int:
         p = int(doh_cfg.get("port", 8153))
         if isinstance(doh_cfg, dict):
             try:
+                from foghorn.servers.webserver.tls_certs import (
+                    enforce_tls_enable_consistency,
+                )
+
+                enforce_tls_enable_consistency(doh_cfg, location="server.listen.doh")
+            except ValueError as exc:
+                logger.error("DoH TLS config invalid: %s", exc)
+                _record_listener_error("doh", exc)
+                # Refuse to start DoH with contradictory TLS settings.
+                doh_cfg = dict(doh_cfg)
+                doh_cfg["enabled"] = False
+            try:
                 from foghorn.plugins.secrets.resolve import materialize_tls_paths
 
-                expanded = materialize_tls_paths(doh_cfg)
+                expanded = materialize_tls_paths(doh_cfg, config_path=cfg_path)
                 if isinstance(expanded, dict):
                     for key in ("cert_file", "key_file"):
                         if expanded.get(key) and not doh_cfg.get(key):

@@ -56,6 +56,107 @@ def normalize_generate_policy(value: object) -> str:
     return normalized
 
 
+def normalize_tls_enable_flag(value: object) -> bool | None:
+    """Brief: Normalize an explicit TLS enable flag.
+
+    Inputs:
+      - value: Raw enable_tls field (bool/str/None).
+
+    Outputs:
+      - True when explicitly enabled, False when explicitly disabled,
+        None when unset (auto: certs enable TLS).
+
+    Example:
+      >>> normalize_tls_enable_flag("enabled")
+      True
+      >>> normalize_tls_enable_flag(False)
+      False
+    """
+
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return bool(value)
+
+    text = str(value).strip().lower()
+    if not text:
+        return None
+
+    if text in {"1", "true", "yes", "on", "enabled", "enable"}:
+        return True
+    if text in {"0", "false", "no", "off", "disabled", "disable"}:
+        return False
+    raise ValueError(
+        "enable_tls must be one of: enabled/disabled, true/false, yes/no, on/off, 1/0 "
+        f"(got {value!r})"
+    )
+
+
+def tls_material_configured(cfg: dict[str, Any] | None) -> bool:
+    """Brief: Return True when TLS cert/key material or generation is configured.
+
+    Inputs:
+      - cfg: server.http / listen.dot / listen.doh mapping.
+
+    Outputs:
+      - bool: True when any cert/key path, secret ref, or generate=yes|maybe is set.
+    """
+
+    if not isinstance(cfg, dict):
+        return False
+    for key in ("cert_file", "key_file", "cert_secret", "key_secret"):
+        raw = cfg.get(key)
+        if raw is None:
+            continue
+        if isinstance(raw, str) and not raw.strip():
+            continue
+        if isinstance(raw, dict) and not raw:
+            continue
+        return True
+    try:
+        policy = normalize_generate_policy(cfg.get("generate", "no"))
+    except Exception:
+        policy = "no"
+    return policy in {"yes", "maybe"}
+
+
+def enforce_tls_enable_consistency(
+    cfg: dict[str, Any] | None,
+    *,
+    location: str = "server.http",
+) -> None:
+    """Brief: Fail when enable_tls is explicitly disabled but cert material is set.
+
+    Inputs:
+      - cfg: TLS-capable config mapping (http/dot/doh).
+      - location: Config path label for error text.
+
+    Outputs:
+      - None.
+
+    Raises:
+      - ValueError: when enable_tls is explicitly falsy and certs/secrets/generate
+        indicate TLS material is configured.
+    """
+
+    if not isinstance(cfg, dict):
+        return
+    if "enable_tls" not in cfg:
+        return
+    enabled = normalize_tls_enable_flag(cfg.get("enable_tls"))
+    if enabled is not False:
+        return
+    if not tls_material_configured(cfg):
+        return
+    raise ValueError(
+        f"{location}.enable_tls is disabled/false but TLS material is configured "
+        f"(cert_file/key_file/cert_secret/key_secret or generate=yes|maybe); "
+        f"remove the cert settings or set enable_tls: enabled"
+    )
+
+
 def _normalize_optional_path(value: Any) -> str | None:
     """Brief: Normalize an optional filesystem path config value.
 
@@ -560,7 +661,10 @@ def ensure_admin_tls_files(
     if not isinstance(web_cfg, dict):
         return None, None
 
-    # Expand cert_secret/key_secret refs from secrets backends into temp paths
+    # Explicit enable_tls: false/disabled with cert material configured is fatal.
+    enforce_tls_enable_consistency(web_cfg, location=location)
+
+    # Expand cert_secret/key_secret refs from secrets backends into paths
     # when explicit cert_file/key_file are unset.
     try:
         from foghorn.plugins.secrets.resolve import materialize_tls_paths
