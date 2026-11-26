@@ -339,8 +339,9 @@
 				start: '',
 				end: '',
 			};
-			var queryLogPage = 1;
+var queryLogPage = 1;
 			var queryLogPageSize = 50;
+			var queryLogRequestToken = 0;
 			var queryLogSummaryEl = document.getElementById('query-log-summary');
 			var queryLogErrorEl = document.getElementById('query-log-error');
 			var queryLogChipsEl = document.getElementById('query-log-filter-chips');
@@ -1410,11 +1411,11 @@ textBtn.type = 'button';
 				} catch (e) {}
 			}
 
-			function renderQueryLogFilterChips() {
+function renderQueryLogFilterChips() {
 				if (!queryLogChipsEl) {
 					return;
 				}
-				queryLogChipsEl.textContent = '';
+				var next = document.createDocumentFragment();
 				QUERY_LOG_FILTER_KEYS.forEach(function (key) {
 					var value = normalizeQueryLogFilterValue(queryLogFilters[key]);
 					if (!value) {
@@ -1441,15 +1442,19 @@ textBtn.type = 'button';
 						loadQueryLog();
 					});
 					chip.appendChild(removeBtn);
-					queryLogChipsEl.appendChild(chip);
+					next.appendChild(chip);
 				});
+				replaceContainerChildren(queryLogChipsEl, next);
 			}
 
-			function renderQueryLogRows(items) {
+function renderQueryLogRows(items) {
+				// Build tbody rows off-DOM, then atomically swap into the live table body.
+				// Inputs: items Array of query-log row objects
+				// Outputs: none (updates queryLogTableBodyEl)
 				if (!queryLogTableBodyEl) {
 					return;
 				}
-				queryLogTableBodyEl.textContent = '';
+				var nextBody = document.createDocumentFragment();
 				items = Array.isArray(items) ? items : [];
 				if (!items.length) {
 					var emptyTr = document.createElement('tr');
@@ -1458,7 +1463,8 @@ textBtn.type = 'button';
 					emptyTd.className = 'fh-pane-help';
 					emptyTd.textContent = 'No query-log rows matched the current filters.';
 					emptyTr.appendChild(emptyTd);
-					queryLogTableBodyEl.appendChild(emptyTr);
+					nextBody.appendChild(emptyTr);
+					replaceContainerChildren(queryLogTableBodyEl, nextBody);
 					return;
 				}
 				items.forEach(function (item) {
@@ -1510,7 +1516,7 @@ textBtn.type = 'button';
 						? statusSeverity
 						: classifyQueryLogQtype(qtypeValue);
 					var sourceTooltipParts = [];
-                    var sourceDisplay = normalizeQueryLogSourceDisplayWithUpstream(sourceRaw, result, upstreamValue);
+					var sourceDisplay = normalizeQueryLogSourceDisplayWithUpstream(sourceRaw, result, upstreamValue);
 					if (sourceDisplay) {
 						sourceTooltipParts.push('source: ' + sourceDisplay);
 					}
@@ -1587,8 +1593,9 @@ textBtn.type = 'button';
 						firstTitleValue
 					);
 					appendQueryLogCell(row, errorValue, '', '', '');
-					queryLogTableBodyEl.appendChild(row);
+					nextBody.appendChild(row);
 				});
+				replaceContainerChildren(queryLogTableBodyEl, nextBody);
 			}
 
 			function updateQueryLogPager(payload) {
@@ -1640,7 +1647,10 @@ textBtn.type = 'button';
 				return '/api/v1/query_log' + _buildQuery(query);
 			}
 
-			function loadQueryLog() {
+function loadQueryLog() {
+				// Fetch query-log page fully, then atomically swap the table body.
+				// Inputs: none (uses queryLog* state)
+				// Outputs: Promise|undefined
 				if (!pageQueryLog) {
 					return;
 				}
@@ -1649,9 +1659,14 @@ textBtn.type = 'button';
 				if (queryLogSummaryEl) {
 					queryLogSummaryEl.textContent = 'Loading query-log rows...';
 				}
+				queryLogRequestToken += 1;
+				var token = queryLogRequestToken;
 				var url = buildQueryLogApiUrl();
 				return fetchJson(url)
 					.then(function (payload) {
+						if (token !== queryLogRequestToken) {
+							return;
+						}
 						if (payload && payload.status === 'disabled') {
 							renderQueryLogRows([]);
 							if (queryLogSummaryEl) {
@@ -1675,16 +1690,16 @@ textBtn.type = 'button';
 						writeUiStateToUrl('query-log');
 					})
 					.catch(function (err) {
-						renderQueryLogRows([]);
+						if (token !== queryLogRequestToken) {
+							return;
+						}
+						// Keep the previous rows visible on failure; only surface the error.
 						setQueryLogError(
 							'Failed to load query-log rows: ' +
 								(err && err.message ? err.message : String(err))
 						);
 						if (queryLogSummaryEl) {
 							queryLogSummaryEl.textContent = '';
-						}
-						if (queryLogPageInfoEl) {
-							queryLogPageInfoEl.textContent = '';
 						}
 					});
 			}
@@ -1880,18 +1895,43 @@ textBtn.type = 'button';
 					}
 				}
 			}
-			function replaceContainerChildren(target, source) {
-				if (!target || !source) {
+function replaceContainerChildren(target, source) {
+				// Atomically replace target's children with source (Node, DocumentFragment,
+				// array-like of nodes, or null/undefined to clear).
+				// Inputs: target Element, source Node|DocumentFragment|ArrayLike|null
+				// Outputs: none (mutates target in place)
+				if (!target) {
 					return;
 				}
+				var nodes = [];
+				if (source == null) {
+					nodes = [];
+				} else if (typeof DocumentFragment !== 'undefined' && source instanceof DocumentFragment) {
+					while (source.firstChild) {
+						nodes.push(source.firstChild);
+						source.removeChild(source.firstChild);
+					}
+				} else if (typeof Node !== 'undefined' && source instanceof Node) {
+					nodes = [source];
+				} else if (typeof source.length === 'number') {
+					for (var i = 0; i < source.length; i++) {
+						if (source[i]) {
+							nodes.push(source[i]);
+						}
+					}
+				} else {
+					nodes = [source];
+				}
 				if (typeof target.replaceChildren === 'function') {
-					target.replaceChildren(source);
+					target.replaceChildren.apply(target, nodes);
 					return;
 				}
 				while (target.firstChild) {
 					target.removeChild(target.firstChild);
 				}
-				target.appendChild(source);
+				for (var j = 0; j < nodes.length; j++) {
+					target.appendChild(nodes[j]);
+				}
 			}
 
 			function appendDictGroup(title, mapping) {
@@ -2965,17 +3005,18 @@ textBtn.type = 'button';
 
 			}
 
-			function loadStats() {
-				fetchJson('/api/v1/stats')
-					.then(function (data) {
-						return fetchJson('/api/v1/upstream_status')
-							.then(function (ustatus) {
-								renderStats(data, ustatus);
-							})
-							.catch(function () {
-								// Upstream status is optional; still render core stats.
-								renderStats(data, null);
-							});
+function loadStats() {
+				// Wait for stats (+ optional upstream status) before one atomic DOM swap.
+				// Inputs: none
+				// Outputs: none (calls renderStats)
+				var statsPromise = fetchJson('/api/v1/stats');
+				var upstreamPromise = fetchJson('/api/v1/upstream_status').catch(function () {
+					// Upstream status is optional; still render core stats.
+					return null;
+				});
+				Promise.all([statsPromise, upstreamPromise])
+					.then(function (results) {
+						renderStats(results[0], results[1]);
 					})
 					.catch(function () {});
 			}
@@ -4152,14 +4193,14 @@ textBtn.type = 'button';
 				var storedSortState = readTableSortState(sortStateKey, columns);
 				var sortState = storedSortState || { key: '', dir: 'asc' };
 
-				function renderTable() {
+function renderTable() {
 					var displayRows = rows.slice();
 					if (sortState.key) {
 						var activeCol = getTableColumnByKey(columns, sortState.key);
 						displayRows = sortRowsByColumn(displayRows, activeCol, sortState.dir);
 					}
-					table.textContent = '';
-					table.appendChild(
+					var next = document.createDocumentFragment();
+					next.appendChild(
 						renderSortableHeader(columns, sortState, function (key) {
 							if (sortState.key === key) {
 								sortState.dir = sortState.dir === 'asc' ? 'desc' : 'asc';
@@ -4174,12 +4215,13 @@ textBtn.type = 'button';
 							renderTable();
 						})
 					);
-					table.appendChild(
+					next.appendChild(
 						renderTableBodyRows(columns, displayRows, {
 							sectionStyle: section && section.style,
 							setMetricsAttrs: true,
 						})
 					);
+					replaceContainerChildren(table, next);
 				}
 
 				renderTable();
@@ -4251,12 +4293,9 @@ textBtn.type = 'button';
 					return false;
 				}
 
-				function renderBody(items) {
-					var tbody = renderTableBodyRows(columns, items, {
-						emptyText: 'No matching rows.',
-					});
-					table.textContent = '';
-					table.appendChild(
+function renderBody(items) {
+					var next = document.createDocumentFragment();
+					next.appendChild(
 						renderSortableHeader(columns, sortState, function (key) {
 							if (sortState.key === key) {
 								sortState.dir = sortState.dir === 'asc' ? 'desc' : 'asc';
@@ -4271,7 +4310,12 @@ textBtn.type = 'button';
 							applySearch();
 						})
 					);
-					table.appendChild(tbody);
+					next.appendChild(
+						renderTableBodyRows(columns, items, {
+							emptyText: 'No matching rows.',
+						})
+					);
+					replaceContainerChildren(table, next);
 				}
 
 				function applySearch() {
@@ -4693,27 +4737,26 @@ textBtn.type = 'button';
 							if (searchInput.value !== state.search) {
 								searchInput.value = state.search;
 							}
-							writeTableSortState(sortStateKey, {
+writeTableSortState(sortStateKey, {
 								key: state.sortKey,
 								dir: state.sortDir || 'asc',
 							});
 							persistPagedViewState();
 
-							table.textContent = '';
-							table.appendChild(renderHeader());
-							table.appendChild(renderBody(state.lastItems));
+							var next = document.createDocumentFragment();
+							next.appendChild(renderHeader());
+							next.appendChild(renderBody(state.lastItems));
+							replaceContainerChildren(table, next);
 							updatePager(payload);
 						})
 						.catch(function (err) {
 							if (token !== requestToken) {
 								return;
 							}
-							table.textContent = '';
-							var pre = document.createElement('pre');
-							pre.className = 'fh-pre fh-pre-compact';
-							pre.textContent = 'Failed to load table: ' + err.message;
-							group.appendChild(pre);
-							pageInfo.textContent = ' Error';
+							// Keep previous table contents; only surface the failure in the pager.
+							pageInfo.textContent =
+								' Error: ' +
+								(err && err.message ? err.message : String(err));
 						});
 				}
 
