@@ -588,11 +588,7 @@ async def _handle_conn(
     except (
         asyncio.TimeoutError
     ):  # pragma: no cover - defensive: idle timeout closes connection
-        warn_suppressed_exception(
-            "TCP asyncio: idle timeout for client_ip=%s",
-            client_ip,
-            logger=logger,
-        )
+        logger.debug("TCP asyncio: idle timeout for client_ip=%s", client_ip)
     except (
         ConnectionError,
         OSError,

@@ -264,11 +264,7 @@ async def _handle_conn(
             ):
                 break
     except TimeoutError:  # pragma: no cover - defensive: idle timeout closes connection
-        warn_suppressed_exception(
-            "DoT handler idle timeout for client %s",
-            client_ip,
-            logger=logger,
-        )
+        logger.debug("DoT handler idle timeout for client %s", client_ip)
     except (
         ConnectionError,
         OSError,

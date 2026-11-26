@@ -7,6 +7,7 @@ in logs without aborting the caller.
 from __future__ import annotations
 
 import logging
+import sys
 from collections.abc import Callable
 from typing import TypeVar
 
@@ -21,7 +22,7 @@ def warn_suppressed_exception(
     logger: logging.Logger | None = None,
     logger_name: str = _DEFAULT_LOGGER_NAME,
 ) -> None:
-    """Brief: Log the active exception from an except-block, then continue.
+    """Brief: Log a suppressed except-block failure, then continue.
 
     Inputs:
       - message: printf-style warning text describing what failed.
@@ -33,8 +34,8 @@ def warn_suppressed_exception(
       - None.
 
     Notes:
-      - Call only from an ``except`` block so ``exc_info=True`` attaches the
-        current exception traceback.
+      - Call from an ``except`` block. Logs exception type/message only — no
+        traceback (suppressed paths should stay quiet in operator logs).
       - Use instead of bare ``pass`` when swallowing errors on cleanup,
         best-effort side effects, or non-fatal helper paths.
 
@@ -49,7 +50,11 @@ def warn_suppressed_exception(
         if logger is not None
         else logging.getLogger(str(logger_name or _DEFAULT_LOGGER_NAME))
     )
-    log.warning(message, *args, exc_info=True)
+    exc = sys.exc_info()[1]
+    if exc is not None:
+        log.warning(message + " (%s: %s)", *args, type(exc).__name__, exc)
+    else:
+        log.warning(message, *args)
 
 
 def call_warn_on_exception(
