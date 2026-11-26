@@ -172,6 +172,14 @@ class ListenerDot(ListenerConnLimits):
     enabled: bool | None = None
     host: str | None = None
     port: PortInt | None = None
+    enable_tls: bool | str | None = Field(
+        default=None,
+        description=(
+            "Explicit TLS enable flag: enabled/true/yes or disabled/false/no. "
+            "When unset, cert material enables TLS. When explicitly disabled "
+            "while certs/secrets/generate are set, startup fails."
+        ),
+    )
     cert_file: str | None = None
     key_file: str | None = None
     cert_secret: dict[str, Any] | None = Field(
@@ -205,6 +213,14 @@ class ListenerDoh(StrictModel):
     enabled: bool | None = None
     host: str | None = None
     port: PortInt | None = None
+    enable_tls: bool | str | None = Field(
+        default=None,
+        description=(
+            "Explicit TLS enable flag: enabled/true/yes or disabled/false/no. "
+            "When unset, cert material enables TLS. When explicitly disabled "
+            "while certs/secrets are set, startup fails."
+        ),
+    )
     cert_file: str | None = None
     key_file: str | None = None
     cert_secret: dict[str, Any] | None = Field(
@@ -587,6 +603,14 @@ class ServerHttpConfig(StrictModel):
     host: str = Field(default="127.0.0.1")
     port: PortInt = Field(default=5380)
     allow_threaded_fallback: bool = Field(default=True)
+    enable_tls: bool | str | None = Field(
+        default=None,
+        description=(
+            "Explicit TLS enable flag: enabled/true/yes or disabled/false/no. "
+            "When unset, cert material enables HTTPS. When explicitly disabled "
+            "while certs/secrets/generate are set, startup fails."
+        ),
+    )
     cert_file: str | None = None
     key_file: str | None = None
     cert_secret: dict[str, Any] | None = Field(
