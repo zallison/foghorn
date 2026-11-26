@@ -4616,13 +4616,15 @@ def test_config_cache_ttl_overridden_by_web_cfg(monkeypatch) -> None:
       - monkeypatch used to reset _CONFIG_TEXT_CACHE_TTL_SECONDS.
 
     Outputs:
-      - After create_app(), the TTL global reflects the configured value.
+      - After create_app(), the TTL global and TTLCache.ttl reflect the configured value.
     """
 
     import foghorn.servers.webserver as web_mod
     import foghorn.servers.webserver.core as web_core
+    import foghorn.servers.webserver.config_helpers as cfg_helpers
 
     original_ttl = web_core._CONFIG_TEXT_CACHE_TTL_SECONDS
+    original_cache_ttl = int(cfg_helpers._CONFIG_TEXT_CACHE.ttl)
     try:
         monkeypatch.setattr(
             web_mod, "_CONFIG_TEXT_CACHE_TTL_SECONDS", 2.0, raising=False
@@ -4633,9 +4635,14 @@ def test_config_cache_ttl_overridden_by_web_cfg(monkeypatch) -> None:
         cfg = {"webserver": {"enabled": True, "config_cache_ttl_seconds": 7.5}}
         create_app(stats=None, config=cfg, log_buffer=RingBuffer())
         assert web_core._CONFIG_TEXT_CACHE_TTL_SECONDS == 7.5
+        assert int(cfg_helpers._CONFIG_TEXT_CACHE.ttl) == 7
     finally:
         web_mod._CONFIG_TEXT_CACHE_TTL_SECONDS = original_ttl
         web_core._CONFIG_TEXT_CACHE_TTL_SECONDS = original_ttl
+        cfg_helpers._CONFIG_TEXT_CACHE_TTL_SECONDS = original_ttl
+        from foghorn.utils.register_caches import set_cachetools_ttl
+
+        set_cachetools_ttl(cfg_helpers._CONFIG_TEXT_CACHE, original_cache_ttl)
 
 
 def test_config_raw_json_500_when_config_path_missing() -> None:

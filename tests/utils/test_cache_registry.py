@@ -357,7 +357,8 @@ def test_apply_decorated_cache_overrides_updates_ttlcache_maxsize_and_ttl() -> N
         return x * 2
 
     assert fn_ttl_override(1) == 2
-    old_ttl = cache.ttl
+    assert len(cache) == 1
+    old_ttl = int(cache.ttl)
 
     overrides = [
         {
@@ -372,8 +373,30 @@ def test_apply_decorated_cache_overrides_updates_ttlcache_maxsize_and_ttl() -> N
 
     cache_reg.apply_decorated_cache_overrides(overrides)
 
+    assert cache.maxsize == 8
+    assert int(cache.ttl) == old_ttl + 1
+    # reset_on_ttl_change should have cleared prior entries.
+    assert len(cache) == 0
+
     # Smoke check: function remains callable after applying overrides.
     assert fn_ttl_override(2) == 4
+
+
+def test_set_cachetools_ttl_and_maxsize_mutate_readonly_properties() -> None:
+    """Brief: set_cachetools_ttl/maxsize work when public properties have no setters.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts TTLCache.ttl and maxsize update via helper setters.
+    """
+
+    cache = TTLCache(maxsize=4, ttl=2)
+    cache_reg.set_cachetools_ttl(cache, 9)
+    cache_reg.set_cachetools_maxsize(cache, 12)
+    assert int(cache.ttl) == 9
+    assert int(cache.maxsize) == 12
 
 
 def test_apply_decorated_cache_overrides_updates_lfu_cache_and_ignores_ttl() -> None:

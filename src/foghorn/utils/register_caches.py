@@ -17,6 +17,56 @@ _REGISTERED_CACHED_FUNCS: List[Dict[str, Any]] = []
 _logger = logging.getLogger("foghorn.utils.register_caches")
 
 
+def set_cachetools_ttl(cache: Any, ttl: int | float) -> None:
+    """Set TTL on a cachetools TTLCache in place.
+
+    Inputs:
+      - cache: TTLCache (or compatible) instance.
+      - ttl: New time-to-live in seconds.
+
+    Outputs:
+      - None. Mutates ``cache`` so subsequent inserts use the new TTL.
+
+    Notes:
+      - cachetools exposes ``ttl`` as a read-only property backed by
+        ``_TTLCache__ttl``. Prefer the public setter when present (older
+        cachetools); otherwise update the private field.
+    """
+
+    ttl_i = max(0, int(ttl))
+    try:
+        cache.ttl = ttl_i  # type: ignore[misc]
+        return
+    except AttributeError:
+        pass
+    setattr(cache, "_TTLCache__ttl", ttl_i)
+
+
+def set_cachetools_maxsize(cache: Any, maxsize: int) -> None:
+    """Set maxsize on a cachetools Cache subclass in place.
+
+    Inputs:
+      - cache: cachetools Cache instance (TTLCache, LFUCache, etc.).
+      - maxsize: New maximum entry count.
+
+    Outputs:
+      - None. Mutates ``cache`` so the capacity limit reflects ``maxsize``.
+
+    Notes:
+      - cachetools exposes ``maxsize`` as a read-only property backed by
+        ``_Cache__maxsize``. Prefer the public setter when present; otherwise
+        update the private field (same approach used for LFU/RR/FIFO overrides).
+    """
+
+    maxsize_i = max(0, int(maxsize))
+    try:
+        cache.maxsize = maxsize_i  # type: ignore[misc]
+        return
+    except AttributeError:
+        pass
+    setattr(cache, "_Cache__maxsize", maxsize_i)
+
+
 class _LruProxy:
     """Brief: Indirection wrapper so lru_cache backends can be swapped at runtime.
 
@@ -1039,7 +1089,7 @@ def apply_decorated_cache_overrides(overrides: List[Dict[str, Any]]) -> None:
 
                 if maxsize_val is not None:
                     try:
-                        cache_ref.maxsize = int(maxsize_val)
+                        set_cachetools_maxsize(cache_ref, int(maxsize_val))
                         entry["maxsize"] = int(maxsize_val)
                     except Exception:  # pragma: nocover defensive maxsize update
                         _logger.debug(
@@ -1052,7 +1102,7 @@ def apply_decorated_cache_overrides(overrides: List[Dict[str, Any]]) -> None:
 
                 if ttl_val is not None:
                     try:
-                        cache_ref.ttl = int(ttl_val)
+                        set_cachetools_ttl(cache_ref, int(ttl_val))
                         entry["ttl"] = int(ttl_val)
 
                         if (
@@ -1130,10 +1180,9 @@ def apply_decorated_cache_overrides(overrides: List[Dict[str, Any]]) -> None:
                 if maxsize_val is not None and cache_ref is not None:
                     try:
                         # cachetools.LFUCache/RRCache expose ``maxsize`` as a
-                        # read-only property backed by a private ``_Cache__maxsize``
-                        # attribute. Updating the private field is the only way to
-                        # adjust the limit at runtime.
-                        setattr(cache_ref, "_Cache__maxsize", int(maxsize_val))
+                        # read-only property; set_cachetools_maxsize updates the
+                        # private backing field when no public setter exists.
+                        set_cachetools_maxsize(cache_ref, int(maxsize_val))
                         entry["maxsize"] = int(maxsize_val)
                     except Exception:  # pragma: nocover defensive maxsize update
                         _logger.debug(

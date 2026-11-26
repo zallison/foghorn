@@ -9,7 +9,11 @@ from datetime import datetime, timezone
 from typing import Any, Dict
 
 from cachetools import TTLCache
-from foghorn.utils.register_caches import registered_cached, registered_ttl_cache
+from foghorn.utils.register_caches import (
+    registered_cached,
+    registered_ttl_cache,
+    set_cachetools_ttl,
+)
 
 from ...stats import StatsCollector, StatsSnapshot
 from foghorn.utils.exception_logging import warn_suppressed_exception
@@ -276,7 +280,7 @@ def _sync_stats_snapshot_cache_ttl() -> None:
 
     try:
         ttl_i = max(0, int(float(_STATS_SNAPSHOT_CACHE_TTL_SECONDS)))
-        _STATS_SNAPSHOT_CACHE.ttl = ttl_i
+        set_cachetools_ttl(_STATS_SNAPSHOT_CACHE, ttl_i)
     except Exception:  # pragma: no cover - defensive ttl sync
         warn_suppressed_exception(
             "best-effort operation failed in servers/webserver/stats_helpers.py:_sync_stats_snapshot_cache_ttl",
@@ -412,7 +416,7 @@ def _sync_system_info_cache_ttl(web_core: Any | None = None) -> float:
             ttl = float(_SYSTEM_INFO_CACHE_TTL_SECONDS)
     try:
         ttl_i = max(0, int(ttl))
-        _SYSTEM_INFO_CACHE.ttl = ttl_i
+        set_cachetools_ttl(_SYSTEM_INFO_CACHE, ttl_i)
     except Exception:  # pragma: no cover - defensive ttl sync
         warn_suppressed_exception(
             "best-effort operation failed in servers/webserver/stats_helpers.py:_sync_system_info_cache_ttl",

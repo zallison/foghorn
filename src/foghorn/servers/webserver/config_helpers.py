@@ -22,7 +22,11 @@ from typing import Any, Dict, List, Tuple, Final
 import yaml
 from cachetools import TTLCache
 
-from foghorn.utils.register_caches import registered_cached, registered_lru_cache
+from foghorn.utils.register_caches import (
+    registered_cached,
+    registered_lru_cache,
+    set_cachetools_ttl,
+)
 from foghorn.utils.exception_logging import warn_suppressed_exception
 
 # Short-lived cache for sanitized YAML configuration text returned by /config.
@@ -176,7 +180,7 @@ def _sync_config_text_cache_ttl() -> float:
     except Exception:
         ttl = float(_CONFIG_TEXT_CACHE_TTL_SECONDS)
     try:
-        _CONFIG_TEXT_CACHE.ttl = max(0, int(ttl))
+        set_cachetools_ttl(_CONFIG_TEXT_CACHE, max(0, int(ttl)))
     except Exception:  # pragma: no cover - defensive ttl sync
         warn_suppressed_exception(
             "best-effort operation failed in servers/webserver/config_helpers.py:_sync_config_text_cache_ttl",

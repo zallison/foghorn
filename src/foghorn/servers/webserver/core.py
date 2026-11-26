@@ -43,7 +43,11 @@ from fastapi.responses import (
 )
 from pydantic import BaseModel
 
-from foghorn.utils.register_caches import registered_cached, registered_lru_cache
+from foghorn.utils.register_caches import (
+    registered_cached,
+    registered_lru_cache,
+    set_cachetools_ttl,
+)
 from foghorn.utils.exception_logging import warn_suppressed_exception
 
 # psutil is an optional dependency. stats_helpers.get_system_info() consults
@@ -238,7 +242,7 @@ def create_app(
         _SYSTEM_INFO_CACHE_TTL_SECONDS = float(ttl_raw)
         _stats_helpers._SYSTEM_INFO_CACHE_TTL_SECONDS = float(ttl_raw)
         try:
-            _stats_helpers._SYSTEM_INFO_CACHE.ttl = max(0, int(ttl_raw))
+            set_cachetools_ttl(_stats_helpers._SYSTEM_INFO_CACHE, max(0, int(ttl_raw)))
         except Exception:  # pragma: no cover - defensive ttl apply
             warn_suppressed_exception(
                 "best-effort operation failed in servers/webserver/core.py:create_app",
@@ -250,7 +254,9 @@ def create_app(
     if isinstance(stats_ttl_raw, (int, float)) and stats_ttl_raw > 0:
         _stats_helpers._STATS_SNAPSHOT_CACHE_TTL_SECONDS = float(stats_ttl_raw)
         try:
-            _stats_helpers._STATS_SNAPSHOT_CACHE.ttl = max(0, int(stats_ttl_raw))
+            set_cachetools_ttl(
+                _stats_helpers._STATS_SNAPSHOT_CACHE, max(0, int(stats_ttl_raw))
+            )
         except Exception:  # pragma: no cover - defensive ttl apply
             warn_suppressed_exception(
                 "best-effort operation failed in servers/webserver/core.py:create_app",
@@ -263,7 +269,9 @@ def create_app(
         _CONFIG_TEXT_CACHE_TTL_SECONDS = float(cfg_ttl_raw)
         _config_helpers._CONFIG_TEXT_CACHE_TTL_SECONDS = float(cfg_ttl_raw)
         try:
-            _config_helpers._CONFIG_TEXT_CACHE.ttl = max(0, int(cfg_ttl_raw))
+            set_cachetools_ttl(
+                _config_helpers._CONFIG_TEXT_CACHE, max(0, int(cfg_ttl_raw))
+            )
         except Exception:  # pragma: no cover - defensive ttl apply
             warn_suppressed_exception(
                 "best-effort operation failed in servers/webserver/core.py:create_app",
