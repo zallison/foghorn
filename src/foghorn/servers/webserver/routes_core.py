@@ -2467,6 +2467,10 @@ def _register_plugin_routes(app: FastAPI, auth_dep: Any) -> None:
         dependencies=[Depends(auth_dep)],
     )
     @app.get(
+        "/api/v1/plugins/{plugin_name}/unifi_hosts",
+        dependencies=[Depends(auth_dep)],
+    )
+    @app.get(
         "/api/v1/plugins/{plugin_name}/etc_hosts", dependencies=[Depends(auth_dep)]
     )
     @app.get("/api/v1/plugins/{plugin_name}/mdns", dependencies=[Depends(auth_dep)])

@@ -1,0 +1,94 @@
+# Example: UnifiHosts resolve plugin
+#
+# Requires a UniFi Network Integration API key. See
+# docs/plugins/resolve/unifi_hosts.md for local + Site Manager key setup.
+
+vars:
+  DOMAIN: example.lan
+  # Prefer env substitution in real deploys:
+  #   export UNIFI_API_KEY=...
+
+upstreams:
+  endpoints:
+    - host: 192.0.2.53
+      port: 53
+
+logging:
+  python:
+    level: info
+
+plugins:
+  - type: unifi_hosts
+    id: unifi-lan
+    enabled: true
+    comment: "Publish UniFi Network clients and devices as DNS names."
+    hooks:
+      pre_resolve: 40
+    config:
+      # BasePlugin options
+      abort_on_failure: false
+      targets:
+        ips:
+          - 0.0.0.0/0
+        listeners: any
+        qtypes:
+          - A
+          - AAAA
+          - PTR
+          - TXT
+        opcodes:
+          - QUERY
+      logging:
+        level: info
+        stderr: true
+
+      # UnifiHosts-specific options
+      suffix: unifi.${DOMAIN}
+      ttl: 60
+      reload_interval_second: 120
+      include_clients: true
+      include_devices: true
+      publish_mac: false
+      # include_types:
+      #   - wired
+      #   - wireless
+      # device_states:
+      #   - ONLINE
+      # site_names:
+      #   - default
+      # Drop guest/VPN noise by CIDR when needed:
+      # include_cidrs:
+      #   - 10.0.0.0/8
+      # exclude_cidrs:
+      #   - 192.168.99.0/24
+      discovery: false
+      expose_txt_in_additional: false
+      # One healthy console is enough. Extra URLs are failover only.
+      endpoints:
+        - id: udm
+          url: https://unifi.${DOMAIN}
+          api_key: "${UNIFI_API_KEY}"
+          verify_tls: false
+          # tls_ca: keys/unifi-ca.pem
+          # tls_server_name: unifi.example.com
+        # Site Manager cloud connector example:
+        # - id: cloud
+        #   url: https://api.ui.com
+        #   console_id: YOUR_CONSOLE_ID
+        #   api_key: "${UNIFI_SM_API_KEY}"
+        #   verify_tls: true
+
+server:
+  listen:
+    udp:
+      enabled: true
+      host: 127.0.0.1
+      port: 5353
+    tcp:
+      enabled: false
+    dot:
+      enabled: false
+  dnssec:
+    mode: passthrough
+    validation: upstream_ad
+    udp_payload_size: 1232
