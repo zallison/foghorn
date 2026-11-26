@@ -48,16 +48,16 @@ secrets:
         keys_dir: ./keys/dnssec
 ```
 
-Single-backend shorthand:
+Single-backend shorthand (inline material):
 
 ```yaml
 secrets:
-  module: file
+  module: inline
   config:
     entries:
       - id: admin-api
         kind: token
-        token: "inline-or-prefer-file"
+        token: "embedded-token-value"
 ```
 
 ## References
@@ -123,10 +123,18 @@ File backends understand the existing `domainkey_<apex>.{ksk,zsk}.key` layout.
 
 ### `file`
 
-- `entries[]`: catalog of secrets (paths or inline values)
+- `entries[]`: path-backed catalog only (`cert_file`/`key_file`/`value_file`/`secret_file`/...)
+- Rejects inline value fields (`token`, `secret`, `cert_pem`, ...); use `inline` for those
 - `keys_dir`: index DNSSEC PEMs from disk
 - `root` / `base_dir`: base for relative paths
 - Writable `put()` for DNSSEC generate
+
+### `inline` (aliases: `config`, `embedded`, `literal`)
+
+- `entries[]`: in-config material only (`token`/`value`/`secret`, `cert_pem`/`key_pem`/`ca_pem`, ...)
+- Rejects filesystem path fields; use `file` for those
+- No `keys_dir` support
+- Writable in-memory `put()` (does not rewrite YAML on disk)
 
 ### `mysql` / `mariadb`
 
