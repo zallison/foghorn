@@ -1375,7 +1375,7 @@ def test_commit_rejects_multi_cname_and_cname_with_other_types() -> None:
 
     plugin2 = _plugin(
         records={
-            ("host.example.com", int(QTYPE.A)): (300, ["***********"], ["src"]),
+            ("host.example.com", int(QTYPE.A)): (300, ["203.0.113.1"], ["src"]),
         }
     )
     with_a = zone_commit.commit_record_actions(

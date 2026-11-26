@@ -615,16 +615,22 @@ def test_pre_plugin_deny_response_is_tsig_signed(monkeypatch, set_runtime_snapsh
 
     qname = "tsig-deny-signed.example"
     keyring, _ = tsig.build_tsig_keyring(_TSIG_KEYS)
+
+    # Isolate from upstream health / network leftovers in the full suite.
+    def _forward(*_a, **_kw):
+        raise AssertionError("deny short-circuit must not forward upstream")
+
+    monkeypatch.setattr(srv, "send_query_with_failover", _forward)
     set_runtime_snapshot(
         plugins=[_DenyPlugin()],
-        upstream_addrs=[{"host": "*******", "port": 53}],
+        upstream_addrs=[{"host": "1.1.1.1", "port": 53}],
         resolver_mode="forward",
         tsig_enabled=True,
         tsig_mode="optional",
         tsig_keys=_TSIG_KEYS,
         cookies_enabled=False,
     )
-    wire = srv.resolve_query_bytes(_sign_query(qname), "************", listener="udp")
+    wire = srv.resolve_query_bytes(_sign_query(qname), "203.0.113.11", listener="udp")
     msg = dns.message.from_wire(wire, keyring=keyring)
     assert getattr(msg, "had_tsig", False) is True
     assert int(msg.rcode()) == int(dns.rcode.NXDOMAIN)
@@ -656,13 +662,13 @@ def test_passthrough_mode_forwards_without_local_resign(
         seen["passthrough"] = bool(client_tsig_passthrough)
         seen["wire"] = outbound_wire
         r = req.reply()
-        r.add_answer(RR(qname, rdata=A("*******"), ttl=60))
+        r.add_answer(RR(qname, rdata=A("9.9.9.9"), ttl=60))
         return r.pack(), upstreams[0], "ok"
 
     monkeypatch.setattr(srv, "send_query_with_failover", _forward)
     set_runtime_snapshot(
         plugins=[],
-        upstream_addrs=[{"host": "*******", "port": 53}],
+        upstream_addrs=[{"host": "1.1.1.1", "port": 53}],
         resolver_mode="forward",
         tsig_enabled=True,
         tsig_mode="passthrough",
@@ -671,7 +677,7 @@ def test_passthrough_mode_forwards_without_local_resign(
         cache_plugin=plugin_base.DNS_CACHE,
     )
     qwire = _sign_query(qname)
-    wire = srv.resolve_query_bytes(qwire, "************", listener="udp")
+    wire = srv.resolve_query_bytes(qwire, "203.0.113.11", listener="udp")
     assert seen["passthrough"] is True
     assert seen["wire"] == qwire
     # Local keys empty and passthrough: response is not re-signed with features keys.
@@ -705,7 +711,7 @@ def test_upstream_endpoint_tsig_signs_and_verifies(monkeypatch):
     keyring, _ = tsig.build_tsig_keyring(_TSIG_KEYS)
     q = DNSRecord.question("up-tsig.example", "A")
     upstream = {
-        "host": "*******",
+        "host": "9.9.9.9",
         "port": 53,
         "transport": "udp",
         "tsig": dict(_TSIG_KEYS[0]),
@@ -716,7 +722,7 @@ def test_upstream_endpoint_tsig_signs_and_verifies(monkeypatch):
         captured["wire"] = wire
         # Return an unsigned NOERROR so endpoint TSIG verify fails (missing TSIG).
         r = q.reply()
-        r.add_answer(RR("up-tsig.example", rdata=A("*******"), ttl=60))
+        r.add_answer(RR("up-tsig.example", rdata=A("9.9.9.9"), ttl=60))
         return r.pack()
 
     monkeypatch.setattr("foghorn.servers.transports.udp.udp_query", _udp)
@@ -742,7 +748,7 @@ def test_normalize_upstream_preserves_tsig():
         "upstreams": {
             "endpoints": [
                 {
-                    "host": "*******",
+                    "host": "9.9.9.9",
                     "port": 53,
                     "tsig": {
                         "name": "k.example.",

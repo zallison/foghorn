@@ -1491,7 +1491,7 @@ def test_forward_local_blocking_does_not_affect_non_local_queries(
 
 def _make_ctx(
     data: bytes,
-    client_ip: str = "*********",
+    client_ip: str = "127.0.0.1",
     *,
     listener: str | None = "udp",
     secure: bool | None = False,

@@ -243,7 +243,7 @@ def test_empty_blocked_keyword_does_not_match_all(tmp_path):
         blocked_keywords=["", "  ", "bad"],
     )
     p.setup()
-    ctx = PluginContext(client_ip="*******")
+    ctx = PluginContext(client_ip="1.2.3.4")
 
     with closing(p.conn):
         assert "" not in p.blocked_keywords

@@ -299,11 +299,11 @@ def test_pre_resolve_exception_fail_closed_servfail(set_runtime_snapshot):
         plugins=[_PreRaises()],
         # If fail-open returned, resolution would try upstreams / hit no-upstream SERVFAIL
         # without the plugin-failure EDE text. An allow path would be worse.
-        upstream_addrs=[{"host": "*******", "port": 53}],
+        upstream_addrs=[{"host": "1.1.1.1", "port": 53}],
     )
 
     q = _make_edns_query("ede-pre-raise.example")
-    result = srv._resolve_core(q.pack(), "*********")
+    result = srv._resolve_core(q.pack(), "127.0.0.1")
     resp = DNSRecord.parse(result.wire)
 
     assert result.rcode_name == "SERVFAIL"
@@ -338,17 +338,17 @@ def test_post_resolve_exception_fail_closed_servfail(monkeypatch, set_runtime_sn
         max_concurrent=None,
         on_attempt_result=None,
     ):
-        return ok, {"host": "*******", "port": 53}, "ok"
+        return ok, {"host": "1.1.1.1", "port": 53}, "ok"
 
     monkeypatch.setattr(srv, "send_query_with_failover", fake_forward)
     _setup_shared(
         set_runtime_snapshot,
         enable_ede=True,
         plugins=[_PostRaises()],
-        upstream_addrs=[{"host": "*******", "port": 53}],
+        upstream_addrs=[{"host": "1.1.1.1", "port": 53}],
     )
 
-    result = srv._resolve_core(q.pack(), "*********")
+    result = srv._resolve_core(q.pack(), "127.0.0.1")
     resp = DNSRecord.parse(result.wire)
 
     assert result.rcode_name == "SERVFAIL"

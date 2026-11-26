@@ -600,7 +600,8 @@ def test_warn_ssl_error_details_handles_setattr_failure(monkeypatch):
 
     err = _NoSetAttrError("immutable")
     dot._warn_ssl_error_details(err, phase="context setup")
-    assert len(warning_calls) == 1
+    # One SSL-details warning plus one warn_suppressed_exception for setattr.
+    assert len(warning_calls) == 2
 
 
 def test_build_ssl_context_verified_and_unverified_paths(monkeypatch):

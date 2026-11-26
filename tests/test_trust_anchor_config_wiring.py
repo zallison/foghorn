@@ -213,10 +213,10 @@ def test_apply_dnssec_validation_runtime_sets_resolver() -> None:
         dnssec_mode="validate",
         dnssec_validation="local",
         resolver_mode="forward",
-        upstream_hosts=["*********", "***********"],
+        upstream_hosts=["192.0.2.1", "203.0.113.1"],
         enforce_data_root=False,
     )
-    assert dval._VALIDATION_NAMESERVERS == ["*********", "***********"]
+    assert dval._VALIDATION_NAMESERVERS == ["192.0.2.1", "203.0.113.1"]
     assert dval._VALIDATION_VIA_RECURSIVE is False
 
     dval.apply_dnssec_validation_runtime(
@@ -263,14 +263,14 @@ def test_runtime_snapshot_apply_reconfigures_trust_anchors(tmp_path: Path) -> No
             "dnssec_mode": "validate",
             "dnssec_validation": "local",
             "resolver_mode": "forward",
-            "upstream_addrs": [{"host": "*********"}],
+            "upstream_addrs": [{"host": "127.0.0.1"}],
         }
     )
     rc._apply_snapshot_to_runtime_globals(snap)
     assert dval._TRUST_ANCHOR_MODE == "rfc5011"
     assert dval._TRUST_ANCHOR_STORE_PATH == store
     assert dval._TRUST_ANCHOR_HOLD_ADD_DAYS == 9
-    assert dval._VALIDATION_NAMESERVERS == ["*********"]
+    assert dval._VALIDATION_NAMESERVERS == ["127.0.0.1"]
 
 
 def test_ds_matches_dnskey_helper() -> None:

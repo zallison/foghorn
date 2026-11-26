@@ -514,16 +514,16 @@ def test_handle_one_sendto_exception_does_not_fallback_as_resolver_error(
         transport = DummyTransport()
         proto._transport = transport  # type: ignore[assignment]
         proto._inflight_total = 1
-        proto._inflight_per_ip["*********"] = 2
+        proto._inflight_per_ip["127.0.0.1"] = 2
 
-        await proto._handle_one(query, ("*********", 12345), "*********", None)
+        await proto._handle_one(query, ("127.0.0.1", 12345), "127.0.0.1", None)
 
         # Send failure must not be treated as a resolver failure.
         assert overload_calls["n"] == 0
         assert sent == []
         assert transport.calls == 1
         assert proto._inflight_total == 0
-        assert proto._inflight_per_ip["*********"] == 1
+        assert proto._inflight_per_ip["127.0.0.1"] == 1
 
     asyncio.run(_run())
 
@@ -539,8 +539,8 @@ def test_sendto_safe_returns_false_on_missing_transport_or_error() -> None:
     """
     from foghorn.servers.udp_send import sendto_safe
 
-    assert sendto_safe(None, b"x", ("*********", 53)) is False
-    assert sendto_safe(object(), b"", ("*********", 53)) is False
+    assert sendto_safe(None, b"x", ("127.0.0.1", 53)) is False
+    assert sendto_safe(object(), b"", ("127.0.0.1", 53)) is False
 
     class OkTransport:
         def sendto(self, data: bytes, addr: Any) -> None:  # noqa: ANN401
@@ -550,8 +550,8 @@ def test_sendto_safe_returns_false_on_missing_transport_or_error() -> None:
         def sendto(self, data: bytes, addr: Any) -> None:  # noqa: ANN401
             raise OSError("no route")
 
-    assert sendto_safe(OkTransport(), b"ok", ("*********", 53)) is True
-    assert sendto_safe(BoomTransport(), b"x", ("*********", 53)) is False
+    assert sendto_safe(OkTransport(), b"ok", ("127.0.0.1", 53)) is True
+    assert sendto_safe(BoomTransport(), b"x", ("127.0.0.1", 53)) is False
 
     proto = udp_mod._UDPProtocol(
         lambda _q, _ip: b"",
@@ -560,11 +560,11 @@ def test_sendto_safe_returns_false_on_missing_transport_or_error() -> None:
         max_inflight_per_ip=10,
         max_query_bytes=4096,
     )
-    assert proto._sendto_safe(b"x", ("*********", 53)) is False
+    assert proto._sendto_safe(b"x", ("10.1.2.3", 53)) is False
     proto._transport = OkTransport()  # type: ignore[assignment]
-    assert proto._sendto_safe(b"ok", ("*********", 53)) is True
+    assert proto._sendto_safe(b"ok", ("10.1.2.3", 53)) is True
     proto._transport = BoomTransport()  # type: ignore[assignment]
-    assert proto._sendto_safe(b"x", ("*********", 53)) is False
+    assert proto._sendto_safe(b"x", ("10.1.2.3", 53)) is False
 
 
 def test_handle_one_resolver_exception_sends_overload_response(

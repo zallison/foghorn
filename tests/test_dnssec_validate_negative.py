@@ -421,9 +421,9 @@ def test_dnssec_negative_nsec3_secure_nxdomain(
     msg.set_rcode(dns.rcode.NXDOMAIN)
 
     # Owner and next are arbitrary hashed labels under apex; the salt and next
-    # fields just need to be syntactically valid.
+    # fields just need to be syntactically valid base32hex (0-9A-V).
     owner = dns.name.from_text("aaaaaa.example.test.")
-    next_hash = "ZZZZZZZZ"  # arbitrary base32 hash label
+    next_hash = "01234567"  # arbitrary base32hex hash label
     nsec3_rrset = dns.rrset.from_text(
         owner.to_text(),
         300,

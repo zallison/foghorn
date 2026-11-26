@@ -48,9 +48,9 @@ def test_sendall_framed_success_and_failures() -> None:
         def sendall(self, data: bytes) -> None:
             raise OSError("broken pipe")
 
-    assert sendall_framed(OkSock(), b"hi", client_ip="*********") is True
+    assert sendall_framed(OkSock(), b"hi", client_ip="127.0.0.1") is True
     assert sent == [b"\x00\x02hi"]
-    assert sendall_framed(BoomSock(), b"hi", client_ip="*********") is False
+    assert sendall_framed(BoomSock(), b"hi", client_ip="127.0.0.1") is False
 
 
 def test_write_framed_success_and_failures() -> None:
@@ -90,7 +90,7 @@ def test_write_framed_success_and_failures() -> None:
             async def drain(self) -> None:
                 raise OSError("broken")
 
-        assert await write_framed(OkWriter(), b"ok", client_ip="*********") is True
+        assert await write_framed(OkWriter(), b"ok", client_ip="127.0.0.1") is True
         assert written == [b"\x00\x02ok"]
         assert await write_framed(BoomWriter(), b"x") is False
         assert await write_framed(DrainBoomWriter(), b"x") is False

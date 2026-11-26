@@ -12,7 +12,7 @@ Runs the shared contract checks from ``contract_tests.py`` against:
 
 from __future__ import annotations
 
-from typing import Dict, List, Type
+from typing import Any, Dict, List, Type
 
 import pytest
 from contract_tests import (
@@ -20,6 +20,7 @@ from contract_tests import (
     StatsStoreContract,
     run_contract_checks,
 )
+from pydantic import BaseModel
 
 from foghorn.plugins.querylog.sqlite import SqliteStatsStore
 from foghorn.plugins.resolve.base import BasePlugin
@@ -55,6 +56,50 @@ def test_noop_plugin_contract() -> None:
     run_contract_checks(ResolvePluginContract(plugin))
 
 
+def _minimal_plugin_kwargs(plugin_cls: Type[BasePlugin]) -> Dict[str, Any]:
+    """Brief: Build bare kwargs so plugins with required config can construct.
+
+    Inputs:
+      - plugin_cls: Registered BasePlugin subclass under test.
+
+    Outputs:
+      - Dict of keyword args covering required Pydantic config fields with
+        simple placeholder values (empty string/list/dict, 0, False, or a
+        one-label domain-like string for ``str`` fields). Returns {} when the
+        plugin has no config model or no required fields.
+    """
+
+    get_model = getattr(plugin_cls, "get_config_model", None)
+    if not callable(get_model):
+        return {}
+    try:
+        model = get_model()
+    except Exception:
+        return {}
+    if not isinstance(model, type) or not issubclass(model, BaseModel):
+        return {}
+
+    kwargs: Dict[str, Any] = {}
+    for name, field in model.model_fields.items():
+        if not field.is_required():
+            continue
+        ann = field.annotation
+        if ann is str:
+            # Prefer a one-label placeholder so domain-like validators pass.
+            kwargs[name] = "contract.test"
+        elif ann is int or ann is float:
+            kwargs[name] = 0
+        elif ann is bool:
+            kwargs[name] = False
+        elif ann is list or getattr(ann, "__origin__", None) is list:
+            kwargs[name] = []
+        elif ann is dict or getattr(ann, "__origin__", None) is dict:
+            kwargs[name] = {}
+        else:
+            kwargs[name] = "contract.test"
+    return kwargs
+
+
 @pytest.mark.parametrize("plugin_cls", _PLUGIN_CLASSES, ids=lambda cls: cls.__name__)
 def test_registered_plugins_structural_contract(
     plugin_cls: Type[BasePlugin],
@@ -64,7 +109,7 @@ def test_registered_plugins_structural_contract(
     Hook-based checks are intentionally excluded here: they assume setup()
     has already run, which is covered per-plugin in each plugin's own tests.
     """
-    plugin = plugin_cls()
+    plugin = plugin_cls(**_minimal_plugin_kwargs(plugin_cls))
     contract = ResolvePluginContract(plugin)
     contract.test_basic_interface()
     contract.test_priority_bounds()

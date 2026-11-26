@@ -61,16 +61,24 @@ def test_getattr_re_raises_non_matching_module_not_found(monkeypatch):
         monkeypatch importlib.import_module to raise ModuleNotFoundError with e.name != fullname;
         getattr(plugins, "base") should propagate ModuleNotFoundError.
     """
+    import sys
+
     target_name = "base"
     fullname = f"{plugins.__name__}.{target_name}"
 
+    # Snapshot so we can restore after deliberately unloading base. Leaving
+    # foghorn.plugins.resolve.base out of sys.modules reloads a new module object
+    # later and breaks isinstance(PluginDecision) across already-imported servers.
+    saved_module = sys.modules.get(fullname)
+    saved_attr = getattr(plugins, target_name, None)
+    had_attr = hasattr(plugins, target_name)
+
     # Ensure attribute and module are not already loaded so __getattr__ path is exercised
-    if hasattr(plugins, target_name):
+    if had_attr:
         try:
             delattr(plugins, target_name)
         except Exception:  # pragma: no cover
             pass  # pragma: no cover
-    import sys
 
     sys.modules.pop(fullname, None)
 
@@ -85,5 +93,18 @@ def test_getattr_re_raises_non_matching_module_not_found(monkeypatch):
 
     monkeypatch.setattr(importlib, "import_module", fake_import)
 
-    with pytest.raises(ModuleNotFoundError):
-        getattr(plugins, target_name)
+    try:
+        with pytest.raises(ModuleNotFoundError):
+            getattr(plugins, target_name)
+    finally:
+        if saved_module is not None:
+            sys.modules[fullname] = saved_module
+        elif fullname in sys.modules:
+            sys.modules.pop(fullname, None)
+        if had_attr and saved_attr is not None:
+            setattr(plugins, target_name, saved_attr)
+        elif hasattr(plugins, target_name):
+            try:
+                delattr(plugins, target_name)
+            except Exception:  # pragma: no cover
+                pass  # pragma: no cover

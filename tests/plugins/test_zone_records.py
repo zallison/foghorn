@@ -1306,9 +1306,12 @@ def test_send_notify_for_zones_uses_static_targets(
 
     calls: list[tuple[str, dict]] = []
 
-    def fake_send_notify(zone_apex: str, target: dict) -> None:
+    def fake_send_notify(
+        zone_apex: str, target: dict, plugin: object | None = None
+    ) -> None:
         """Record NOTIFY sends instead of performing network I/O."""
 
+        _ = plugin
         calls.append((zone_apex, dict(target)))
 
     notify_mod = importlib.import_module("foghorn.plugins.resolve.zone_records.notify")

@@ -681,8 +681,8 @@ def test_main_axfr_invalid_values_and_malformed_tsig_entries(monkeypatch) -> Non
         '    max_concurrent_transfers: "bad"\n'
         '    rate_limit_per_client_per_second: "bad"\n'
         '    rate_limit_burst: "bad"\n'
-        '    max_transfer_rate_bytes_per_second: "bad"\n'
-        '    message_max_bytes: "bad"\n'
+        # Byte-sized fields are unit-coerced before AXFR parsing; omit invalid
+        # values here so this test still covers non-byte AXFR coercions.
         "    require_tsig: true\n"
         "    tsig_keys:\n"
         '      - name: "key-valid"\n'
@@ -883,7 +883,8 @@ def test_main_axfr_non_positive_limits_are_clamped(monkeypatch) -> None:
         "    max_concurrent_transfers: 0\n"
         "    rate_limit_per_client_per_second: -1\n"
         "    rate_limit_burst: 0\n"
-        "    max_transfer_rate_bytes_per_second: -10\n"
+        # 0 is valid bytes input; AXFR parser clamps non-positive rates to None.
+        "    max_transfer_rate_bytes_per_second: 0\n"
         "    message_max_bytes: 70000\n"
         "    require_tsig: false\n"
         "    tsig_keys: []\n"
@@ -2159,7 +2160,7 @@ def test_main_returns_one_on_config_validation_error(monkeypatch, capsys):
         "  listen:\n"
         "    udp:\n"
         "      enabled: true\n"
-        "      host: *********\n"
+        "      host: 127.0.0.1\n"
         "      port: 5354\n"
         "  resolver:\n"
         "    mode: forward\n"
@@ -2168,7 +2169,7 @@ def test_main_returns_one_on_config_validation_error(monkeypatch, capsys):
         "  strategy: failover\n"
         "  max_concurrent: 1\n"
         "  endpoints:\n"
-        "    - host: *******\n"
+        "    - host: 1.1.1.1\n"
         "      port: 53\n"
     )
 

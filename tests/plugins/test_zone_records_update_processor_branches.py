@@ -1068,7 +1068,7 @@ def test_apply_update_operations_branch_matrix(monkeypatch: pytest.MonkeyPatch) 
                 name="host.example.com",
                 rdtype=int(dns.rdatatype.A),
                 rdclass=99999,
-                values=["**********"],
+                values=["192.0.2.10"],
             )
         ],
         plugin=plugin,
@@ -1084,14 +1084,14 @@ def test_apply_update_operations_branch_matrix(monkeypatch: pytest.MonkeyPatch) 
                 rdtype=int(dns.rdatatype.A),
                 rdclass=int(dns.rdataclass.IN),
                 deleting=int(dns.rdataclass.NONE),
-                values=["**********"],
+                values=["192.0.2.10"],
             ),
             # Add/merge: zone class, not deleting.
             _RRset(
                 name="wipe.example.com",
                 rdtype=int(dns.rdatatype.A),
                 rdclass=int(dns.rdataclass.IN),
-                values=["************"],
+                values=["192.0.2.10"],
             ),
             # Name delete: CLASS ANY + TYPE ANY (wire: rdclass=IN, deleting=ANY).
             _RRset(
@@ -1303,7 +1303,7 @@ def test_apply_update_operations_detects_conflict_without_mutating_live_records(
                 rdtype=int(dns.rdatatype.A),
                 rdclass=int(dns.rdataclass.IN),
                 deleting=int(dns.rdataclass.NONE),
-                values=["**********"],
+                values=["192.0.2.10"],
             )
         ],
         plugin=plugin,
@@ -1328,7 +1328,7 @@ def test_apply_update_operations_add_and_single_value_delete_paths() -> None:
                 ["ns1.example.com. hostmaster.example.com. 1 3600 600 604800 300"],
                 ["src"],
             ),
-            ("single.example.com", int(QTYPE.A)): (300, ["**********"], ["src"]),
+            ("single.example.com", int(QTYPE.A)): (300, ["192.0.2.10"], ["src"]),
         },
         _records_lock=threading.RLock(),
     )
@@ -1340,7 +1340,7 @@ def test_apply_update_operations_add_and_single_value_delete_paths() -> None:
             rdtype=int(dns.rdatatype.A),
             rdclass=int(dns.rdataclass.IN),
             ttl=60,
-            values=["*************"],
+            values=["198.51.100.60"],
         ),
         # Specific-value delete uses CLASS NONE (wire: deleting=NONE).
         _RRset(
@@ -1349,7 +1349,7 @@ def test_apply_update_operations_add_and_single_value_delete_paths() -> None:
             rdclass=int(dns.rdataclass.IN),
             deleting=int(dns.rdataclass.NONE),
             ttl=0,
-            values=["**********"],
+            values=["192.0.2.10"],
         ),
     ]
     rcode, err = up.apply_update_operations(

@@ -209,7 +209,7 @@ def test_targets_returns_false_on_invalid_client_ip() -> None:
       - None; asserts invalid client_ip leads to a False decision.
     """
 
-    plugin = BasePlugin(targets={"ips": ["********/8"]})
+    plugin = BasePlugin(targets={"ips": ["10.0.0.0/8"]})
     plugin.setup()
     ctx = PluginContext(client_ip="not-an-ip")
 
