@@ -64,6 +64,7 @@ Headless Services (`clusterIP: None`) are skipped. Non-Running pods are skipped.
 | Field | Meaning |
 |-------|---------|
 | `endpoints` | Optional multi-cluster list; empty uses top-level connection fields |
+| `endpoints[].id` | Optional short label preferred in logs (falls back to `api_server`) |
 | `namespaces` | Limit scope; empty lists all namespaces the token can see |
 | `include_services` / `include_pods` | Resource kinds |
 | `label_selector` / `field_selector` | K8s list filters |

@@ -4,6 +4,7 @@
 #   - in_cluster: true
 #   - kubeconfig: /path/to/kubeconfig
 #   - api_server + token (+ optional ca_cert / tls_verify)
+# Optional endpoints[].id is preferred over api_server in logs.
 
 vars:
   DOMAIN: cluster.local

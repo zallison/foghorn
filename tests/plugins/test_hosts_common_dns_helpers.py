@@ -139,3 +139,59 @@ def test_dns_names_from_labels_parses_and_validates() -> None:
     assert hosts_common.dns_names_from_labels({}, "dns_name") == []
     assert hosts_common.is_valid_dns_hostname("api.internal") is True
     assert hosts_common.is_valid_dns_hostname("_x") is False
+
+
+def test_parse_endpoint_host_ips_and_ttl() -> None:
+    """Brief: Shared endpoint IP/TTL parsers accept good values and drop bad ones.
+
+    Inputs:
+      - None.
+    Outputs:
+      - None; asserts valid/invalid use_ipv4/use_ipv6/ttl handling.
+    """
+
+    v4, v6 = hosts_common.parse_endpoint_host_ips(
+        {"use_ipv4": "10.0.0.1", "use_ipv6": "2001:db8::1"}
+    )
+    assert v4 == "10.0.0.1"
+    assert v6 == "2001:db8::1"
+
+    bad_v4, bad_v6 = hosts_common.parse_endpoint_host_ips(
+        {"use_ipv4": "2001:db8::1", "use_ipv6": "10.0.0.1"}
+    )
+    assert bad_v4 is None
+    assert bad_v6 is None
+
+    assert hosts_common.parse_endpoint_ttl({"ttl": 30}) == 30
+    assert hosts_common.parse_endpoint_ttl({"ttl": -1}) is None
+    assert hosts_common.parse_endpoint_ttl({"ttl": "nope"}, label="ep1") is None
+    assert hosts_common.parse_endpoint_ttl({}) is None
+
+
+def test_endpoint_label_and_min_positive_interval() -> None:
+    """Brief: endpoint_label prefers id; min_positive_interval ignores non-positive.
+
+    Inputs:
+      - None.
+    Outputs:
+      - None; asserts label selection and interval min math.
+    """
+
+    assert hosts_common.endpoint_label({"id": "pve1", "url": "https://pve"}) == "pve1"
+    assert hosts_common.endpoint_label({"url": "https://pve"}) == "https://pve"
+    assert (
+        hosts_common.endpoint_label({"api_server": "https://k8s"}, default="endpoint")
+        == "https://k8s"
+    )
+    assert hosts_common.endpoint_label({"id": "x"}, url="https://override") == "x"
+    assert hosts_common.endpoint_label({}, url="https://only") == "https://only"
+    assert hosts_common.endpoint_label({}, default="endpoint") == "endpoint"
+
+    assert (
+        hosts_common.min_positive_interval(
+            [{"interval": 0}, {"interval": 30}, {"interval": 10}]
+        )
+        == 10.0
+    )
+    assert hosts_common.min_positive_interval([{"interval": 0}]) is None
+    assert hosts_common.min_positive_interval([]) is None

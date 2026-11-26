@@ -68,6 +68,7 @@ are not contacted unless earlier ones fail.
 ### Plugin-specific
 
 - `endpoints: list`
+  - `id` (optional): Short label preferred in logs and admin UI (falls back to `url`)
   - `url` (required): Base URL, e.g. `https://pve1.lan:8006`
   - `token_id` / `token_secret`: API token (`USER@REALM!TOKENID` + secret)
   - `user` / `password`: Optional ticket auth instead of a token

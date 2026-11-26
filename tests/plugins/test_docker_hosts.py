@@ -678,12 +678,12 @@ def test_docker_hosts_iter_containers_state_change_logs_failures(monkeypatch, ca
 
     # First failure at t=100, quiet repeats, hourly re-warn at t=3700.
     timeline = iter([100.0, 101.0, 102.0, 3700.0, 3701.0])
-    hc = importlib.import_module("foghorn.plugins.resolve.hosts_common")
+    cl = importlib.import_module("foghorn.utils.condition_logging")
 
     def _mono() -> float:
         return next(timeline)
 
-    monkeypatch.setattr(hc.time, "monotonic", _mono)
+    monkeypatch.setattr(cl.time, "monotonic", _mono)
 
     caplog.set_level("DEBUG", logger=mod.__name__)
     endpoint = {"url": "unix:///var/run/docker.sock"}
@@ -1101,8 +1101,7 @@ def test_docker_hosts_setup_continues_after_one_endpoint_fails_with_id(
     assert "tcp://good.example:2376" in clients
     assert any("failed to create client" in r.getMessage() for r in caplog.records)
     assert any(
-        "connected to endpoint good-id (tcp://good.example:2376)" in r.getMessage()
-        for r in caplog.records
+        "connected to endpoint good-id" in r.getMessage() for r in caplog.records
     )
     assert any("1 connected, 1 unavailable" in r.getMessage() for r in caplog.records)
 
@@ -2201,9 +2200,9 @@ def test_docker_hosts_discovery_emits_hosts_txt_with_host_ips(monkeypatch):
         discovery=True,
         endpoints=[
             {
-                "url": "tcp://*********:2375",
-                "use_ipv4": "**********",
-                "use_ipv6": "************",
+                "url": "tcp://localhost:2375",
+                "use_ipv4": "192.0.2.10",
+                "use_ipv6": "2001:db8::10",
             }
         ],
     )
@@ -2217,9 +2216,9 @@ def test_docker_hosts_discovery_emits_hosts_txt_with_host_ips(monkeypatch):
     assert lines
     joined = " ".join(lines)
     # Endpoint should be shortened to host-only, without the tcp:// scheme or port.
-    assert "endpoint=*********" in joined
-    assert "ans4=**********" in joined
-    assert "ans6=************" in joined
+    assert "endpoint=localhost" in joined
+    assert "ans4=192.0.2.10" in joined
+    assert "ans6=2001:db8::10" in joined
 
 
 def test_docker_hosts_endpoint_id_preferred_in_txt_and_snapshot(monkeypatch):

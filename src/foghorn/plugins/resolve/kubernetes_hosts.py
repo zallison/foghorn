@@ -27,13 +27,14 @@ from foghorn.plugins.resolve.hosts_common import (
     DynamicHostsPlugin,
     add_forward_records,
     dns_names_from_labels,
+    endpoint_label,
     fold_tls_aliases,
+    get_sni_session,
     join_host_suffix,
     merge_list_map,
     normalize_host_label,
     normalize_suffix,
     resolve_plugin_tls_path,
-    get_sni_session,
 )
 from foghorn.utils import condition_logging as condition_log
 
@@ -53,6 +54,7 @@ class KubernetesEndpointConfig(BaseModel):
     """Per-endpoint (or cluster) connection and scope settings.
 
     Inputs (fields):
+      - id: Optional short label preferred in logs (falls back to api_server).
       - api_server: Explicit API base URL (https://...).
       - kubeconfig: Path to kubeconfig file.
       - in_cluster: Use in-cluster service account files when True.
@@ -69,6 +71,7 @@ class KubernetesEndpointConfig(BaseModel):
       - Validated endpoint config (extra keys allowed).
     """
 
+    id: str | None = None
     api_server: str | None = None
     kubeconfig: str | None = None
     in_cluster: bool = False
@@ -531,8 +534,12 @@ class KubernetesHosts(DynamicHostsPlugin):
             verify = False
             from foghorn.plugins.resolve.hosts_common import note_insecure_tls
 
+            # Prefer configured id/label over API URL in operator-facing logs.
             note_insecure_tls(
-                str(api_server or endpoint.api_server or "kubernetes"),
+                self._endpoint_label(
+                    endpoint,
+                    api_server=api_server or endpoint.api_server,
+                ),
                 log=logger,
             )
         elif ca_cert:
@@ -703,6 +710,24 @@ class KubernetesHosts(DynamicHostsPlugin):
             if not cont:
                 break
         return items
+
+    @staticmethod
+    def _endpoint_label(
+        endpoint: KubernetesEndpointConfig,
+        *,
+        api_server: str | None = None,
+    ) -> str:
+        """Brief: Prefer configured endpoint id over API URL for operator text.
+
+        Inputs:
+          - endpoint: Endpoint configuration.
+          - api_server: Optional resolved API URL override.
+
+        Outputs:
+          - Display label (id when set, else api_server, else "endpoint").
+        """
+
+        return endpoint_label(endpoint, url=api_server, default="endpoint")
 
     def _endpoint_namespaces(
         self, endpoint: KubernetesEndpointConfig
@@ -888,7 +913,9 @@ class KubernetesHosts(DynamicHostsPlugin):
         namespaces = self._endpoint_namespaces(endpoint)
         single_ns = len([n for n in namespaces if n]) == 1
 
+        # Condition keys stay on the resolved API URL for stability; logs prefer id.
         api_id = str(conn.get("api_server") or endpoint.api_server or "k8s")
+        ep_label = self._endpoint_label(endpoint, api_server=api_id)
         for ns in namespaces:
             ns_label = ns or "*"
             if include_services:
@@ -908,8 +935,9 @@ class KubernetesHosts(DynamicHostsPlugin):
                     condition_log.note_condition_failure(
                         self,
                         list_key,
-                        "[%s]: list services failed (ns=%s): %s",
+                        "[%s]: list services failed on %s (ns=%s): %s",
                         self.name,
+                        ep_label,
                         ns_label,
                         exc,
                     )
@@ -918,8 +946,9 @@ class KubernetesHosts(DynamicHostsPlugin):
                     condition_log.note_condition_ok(
                         self,
                         list_key,
-                        "[%s]: list services recovered (ns=%s)",
+                        "[%s]: list services recovered on %s (ns=%s)",
                         self.name,
+                        ep_label,
                         ns_label,
                     )
                 for svc in services:
@@ -1001,8 +1030,9 @@ class KubernetesHosts(DynamicHostsPlugin):
                     condition_log.note_condition_failure(
                         self,
                         list_key,
-                        "[%s]: list pods failed (ns=%s): %s",
+                        "[%s]: list pods failed on %s (ns=%s): %s",
                         self.name,
+                        ep_label,
                         ns_label,
                         exc,
                     )
@@ -1011,8 +1041,9 @@ class KubernetesHosts(DynamicHostsPlugin):
                     condition_log.note_condition_ok(
                         self,
                         list_key,
-                        "[%s]: list pods recovered (ns=%s)",
+                        "[%s]: list pods recovered on %s (ns=%s)",
                         self.name,
+                        ep_label,
                         ns_label,
                     )
                 for pod in pods:
@@ -1117,7 +1148,12 @@ class KubernetesHosts(DynamicHostsPlugin):
 
         cap_exceeded = False
         for endpoint in self._effective_endpoints():
-            endpoint_key = f"endpoint-collect:{getattr(endpoint, 'api_server', None) or id(endpoint)}"
+            ep_label = self._endpoint_label(endpoint)
+            # Sticky key prefers stable api_server URL; fall back to configured id.
+            endpoint_key = (
+                f"endpoint-collect:"
+                f"{getattr(endpoint, 'api_server', None) or getattr(endpoint, 'id', None) or id(endpoint)}"
+            )
             try:
                 (
                     e_v4,
@@ -1138,8 +1174,9 @@ class KubernetesHosts(DynamicHostsPlugin):
                 condition_log.note_condition_failure(
                     self,
                     endpoint_key,
-                    "[%s]: endpoint collect failed: %s",
+                    "[%s]: endpoint collect failed on %s: %s",
                     self.name,
+                    ep_label,
                     exc,
                 )
                 continue
@@ -1148,7 +1185,7 @@ class KubernetesHosts(DynamicHostsPlugin):
                 endpoint_key,
                 "[%s]: endpoint collect recovered (%s)",
                 self.name,
-                getattr(endpoint, "api_server", None) or "endpoint",
+                ep_label,
             )
             merge_list_map(forward_v4, e_v4)
             merge_list_map(forward_v6, e_v6)

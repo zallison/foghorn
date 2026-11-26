@@ -27,6 +27,8 @@ from foghorn.plugins.resolve.hosts_common import (
     is_valid_dns_hostname,
     is_valid_dns_label,
     normalize_suffix,
+    parse_endpoint_host_ips,
+    parse_endpoint_ttl,
     resolve_plugin_tls_path,
     sanitize_txt_chunk,
 )
@@ -201,10 +203,74 @@ class DockerHosts(DynamicHostsPlugin):
 
         # Runtime configuration + shared host maps / condition logging.
         self._init_dynamic_hosts_state(default_ttl=int(self.config.get("ttl", 300)))
+        self._apply_setup_options()
+        self._endpoints = self._parse_endpoints(self.config.get("endpoints") or [])
+
+        # Per-host exported ports (hostports) for admin UI display.
+        self._hostports: dict[str, list[str]] = {}
+
+        # Docker clients per endpoint URL (when docker SDK is available).
+        # One unreachable endpoint must not block connecting to the others;
+        # failures are sticky-logged and retried on each reload cycle.
+        self._clients: dict[str, object] = {}
+        self._connect_endpoint_clients()
+        self._configure_reload_interval()
+
+        # Initial population from Docker (skips endpoints without a live client).
+        self._reload_from_docker()
+
+        # Optionally start a background refresher to keep mappings up to date
+        # without relying on signals. When reload_interval is 0 or negative, the
+        # periodic loop is disabled and only the initial snapshot is used.
+        self._start_reload_loop(thread_name="DockerHostsPoller")
+
+    def _apply_setup_options(self) -> None:
+        """Brief: Copy plugin-level options onto instance attributes.
+
+        Inputs:
+          - None (reads self.config).
+        Outputs:
+          - None; sets health allowlist, discovery, suffix, txt_fields, etc.
+        """
 
         # Health/status allowlist. Containers whose effective health/status is
         # not in this list are skipped.
-        raw_health = self.config.get("health")
+        self._health_allowlist = self._parse_health_allowlist(self.config.get("health"))
+
+        # When true, publish a TXT record at _containers.<suffix> (or
+        # _containers when no suffix is set) plus a host-level summary at
+        # _hosts.<suffix> (or _hosts).
+        self._discovery = bool(self.config.get("discovery", False))
+        self._expose_txt_in_additional = bool(
+            self.config.get("expose_txt_in_additional", False)
+        )
+
+        # Optional default suffix applied to container names when no
+        # per-endpoint suffix is provided, e.g. "docker.mycorp" so that a
+        # container named "web" is published as "web.docker.mycorp".
+        self._suffix = normalize_suffix(self.config.get("suffix"))
+
+        # Label key for explicit DNS names (provider-neutral default: dns_name).
+        raw_label_key = self.config.get("dns_name_label", "dns_name")
+        label_key = str(raw_label_key or "").strip() or "dns_name"
+        self._dns_name_label = label_key
+
+        self._txt_fields = self._parse_txt_fields(self.config.get("txt_fields") or [])
+        self._txt_fields_replace = bool(self.config.get("txt_fields_replace", False))
+        self._txt_fields_keep = self._parse_txt_fields_keep(
+            self.config.get("txt_fields_keep") or []
+        )
+
+    @staticmethod
+    def _parse_health_allowlist(raw_health: object) -> list[str]:
+        """Brief: Normalize container health/status allowlist from config.
+
+        Inputs:
+          - raw_health: None, str, list, or other value from config.
+        Outputs:
+          - Ordered unique allowed statuses (may be empty after filtering).
+        """
+
         if raw_health is None:
             health_items: list[str] = ["healthy", "running"]
         elif isinstance(raw_health, str):
@@ -229,25 +295,22 @@ class DockerHosts(DynamicHostsPlugin):
                 continue
             if key not in health_norm:
                 health_norm.append(key)
-        self._health_allowlist = health_norm
+        return health_norm
 
-        # When true, publish a TXT record at _containers.<suffix> (or
-        # _containers when no suffix is set) plus a host-level summary at
-        # _hosts.<suffix> (or _hosts).
-        self._discovery = bool(self.config.get("discovery", False))
-        self._expose_txt_in_additional = bool(
-            self.config.get("expose_txt_in_additional", False)
-        )
+    @staticmethod
+    def _parse_txt_fields(raw_txt_fields: object) -> list[tuple[str, str]]:
+        """Brief: Parse optional txt_fields name/path pairs from config.
 
-        # Optional default suffix applied to container names when no
-        # per-endpoint suffix is provided, e.g. "docker.mycorp" so that a
-        # container named "web" is published as "web.docker.mycorp".
-        self._suffix = normalize_suffix(self.config.get("suffix"))
+        Inputs:
+          - raw_txt_fields: Config value (list of mappings expected).
+        Outputs:
+          - List of (name, path) tuples for inspect-driven TXT fields.
 
-        # Label key for explicit DNS names (provider-neutral default: dns_name).
-        raw_label_key = self.config.get("dns_name_label", "dns_name")
-        label_key = str(raw_label_key or "").strip() or "dns_name"
-        self._dns_name_label = label_key
+        Notes:
+          - When txt_fields_replace is true and at least one custom field
+            resolves for a container, only those custom fields are emitted in
+            the TXT line; otherwise they are appended to the default summary.
+        """
 
         # Optional per-container TXT customisation driven by docker inspect
         # JSONPath-like expressions. When txt_fields is provided, each entry
@@ -255,11 +318,6 @@ class DockerHosts(DynamicHostsPlugin):
         #   - name: field name used in TXT output (e.g. "image").
         #   - path: JSONPath-like expression evaluated against the container
         #           inspect dict (e.g. "Config.Image").
-        #
-        # When txt_fields_replace is true and at least one custom field
-        # resolves for a container, only those custom fields are emitted in the
-        # TXT line; otherwise they are appended to the default summary.
-        raw_txt_fields = self.config.get("txt_fields") or []
         txt_fields: list[tuple[str, str]] = []
         if isinstance(raw_txt_fields, list):
             for item in raw_txt_fields:
@@ -280,17 +338,22 @@ class DockerHosts(DynamicHostsPlugin):
                 "txt_fields must be a list when set; got %r",
                 type(raw_txt_fields),
             )
+        return txt_fields
 
-        self._txt_fields: list[tuple[str, str]] = txt_fields
-        self._txt_fields_replace: bool = bool(
-            self.config.get("txt_fields_replace", False)
-        )
+    @staticmethod
+    def _parse_txt_fields_keep(raw_txt_keep: object) -> list[str]:
+        """Brief: Parse txt_fields_keep built-in key names from config.
+
+        Inputs:
+          - raw_txt_keep: Config value (list of strings expected).
+        Outputs:
+          - List of non-empty key names to preserve under replace mode.
+        """
 
         # Optional: when txt_fields_replace is true, preserve a subset of the
         # built-in TXT summary keys (for example "ans4", "endpoint"). Any
         # listed keys are only kept when they exist for the container; missing
         # ones are silently ignored.
-        raw_txt_keep = self.config.get("txt_fields_keep") or []
         txt_fields_keep: list[str] = []
         if isinstance(raw_txt_keep, list):
             for item in raw_txt_keep:
@@ -303,135 +366,141 @@ class DockerHosts(DynamicHostsPlugin):
                 "txt_fields_keep must be a list when set; got %r",
                 type(raw_txt_keep),
             )
+        return txt_fields_keep
 
-        self._txt_fields_keep: list[str] = txt_fields_keep
+    @staticmethod
+    def _endpoint_reload_interval(item: dict[str, object]) -> float:
+        """Brief: Parse per-endpoint reload_interval_second.
 
-        raw_endpoints = self.config.get("endpoints") or []
-        endpoints_cfg: list[dict[str, object]] = []
+        Inputs:
+          - item: Endpoint mapping.
+        Outputs:
+          - Non-negative interval seconds (default 60.0).
+        """
 
-        # Normalize endpoint mappings; each must be a dict with a "url" key.
-        for item in raw_endpoints:
-            if not isinstance(item, dict):
-                logger.warning("ignoring non-mapping endpoint definition %r", item)
-                continue
-            url_raw = item.get("url")
-            if not url_raw:
-                logger.warning("endpoint missing 'url'; skipping entry %r", item)
-                continue
-            url = str(url_raw).strip()
-            if not url:
-                logger.warning("endpoint has empty 'url'; skipping entry %r", item)
-                continue
+        interval_raw = item.get("reload_interval_second", 60.0)
+        try:
+            interval = float(interval_raw)
+        except (TypeError, ValueError):
+            interval = 60.0
+        if interval < 0:
+            interval = 0.0
+        return interval
 
-            # Per-endpoint reload interval
-            interval_raw = item.get("reload_interval_second", 60.0)
-            try:
-                interval = float(interval_raw)
-            except (TypeError, ValueError):
-                interval = 60.0
-            if interval < 0:
-                interval = 0.0
+    @staticmethod
+    def _normalize_endpoint(raw_item: object) -> dict[str, object] | None:
+        """Brief: Validate and normalize one Docker endpoint config mapping.
 
-            # Per-endpoint host IP overrides
-            host_ipv4: str | None = None
-            host_ipv6: str | None = None
-            raw_v4 = item.get("use_ipv4")
-            if raw_v4:
-                try:
-                    ip_obj = ipaddress.ip_address(str(raw_v4))
-                    if ip_obj.version == 4:
-                        host_ipv4 = str(ip_obj)
-                    else:
-                        logger.warning("use_ipv4=%r is not IPv4; ignoring", raw_v4)
-                except ValueError:
-                    logger.warning("invalid use_ipv4 %r; ignoring", raw_v4)
-            raw_v6 = item.get("use_ipv6")
-            if raw_v6:
-                try:
-                    ip_obj = ipaddress.ip_address(str(raw_v6))
-                    if ip_obj.version == 6:
-                        host_ipv6 = str(ip_obj)
-                    else:
-                        logger.warning("use_ipv6=%r is not IPv6; ignoring", raw_v6)
-                except ValueError:
-                    logger.warning("invalid use_ipv6 %r; ignoring", raw_v6)
+        Inputs:
+          - raw_item: Raw endpoints list entry.
+        Outputs:
+          - Normalized endpoint dict, or None when the entry is skipped.
+        """
 
-            # Per-endpoint TTL override
-            ttl_override: int | None
-            ttl_raw = item.get("ttl")
-            if ttl_raw is None:
-                ttl_override = None
-            else:
-                try:
-                    ttl_val = int(ttl_raw)
-                    ttl_override = ttl_val if ttl_val >= 0 else None
-                except (TypeError, ValueError):
-                    logger.warning(
-                        "invalid ttl %r for endpoint %s; ignoring override",
-                        ttl_raw,
-                        item.get("id") or url,
-                    )
-                    ttl_override = None
-            tls_verify = bool(item.get("tls_verify", False))
-            tls_cert = str(item.get("tls_cert") or "").strip() or None
-            tls_key = str(item.get("tls_key") or "").strip() or None
-            tls_ca = str(item.get("tls_ca") or "").strip() or None
-            if url.startswith("tcp://") and not (
-                tls_verify or tls_cert or tls_key or tls_ca
-            ):
-                logger.warning(
-                    "missing TLS: plaintext endpoint %s",
-                    item.get("id") or url,
-                )
+        if not isinstance(raw_item, dict):
+            logger.warning("ignoring non-mapping endpoint definition %r", raw_item)
+            return None
+        item = raw_item
+        url_raw = item.get("url")
+        if not url_raw:
+            logger.warning("endpoint missing 'url'; skipping entry %r", item)
+            return None
+        url = str(url_raw).strip()
+        if not url:
+            logger.warning("endpoint has empty 'url'; skipping entry %r", item)
+            return None
 
-            # Optional per-endpoint suffix; when absent, we fall back to the
-            # plugin-level suffix stored in self._suffix.
-            ep_suffix = normalize_suffix(item.get("suffix"))
+        interval = DockerHosts._endpoint_reload_interval(item)
+        host_ipv4, host_ipv6 = parse_endpoint_host_ips(item, log=logger)
+        # Warning labels match prior setup(): raw id or url (not stripped ep_id).
+        warn_label = item.get("id") or url
+        ttl_override = parse_endpoint_ttl(item, label=warn_label, log=logger)
 
-            ep_id = str(item.get("id") or "").strip() or None
-            endpoints_cfg.append(
-                {
-                    "id": ep_id,
-                    "url": url,
-                    "interval": interval,
-                    "host_ipv4": host_ipv4,
-                    "host_ipv6": host_ipv6,
-                    "ttl": ttl_override,
-                    "suffix": ep_suffix,
-                    "tls_verify": tls_verify,
-                    "tls_cert": tls_cert,
-                    "tls_key": tls_key,
-                    "tls_ca": tls_ca,
-                }
+        tls_verify = bool(item.get("tls_verify", False))
+        tls_cert = str(item.get("tls_cert") or "").strip() or None
+        tls_key = str(item.get("tls_key") or "").strip() or None
+        tls_ca = str(item.get("tls_ca") or "").strip() or None
+        if url.startswith("tcp://") and not (
+            tls_verify or tls_cert or tls_key or tls_ca
+        ):
+            logger.warning(
+                "missing TLS: plaintext endpoint %s",
+                warn_label,
             )
+
+        ep_id = str(item.get("id") or "").strip() or None
+
+        # Optional per-endpoint suffix; when absent, we fall back to the
+        # plugin-level suffix stored in self._suffix.
+        ep_suffix = normalize_suffix(item.get("suffix"))
+
+        return {
+            "id": ep_id,
+            "url": url,
+            "interval": interval,
+            "host_ipv4": host_ipv4,
+            "host_ipv6": host_ipv6,
+            "ttl": ttl_override,
+            "suffix": ep_suffix,
+            "tls_verify": tls_verify,
+            "tls_cert": tls_cert,
+            "tls_key": tls_key,
+            "tls_ca": tls_ca,
+        }
+
+    @staticmethod
+    def _default_endpoint() -> dict[str, object]:
+        """Brief: Built-in local docker.sock endpoint used when config is empty.
+
+        Inputs:
+          - None.
+        Outputs:
+          - Normalized default endpoint mapping (no id/suffix keys).
+        """
+
+        return {
+            "url": "unix:///var/run/docker.sock",
+            "interval": 60.0,
+            "host_ipv4": None,
+            "host_ipv6": None,
+            "ttl": None,
+            "tls_verify": False,
+            "tls_cert": None,
+            "tls_key": None,
+            "tls_ca": None,
+        }
+
+    def _parse_endpoints(self, raw_endpoints: object) -> list[dict[str, object]]:
+        """Brief: Normalize endpoints list, defaulting to local docker.sock.
+
+        Inputs:
+          - raw_endpoints: Config endpoints value (usually a list).
+        Outputs:
+          - Non-empty list of normalized endpoint dicts.
+        """
+
+        endpoints_cfg: list[dict[str, object]] = []
+        for raw_item in raw_endpoints or []:
+            normalized = self._normalize_endpoint(raw_item)
+            if normalized is not None:
+                endpoints_cfg.append(normalized)
 
         if not endpoints_cfg:
             logger.info(
                 "no endpoints configured; using default unix:///var/run/docker.sock"
             )
-            endpoints_cfg.append(
-                {
-                    "url": "unix:///var/run/docker.sock",
-                    "interval": 60.0,
-                    "host_ipv4": None,
-                    "host_ipv6": None,
-                    "ttl": None,
-                    "tls_verify": False,
-                    "tls_cert": None,
-                    "tls_key": None,
-                    "tls_ca": None,
-                }
-            )
+            endpoints_cfg.append(self._default_endpoint())
+        return endpoints_cfg
 
-        self._endpoints: list[dict[str, object]] = endpoints_cfg
+    def _connect_endpoint_clients(self) -> None:
+        """Brief: Create Docker SDK clients for configured endpoints.
 
-        # Per-host exported ports (hostports) for admin UI display.
-        self._hostports: dict[str, list[str]] = {}
+        Inputs:
+          - None (uses self._endpoints / self._clients).
+        Outputs:
+          - None; populates self._clients and logs connect summary.
+        """
 
-        # Docker clients per endpoint URL (when docker SDK is available).
-        # One unreachable endpoint must not block connecting to the others;
-        # failures are sticky-logged and retried on each reload cycle.
-        self._clients: dict[str, object] = {}
         connected = 0
         failed = 0
         if docker is not None:
@@ -463,19 +532,17 @@ class DockerHosts(DynamicHostsPlugin):
                 "docker SDK is not installed; plugin will be inert until it is available"
             )
 
-        # Compute global reload interval as the minimum positive endpoint interval
-        positive_intervals = [
-            float(ep["interval"]) for ep in self._endpoints if float(ep["interval"]) > 0
-        ]
-        self._reload_interval = min(positive_intervals) if positive_intervals else 0.0
+    def _configure_reload_interval(self) -> None:
+        """Brief: Set self._reload_interval from positive endpoint intervals.
 
-        # Initial population from Docker (skips endpoints without a live client).
-        self._reload_from_docker()
+        Inputs:
+          - None (uses self._endpoints).
+        Outputs:
+          - None; assigns self._reload_interval (0.0 when none positive).
+        """
 
-        # Optionally start a background refresher to keep mappings up to date
-        # without relying on signals. When reload_interval is 0 or negative, the
-        # periodic loop is disabled and only the initial snapshot is used.
-        self._start_reload_loop(thread_name="DockerHostsPoller")
+        # Compute global reload interval as the minimum positive endpoint interval.
+        self._set_reload_interval_from_endpoints(fallback=0.0)
 
     def _iter_containers_for_endpoint(
         self, endpoint: dict[str, object]

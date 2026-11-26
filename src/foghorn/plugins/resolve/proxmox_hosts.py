@@ -625,13 +625,15 @@ class ProxmoxHosts(DynamicHostsPlugin):
           - _PveClient or None on failure.
         """
 
-        url = str(endpoint["url"])
-        client = self._clients.get(url)
+        endpoint_id = endpoint.get("token_id")
+        endpoint_url = endpoint.get("url")
+        endpoint_id_or_url = endpoint_id if endpoint_id else endpoint_url
+        client = self._clients.get(endpoint_id_or_url)
         if client is not None:
             return client
         try:
             client = _PveClient(
-                base_url=url,
+                base_url=endpoint_url,  # type: ignore[arg-type]
                 token_id=endpoint.get("token_id"),  # type: ignore[arg-type]
                 token_secret=endpoint.get("token_secret"),  # type: ignore[arg-type]
                 user=endpoint.get("user"),  # type: ignore[arg-type]
@@ -642,14 +644,14 @@ class ProxmoxHosts(DynamicHostsPlugin):
         except Exception as exc:
             condition_log.note_condition_failure(
                 self,
-                f"endpoint:{url}",
+                f"endpoint:{endpoint_url}",
                 "failed to create client for %s: %s",
-                url,
+                endpoint_url,
                 exc,
             )
             return None
-        self._clients[url] = client
-        logger.info("using endpoint %s", url)
+        self._clients[endpoint_id_or_url] = client
+        logger.info("using endpoint %s", endpoint_id_or_url)
         return client
 
     def _fetch_cluster_vms(self, client: _PveClient) -> list[dict[str, Any]]:
@@ -1069,7 +1071,10 @@ class ProxmoxHosts(DynamicHostsPlugin):
         last_error: Exception | None = None
 
         for endpoint in self._endpoints:
-            url = str(endpoint["url"])
+            endpoint_id = endpoint.get("token_id")
+            endpoint_url = endpoint.get("url")
+            endpoint_id_or_url = endpoint_id if endpoint_id else endpoint_url
+            client = self._clients.get(endpoint_id_or_url)
             client = self._get_client(endpoint)
             if client is None:
                 continue
@@ -1077,17 +1082,17 @@ class ProxmoxHosts(DynamicHostsPlugin):
                 resources = self._fetch_cluster_vms(client)
                 condition_log.note_condition_ok(
                     self,
-                    f"endpoint:{url}",
+                    f"endpoint:{endpoint_url}",
                     "endpoint %s is reachable again",
-                    url,
+                    endpoint_url,
                 )
             except Exception as exc:
                 last_error = exc
                 condition_log.note_condition_failure(
                     self,
-                    f"endpoint:{url}",
+                    f"endpoint:{endpoint_url}",
                     "failed listing VMs on %s: %s",
-                    url,
+                    endpoint_url,
                     exc,
                 )
                 continue
@@ -1216,7 +1221,7 @@ class ProxmoxHosts(DynamicHostsPlugin):
 
             loaded = True
             # One node answers for the whole cluster; stop after first success.
-            logger.debug("cluster inventory loaded from %s", url)
+            logger.debug("cluster inventory loaded from %s", endpoint_url)
             break
 
         if not loaded:

@@ -815,6 +815,161 @@ def fold_tls_aliases(
     return out
 
 
+def parse_endpoint_host_ips(
+    item: dict[str, object],
+    *,
+    log: logging.Logger | None = None,
+) -> tuple[str | None, str | None]:
+    """Brief: Parse optional use_ipv4/use_ipv6 overrides on an endpoint mapping.
+
+    Inputs:
+      - item: Endpoint mapping with optional use_ipv4 / use_ipv6.
+      - log: Logger for invalid-value warnings (defaults to module logger).
+
+    Outputs:
+      - (host_ipv4, host_ipv6) strings or None when unset/invalid.
+    """
+
+    lg = log or logger
+    host_ipv4: str | None = None
+    host_ipv6: str | None = None
+    raw_v4 = item.get("use_ipv4")
+    if raw_v4:
+        ip_obj = parse_ip(str(raw_v4))
+        if ip_obj is None:
+            lg.warning("invalid use_ipv4 %r; ignoring", raw_v4)
+        elif ip_obj.version == 4:
+            host_ipv4 = str(ip_obj)
+        else:
+            lg.warning("use_ipv4=%r is not IPv4; ignoring", raw_v4)
+    raw_v6 = item.get("use_ipv6")
+    if raw_v6:
+        ip_obj = parse_ip(str(raw_v6))
+        if ip_obj is None:
+            lg.warning("invalid use_ipv6 %r; ignoring", raw_v6)
+        elif ip_obj.version == 6:
+            host_ipv6 = str(ip_obj)
+        else:
+            lg.warning("use_ipv6=%r is not IPv6; ignoring", raw_v6)
+    return host_ipv4, host_ipv6
+
+
+def parse_endpoint_ttl(
+    item: dict[str, object],
+    *,
+    label: object = None,
+    log: logging.Logger | None = None,
+) -> int | None:
+    """Brief: Parse optional per-endpoint TTL override.
+
+    Inputs:
+      - item: Endpoint mapping with optional ttl.
+      - label: Optional endpoint label for warning logs.
+      - log: Logger for invalid-value warnings (defaults to module logger).
+
+    Outputs:
+      - Non-negative TTL int, or None when unset/invalid.
+    """
+
+    lg = log or logger
+    ttl_raw = item.get("ttl")
+    if ttl_raw is None:
+        return None
+    try:
+        ttl_val = int(ttl_raw)  # type: ignore[arg-type]
+        return ttl_val if ttl_val >= 0 else None
+    except (TypeError, ValueError):
+        lg.warning(
+            "invalid ttl %r for endpoint %s; ignoring override",
+            ttl_raw,
+            label if label is not None else "?",
+        )
+        return None
+
+
+def endpoint_label(
+    endpoint: object | None = None,
+    *,
+    endpoint_id: object | None = None,
+    url: object | None = None,
+    id_attr: str = "id",
+    url_attrs: tuple[str, ...] = ("url", "api_server"),
+    default: str = "",
+) -> str:
+    """Brief: Prefer configured endpoint id over URL for operator-facing text.
+
+    Inputs:
+      - endpoint: Mapping or object with id/url (or api_server) fields.
+      - endpoint_id / url: Optional explicit overrides.
+      - id_attr / url_attrs: Attribute/key names to read from endpoint.
+      - default: Value when no id or URL is available.
+
+    Outputs:
+      - Display label string.
+
+    Example:
+      endpoint_label({"id": "pve1", "url": "https://pve"}) -> "pve1"
+      endpoint_label({"url": "https://pve"}) -> "https://pve"
+    """
+
+    def _get(obj: object | None, key: str) -> object | None:
+        if obj is None:
+            return None
+        if isinstance(obj, dict):
+            return obj.get(key)
+        return getattr(obj, key, None)
+
+    if endpoint_id is not None:
+        label = str(endpoint_id or "").strip()
+    else:
+        label = str(_get(endpoint, id_attr) or "").strip()
+    if label:
+        return label
+
+    if url is not None:
+        text = str(url or "").strip()
+        if text:
+            return text
+
+    for attr in url_attrs:
+        text = str(_get(endpoint, attr) or "").strip()
+        if text:
+            return text
+    return default
+
+
+def min_positive_interval(
+    endpoints: Iterable[object],
+    *,
+    key: str = "interval",
+) -> float | None:
+    """Brief: Smallest positive numeric interval among endpoint entries.
+
+    Inputs:
+      - endpoints: Iterable of mappings/objects with an interval field.
+      - key: Attribute/key name holding the interval (default "interval").
+
+    Outputs:
+      - min(positive intervals), or None when none are > 0.
+    """
+
+    positive: list[float] = []
+    for ep in endpoints or []:
+        if isinstance(ep, dict):
+            raw = ep.get(key)
+        else:
+            raw = getattr(ep, key, None)
+        try:
+            value = float(raw)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            positive.append(value)
+    if not positive:
+        return None
+    return min(positive)
+
+
 class DynamicHostsPlugin(BasePlugin):
     """Brief: Base for inventory-backed hosts plugins (Docker/Proxmox/K8s).
 
@@ -852,6 +1007,41 @@ class DynamicHostsPlugin(BasePlugin):
         self._reload_interval = 0.0
         self._expose_txt_in_additional = False
         condition_log.init_condition_logging(self)
+
+    def _set_reload_interval_from_endpoints(
+        self,
+        *,
+        endpoints: Iterable[object] | None = None,
+        key: str = "interval",
+        fallback: float = 0.0,
+    ) -> None:
+        """Brief: Set self._reload_interval from positive endpoint intervals.
+
+        Inputs:
+          - endpoints: Endpoint list (default: self._endpoints).
+          - key: Interval field name on each endpoint (default "interval").
+          - fallback: Value when no positive endpoint interval exists.
+
+        Outputs:
+          - None; assigns self._reload_interval (clamps negative fallback to 0).
+        """
+
+        eps = (
+            endpoints
+            if endpoints is not None
+            else getattr(self, "_endpoints", []) or []
+        )
+        chosen = min_positive_interval(eps, key=key)
+        if chosen is not None:
+            self._reload_interval = float(chosen)
+            return
+        try:
+            value = float(fallback)
+        except (TypeError, ValueError):
+            value = 0.0
+        if value < 0:
+            value = 0.0
+        self._reload_interval = value
 
     def _note_condition_failure(self, key: str, message: str, *args: object) -> None:
         """Brief: Log a sticky condition failure (wraps condition_log.note_condition_failure)."""

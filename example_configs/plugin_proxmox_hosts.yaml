@@ -67,7 +67,8 @@ plugins:
       # One node is enough (/cluster/resources is cluster-wide). Extra URLs are
       # failover only and are not contacted unless earlier ones fail.
       endpoints:
-        - url: https://pve1.${DOMAIN}:8006
+        - id: pve1
+          url: https://pve1.${DOMAIN}:8006
           token_id: foghorn@pve!dns
           token_secret: "${PVE_TOKEN_SECRET}"
           verify_tls: true
