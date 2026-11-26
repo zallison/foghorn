@@ -69,6 +69,9 @@ All notable changes to this project will be documented in this file.
 - DNSSEC validation tests reshaped around cached DNSKEY/DS and trust-anchor matching paths.
 
 ### Fixed
+- Admin UI builds query-log chips/rows and sortable/paged tables off-DOM (`DocumentFragment` + `replaceContainerChildren`) before swapping, reducing flicker during refresh.
+- Admin query-log fetches use a request token so stale responses are ignored; failed refreshes keep the previous rows visible and surface the error in the pager instead of clearing the table.
+- Admin stats refresh gathers core stats (and optional upstream status) before rendering so partial updates do not flash empty panels.
 - `server.http.auth.mode=basic` combined with a non-empty `auth.token` is rejected as ambiguous (Pydantic model, config parse, and webserver startup/`create_app`).
 - Zone DNSSEC private keys are written atomically (temp file + `os.replace`) with owner-only mode 0o600; fsync/chmod remain best-effort.
 - KubernetesHosts example config uses `server.listen.udp.host` (not invalid `address`).
@@ -87,6 +90,7 @@ All notable changes to this project will be documented in this file.
 
 ### Documentation
 - Documented multi-backend secrets stores in `docs/plugins/secrets.md`, including the `inline` vs `file` split, with examples `example_configs/secrets_file.yaml`, `example_configs/secrets_mysql_mariadb.yaml`, and `example_configs/secrets_enable_tls.yaml`.
+- Added example architecture diagram assets under `example_configs/` (`diagram.dot` / `diagram.png` and dark variants) generated from `secrets_enable_tls.yaml`.
 - Added `docs/plugins/resolve/unifi_hosts.md` and documented optional KubernetesHosts/ProxmoxHosts `endpoints[].id` labels in resolve plugin docs and examples.
 - Documented TSIG passthrough mode, shared-cache re-sign vs passthrough cache bypass, and per-endpoint upstream client TSIG in `docs/RFCs.md` §5.4, README features notes, and `example_configs/server_all_options.yaml`.
 - Documented operator DNSSEC trust-anchor knobs (mode/store/hold-downs/custom anchors), RFC 5011 live updates, and reload behavior in `docs/RFCs.md` §4.3 and example configs.
