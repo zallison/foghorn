@@ -5,7 +5,16 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 ### Added
-- Secrets backend family (`secrets.backends[]`): pluggable multi-backend store for TLS PEMs, TSIG keys, API tokens, and DNSSEC KSK/ZSK material (`file` and `mysql`/`mariadb` modules) with a process-wide router, startup/reload/shutdown lifecycle, and consumer refs (`token_secret`, `cert_secret`/`key_secret`/`ca_secret`, TSIG `key_sources type: secrets`, zone `dnssec_signing.secrets`).
+- Secrets backend family (`secrets.backends[]`): pluggable multi-backend store for TLS PEMs, TSIG keys, API tokens, and DNSSEC KSK/ZSK material (`inline`, `file`, and `mysql`/`mariadb` modules) with a process-wide router, startup/reload/shutdown lifecycle, and consumer refs (`token_secret`, `cert_secret`/`key_secret`/`ca_secret`, TSIG `key_sources type: secrets`, zone `dnssec_signing.secrets`).
+- Inline secrets backend (`module: inline`): embed token/TSIG/TLS/DNSSEC material directly in config; rejects filesystem path fields and directs operators to `file` for path-backed secrets.
+- `server.http` / `server.listen.dot` / `server.listen.doh` `enable_tls`: explicit TLS on/off with common boolean aliases; unset keeps auto behavior from certificate material, while `false` with certs/secrets/generate configured fails validation.
+- Admin Basic auth `server.http.auth.password_secret` (and mapping-form `auth.password` secret refs): resolve the Basic password from secrets backends when no inline password is set.
+- Shared cachetools mutators `set_cachetools_ttl` / `set_cachetools_maxsize` in `foghorn.utils.register_caches`; admin/web cache override paths use them so TTL/maxsize updates apply through public setters or private backing fields.
+- Shared dynamic-hosts endpoint helpers in `hosts_common` (`parse_endpoint_host_ips`, `parse_endpoint_ttl`, `endpoint_label`, `min_positive_interval`) and reload-interval derivation from per-endpoint intervals.
+- KubernetesHosts and ProxmoxHosts optional `endpoints[].id` for operator-facing logs/labels (API URL remains available for stable condition keys).
+- UnifiHosts resolve plugin (`foghorn.plugins.resolve.unifi_hosts`): indexes UniFi Network clients/devices via the Integration API (`X-API-KEY`), builds forward/reverse maps, and answers matching A/AAAA/PTR/TXT queries in `pre_resolve`.
+- Admin snapshot route for UnifiHosts: `GET /api/v1/plugins/{plugin_name}/unifi_hosts` (FastAPI and threaded), plus generic `/snapshot` via `get_http_snapshot()`.
+- Example configs `example_configs/plugin_unifi_hosts.yaml` and `example_configs/secrets_enable_tls.yaml` (secrets backends with TLS listeners and admin auth).
 - Downstream QUERY TSIG `server.features.tsig.mode: passthrough`: skip local verify/re-sign; when client TSIG is present, bypass cache and forward the original signed wire upstream, returning upstream TSIG as-is.
 - Forward-mode upstream client TSIG via per-endpoint `upstreams.endpoints[].tsig` / backup endpoints (`name`/`secret`/`algorithm`): Foghorn signs outbound QUERY and verifies responses (skipped during client passthrough).
 - Shared TSIG helpers: `apply_client_tsig_to_response`, `normalize_upstream_tsig_config`, `sign_query_wire_tsig`, `verify_response_tsig_wire`.
@@ -36,11 +45,14 @@ All notable changes to this project will be documented in this file.
 - Plugin hook priorities accept bare `int` or `{priority: int}` mapping nodes.
 
 ### Changed
+- `warn_suppressed_exception` logs exception type/message only (no traceback) so best-effort/cleanup paths stay quiet in operator logs.
+- File secrets backend is path-backed only: inline `value`/`secret`/PEM/body fields are rejected with guidance to use `module: inline`; readable `*_file` paths are required for configured token/TSIG/TLS/DNSSEC entries.
+- DockerHosts multi-endpoint setup normalizes host IP overrides and TTLs through shared `hosts_common` helpers and derives the plugin reload interval from the minimum positive endpoint interval.
 - QUERY client TSIG re-sign is applied once at the `_resolve_core` exit choke point (cache hit, pack, pre-plugin deny/override, refuse/local_blocked, SERVFAIL) so optional/require signed clients get MACs on all successful exits; cache/finalize only strip residual TSIG.
 - Non-QUERY opcode replies are best-effort TSIG re-signed when features/snapshot keys verified the request.
 - Config dumps redact AXFR nested/`tsig_keys` and upstream endpoint `tsig.secret` values as `***`.
 - Main keepalive loop checks listener thread liveness via `Thread.is_alive()` only (removed `_listener_thread_is_dead` AttributeError/broad-exception fallbacks); UDP teardown no longer walks a nested `.server` stub path.
-- Expected DoT/TCP idle-timeout and transport-disconnect paths, and DNS_CACHE snapshot-assign failures, log via `warn_suppressed_exception` instead of silent `pass`.
+- Expected DoT/TCP idle timeouts log at DEBUG (no traceback); transport-disconnect and DNS_CACHE snapshot-assign failures use `warn_suppressed_exception` instead of silent `pass`.
 - Structured config sections prefer `extra="forbid"` (listeners, plugin hooks/setup/logging, logging/stats/upstreams, server resolver/limits/cache/dnssec/http/axfr/features) so unknown keys fail validation; opaque maps remain open (`plugins[].config`, cache backend `config`, `vars`).
 - Schema generation omits resolve plugins under `foghorn.plugins.resolve.examples` from `$defs.PluginConfigs` (promote out of `examples/` and re-run `make schema` to publish).
 - DockerHosts sticky condition paths call `foghorn.utils.condition_logging` directly (no plugin-local wrappers).
@@ -74,7 +86,8 @@ All notable changes to this project will be documented in this file.
 - etc_hosts reverse maps include IPv6 as well as IPv4 via shared hosts helpers.
 
 ### Documentation
-- Documented multi-backend secrets stores in `docs/plugins/secrets.md` with examples `example_configs/secrets_file.yaml` and `example_configs/secrets_mysql_mariadb.yaml`.
+- Documented multi-backend secrets stores in `docs/plugins/secrets.md`, including the `inline` vs `file` split, with examples `example_configs/secrets_file.yaml`, `example_configs/secrets_mysql_mariadb.yaml`, and `example_configs/secrets_enable_tls.yaml`.
+- Added `docs/plugins/resolve/unifi_hosts.md` and documented optional KubernetesHosts/ProxmoxHosts `endpoints[].id` labels in resolve plugin docs and examples.
 - Documented TSIG passthrough mode, shared-cache re-sign vs passthrough cache bypass, and per-endpoint upstream client TSIG in `docs/RFCs.md` §5.4, README features notes, and `example_configs/server_all_options.yaml`.
 - Documented operator DNSSEC trust-anchor knobs (mode/store/hold-downs/custom anchors), RFC 5011 live updates, and reload behavior in `docs/RFCs.md` §4.3 and example configs.
 - Documented token-mode Basic `foghorn:<token>` gated by `allow_basic_token`, dual `WWW-Authenticate`, and basic+token rejection in `docs/API.md`.
@@ -85,7 +98,10 @@ All notable changes to this project will be documented in this file.
 - Documented DockerHosts multi-endpoint client-failure continue behavior in `docs/plugins/resolve/docker_hosts.md`.
 
 ### Tests
-- Secrets core coverage (`tests/secrets/test_secrets_core.py`): registry aliases, file backend kinds, multi-backend router ambiguity, TSIG `key_sources type: secrets`, token/TLS helpers, DNSSEC keys_dir index and put.
+- Secrets core coverage (`tests/secrets/test_secrets_core.py`): registry aliases, file backend kinds, multi-backend router ambiguity, TSIG `key_sources type: secrets`, token/TLS helpers, DNSSEC keys_dir index and put, plus `InlineSecrets` materialization and cross-mode field rejection (`inline` vs `file`).
+- Cache registry coverage for `set_cachetools_ttl` / `set_cachetools_maxsize` mutation and clearing after TTL changes; webserver cache override asserts underlying `TTLCache.ttl`.
+- Hosts common coverage for endpoint host-IP/TTL parsing, labels, and minimum positive reload intervals; contract/plugin init fixtures supply required Pydantic config placeholders.
+- Added `tests/plugins/test_unifi_hosts.py` for UniFi map build, auth header handling, and snapshot wiring.
 - TSIG coverage for pre-plugin deny re-sign, passthrough forward/cache bypass, feature-flag `passthrough` normalization, endpoint tsig sign/verify failure, and upstream config preserving `tsig`.
 - Main listener/thread stubs implement `is_alive()` so keepalive exit matches production threads; main startup fixture uses `cache.module` instead of `backend`.
 - Added `tests/test_trust_anchor_config_wiring.py` for RFC 5011 live store updates, custom anchors, configure-from-config helpers, and reload snapshot TA re-apply.
