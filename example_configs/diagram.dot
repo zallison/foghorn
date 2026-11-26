@@ -1,0 +1,51 @@
+// Generated from: example_configs/secrets_enable_tls.yaml
+digraph config_diagram {
+  rankdir=TB;
+  nodesep=0.8;
+  ranksep=0.9;
+  fontsize=18;
+  graph [fontname="sans", colorscheme="paired12"];
+  node [shape=box, style="rounded,filled", fillcolor="#FFFFFF", fontname="sans"];
+  edge [color="#555555", fontcolor="#111827", fontname="sans"];
+  Q [shape=ellipse, label="Query", group="pipeline"];
+  Cache [shape=diamond, label="Cache hit?", group="pipeline"];
+  Resolver [label="Resolver mode: forward", fillcolor="#e5e7eb", group="pipeline"];
+  Upstream [label="Forward to upstreams", group="pipeline"];
+  Resp [shape=ellipse, label="Response", group="pipeline"];
+  subgraph cluster_listeners {
+    label="Listeners";
+    style="rounded";
+    color="#94a3b8";
+    Listener_udp [label="udp: 127.0.0.1:15353", fillcolor="/paired12/6", fontcolor="#ffffff", color="#111827"];
+    Listener_tcp [label="tcp: 127.0.0.1:15353", fillcolor="/paired12/6", fontcolor="#ffffff", color="#111827"];
+  }
+  Listener_udp -> Q;
+  Listener_tcp -> Q;
+  subgraph cluster_query {
+    label="DNS query path";
+    style="rounded";
+    color="#94a3b8";
+    subgraph cluster_resolver {
+      label="Resolver";
+      style="rounded,filled";
+      fillcolor="#f3f4f6";
+      color="#94a3b8";
+      Cache;
+      Resolver;
+      Upstream;
+    }
+    Q -> Cache;
+    Cache -> Resp [label="hit", constraints="false"];
+    Cache -> Resolver [label="miss"];
+    Resolver -> Upstream;
+    subgraph cluster_upstreams {
+      label="Upstreams";
+      style="rounded,filled";
+      fillcolor="#f3f4f6";
+      color="#94a3b8";
+      Upstreams [label="Upstreams (insecure)\nstrategy=failover\nmax_concurrent=1\nudp: 1.1.1.1:53\nudp: 8.8.8.8:53", group="pipeline", fillcolor="/paired12/6", fontcolor="#ffffff"];
+    Upstream -> Upstreams;
+    }
+    Upstreams -> Resp;
+  }
+}
